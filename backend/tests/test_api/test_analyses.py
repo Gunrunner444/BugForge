@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
@@ -70,13 +69,13 @@ class TestAnalysisEndpoints:
 
     async def test_get_nonexistent_analysis(self, client) -> None:
         response = await client.get(
-            f"/api/v1/analyses/00000000-0000-0000-0000-000000000000"
+            "/api/v1/analyses/00000000-0000-0000-0000-000000000000"
         )
         assert response.status_code == 404
 
     async def test_analyze_nonexistent_project(self, client) -> None:
         response = await client.post(
-            f"/api/v1/projects/00000000-0000-0000-0000-000000000000/analyze"
+            "/api/v1/projects/00000000-0000-0000-0000-000000000000/analyze"
         )
         assert response.status_code == 404
 

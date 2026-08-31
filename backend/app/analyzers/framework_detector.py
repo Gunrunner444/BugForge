@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -14,7 +15,7 @@ class FrameworkInfo:
 
 
 # Describes how to detect a framework
-_PYTHON_FRAMEWORKS: list[dict] = [
+_PYTHON_FRAMEWORKS: list[dict[str, Any]] = [
     {
         "name": "django",
         "language": "python",
@@ -65,7 +66,7 @@ _PYTHON_FRAMEWORKS: list[dict] = [
     },
 ]
 
-_JS_FRAMEWORKS: list[dict] = [
+_JS_FRAMEWORKS: list[dict[str, Any]] = [
     {
         "name": "next.js",
         "language": "javascript/typescript",
@@ -96,7 +97,7 @@ _JS_FRAMEWORKS: list[dict] = [
 class FrameworkDetector:
     def detect(self, repo_root: Path, all_file_paths: list[Path]) -> list[FrameworkInfo]:
         relative_paths = {p.relative_to(repo_root) for p in all_file_paths if p.is_relative_to(repo_root)}
-        path_strings = {str(p) for p in relative_paths}
+        {str(p) for p in relative_paths}
         file_names = {p.name for p in relative_paths}
         dir_names = {str(part) for p in relative_paths for part in p.parts[:-1]}
 
@@ -131,7 +132,7 @@ class FrameworkDetector:
 
     def _check_framework(
         self,
-        spec: dict,
+        spec: dict[str, Any],
         repo_root: Path,
         file_names: set[str],
         dir_names: set[str],

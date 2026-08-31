@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.analyzers.language_detector import detect_languages, language_for_path
 
 

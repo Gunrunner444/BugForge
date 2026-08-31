@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from functools import lru_cache
+
+_UNSAFE_DEFAULT_KEY = "change_me_in_production_please"
 
 
 class Settings(BaseSettings):
@@ -14,6 +17,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
+    version: str = "0.2.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -21,10 +25,10 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://bugforge:bugforge_dev@localhost:5432/bugforge"
 
-    # Security
-    secret_key: str = "change_me_in_production_please"
+    # Security — must be overridden in production
+    secret_key: str = _UNSAFE_DEFAULT_KEY
 
-    # CORS — accepts a JSON array string or a list
+    # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
 
     # Analysis limits
@@ -39,6 +43,18 @@ class Settings(BaseSettings):
         valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if v not in valid:
             raise ValueError(f"log_level must be one of {valid}")
+        return v
+
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str, info: object) -> str:
+        # Prevent the default placeholder from being used in production
+        env = getattr(getattr(info, "data", {}), "get", lambda k, d=None: d)("environment", "development")
+        if v == _UNSAFE_DEFAULT_KEY and env == "production":
+            raise ValueError(
+                "SECRET_KEY must be set to a secure random value in production. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+            )
         return v
 
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.analyzers.python.parser import PythonParser, ParseResult
+from app.analyzers.python.parser import PythonParser
 
 
 @pytest.fixture

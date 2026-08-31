@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -54,17 +55,17 @@ class AnalysisRepository:
             raise ValueError(f"Analysis {analysis_id} not found")
         analysis.status = status
         if status == "running":
-            analysis.started_at = datetime.now(timezone.utc)
+            analysis.started_at = datetime.now(UTC)
         if error_message is not None:
             analysis.error_message = error_message
         await self.session.flush()
 
-    async def complete_analysis(self, analysis_id: UUID, summary: dict) -> None:
+    async def complete_analysis(self, analysis_id: UUID, summary: dict[str, Any]) -> None:
         analysis = await self.session.get(Analysis, analysis_id)
         if analysis is None:
             raise ValueError(f"Analysis {analysis_id} not found")
         analysis.status = "completed"
-        analysis.completed_at = datetime.now(timezone.utc)
+        analysis.completed_at = datetime.now(UTC)
         analysis.summary = summary
         await self.session.flush()
 
@@ -94,7 +95,7 @@ class AnalysisRepository:
         offset: int = 0,
         limit: int = 100,
     ) -> tuple[list[CodeEntity], int]:
-        base_filter = CodeEntity.file_id.in_(
+        base_filter: Any = CodeEntity.file_id.in_(
             select(RepositoryFile.id).where(RepositoryFile.analysis_id == analysis_id)
         )
         if file_id is not None:
@@ -121,7 +122,7 @@ class AnalysisRepository:
         offset: int = 0,
         limit: int = 200,
     ) -> tuple[list[ImportRecord], int]:
-        base_filter = ImportRecord.file_id.in_(
+        base_filter: Any = ImportRecord.file_id.in_(
             select(RepositoryFile.id).where(RepositoryFile.analysis_id == analysis_id)
         )
         if file_id is not None:

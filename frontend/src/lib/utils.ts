@@ -1,4 +1,4 @@
-import type { AnalysisStatus } from "./types";
+import type { AnalysisStatus, TestRunStatus } from "./types";
 
 export function formatDate(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
@@ -10,7 +10,7 @@ export function formatDate(iso: string): string {
   });
 }
 
-export function statusColor(status: AnalysisStatus): string {
+export function statusColor(status: AnalysisStatus | TestRunStatus): string {
   switch (status) {
     case "completed":
       return "bg-emerald-100 text-emerald-800";
@@ -19,6 +19,7 @@ export function statusColor(status: AnalysisStatus): string {
     case "pending":
       return "bg-yellow-100 text-yellow-800";
     case "failed":
+    case "timeout":
       return "bg-red-100 text-red-800";
     default:
       return "bg-gray-100 text-gray-800";

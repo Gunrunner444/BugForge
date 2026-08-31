@@ -13,7 +13,7 @@ on:
 
 jobs:
   test:
-    name: Test & Lint
+    name: Test, Lint & Type-check
     runs-on: ubuntu-latest
 
     steps:
@@ -24,18 +24,19 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
 
       - name: Install dependencies
         working-directory: backend
         run: pip install -e ".[dev]"
 
-      - name: Run tests
-        working-directory: backend
-        run: pytest tests/ --cov=app --cov-report=term-missing -v
-
       - name: Run ruff lint
         working-directory: backend
-        run: ruff check app/ tests/
+        run: ruff check app/ tests/ --output-format=github
+
+      - name: Run tests with coverage
+        working-directory: backend
+        run: pytest tests/ --cov=app --cov-report=term-missing -v
 
       - name: Run mypy type check
         working-directory: backend

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from app.analyzers.repo_analyzer import AnalysisResult, RepoAnalyzer
@@ -72,7 +73,7 @@ class AnalysisService:
 
     async def _persist_results(
         self,
-        session,
+        session: Any,
         analysis_id: UUID,
         result: AnalysisResult,
         duration: float,

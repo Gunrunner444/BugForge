@@ -103,3 +103,57 @@ export interface ProjectListResponse {
   items: Project[];
   total: number;
 }
+
+// ── Test Runs ──────────────────────────────────────────────────────────────
+
+export type TestRunStatus = "pending" | "running" | "completed" | "failed" | "timeout";
+
+export interface TestRun {
+  id: string;
+  project_id: string;
+  status: TestRunStatus;
+  framework: string;
+  repository_path: string;
+  command: string | null;
+  exit_code: number | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  total_tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  stdout?: string | null;
+  stderr?: string | null;
+}
+
+export interface TestResult {
+  id: string;
+  test_run_id: string;
+  node_id: string;
+  test_file: string | null;
+  test_name: string;
+  status: "passed" | "failed" | "skipped" | "error" | "timeout";
+  duration_seconds: number | null;
+  traceback: string | null;
+  stdout: string | null;
+  stderr: string | null;
+  skip_reason: string | null;
+}
+
+export interface TestRunListResponse {
+  items: TestRun[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface TestResultListResponse {
+  items: TestResult[];
+  total: number;
+  offset: number;
+  limit: number;
+}

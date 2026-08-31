@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type { Analysis, Project } from "@/lib/types";
 import AnalysisResults from "@/components/AnalysisResults";
+import TestRunPanel from "@/components/TestRunPanel";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Badge from "@/components/ui/Badge";
-import { formatDate, statusColor } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
+
+type PageTab = "analysis" | "tests";
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -18,7 +21,9 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"overview" | "files" | "entities" | "imports">("overview");
+  const [pageTab, setPageTab] = useState<PageTab>("analysis");
+  const [analysisTab, setAnalysisTab] = useState<"overview" | "files" | "entities" | "imports">("overview");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadProject = useCallback(async () => {
     try {
@@ -32,7 +37,7 @@ export default function ProjectDetailPage() {
         setSelectedAnalysis(analysisResp.items[0]);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Unknown error");
     } finally {
       setLoading(false);
     }
@@ -76,7 +81,7 @@ export default function ProjectDetailPage() {
       setAnalyses((prev) => [analysis, ...prev]);
       setSelectedAnalysis(analysis);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Unknown error");
       setAnalyzing(false);
     }
   };
@@ -110,13 +115,15 @@ export default function ProjectDetailPage() {
           )}
           <p className="text-xs text-slate-400 font-mono mt-2">{project.repository_path}</p>
         </div>
-        <button
-          onClick={handleAnalyze}
-          disabled={analyzing}
-          className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-        >
-          {analyzing ? "Analyzing…" : "Run Analysis"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleAnalyze}
+            disabled={analyzing}
+            className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            {analyzing ? "Analyzing…" : "Run Analysis"}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -125,44 +132,64 @@ export default function ProjectDetailPage() {
         </div>
       )}
 
-      {/* Analysis list */}
-      {analyses.length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-sm font-medium text-slate-500 mb-2">Analyses</h2>
-          <div className="flex flex-wrap gap-2">
-            {analyses.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => { setSelectedAnalysis(a); setTab("overview"); }}
-                className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
-                  selectedAnalysis?.id === a.id
-                    ? "border-indigo-400 bg-indigo-50 text-indigo-700"
-                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-                }`}
-              >
-                {formatDate(a.created_at)}
-                {" · "}
-                <Badge status={a.status as any} />
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Page-level tabs */}
+      <div className="flex border-b border-slate-200 mb-6">
+        {(["analysis", "tests"] as PageTab[]).map((t) => (
+          <button
+            key={t}
+            onClick={() => setPageTab(t)}
+            className={`py-2.5 px-5 text-sm font-medium border-b-2 transition-colors capitalize ${
+              pageTab === t
+                ? "border-indigo-500 text-indigo-600"
+                : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            {t === "analysis" ? "Analysis" : "Tests"}
+          </button>
+        ))}
+      </div>
+
+      {/* Analysis tab */}
+      {pageTab === "analysis" && (
+        <>
+          {analyses.length > 0 && (
+            <div className="mb-4">
+              <div className="flex flex-wrap gap-2">
+                {analyses.map((a) => (
+                  <button
+                    key={a.id}
+                    onClick={() => { setSelectedAnalysis(a); setAnalysisTab("overview"); }}
+                    className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                      selectedAnalysis?.id === a.id
+                        ? "border-indigo-400 bg-indigo-50 text-indigo-700"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    {formatDate(a.created_at)}
+                    {" · "}
+                    <Badge status={a.status} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {selectedAnalysis ? (
+            <AnalysisResults
+              analysis={selectedAnalysis}
+              tab={analysisTab}
+              onTabChange={setAnalysisTab}
+            />
+          ) : (
+            <div className="text-center py-16 border border-dashed border-slate-200 rounded-xl text-slate-400">
+              No analyses yet. Click <strong>Run Analysis</strong> to start.
+            </div>
+          )}
+        </>
       )}
 
-      {/* Analysis detail */}
-      {selectedAnalysis && (
-        <AnalysisResults
-          analysis={selectedAnalysis}
-          tab={tab}
-          onTabChange={setTab}
-        />
-      )}
-
-      {!selectedAnalysis && analyses.length === 0 && (
-        <div className="text-center py-16 border border-dashed border-slate-200 rounded-xl text-slate-400">
-          No analyses yet. Click <strong>Run Analysis</strong> to start.
-        </div>
-      )}
+      {/* Tests tab */}
+      {pageTab === "tests" && <TestRunPanel projectId={id} />}
     </div>
   );
 }

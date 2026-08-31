@@ -8,6 +8,7 @@ from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
 from app.analyzers.language_detector import LanguageStats, detect_languages, language_for_path
 from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
 from app.analyzers.python.parser import ParseResult
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,14 @@ class RepoAnalyzer:
         # 5. Parse Python source/test files
         for fr in file_results:
             if fr.language == "python":
+                if fr.size_bytes > settings.max_file_size_bytes:
+                    logger.debug(
+                        "Skipping oversized file (%d bytes): %s",
+                        fr.size_bytes,
+                        fr.relative_path,
+                    )
+                    fr.has_parse_errors = True
+                    continue
                 try:
                     pr = self._python_analyzer.analyze_file(
                         fr.absolute_path, local_packages=local_packages
@@ -191,6 +200,9 @@ class RepoAnalyzer:
                     fr.has_parse_errors = bool(pr.errors)
                     if pr.errors:
                         logger.debug("Parse errors in %s: %s", fr.relative_path, pr.errors)
+                except (OSError, PermissionError) as exc:
+                    logger.warning("Cannot read %s: %s", fr.relative_path, exc)
+                    fr.has_parse_errors = True
                 except Exception as exc:
                     logger.warning("Failed to parse %s: %s", fr.relative_path, exc)
                     fr.has_parse_errors = True
@@ -220,18 +232,39 @@ class RepoAnalyzer:
 
     def _walk(self, repo_path: Path) -> list[Path]:
         files: list[Path] = []
+        repo_root_resolved = repo_path.resolve()
+
         for item in repo_path.rglob("*"):
-            # Skip directories
             if item.is_dir():
                 continue
-            # Skip symlinks that don't resolve
-            if item.is_symlink() and not item.exists():
+
+            # Guard against symlinks escaping the repository root
+            try:
+                resolved = item.resolve()
+                if not str(resolved).startswith(str(repo_root_resolved)):
+                    logger.debug("Skipping symlink outside repo root: %s", item)
+                    continue
+            except OSError:
                 continue
-            # Skip ignored dirs anywhere in the path
-            if any(part in _SKIP_DIRS for part in item.relative_to(repo_path).parts):
+
+            try:
+                rel = item.relative_to(repo_path)
+            except ValueError:
+                continue
+
+            if any(part in _SKIP_DIRS for part in rel.parts):
                 continue
             if item.suffix.lower() in _SKIP_EXTENSIONS:
                 continue
+
+            # Enforce max file count early to avoid iterating millions of files
+            if len(files) >= settings.max_repo_files:
+                logger.warning(
+                    "Repository exceeds max file count (%d); stopping walk",
+                    settings.max_repo_files,
+                )
+                break
+
             files.append(item)
         return files
 
@@ -241,7 +274,7 @@ class RepoAnalyzer:
         size = 0
         try:
             size = file_path.stat().st_size
-        except OSError:
+        except (OSError, PermissionError):
             pass
 
         language = language_for_path(file_path)
@@ -266,7 +299,6 @@ class RepoAnalyzer:
             return "config"
 
         # Test detection: name pattern
-        stem = rel.stem
         if name.startswith(_TEST_FILENAME_PREFIXES) or name.endswith(_TEST_FILENAME_SUFFIXES):
             return "test"
 

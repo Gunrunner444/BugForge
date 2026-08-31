@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncGenerator
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import get_db
 from app.main import app
+from app.models import Analysis, Project  # noqa: F401 — ensure models are registered
 from app.models.base import Base
-from app.models import Project, Analysis  # noqa: F401 — ensure models are registered
+from app.models.test_run import TestResult, TestRun  # noqa: F401
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 

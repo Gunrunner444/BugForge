@@ -180,7 +180,9 @@ class PythonParser:
             elif isinstance(dec, ast.Attribute):
                 names.append(f"{self._expr_str(dec.value)}.{dec.attr}")
             elif isinstance(dec, ast.Call) and isinstance(dec.func, (ast.Name, ast.Attribute)):
-                names.append(self._expr_str(dec.func))
+                result = self._expr_str(dec.func)
+                if result is not None:
+                    names.append(result)
         return names
 
     def _parameters(

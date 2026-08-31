@@ -1,8 +1,8 @@
-import type { AnalysisStatus } from "@/lib/types";
+import type { AnalysisStatus, TestRunStatus } from "@/lib/types";
 import { statusColor } from "@/lib/utils";
 
 interface Props {
-  status: AnalysisStatus;
+  status: AnalysisStatus | TestRunStatus;
 }
 
 export default function Badge({ status }: Props) {

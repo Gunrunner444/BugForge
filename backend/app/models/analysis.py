@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.project import Project
 
 
 class Analysis(Base):
@@ -24,14 +28,14 @@ class Analysis(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Aggregated summary stored as JSON to avoid expensive joins for list views
-    summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
-    project: Mapped[Project] = relationship(  # type: ignore[name-defined]
+    project: Mapped[Project] = relationship(
         "Project", back_populates="analyses"
     )
     files: Mapped[list[RepositoryFile]] = relationship(
@@ -58,7 +62,7 @@ class RepositoryFile(Base):
     has_errors: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -87,13 +91,13 @@ class CodeEntity(Base):
     end_line: Mapped[int] = mapped_column(Integer, nullable=False)
     docstring: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_async: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    decorators: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
-    parameters: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    decorators: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    parameters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True, default=list)
     return_annotation: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -117,7 +121,7 @@ class ImportRecord(Base):
     is_from_import: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.analysis import Analysis
+    from app.models.test_run import TestRun
 
 
 class Project(Base):
@@ -18,19 +23,26 @@ class Project(Base):
     repository_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )
 
-    analyses: Mapped[list[Analysis]] = relationship(  # type: ignore[name-defined]
+    analyses: Mapped[list[Analysis]] = relationship(
         "Analysis",
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="Analysis.created_at.desc()",
+    )
+
+    test_runs: Mapped[list[TestRun]] = relationship(
+        "TestRun",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="TestRun.created_at.desc()",
     )

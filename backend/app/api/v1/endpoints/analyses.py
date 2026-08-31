@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.analysis import Analysis
+from app.repositories.analysis_repo import AnalysisRepository
 from app.schemas.analysis import (
     AnalysisResponse,
     AnalysisSummarySchema,
@@ -14,14 +16,12 @@ from app.schemas.analysis import (
     PaginatedFilesResponse,
     PaginatedImportsResponse,
 )
-from app.services.analysis_service import AnalysisService
-from app.repositories.analysis_repo import AnalysisRepository
 
 router = APIRouter(prefix="/analyses", tags=["Analyses"])
 logger = logging.getLogger(__name__)
 
 
-def _analysis_to_response(analysis) -> AnalysisResponse:
+def _analysis_to_response(analysis: Analysis) -> AnalysisResponse:
     summary = None
     if analysis.summary:
         summary = AnalysisSummarySchema(**analysis.summary)
