@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+engine = create_async_engine(
+    settings.database_url,
+    echo=settings.debug,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
+
+async_session_factory = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+async def create_tables() -> None:
+    """Create all tables defined in the metadata. Used only for testing / dev convenience."""
+    from app.models.base import Base  # noqa: PLC0415  (avoid circular at module level)
+    import app.models.project  # noqa: F401
+    import app.models.analysis  # noqa: F401
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables verified/created")
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency that yields a database session."""
+    async with async_session_factory() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise

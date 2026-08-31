@@ -1,0 +1,105 @@
+// All shared TypeScript types mirroring the backend API schemas
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  repository_path: string;
+  created_at: string;
+  updated_at: string;
+  latest_analysis_id: string | null;
+  latest_analysis_status: AnalysisStatus | null;
+}
+
+export type AnalysisStatus = "pending" | "running" | "completed" | "failed";
+
+export interface LanguageStats {
+  language: string;
+  file_count: number;
+  percentage: number;
+}
+
+export interface FrameworkDetection {
+  name: string;
+  language: string;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface AnalysisSummary {
+  total_files: number;
+  source_files: number;
+  test_files: number;
+  ignored_files: number;
+  total_entities: number;
+  total_imports: number;
+  languages: LanguageStats[];
+  frameworks: FrameworkDetection[];
+  analysis_duration_seconds: number | null;
+}
+
+export interface Analysis {
+  id: string;
+  project_id: string;
+  status: AnalysisStatus;
+  repository_path: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+  summary: AnalysisSummary | null;
+  created_at: string;
+}
+
+export interface RepositoryFile {
+  id: string;
+  relative_path: string;
+  file_type: "source" | "test" | "config" | "other";
+  language: string | null;
+  size_bytes: number;
+  line_count: number;
+  has_errors: boolean;
+}
+
+export interface CodeEntity {
+  id: string;
+  file_id: string;
+  entity_type: string;
+  name: string;
+  qualified_name: string;
+  start_line: number;
+  end_line: number;
+  docstring: string | null;
+  is_async: boolean;
+  decorators: string[] | null;
+  parameters: Array<{
+    name: string;
+    annotation: string | null;
+    default: string | null;
+    kind: string;
+  }> | null;
+  return_annotation: string | null;
+  parent_name: string | null;
+}
+
+export interface ImportRecord {
+  id: string;
+  file_id: string;
+  module_name: string;
+  imported_name: string | null;
+  alias: string | null;
+  import_type: "stdlib" | "third_party" | "relative" | "local";
+  line_number: number;
+  is_from_import: boolean;
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface ProjectListResponse {
+  items: Project[];
+  total: number;
+}

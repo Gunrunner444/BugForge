@@ -1,0 +1,42 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        working-directory: backend
+        run: pytest tests/ --cov=app --cov-report=term-missing -v
+
+      - name: Run ruff lint
+        working-directory: backend
+        run: ruff check app/ tests/
+
+      - name: Run mypy type check
+        working-directory: backend
+        run: mypy app/ --ignore-missing-imports

@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
+from app.analyzers.language_detector import LanguageStats, detect_languages, language_for_path
+from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
+from app.analyzers.python.parser import ParseResult
+
+logger = logging.getLogger(__name__)
+
+# Directories to skip entirely during traversal
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".bzr",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        ".tox",
+        "node_modules",
+        ".npm",
+        ".yarn",
+        ".venv",
+        "venv",
+        "env",
+        ".cache",
+        "dist",
+        "build",
+        "target",
+        "out",
+        ".next",
+        ".nuxt",
+        "coverage",
+        "htmlcov",
+        ".idea",
+        ".vscode",
+    }
+)
+
+# File extensions that are never interesting to parse
+_SKIP_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".pyc",
+        ".pyo",
+        ".pyd",
+        ".class",
+        ".jar",
+        ".war",
+        ".o",
+        ".a",
+        ".so",
+        ".dll",
+        ".exe",
+        ".bin",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".svg",
+        ".webp",
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".avi",
+        ".pdf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".whl",
+        ".egg",
+    }
+)
+
+# Name patterns that indicate test files
+_TEST_FILENAME_PREFIXES: tuple[str, ...] = ("test_",)
+_TEST_FILENAME_SUFFIXES: tuple[str, ...] = ("_test.py", "_spec.py")
+_TEST_DIR_NAMES: frozenset[str] = frozenset({"tests", "test", "spec", "__tests__"})
+
+# Names that indicate config / infrastructure files
+_CONFIG_NAMES: frozenset[str] = frozenset(
+    {
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements-test.txt",
+        "Pipfile",
+        "Pipfile.lock",
+        "poetry.lock",
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "tsconfig.json",
+        "webpack.config.js",
+        "babel.config.js",
+        ".babelrc",
+        ".eslintrc.js",
+        ".eslintrc.json",
+        "next.config.js",
+        "tailwind.config.js",
+        "Makefile",
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        ".env.example",
+        "alembic.ini",
+        "pytest.ini",
+        "conftest.py",
+        "tox.ini",
+        "mypy.ini",
+        ".pre-commit-config.yaml",
+        "MANIFEST.in",
+    }
+)
+
+
+@dataclass
+class FileAnalysisResult:
+    relative_path: str
+    absolute_path: Path
+    language: str | None
+    file_type: str  # source | test | config | other
+    size_bytes: int
+    line_count: int
+    has_parse_errors: bool = False
+    parse_result: ParseResult | None = None
+
+
+@dataclass
+class AnalysisResult:
+    repository_path: str
+    file_results: list[FileAnalysisResult] = field(default_factory=list)
+    language_stats: list[LanguageStats] = field(default_factory=list)
+    framework_detections: list[FrameworkInfo] = field(default_factory=list)
+    total_files: int = 0
+    source_file_count: int = 0
+    test_file_count: int = 0
+    config_file_count: int = 0
+    ignored_file_count: int = 0
+
+
+class RepoAnalyzer:
+    """Walks and analyses a local repository — synchronous, safe to run in a thread."""
+
+    def __init__(self) -> None:
+        self._python_analyzer = PythonLanguageAnalyzer()
+        self._framework_detector = FrameworkDetector()
+
+    def analyze(self, repo_path: Path) -> AnalysisResult:
+        if not repo_path.exists():
+            raise ValueError(f"Repository path does not exist: {repo_path}")
+        if not repo_path.is_dir():
+            raise ValueError(f"Repository path is not a directory: {repo_path}")
+
+        logger.info("Analyzing repository at %s", repo_path)
+
+        # 1. Walk the filesystem
+        raw_files = self._walk(repo_path)
+
+        # 2. Classify each file
+        file_results = [self._classify_file(repo_path, p) for p in raw_files]
+
+        # 3. Language statistics (over all discovered files)
+        language_stats = detect_languages([f.absolute_path for f in file_results])
+
+        # 4. Detect local Python packages for accurate import classification
+        local_packages = PythonLanguageAnalyzer.discover_local_packages(repo_path)
+
+        # 5. Parse Python source/test files
+        for fr in file_results:
+            if fr.language == "python":
+                try:
+                    pr = self._python_analyzer.analyze_file(
+                        fr.absolute_path, local_packages=local_packages
+                    )
+                    fr.parse_result = pr
+                    fr.line_count = pr.line_count
+                    fr.has_parse_errors = bool(pr.errors)
+                    if pr.errors:
+                        logger.debug("Parse errors in %s: %s", fr.relative_path, pr.errors)
+                except Exception as exc:
+                    logger.warning("Failed to parse %s: %s", fr.relative_path, exc)
+                    fr.has_parse_errors = True
+
+        # 6. Framework detection
+        framework_detections = self._framework_detector.detect(
+            repo_path, [f.absolute_path for f in file_results]
+        )
+
+        result = AnalysisResult(
+            repository_path=str(repo_path),
+            file_results=file_results,
+            language_stats=language_stats,
+            framework_detections=framework_detections,
+            total_files=len(file_results),
+            source_file_count=sum(1 for f in file_results if f.file_type == "source"),
+            test_file_count=sum(1 for f in file_results if f.file_type == "test"),
+            config_file_count=sum(1 for f in file_results if f.file_type == "config"),
+        )
+        logger.info(
+            "Analysis complete: %d files, %d source, %d test",
+            result.total_files,
+            result.source_file_count,
+            result.test_file_count,
+        )
+        return result
+
+    def _walk(self, repo_path: Path) -> list[Path]:
+        files: list[Path] = []
+        for item in repo_path.rglob("*"):
+            # Skip directories
+            if item.is_dir():
+                continue
+            # Skip symlinks that don't resolve
+            if item.is_symlink() and not item.exists():
+                continue
+            # Skip ignored dirs anywhere in the path
+            if any(part in _SKIP_DIRS for part in item.relative_to(repo_path).parts):
+                continue
+            if item.suffix.lower() in _SKIP_EXTENSIONS:
+                continue
+            files.append(item)
+        return files
+
+    def _classify_file(self, repo_root: Path, file_path: Path) -> FileAnalysisResult:
+        rel = file_path.relative_to(repo_root)
+        rel_str = str(rel)
+        size = 0
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            pass
+
+        language = language_for_path(file_path)
+        file_type = self._determine_file_type(rel)
+
+        return FileAnalysisResult(
+            relative_path=rel_str,
+            absolute_path=file_path,
+            language=language,
+            file_type=file_type,
+            size_bytes=size,
+            line_count=0,  # filled in after parsing
+        )
+
+    @staticmethod
+    def _determine_file_type(rel: Path) -> str:
+        name = rel.name
+        parts = rel.parts
+
+        # Config files by name
+        if name in _CONFIG_NAMES:
+            return "config"
+
+        # Test detection: name pattern
+        stem = rel.stem
+        if name.startswith(_TEST_FILENAME_PREFIXES) or name.endswith(_TEST_FILENAME_SUFFIXES):
+            return "test"
+
+        # Test detection: parent directory
+        for part in parts[:-1]:
+            if part in _TEST_DIR_NAMES:
+                return "test"
+
+        # If it has a known programming language extension, call it source
+        from app.analyzers.language_detector import language_for_path
+
+        if language_for_path(rel) and language_for_path(rel) not in (
+            "yaml",
+            "json",
+            "toml",
+            "markdown",
+            "restructuredtext",
+        ):
+            return "source"
+
+        return "other"

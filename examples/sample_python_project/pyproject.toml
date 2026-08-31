@@ -1,0 +1,8 @@
+[project]
+name = "sample-python-project"
+version = "0.1.0"
+description = "Intentionally buggy Python project used to test BugForge analysis"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
