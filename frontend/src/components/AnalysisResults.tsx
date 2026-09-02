@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import type { Analysis, CodeEntity, ImportRecord, RepositoryFile } from "@/lib/types";
 import { api } from "@/lib/api";
-import { formatDate, languageColor, pluralize, statusColor } from "@/lib/utils";
+import FindingsPanel from "@/components/FindingsPanel";
+import { formatDate, languageColor, statusColor } from "@/lib/utils";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 
-type Tab = "overview" | "files" | "entities" | "imports";
+type Tab = "overview" | "files" | "entities" | "imports" | "findings";
 
 interface Props {
   analysis: Analysis;
@@ -19,6 +20,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "files", label: "Files" },
   { key: "entities", label: "Entities" },
   { key: "imports", label: "Imports" },
+  { key: "findings", label: "Findings" },
 ];
 
 export default function AnalysisResults({ analysis, tab, onTabChange }: Props) {
@@ -99,6 +101,7 @@ export default function AnalysisResults({ analysis, tab, onTabChange }: Props) {
                 {tab === "files" && <FilesTab files={files} />}
                 {tab === "entities" && <EntitiesTab entities={entities} />}
                 {tab === "imports" && <ImportsTab imports={imports} />}
+                {tab === "findings" && <FindingsPanel analysisId={analysis.id} />}
               </>
             )}
           </div>

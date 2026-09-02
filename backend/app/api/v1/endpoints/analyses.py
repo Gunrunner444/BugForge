@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.analysis import Analysis
 from app.repositories.analysis_repo import AnalysisRepository
+from app.repositories.finding_repo import FindingRepository
 from app.schemas.analysis import (
     AnalysisResponse,
     AnalysisSummarySchema,
@@ -16,6 +17,7 @@ from app.schemas.analysis import (
     PaginatedFilesResponse,
     PaginatedImportsResponse,
 )
+from app.schemas.finding import PaginatedFindingsResponse
 
 router = APIRouter(prefix="/analyses", tags=["Analyses"])
 logger = logging.getLogger(__name__)
@@ -117,3 +119,29 @@ async def list_analysis_imports(
         offset=offset,
         limit=limit,
     )
+
+
+@router.get("/{analysis_id}/findings", response_model=PaginatedFindingsResponse)
+async def list_analysis_findings(
+    analysis_id: UUID,
+    severity: str | None = Query(None, description="Filter by severity (info/low/medium/high/critical)"),
+    category: str | None = Query(None, description="Filter by rule category"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+) -> PaginatedFindingsResponse:
+    analysis_repo = AnalysisRepository(db)
+    if await analysis_repo.get_by_id(analysis_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found")
+
+    finding_repo = FindingRepository(db)
+    findings, total = await finding_repo.list_for_analysis(
+        analysis_id, severity=severity, category=category, offset=offset, limit=limit
+    )
+    return PaginatedFindingsResponse(
+        items=findings,  # type: ignore[arg-type]
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+

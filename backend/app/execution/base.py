@@ -17,10 +17,17 @@ class ExecutionConfig:
     working_directory: str
     timeout_seconds: int = 120
     memory_limit_mb: int = 512
-    cpu_limit: float = 1.0  # number of CPUs
+    cpu_limit: float = 1.0
     environment: dict[str, str] = field(default_factory=dict)
-    # When True the executor may allow outbound network (default off)
     allow_network: bool = False
+    # Host-side directory for artifacts produced by the command.
+    # For Docker: mounted into the container at OUTPUT_CONTAINER_PATH.
+    # For Local: the command path and host path are identical.
+    output_dir: str | None = None
+
+
+# Container-side mount path for the output directory
+OUTPUT_CONTAINER_PATH = "/bugforge-output"
 
 
 @dataclass
@@ -33,6 +40,9 @@ class ExecutionResult:
     duration_seconds: float
     timed_out: bool = False
     error_message: str | None = None
+    # Contents of files captured from output_dir after execution.
+    # Key is the relative filename (e.g., "report.json").
+    artifact_contents: dict[str, str] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
@@ -43,16 +53,28 @@ class TestExecutor(ABC):
     """Abstract interface for sandboxed test execution.
 
     Concrete implementations:
-      - DockerTestExecutor  (Docker containers — used in production)
-      - LocalTestExecutor   (direct subprocess — only for development/testing)
+      - DockerTestExecutor  (Docker containers — use in production / CI)
+      - LocalTestExecutor   (direct subprocess — development / trusted repos only)
     """
 
     @abstractmethod
     async def execute(self, config: ExecutionConfig) -> ExecutionResult:
-        """Run the command described by config and return the result."""
+        """Run the command and return the result, including any captured artifacts."""
         ...
 
     @abstractmethod
     async def is_available(self) -> bool:
         """Return True if this executor backend is usable in the current environment."""
         ...
+
+    def get_artifact_write_path(self, config: ExecutionConfig, filename: str) -> str:
+        """Return the path the *command* should write artifacts to.
+
+        For LocalTestExecutor this equals the host path.
+        For DockerTestExecutor this is the container-side path.
+        Subclasses override when they need a different mapping.
+        """
+        if config.output_dir is None:
+            raise ValueError("output_dir must be set before calling get_artifact_write_path")
+        return f"{config.output_dir}/{filename}"
+

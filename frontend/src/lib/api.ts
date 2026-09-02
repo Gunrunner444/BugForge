@@ -1,6 +1,8 @@
 import type {
   Analysis,
   CodeEntity,
+  Finding,
+  FindingsListResponse,
   ImportRecord,
   PaginatedResponse,
   Project,
@@ -118,6 +120,13 @@ export const api = {
       request<PaginatedResponse<ImportRecord>>(
         `/api/v1/analyses/${id}/imports?offset=${offset}&limit=${limit}`,
       ),
+
+    findings: (id: string, severity?: string, category?: string, offset = 0, limit = 200) => {
+      const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+      if (severity) params.set("severity", severity);
+      if (category) params.set("category", category);
+      return request<FindingsListResponse>(`/api/v1/analyses/${id}/findings?${params}`);
+    },
   },
 
   testRuns: {

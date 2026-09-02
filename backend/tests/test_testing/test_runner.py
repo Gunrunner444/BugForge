@@ -155,3 +155,48 @@ class TestLocalExecutor:
 
         executor = LocalTestExecutor()
         assert await executor.is_available() is True
+
+    async def test_artifact_capture(self, tmp_path: Path) -> None:
+        """Executor should read files placed in output_dir after execution."""
+        from app.execution.local_executor import LocalTestExecutor
+
+        executor = LocalTestExecutor()
+        result = await executor.execute(
+            ExecutionConfig(
+                command=["python3", "-c", f"open('{tmp_path}/artifact.txt','w').write('hello')"],
+                working_directory=str(tmp_path),
+                timeout_seconds=10,
+                output_dir=str(tmp_path),
+            )
+        )
+        assert result.exit_code == 0
+        assert "artifact.txt" in result.artifact_contents
+        assert result.artifact_contents["artifact.txt"] == "hello"
+
+    async def test_secrets_not_inherited(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SECRET_KEY must be stripped from the subprocess environment."""
+        monkeypatch.setenv("SECRET_KEY", "should_not_leak")
+
+        from app.execution.local_executor import LocalTestExecutor
+
+        executor = LocalTestExecutor()
+        result = await executor.execute(
+            ExecutionConfig(
+                command=["python3", "-c", "import os; print(os.environ.get('SECRET_KEY','MISSING'))"],
+                working_directory=str(tmp_path),
+                timeout_seconds=10,
+            )
+        )
+        assert "MISSING" in result.stdout
+        assert "should_not_leak" not in result.stdout
+
+
+class TestExecutorFactory:
+    def test_factory_returns_executor(self) -> None:
+        from app.execution import ExecutorFactory
+
+        executor = ExecutorFactory.create()
+        # Should return some concrete executor without raising
+        from app.execution.base import TestExecutor
+        assert isinstance(executor, TestExecutor)
+

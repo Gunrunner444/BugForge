@@ -33,6 +33,7 @@ export interface AnalysisSummary {
   ignored_files: number;
   total_entities: number;
   total_imports: number;
+  total_findings: number;
   languages: LanguageStats[];
   frameworks: FrameworkDetection[];
   analysis_duration_seconds: number | null;
@@ -153,6 +154,35 @@ export interface TestRunListResponse {
 
 export interface TestResultListResponse {
   items: TestResult[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ── Static Analysis ────────────────────────────────────────────────────────
+
+export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+
+export interface Finding {
+  id: string;
+  analysis_id: string;
+  category: string;
+  severity: FindingSeverity;
+  confidence: string;
+  file_path: string;
+  line: number;
+  end_line: number;
+  column: number | null;
+  message: string;
+  explanation: string;
+  analyzer: string;
+  evidence: string;
+  suggested_fix: string;
+  created_at: string;
+}
+
+export interface FindingsListResponse {
+  items: Finding[];
   total: number;
   offset: number;
   limit: number;

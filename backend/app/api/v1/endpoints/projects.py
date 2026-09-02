@@ -185,7 +185,7 @@ async def start_test_run(
     except ProjectNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    from app.execution.local_executor import LocalTestExecutor
+    from app.execution import ExecutorFactory
     from app.repositories.test_run_repo import TestRunRepository
     from app.services.test_runner_service import TestRunnerService
     from app.workers.job_runner import FastAPIBackgroundRunner
@@ -197,7 +197,7 @@ async def start_test_run(
     await db.commit()
     await db.refresh(run)
 
-    svc = TestRunnerService(executor=LocalTestExecutor())
+    svc = TestRunnerService(executor=ExecutorFactory.create())
     runner = FastAPIBackgroundRunner(background_tasks)
     runner.submit(
         svc.execute_test_run,

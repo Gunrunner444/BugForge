@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 
 if TYPE_CHECKING:
+    from app.models.finding import DBFinding
     from app.models.project import Project
 
 
@@ -40,6 +41,11 @@ class Analysis(Base):
     )
     files: Mapped[list[RepositoryFile]] = relationship(
         "RepositoryFile",
+        back_populates="analysis",
+        cascade="all, delete-orphan",
+    )
+    findings: Mapped[list[DBFinding]] = relationship(
+        "DBFinding",
         back_populates="analysis",
         cascade="all, delete-orphan",
     )

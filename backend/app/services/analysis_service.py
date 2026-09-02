@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from app.analysis.engine import StaticAnalysisEngine
 from app.analyzers.repo_analyzer import AnalysisResult, RepoAnalyzer
 from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFile
 
@@ -22,6 +23,7 @@ class AnalysisService:
 
     def __init__(self) -> None:
         self._analyzer = RepoAnalyzer()
+        self._static_engine = StaticAnalysisEngine()
 
     async def start_analysis(self, project_id: UUID, repository_path: str) -> Analysis:
         """Creates the analysis record and returns it. The caller schedules run_analysis()."""
@@ -54,15 +56,28 @@ class AnalysisService:
             )
             duration = time.monotonic() - start_time
 
+            # Run static analysis on the files collected during repo analysis
+            all_file_paths = [
+                fr.absolute_path for fr in analysis_result.file_results
+            ]
+            static_findings = await asyncio.to_thread(
+                self._static_engine.analyze_repository,
+                Path(repository_path),
+                all_file_paths,
+            )
+
             async with async_session_factory() as session:
-                await self._persist_results(session, analysis_id, analysis_result, duration)
+                await self._persist_results(
+                    session, analysis_id, analysis_result, duration, static_findings
+                )
                 await session.commit()
 
             logger.info(
-                "Analysis %s completed in %.2fs — %d files",
+                "Analysis %s completed in %.2fs — %d files, %d findings",
                 analysis_id,
                 duration,
                 analysis_result.total_files,
+                len(static_findings),
             )
         except Exception as exc:
             logger.exception("Analysis %s failed: %s", analysis_id, exc)
@@ -77,8 +92,10 @@ class AnalysisService:
         analysis_id: UUID,
         result: AnalysisResult,
         duration: float,
+        static_findings: list[Any] | None = None,
     ) -> None:
         from app.repositories.analysis_repo import AnalysisRepository
+        from app.repositories.finding_repo import FindingRepository
 
         total_entities = 0
         total_imports = 0
@@ -145,6 +162,7 @@ class AnalysisService:
             "ignored_files": result.ignored_file_count,
             "total_entities": total_entities,
             "total_imports": total_imports,
+            "total_findings": len(static_findings) if static_findings else 0,
             "languages": [
                 {
                     "language": ls.language,
@@ -167,3 +185,7 @@ class AnalysisService:
 
         repo = AnalysisRepository(session)
         await repo.complete_analysis(analysis_id, summary)
+
+        if static_findings:
+            finding_repo = FindingRepository(session)
+            await finding_repo.bulk_create(analysis_id, static_findings)
