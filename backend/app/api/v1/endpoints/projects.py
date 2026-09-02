@@ -16,6 +16,12 @@ from app.schemas.debugging import (
     StartDebuggingRequest,
 )
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectResponse
+from app.schemas.test_generation import (
+    PaginatedGeneratedTestsResponse,
+    PaginatedTestGenSessionsResponse,
+    StartTestGenerationRequest,
+    TestGenerationSessionResponse,
+)
 from app.schemas.test_run import PaginatedTestRunsResponse, TestRunResponse
 from app.services.analysis_service import AnalysisService
 from app.services.project_service import ProjectNotFoundError, ProjectService
@@ -344,6 +350,101 @@ async def list_project_debugging_sessions(
             )
             for s in sessions
         ],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/{project_id}/test-generation",
+    response_model=TestGenerationSessionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_test_generation(
+    project_id: UUID,
+    request: StartTestGenerationRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> TestGenerationSessionResponse:
+    project_service = ProjectService(db)
+    try:
+        project = await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.test_generation_repo import TestGenerationRepository
+    from app.services.test_generation_service import TestGenerationService
+    from app.workers.job_runner import FastAPIBackgroundRunner as _TGRunner
+
+    gen_repo = TestGenerationRepository(db)
+    s = await gen_repo.create_session(
+        project_id=project.id,
+        analysis_id=request.analysis_id,
+        test_run_id=request.test_run_id,
+        debugging_session_id=request.debugging_session_id,
+    )
+    await db.commit()
+    await db.refresh(s)
+
+    svc = TestGenerationService()
+    _TGRunner(background_tasks).submit(
+        svc.run_session,
+        session_id=s.id,
+        project_id=project.id,
+        repository_path=project.repository_path,
+        project_name=project.name,
+        analysis_id=request.analysis_id,
+        test_run_id=request.test_run_id,
+        debugging_session_id=request.debugging_session_id,
+    )
+    return TestGenerationSessionResponse.model_validate(s)
+
+
+@router.get("/{project_id}/test-generation", response_model=PaginatedTestGenSessionsResponse)
+async def list_test_generation_sessions(
+    project_id: UUID,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> PaginatedTestGenSessionsResponse:
+    project_service = ProjectService(db)
+    try:
+        await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.test_generation_repo import TestGenerationRepository
+
+    repo = TestGenerationRepository(db)
+    sessions, total = await repo.list_sessions(project_id, offset=offset, limit=limit)
+    return PaginatedTestGenSessionsResponse(
+        items=sessions,  # type: ignore[arg-type]
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.get("/{project_id}/generated-tests", response_model=PaginatedGeneratedTestsResponse)
+async def list_project_generated_tests(
+    project_id: UUID,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PaginatedGeneratedTestsResponse:
+    project_service = ProjectService(db)
+    try:
+        await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.test_generation_repo import TestGenerationRepository
+
+    repo = TestGenerationRepository(db)
+    tests, total = await repo.list_for_project(project_id, offset=offset, limit=limit)
+    return PaginatedGeneratedTestsResponse(
+        items=tests,  # type: ignore[arg-type]
         total=total,
         offset=offset,
         limit=limit,

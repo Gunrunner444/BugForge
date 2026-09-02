@@ -243,3 +243,57 @@ export interface DebuggingSessionsListResponse {
   offset: number;
   limit: number;
 }
+
+// ── Test Generation ────────────────────────────────────────────────────────
+
+export type TestGenStatus = "pending" | "running" | "completed" | "failed";
+export type ValidationStatus = "pending" | "valid" | "invalid";
+export type ExecutionStatus = "pending" | "passed" | "failed" | "error" | "timeout" | "not_run";
+
+export interface TestGenerationSession {
+  id: string;
+  project_id: string;
+  analysis_id: string | null;
+  test_run_id: string | null;
+  debugging_session_id: string | null;
+  status: TestGenStatus;
+  error_message: string | null;
+  candidate_count: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface GeneratedTest {
+  id: string;
+  session_id: string;
+  project_id: string;
+  target_file: string;
+  target_symbol: string;
+  category: string;
+  rationale: string;
+  generated_code: string;
+  confidence: number;
+  validation_status: ValidationStatus;
+  validation_error: string | null;
+  execution_status: ExecutionStatus;
+  execution_output: string | null;
+  quality_score: number | null;
+  quality_notes: string | null;
+  hypothesis_id: string | null;
+  created_at: string;
+}
+
+export interface TestGenSessionsListResponse {
+  items: TestGenerationSession[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface GeneratedTestsListResponse {
+  items: GeneratedTest[];
+  total: number;
+  offset: number;
+  limit: number;
+}

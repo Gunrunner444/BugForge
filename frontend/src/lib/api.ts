@@ -1,16 +1,20 @@
 import type {
   Analysis,
   CodeEntity,
+  DebuggingHypothesis,
   DebuggingSession,
   DebuggingSessionsListResponse,
-  DebuggingHypothesis,
   Finding,
   FindingsListResponse,
+  GeneratedTest,
+  GeneratedTestsListResponse,
   ImportRecord,
   PaginatedResponse,
   Project,
   ProjectListResponse,
   RepositoryFile,
+  TestGenerationSession,
+  TestGenSessionsListResponse,
   TestRun,
   TestRunListResponse,
   TestResultListResponse,
@@ -118,6 +122,25 @@ export const api = {
       request<DebuggingSessionsListResponse>(
         `/api/v1/projects/${id}/debugging?offset=${offset}&limit=${limit}`,
       ),
+
+    generateTests: (
+      id: string,
+      opts: { analysis_id?: string; test_run_id?: string; debugging_session_id?: string } = {}
+    ) =>
+      request<TestGenerationSession>(`/api/v1/projects/${id}/test-generation`, {
+        method: "POST",
+        body: JSON.stringify(opts),
+      }),
+
+    testGenSessions: (id: string, offset = 0, limit = 20) =>
+      request<TestGenSessionsListResponse>(
+        `/api/v1/projects/${id}/test-generation?offset=${offset}&limit=${limit}`,
+      ),
+
+    generatedTests: (id: string, offset = 0, limit = 50) =>
+      request<GeneratedTestsListResponse>(
+        `/api/v1/projects/${id}/generated-tests?offset=${offset}&limit=${limit}`,
+      ),
   },
 
   analyses: {
@@ -161,5 +184,13 @@ export const api = {
 
     hypotheses: (sessionId: string) =>
       request<DebuggingHypothesis[]>(`/api/v1/debugging/${sessionId}/hypotheses`),
+  },
+  testGeneration: {
+    get: (sessionId: string) =>
+      request<TestGenerationSession>(`/api/v1/test-generation/${sessionId}`),
+    tests: (sessionId: string, offset = 0, limit = 50) =>
+      request<GeneratedTestsListResponse>(
+        `/api/v1/test-generation/${sessionId}/tests?offset=${offset}&limit=${limit}`,
+      ),
   },
 };

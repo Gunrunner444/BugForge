@@ -12,6 +12,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     from app.models.analysis import Analysis
     from app.models.debugging import DebuggingSession
+    from app.models.test_generation import TestGenerationSession
     from app.models.test_run import TestRun
 
 
@@ -53,4 +54,11 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="DebuggingSession.created_at.desc()",
+    )
+
+    test_generation_sessions: Mapped[list[TestGenerationSession]] = relationship(
+        "TestGenerationSession",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="TestGenerationSession.created_at.desc()",
     )

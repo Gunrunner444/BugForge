@@ -6,12 +6,13 @@ import { api, ApiError } from "@/lib/api";
 import type { Analysis, Project } from "@/lib/types";
 import AnalysisResults from "@/components/AnalysisResults";
 import DebuggingPanel from "@/components/DebuggingPanel";
+import TestGenerationPanel from "@/components/TestGenerationPanel";
 import TestRunPanel from "@/components/TestRunPanel";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Badge from "@/components/ui/Badge";
 import { formatDate } from "@/lib/utils";
 
-type PageTab = "analysis" | "tests" | "debug";
+type PageTab = "analysis" | "tests" | "debug" | "generate";
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -135,7 +136,7 @@ export default function ProjectDetailPage() {
 
       {/* Page-level tabs */}
       <div className="flex border-b border-slate-200 mb-6">
-        {(["analysis", "tests", "debug"] as PageTab[]).map((t) => (
+        {(["analysis", "tests", "debug", "generate"] as PageTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setPageTab(t)}
@@ -145,7 +146,7 @@ export default function ProjectDetailPage() {
                 : "border-transparent text-slate-500 hover:text-slate-700"
             }`}
           >
-            {t === "analysis" ? "Analysis" : t === "tests" ? "Tests" : "AI Debugging"}
+            {t === "analysis" ? "Analysis" : t === "tests" ? "Tests" : t === "debug" ? "AI Debugging" : "Test Generation"}
           </button>
         ))}
       </div>
@@ -198,6 +199,14 @@ export default function ProjectDetailPage() {
           projectId={id}
           latestAnalysisId={analyses[0]?.id ?? null}
           latestTestRun={null}
+        />
+      )}
+
+      {/* Test Generation tab */}
+      {pageTab === "generate" && (
+        <TestGenerationPanel
+          projectId={id}
+          latestAnalysisId={analyses[0]?.id ?? null}
         />
       )}
     </div>

@@ -12,6 +12,7 @@ from app.models import Analysis, Project  # noqa: F401 — ensure models are reg
 from app.models.base import Base
 from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession  # noqa: F401
 from app.models.finding import DBFinding  # noqa: F401
+from app.models.test_generation import GeneratedTest, TestGenerationSession  # noqa: F401
 from app.models.test_run import TestResult, TestRun  # noqa: F401
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
