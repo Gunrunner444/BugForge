@@ -241,7 +241,7 @@ class RepoAnalyzer:
             # Guard against symlinks escaping the repository root
             try:
                 resolved = item.resolve()
-                if not str(resolved).startswith(str(repo_root_resolved)):
+                if not resolved.is_relative_to(repo_root_resolved):
                     logger.debug("Skipping symlink outside repo root: %s", item)
                     continue
             except OSError:

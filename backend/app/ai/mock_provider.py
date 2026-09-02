@@ -1,0 +1,122 @@
+"""
+Mock LLM provider — deterministic responses for development and testing.
+
+Never makes real API calls. Safe to use in CI without credentials.
+"""
+from __future__ import annotations
+
+import time
+
+from app.ai.provider import (
+    AIUsage,
+    DebuggingRequest,
+    HypothesisResult,
+    LLMProvider,
+    ProviderResponse,
+)
+
+
+class MockLLMProvider(LLMProvider):
+    """Returns plausible-looking hypotheses built from the supplied evidence.
+
+    Results are deterministic given the same input, making tests reproducible.
+    """
+
+    def __init__(self, delay_seconds: float = 0.0) -> None:
+        self._delay = delay_seconds
+
+    @property
+    def provider_name(self) -> str:
+        return "mock"
+
+    @property
+    def model_name(self) -> str:
+        return "mock-v1"
+
+    async def is_available(self) -> bool:
+        return True
+
+    async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
+        if self._delay:
+            import asyncio
+
+            await asyncio.sleep(self._delay)
+
+        start = time.monotonic()
+        hypotheses = self._generate_hypotheses(request)
+        duration = time.monotonic() - start
+
+        return ProviderResponse(
+            hypotheses=hypotheses,
+            provider=self.provider_name,
+            model=self.model_name,
+            usage=AIUsage(prompt_tokens=512, completion_tokens=256),
+            duration_seconds=duration,
+            raw_json='{"mock": true}',
+        )
+
+    def _generate_hypotheses(self, req: DebuggingRequest) -> list[HypothesisResult]:
+        hypotheses: list[HypothesisResult] = []
+
+        if req.failing_tests:
+            test = req.failing_tests[0]
+            affected_files = [test.test_file] if test.test_file else []
+
+            # Pull file paths from static findings too
+            for sf in req.static_findings[:3]:
+                if sf.file_path not in affected_files:
+                    affected_files.append(sf.file_path)
+
+            evidence: list[str] = []
+            if test.traceback:
+                evidence.append(f"Traceback from {test.node_id}")
+            for sf in req.static_findings[:2]:
+                evidence.append(f"Static finding: [{sf.severity}] {sf.message} ({sf.file_path}:{sf.line})")
+
+            hypotheses.append(
+                HypothesisResult(
+                    root_cause=(
+                        f"Test `{test.test_name}` is failing. "
+                        + (
+                            f"Static analysis found {len(req.static_findings)} issue(s) in related files. "
+                            if req.static_findings
+                            else ""
+                        )
+                        + "Review the traceback and the highlighted source locations."
+                    ),
+                    confidence=0.6 if req.static_findings else 0.4,
+                    confidence_label="likely" if req.static_findings else "possible",
+                    affected_files=affected_files[:3],
+                    affected_symbols=[test.test_name],
+                    evidence_summary=evidence or [f"Failing test: {test.node_id}"],
+                    contradictory_evidence=[],
+                    reproduction_strategy=f"Run: pytest {test.node_id}",
+                    recommended_tests=[test.node_id],
+                    explanation=(
+                        "[AI INFERENCE] This hypothesis is generated from failing-test evidence "
+                        "and static-analysis findings. It has NOT been verified by execution. "
+                        "The mock provider is in use — replace with a real AI provider for production analysis."
+                    ),
+                )
+            )
+
+        if not hypotheses:
+            hypotheses.append(
+                HypothesisResult(
+                    root_cause="Insufficient evidence to form a hypothesis",
+                    confidence=0.0,
+                    confidence_label="insufficient_evidence",
+                    affected_files=[],
+                    affected_symbols=[],
+                    evidence_summary=["No failing tests or static findings provided"],
+                    contradictory_evidence=[],
+                    reproduction_strategy="",
+                    recommended_tests=[],
+                    explanation=(
+                        "[AI INFERENCE — MOCK PROVIDER] No failing tests were found in the "
+                        "provided evidence. Run the test suite to generate test-failure evidence."
+                    ),
+                )
+            )
+
+        return hypotheses[: req.max_hypotheses]

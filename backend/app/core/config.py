@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "0.3.0"
+    version: str = "0.4.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -35,6 +35,20 @@ class Settings(BaseSettings):
     max_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
     max_repo_files: int = 10_000
     analysis_timeout_seconds: int = 300
+
+    # AI provider (mock | openai | anthropic)
+    ai_provider: str = "mock"
+    ai_model: str = "gpt-4o-mini"
+    # API key comes from environment only — never commit a real key
+    ai_api_key: str = ""
+    # Optional base URL override for OpenAI-compatible endpoints
+    ai_base_url: str = ""
+    ai_max_context_chars: int = 32_000
+    ai_max_output_tokens: int = 2_000
+    ai_temperature: float = 0.1
+    ai_timeout_seconds: int = 60
+    ai_max_retries: int = 2
+    ai_max_hypotheses: int = 3
 
     @field_validator("log_level")
     @classmethod

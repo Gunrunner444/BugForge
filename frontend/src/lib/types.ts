@@ -187,3 +187,59 @@ export interface FindingsListResponse {
   offset: number;
   limit: number;
 }
+
+// ── AI Debugging ───────────────────────────────────────────────────────────
+
+export type DebuggingStatus = "pending" | "running" | "completed" | "failed";
+
+export interface DebuggingHypothesis {
+  id: string;
+  session_id: string;
+  root_cause: string;
+  confidence: number;
+  confidence_label: "confirmed" | "highly_likely" | "likely" | "possible" | "insufficient_evidence";
+  affected_files: string[];
+  affected_symbols: string[];
+  evidence_summary: string[];
+  contradictory_evidence: string[];
+  reproduction_strategy: string;
+  recommended_tests: string[];
+  explanation: string;
+  ai_provider: string;
+  ai_model: string;
+  created_at: string;
+}
+
+export interface AIModelCall {
+  id: string;
+  provider: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  duration_seconds: number;
+  success: boolean;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface DebuggingSession {
+  id: string;
+  project_id: string;
+  analysis_id: string | null;
+  test_run_id: string | null;
+  status: DebuggingStatus;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  hypothesis_count: number;
+  hypotheses?: DebuggingHypothesis[];
+  ai_calls?: AIModelCall[];
+}
+
+export interface DebuggingSessionsListResponse {
+  items: DebuggingSession[];
+  total: number;
+  offset: number;
+  limit: number;
+}

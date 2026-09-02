@@ -10,6 +10,7 @@ from app.database import get_db
 from app.main import app
 from app.models import Analysis, Project  # noqa: F401 — ensure models are registered
 from app.models.base import Base
+from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession  # noqa: F401
 from app.models.finding import DBFinding  # noqa: F401
 from app.models.test_run import TestResult, TestRun  # noqa: F401
 

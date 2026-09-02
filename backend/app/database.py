@@ -31,6 +31,7 @@ async_session_factory = async_sessionmaker(
 async def create_tables() -> None:
     """Create all tables defined in the metadata. Used only for testing / dev convenience."""
     import app.models.analysis  # noqa: F401
+    import app.models.debugging  # noqa: F401
     import app.models.finding  # noqa: F401
     import app.models.project  # noqa: F401
     import app.models.test_run  # noqa: F401

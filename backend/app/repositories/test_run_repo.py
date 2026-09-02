@@ -88,7 +88,8 @@ class TestRunRepository:
         run = await self.session.get(TestRun, run_id)
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
-        run.status = "completed"
+        # Determine semantic status: passed (all green) vs failed (some failed/errored)
+        run.status = "passed" if (parsed.failed == 0 and parsed.errors == 0) else "failed"
         run.completed_at = datetime.now(UTC)
         run.total_tests = parsed.total
         run.passed = parsed.passed
@@ -122,7 +123,8 @@ class TestRunRepository:
         run = await self.session.get(TestRun, run_id)
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
-        run.status = "failed"
+        # "error" = BugForge failed to execute the run, as opposed to "failed" = tests ran but failed
+        run.status = "error"
         run.completed_at = datetime.now(UTC)
         run.error_message = error_message
         await self.session.flush()

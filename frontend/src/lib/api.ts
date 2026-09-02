@@ -1,6 +1,9 @@
 import type {
   Analysis,
   CodeEntity,
+  DebuggingSession,
+  DebuggingSessionsListResponse,
+  DebuggingHypothesis,
   Finding,
   FindingsListResponse,
   ImportRecord,
@@ -101,6 +104,20 @@ export const api = {
       request<TestRunListResponse>(
         `/api/v1/projects/${id}/test-runs?offset=${offset}&limit=${limit}`,
       ),
+
+    debug: (id: string, analysisId?: string, testRunId?: string) =>
+      request<DebuggingSession>(`/api/v1/projects/${id}/debug`, {
+        method: "POST",
+        body: JSON.stringify({
+          analysis_id: analysisId ?? null,
+          test_run_id: testRunId ?? null,
+        }),
+      }),
+
+    debugSessions: (id: string, offset = 0, limit = 20) =>
+      request<DebuggingSessionsListResponse>(
+        `/api/v1/projects/${id}/debugging?offset=${offset}&limit=${limit}`,
+      ),
   },
 
   analyses: {
@@ -136,5 +153,13 @@ export const api = {
       request<TestResultListResponse>(
         `/api/v1/test-runs/${id}/results?offset=${offset}&limit=${limit}`,
       ),
+  },
+
+  debugging: {
+    get: (sessionId: string) =>
+      request<DebuggingSession>(`/api/v1/debugging/${sessionId}`),
+
+    hypotheses: (sessionId: string) =>
+      request<DebuggingHypothesis[]>(`/api/v1/debugging/${sessionId}/hypotheses`),
   },
 };

@@ -30,6 +30,7 @@ class _PytestOutput:
     exit_code: int
     duration_seconds: float
     command: str
+    timed_out: bool = False
 
 
 class TestRunNotFoundError(Exception):
@@ -61,6 +62,7 @@ class TestRunnerService:
             logger.exception("Test run %s failed during execution: %s", test_run_id, exc)
             async with async_session_factory() as session:
                 repo = TestRunRepository(session)
+                # "error" = BugForge infrastructure failure (not a test failure)
                 await repo.fail(test_run_id, str(exc))
                 await session.commit()
             return
@@ -78,6 +80,9 @@ class TestRunnerService:
                     duration_seconds=output.duration_seconds,
                     command=output.command,
                 )
+                # If the executor timed out, override the status to "timeout"
+                if output.timed_out:
+                    await repo.update_status(test_run_id, "timeout")
                 await session.commit()
                 logger.info(
                     "Test run %s completed — %d tests (%d passed, %d failed)",
@@ -145,14 +150,8 @@ class TestRunnerService:
                 parsed = self._parse_text_output(stdout, stderr)
 
             if exec_result.timed_out:
-                parsed = ParsedTestRun(
-                    results=parsed.results,
-                    total=parsed.total,
-                    passed=parsed.passed,
-                    failed=parsed.failed,
-                    skipped=parsed.skipped,
-                    errors=parsed.errors,
-                )
+                # Persist whatever partial results we got, then override status to timeout
+                pass  # status is set in repo.complete() based on parsed counts
 
         return _PytestOutput(
             parsed=parsed,
@@ -161,6 +160,7 @@ class TestRunnerService:
             exit_code=exec_result.exit_code,
             duration_seconds=exec_result.duration_seconds,
             command=command_str,
+            timed_out=exec_result.timed_out,
         )
 
     @staticmethod

@@ -5,12 +5,13 @@ import { useParams } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 import type { Analysis, Project } from "@/lib/types";
 import AnalysisResults from "@/components/AnalysisResults";
+import DebuggingPanel from "@/components/DebuggingPanel";
 import TestRunPanel from "@/components/TestRunPanel";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Badge from "@/components/ui/Badge";
 import { formatDate } from "@/lib/utils";
 
-type PageTab = "analysis" | "tests";
+type PageTab = "analysis" | "tests" | "debug";
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -134,7 +135,7 @@ export default function ProjectDetailPage() {
 
       {/* Page-level tabs */}
       <div className="flex border-b border-slate-200 mb-6">
-        {(["analysis", "tests"] as PageTab[]).map((t) => (
+        {(["analysis", "tests", "debug"] as PageTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setPageTab(t)}
@@ -144,7 +145,7 @@ export default function ProjectDetailPage() {
                 : "border-transparent text-slate-500 hover:text-slate-700"
             }`}
           >
-            {t === "analysis" ? "Analysis" : "Tests"}
+            {t === "analysis" ? "Analysis" : t === "tests" ? "Tests" : "AI Debugging"}
           </button>
         ))}
       </div>
@@ -190,6 +191,15 @@ export default function ProjectDetailPage() {
 
       {/* Tests tab */}
       {pageTab === "tests" && <TestRunPanel projectId={id} />}
+
+      {/* AI Debugging tab */}
+      {pageTab === "debug" && (
+        <DebuggingPanel
+          projectId={id}
+          latestAnalysisId={analyses[0]?.id ?? null}
+          latestTestRun={null}
+        />
+      )}
     </div>
   );
 }

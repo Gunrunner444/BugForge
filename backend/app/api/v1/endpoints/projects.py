@@ -10,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.project import Project
 from app.schemas.analysis import AnalysisResponse, AnalysisSummarySchema
+from app.schemas.debugging import (
+    DebuggingSessionResponse,
+    PaginatedDebuggingSessionsResponse,
+    StartDebuggingRequest,
+)
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectResponse
 from app.schemas.test_run import PaginatedTestRunsResponse, TestRunResponse
 from app.services.analysis_service import AnalysisService
@@ -246,6 +251,99 @@ async def list_project_test_runs(
 
     return PaginatedTestRunsResponse(
         items=runs,  # type: ignore[arg-type]
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/{project_id}/debug",
+    response_model=DebuggingSessionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_debugging_session(
+    project_id: UUID,
+    request: StartDebuggingRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> DebuggingSessionResponse:
+    project_service = ProjectService(db)
+    try:
+        project = await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.debugging_repo import DebuggingRepository
+    from app.services.debugging_service import DebuggingService
+    from app.workers.job_runner import FastAPIBackgroundRunner
+
+    # Create the session record in the request session (test-overrideable)
+    debug_repo = DebuggingRepository(db)
+    ds = await debug_repo.create_session(
+        project_id=project.id,
+        analysis_id=request.analysis_id,
+        test_run_id=request.test_run_id,
+    )
+    await db.commit()
+    await db.refresh(ds)
+
+    svc = DebuggingService()
+    FastAPIBackgroundRunner(background_tasks).submit(
+        svc.run_session,
+        session_id=ds.id,
+        repository_path=project.repository_path,
+        project_name=project.name,
+    )
+
+    return DebuggingSessionResponse(
+        id=ds.id,
+        project_id=ds.project_id,
+        analysis_id=ds.analysis_id,
+        test_run_id=ds.test_run_id,
+        status=ds.status,
+        error_message=ds.error_message,
+        created_at=ds.created_at,
+        started_at=ds.started_at,
+        completed_at=ds.completed_at,
+        hypothesis_count=0,
+    )
+
+
+@router.get("/{project_id}/debugging", response_model=PaginatedDebuggingSessionsResponse)
+async def list_project_debugging_sessions(
+    project_id: UUID,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> PaginatedDebuggingSessionsResponse:
+    project_service = ProjectService(db)
+    try:
+        await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.debugging_repo import DebuggingRepository
+
+    repo = DebuggingRepository(db)
+    sessions, total = await repo.list_for_project(project_id, offset=offset, limit=limit)
+
+    return PaginatedDebuggingSessionsResponse(
+        items=[
+            DebuggingSessionResponse(
+                id=s.id,
+                project_id=s.project_id,
+                analysis_id=s.analysis_id,
+                test_run_id=s.test_run_id,
+                status=s.status,
+                error_message=s.error_message,
+                created_at=s.created_at,
+                started_at=s.started_at,
+                completed_at=s.completed_at,
+                hypothesis_count=len(s.hypotheses),
+            )
+            for s in sessions
+        ],
         total=total,
         offset=offset,
         limit=limit,
