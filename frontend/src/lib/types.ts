@@ -297,3 +297,58 @@ export interface GeneratedTestsListResponse {
   offset: number;
   limit: number;
 }
+
+// ── Bug Reproduction ───────────────────────────────────────────────────────
+
+export type ReproductionStatus = "pending" | "running" | "completed" | "failed";
+export type ReproductionClassification =
+  | "not_reproduced"
+  | "inconclusive"
+  | "intermittent"
+  | "reproduced"
+  | "consistently_reproduced";
+
+export interface BugReproductionAttempt {
+  id: string;
+  session_id: string;
+  attempt_number: number;
+  command: string | null;
+  input_description: string | null;
+  reproducer_code: string | null;
+  exit_code: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  traceback: string | null;
+  duration_seconds: number | null;
+  timed_out: boolean;
+  reproduced: boolean;
+  classification: string;
+  created_at: string;
+}
+
+export interface BugReproductionSession {
+  id: string;
+  project_id: string;
+  debugging_session_id: string | null;
+  hypothesis_id: string | null;
+  generated_test_id: string | null;
+  status: ReproductionStatus;
+  attempt_count: number;
+  successful_attempts: number;
+  total_attempts: number;
+  reproducibility_rate: number | null;
+  final_classification: ReproductionClassification | null;
+  strategy_summary: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  attempts?: BugReproductionAttempt[];
+}
+
+export interface ReproductionSessionsListResponse {
+  items: BugReproductionSession[];
+  total: number;
+  offset: number;
+  limit: number;
+}

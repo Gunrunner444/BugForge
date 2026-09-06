@@ -90,8 +90,31 @@ class ProviderResponse:
     model: str
     usage: AIUsage
     duration_seconds: float
-    # raw JSON for diagnostics — never logged at INFO level
     raw_json: str = ""
+    error: str | None = None
+
+
+@dataclass
+class TestGenerationResponse:
+    """Structured response from generate_tests()."""
+
+    candidates_json: str
+    provider: str
+    model: str
+    usage: AIUsage
+    duration_seconds: float
+    error: str | None = None
+
+
+@dataclass
+class StructuredTextResponse:
+    """Raw JSON response from generate_structured()."""
+
+    content: str
+    provider: str
+    model: str
+    usage: AIUsage
+    duration_seconds: float
     error: str | None = None
 
 
@@ -129,4 +152,19 @@ class LLMProvider(ABC):
     @abstractmethod
     async def is_available(self) -> bool:
         """Return True if this provider is usable (key set, reachable, etc.)."""
+        ...
+
+    @abstractmethod
+    async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
+        """Generate test candidates from evidence.
+
+        system_prompt contains BugForge instructions (trusted).
+        user_message contains evidence + [REPOSITORY_DATA] tagged untrusted content.
+        Returns a TestGenerationResponse with the raw JSON candidates.
+        """
+        ...
+
+    @abstractmethod
+    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+        """Generic structured generation for reproduction planning and other tasks."""
         ...

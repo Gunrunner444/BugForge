@@ -5,6 +5,7 @@ Never makes real API calls. Safe to use in CI without credentials.
 """
 from __future__ import annotations
 
+import json
 import time
 
 from app.ai.provider import (
@@ -13,6 +14,8 @@ from app.ai.provider import (
     HypothesisResult,
     LLMProvider,
     ProviderResponse,
+    StructuredTextResponse,
+    TestGenerationResponse,
 )
 
 
@@ -120,3 +123,41 @@ class MockLLMProvider(LLMProvider):
             )
 
         return hypotheses[: req.max_hypotheses]
+
+    async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
+        from app.testing.test_generator import _mock_test_generation_response
+
+        start = time.monotonic()
+        return TestGenerationResponse(
+            candidates_json=_mock_test_generation_response(),
+            provider=self.provider_name,
+            model=self.model_name,
+            usage=AIUsage(prompt_tokens=256, completion_tokens=512),
+            duration_seconds=time.monotonic() - start,
+        )
+
+    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+        # Return a minimal mock reproduction plan
+        start = time.monotonic()
+        plan = json.dumps({
+            "target_behavior": "Suspected bug based on AI hypothesis",
+            "preconditions": [],
+            "input_description": "Reproduce via the failing test scenario",
+            "expected_failure": "Exception or assertion failure",
+            "observable_evidence": "Traceback or assertion error in output",
+            "reproducer_code": (
+                "import pytest\n\n"
+                "def test_mock_reproduction():\n"
+                "    \"\"\"[AI-GENERATED REPRODUCER] Mock reproduction attempt.\"\"\"\n"
+                "    # TODO: replace with actual reproduction code from hypothesis\n"
+                "    assert True  # placeholder\n"
+            ),
+            "cleanup_required": False,
+        })
+        return StructuredTextResponse(
+            content=plan,
+            provider=self.provider_name,
+            model=self.model_name,
+            usage=AIUsage(prompt_tokens=128, completion_tokens=256),
+            duration_seconds=time.monotonic() - start,
+        )

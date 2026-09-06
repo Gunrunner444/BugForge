@@ -148,26 +148,11 @@ class TestGenerator:
         return "\n".join(parts)
 
     async def _call_provider(self, user_msg: str) -> str:
-        """Call the provider with the test-generation prompt and return raw JSON."""
-
-        # Reuse the LLMProvider interface with an adapted request
-        # We build a custom prompt and intercept the raw_json
-        from app.ai.mock_provider import MockLLMProvider
-
-        if isinstance(self._provider, MockLLMProvider):
-            return _mock_test_generation_response()
-
-        # For real providers, call via httpx directly using our prompt
-        # This avoids the DebuggingRequest wrapper
-
-        if hasattr(self._provider, "_call_api"):
-            try:
-                result: tuple[str, Any] = await self._provider._call_api(_SYSTEM_PROMPT, user_msg)
-                return result[0]
-            except Exception as exc:
-                logger.warning("Test generation provider call failed: %s", exc)
-                return ""
-        return ""
+        """Call the provider via the public generate_tests() interface."""
+        response = await self._provider.generate_tests(_SYSTEM_PROMPT, user_msg)
+        if response.error:
+            logger.warning("Test generation provider error: %s", response.error)
+        return response.candidates_json
 
     def _parse_response(self, raw_json: str, max_count: int) -> list[TestCandidate]:
         if not raw_json:

@@ -1,5 +1,7 @@
 import type {
   Analysis,
+  BugReproductionSession,
+  ReproductionSessionsListResponse,
   CodeEntity,
   DebuggingHypothesis,
   DebuggingSession,
@@ -141,6 +143,17 @@ export const api = {
       request<GeneratedTestsListResponse>(
         `/api/v1/projects/${id}/generated-tests?offset=${offset}&limit=${limit}`,
       ),
+
+    reproduce: (id: string, opts: {hypothesis_id?: string; generated_test_id?: string; debugging_session_id?: string; total_attempts?: number} = {}) =>
+      request<BugReproductionSession>(`/api/v1/projects/${id}/reproduction`, {
+        method: "POST",
+        body: JSON.stringify(opts),
+      }),
+
+    reproductionSessions: (id: string, offset = 0, limit = 20) =>
+      request<ReproductionSessionsListResponse>(
+        `/api/v1/projects/${id}/reproduction?offset=${offset}&limit=${limit}`,
+      ),
   },
 
   analyses: {
@@ -192,5 +205,14 @@ export const api = {
       request<GeneratedTestsListResponse>(
         `/api/v1/test-generation/${sessionId}/tests?offset=${offset}&limit=${limit}`,
       ),
+
+  },
+
+  reproduction: {
+    get: (sessionId: string) =>
+      request<BugReproductionSession>(`/api/v1/reproduction/${sessionId}`),
+
+    attempts: (sessionId: string) =>
+      request<BugReproductionSession>(`/api/v1/reproduction/${sessionId}/attempts`),
   },
 };

@@ -16,6 +16,11 @@ from app.schemas.debugging import (
     StartDebuggingRequest,
 )
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectResponse
+from app.schemas.reproduction import (
+    BugReproductionSessionResponse,
+    PaginatedReproductionSessionsResponse,
+    StartReproductionRequest,
+)
 from app.schemas.test_generation import (
     PaginatedGeneratedTestsResponse,
     PaginatedTestGenSessionsResponse,
@@ -445,6 +450,76 @@ async def list_project_generated_tests(
     tests, total = await repo.list_for_project(project_id, offset=offset, limit=limit)
     return PaginatedGeneratedTestsResponse(
         items=tests,  # type: ignore[arg-type]
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/{project_id}/reproduction",
+    response_model=BugReproductionSessionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_reproduction(
+    project_id: UUID,
+    request: StartReproductionRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> BugReproductionSessionResponse:
+    project_service = ProjectService(db)
+    try:
+        project = await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.reproduction_repo import ReproductionRepository
+    from app.services.reproduction_service import BugReproductionService
+    from app.workers.job_runner import FastAPIBackgroundRunner as _BRRunner
+
+    repo = ReproductionRepository(db)
+    s = await repo.create(
+        project_id=project.id,
+        hypothesis_id=request.hypothesis_id,
+        generated_test_id=request.generated_test_id,
+        debugging_session_id=request.debugging_session_id,
+        total_attempts=request.total_attempts,
+    )
+    await db.commit()
+    await db.refresh(s)
+
+    svc = BugReproductionService()
+    _BRRunner(background_tasks).submit(
+        svc.run_session,
+        session_id=s.id,
+        project_id=project.id,
+        repository_path=project.repository_path,
+        hypothesis_id=request.hypothesis_id,
+        generated_test_id=request.generated_test_id,
+        total_attempts=request.total_attempts,
+    )
+    return BugReproductionSessionResponse.model_validate(s)
+
+
+@router.get("/{project_id}/reproduction", response_model=PaginatedReproductionSessionsResponse)
+async def list_reproduction_sessions(
+    project_id: UUID,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> PaginatedReproductionSessionsResponse:
+    project_service = ProjectService(db)
+    try:
+        await project_service.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.repositories.reproduction_repo import ReproductionRepository
+
+    repo = ReproductionRepository(db)
+    sessions, total = await repo.list_for_project(project_id, offset=offset, limit=limit)
+    return PaginatedReproductionSessionsResponse(
+        items=sessions,  # type: ignore[arg-type]
         total=total,
         offset=offset,
         limit=limit,

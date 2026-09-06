@@ -24,6 +24,8 @@ from app.ai.provider import (
     HypothesisResult,
     LLMProvider,
     ProviderResponse,
+    StructuredTextResponse,
+    TestGenerationResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,48 @@ class OpenAIProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return bool(self._api_key)
+
+    async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
+        start = time.monotonic()
+        try:
+            raw_json, usage = await self._call_api(system_prompt, user_message)
+        except Exception as exc:
+            return TestGenerationResponse(
+                candidates_json="",
+                provider=self.provider_name,
+                model=self._model,
+                usage=AIUsage(),
+                duration_seconds=time.monotonic() - start,
+                error=str(exc),
+            )
+        return TestGenerationResponse(
+            candidates_json=raw_json,
+            provider=self.provider_name,
+            model=self._model,
+            usage=usage,
+            duration_seconds=time.monotonic() - start,
+        )
+
+    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+        start = time.monotonic()
+        try:
+            raw, usage = await self._call_api(system_prompt, user_message)
+        except Exception as exc:
+            return StructuredTextResponse(
+                content="",
+                provider=self.provider_name,
+                model=self._model,
+                usage=AIUsage(),
+                duration_seconds=time.monotonic() - start,
+                error=str(exc),
+            )
+        return StructuredTextResponse(
+            content=raw,
+            provider=self.provider_name,
+            model=self._model,
+            usage=usage,
+            duration_seconds=time.monotonic() - start,
+        )
 
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
         from app.ai.prompt_builder import PromptBuilder
