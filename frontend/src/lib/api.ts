@@ -1,11 +1,18 @@
 import type {
   Analysis,
+  AIStatus,
+  AutonomousRun,
+  AutonomousRunsListResponse,
   BugReproductionSession,
   ReproductionSessionsListResponse,
+  CandidateStatusCounts,
   CodeEntity,
   DebuggingHypothesis,
   DebuggingSession,
   DebuggingSessionsListResponse,
+  DiscoveryRun,
+  DiscoveryRunsListResponse,
+  DiscoverySettings,
   Finding,
   FindingsListResponse,
   GeneratedTest,
@@ -18,6 +25,8 @@ import type {
   ProjectListResponse,
   RepairSession,
   RepairSessionsListResponse,
+  RepositoryCandidate,
+  RepositoryCandidatesListResponse,
   RepositoryFile,
   TestGenerationSession,
   TestGenSessionsListResponse,
@@ -289,5 +298,68 @@ export const api = {
 
     getDelivery: (deliveryId: string) =>
       request<GitHubDelivery>(`/api/v1/github/deliveries/${deliveryId}`),
+  },
+
+  // ── v1.1.0 Autonomous Discovery ─────────────────────────────────────────
+
+  discovery: {
+    triggerRun: (maxPages = 5) =>
+      request<DiscoveryRun>("/api/v1/discovery/run", {
+        method: "POST",
+        body: JSON.stringify({ max_pages: maxPages }),
+      }),
+
+    listRuns: (offset = 0, limit = 20) =>
+      request<DiscoveryRunsListResponse>(
+        `/api/v1/discovery/runs?offset=${offset}&limit=${limit}`,
+      ),
+
+    getRun: (id: string) => request<DiscoveryRun>(`/api/v1/discovery/runs/${id}`),
+
+    getSettings: () => request<DiscoverySettings>("/api/v1/discovery/settings"),
+  },
+
+  candidates: {
+    list: (status?: string, offset = 0, limit = 50) => {
+      const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+      if (status) params.set("eligibility_status", status);
+      return request<RepositoryCandidatesListResponse>(
+        `/api/v1/repositories/discovered?${params}`,
+      );
+    },
+
+    counts: () => request<CandidateStatusCounts>("/api/v1/repositories/discovered/counts"),
+
+    get: (id: string) =>
+      request<RepositoryCandidate>(`/api/v1/repositories/discovered/${id}`),
+
+    analyze: (id: string, forceRescan = false) =>
+      request<AutonomousRun>(`/api/v1/repositories/discovered/${id}/analyze`, {
+        method: "POST",
+        body: JSON.stringify({ force_rescan: forceRescan }),
+      }),
+  },
+
+  autonomous: {
+    listRuns: (status?: string, offset = 0, limit = 50) => {
+      const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+      if (status) params.set("status", status);
+      return request<AutonomousRunsListResponse>(`/api/v1/autonomous/runs?${params}`);
+    },
+
+    getRun: (id: string) => request<AutonomousRun>(`/api/v1/autonomous/runs/${id}`),
+
+    cancelRun: (id: string) =>
+      request<AutonomousRun>(`/api/v1/autonomous/runs/${id}/cancel`, { method: "POST" }),
+  },
+
+  ai: {
+    status: () => request<AIStatus>("/api/v1/ai/status"),
+
+    test: (prompt = "Reply with only the word: ok") =>
+      request<{ provider: string; model: string; response: string; duration_seconds: number; error: string | null }>(
+        "/api/v1/ai/test",
+        { method: "POST", body: JSON.stringify({ prompt }) },
+      ),
   },
 };

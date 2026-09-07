@@ -557,3 +557,150 @@ export interface GitHubDelivery {
   started_at: string | null;
   completed_at: string | null;
 }
+
+// ── Autonomous Discovery (v1.1.0) ─────────────────────────────────────────
+
+export interface DiscoveryRun {
+  id: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  search_criteria: string | null;
+  discovered_count: number;
+  eligible_count: number;
+  rejected_count: number;
+  github_api_requests: number;
+  started_at: string;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface DiscoveryRunsListResponse {
+  items: DiscoveryRun[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export type EligibilityStatus =
+  | "discovered"
+  | "screening"
+  | "eligible"
+  | "rejected"
+  | "blocked"
+  | "queued"
+  | "analyzing"
+  | "completed"
+  | "failed"
+  | "paused";
+
+export type SafetyClassification = "safe_candidate" | "low_risk" | "needs_review" | "blocked";
+
+export interface RepositoryCandidate {
+  id: string;
+  github_repo_id: number;
+  owner: string;
+  name: string;
+  full_name: string;
+  html_url: string;
+  stars: number;
+  is_fork: boolean;
+  is_archived: boolean;
+  default_branch: string;
+  primary_language: string | null;
+  license_key: string | null;
+  size_kb: number;
+  open_issues: number;
+  topics: string | null; // JSON array string
+  description: string | null;
+  last_updated_at: string | null;
+  last_pushed_at: string | null;
+  eligibility_status: EligibilityStatus;
+  eligibility_score: number | null;
+  rejection_reason: string | null;
+  safety_classification: SafetyClassification | null;
+  safety_detail: string | null;
+  analysis_status: string | null;
+  last_analyzed_commit: string | null;
+  last_analyzed_at: string | null;
+  discovered_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RepositoryCandidatesListResponse {
+  items: RepositoryCandidate[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface CandidateStatusCounts {
+  counts: Record<string, number>;
+}
+
+export interface AutonomousRun {
+  id: string;
+  candidate_id: string;
+  project_id: string | null;
+  status: string;
+  current_stage: string | null;
+  commit_sha: string | null;
+  ai_provider: string | null;
+  ai_model: string | null;
+  is_local_ai: boolean;
+  static_findings_count: number;
+  ai_hypotheses_count: number;
+  validated_findings_count: number;
+  rejected_findings_count: number;
+  tests_generated: number;
+  tests_executed: number;
+  repairs_generated: number;
+  repairs_verified: number;
+  started_at: string | null;
+  completed_at: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutonomousRunsListResponse {
+  items: AutonomousRun[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface AIStatus {
+  provider: string;
+  model: string;
+  is_local: boolean;
+  reachable: boolean;
+  configured: boolean;
+  model_available: boolean | null;
+  error: string | null;
+  capabilities: string[] | null;
+}
+
+export interface DiscoverySettings {
+  discovery_mode: string;
+  discovery_interval_hours: number;
+  discovery_min_stars: number;
+  discovery_max_stars: number;
+  discovery_languages: string;
+  discovery_require_license: boolean;
+  discovery_skip_forks: boolean;
+  discovery_skip_archived: boolean;
+  discovery_max_staleness_days: number;
+  discovery_daily_repo_limit: number;
+  discovery_max_concurrent: number;
+  discovery_max_size_kb: number;
+  discovery_excluded_topics: string;
+  discovery_excluded_owners: string;
+  safety_max_repo_size_kb: number;
+  safety_max_file_count: number;
+  safety_allow_docker_exec: boolean;
+  safety_allow_sandbox_network: boolean;
+  safety_allow_dep_install: boolean;
+}
