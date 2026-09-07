@@ -1,4 +1,5 @@
 """Patch Verification API endpoints — Phase 8."""
+
 from __future__ import annotations
 
 import logging

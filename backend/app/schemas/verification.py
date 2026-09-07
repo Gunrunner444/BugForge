@@ -1,4 +1,5 @@
 """Pydantic schemas for v0.8 Patch Verification."""
+
 from __future__ import annotations
 
 import json

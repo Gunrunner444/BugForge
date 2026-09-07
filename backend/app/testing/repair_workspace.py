@@ -4,6 +4,7 @@ Repair workspace — manages disposable copies of a repository for patch testing
 A patch is NEVER applied to the original repository.
 Each candidate gets its own isolated workspace that is destroyed after use.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,9 +42,7 @@ class RepairWorkspace:
 
         # Rough size guard
         total = sum(
-            f.stat().st_size
-            for f in src.rglob("*")
-            if f.is_file() and not _should_skip(f, src)
+            f.stat().st_size for f in src.rglob("*") if f.is_file() and not _should_skip(f, src)
         )
         if total > _MAX_REPO_SIZE_BYTES:
             raise ValueError(
@@ -114,7 +113,9 @@ class RepairWorkspace:
                     current_file = path
                     target = self._repo_root / path
                     if target.exists():
-                        original_lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+                        original_lines = target.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines(keepends=True)
                     else:
                         original_lines = []
             elif stripped.startswith("@@ "):
@@ -153,12 +154,12 @@ class RepairWorkspace:
             # Walk through all hunk lines tracking position sequentially.
             # context lines and removed lines each advance by one in the original;
             # added lines insert new content without advancing the original position.
-            read_pos = orig_start + offset   # current cursor in result[]
-            new_segment: list[str] = []       # replacement lines for this hunk
-            orig_lines_consumed = 0           # how many result lines this hunk replaces
+            read_pos = orig_start + offset  # current cursor in result[]
+            new_segment: list[str] = []  # replacement lines for this hunk
+            orig_lines_consumed = 0  # how many result lines this hunk replaces
 
             for h in hunk:
-                if h.startswith(" "):         # context line
+                if h.startswith(" "):  # context line
                     ctx = h[1:].rstrip("\n")
                     actual = result[read_pos].rstrip("\n") if read_pos < len(result) else ""
                     if actual != ctx:
@@ -166,11 +167,14 @@ class RepairWorkspace:
                             f"Context mismatch in {rel_path} at line {orig_start + orig_lines_consumed + 1}: "
                             f"expected {ctx!r}, got {actual!r}; patch rejected"
                         )
-                    new_segment.append(result[read_pos] if result[read_pos].endswith("\n")
-                                       else result[read_pos] + "\n")
+                    new_segment.append(
+                        result[read_pos]
+                        if result[read_pos].endswith("\n")
+                        else result[read_pos] + "\n"
+                    )
                     read_pos += 1
                     orig_lines_consumed += 1
-                elif h.startswith("-"):       # removed line
+                elif h.startswith("-"):  # removed line
                     removed = h[1:].rstrip("\n")
                     actual = result[read_pos].rstrip("\n") if read_pos < len(result) else ""
                     if actual != removed:
@@ -181,7 +185,7 @@ class RepairWorkspace:
                     # Don't add to new_segment — line is deleted
                     read_pos += 1
                     orig_lines_consumed += 1
-                elif h.startswith("+"):       # added line
+                elif h.startswith("+"):  # added line
                     added = h[1:]
                     if not added.endswith("\n"):
                         added += "\n"
@@ -222,11 +226,7 @@ def _should_skip(path: Path, base: Path) -> bool:
         rel = path.relative_to(base)
         parts = rel.parts
         return any(
-            p in (".git", "__pycache__", "node_modules", ".venv", "venv", ".env")
-            for p in parts
+            p in (".git", "__pycache__", "node_modules", ".venv", "venv", ".env") for p in parts
         )
     except ValueError:
         return False
-
-
-

@@ -13,6 +13,7 @@ Philosophy:
 All checks operate on metadata only; no repository code is cloned or
 executed in this service.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,15 +29,34 @@ logger = logging.getLogger(__name__)
 # Topics that immediately block a repository regardless of other criteria
 _BLOCKED_TOPICS = frozenset(
     {
-        "exploit", "exploitation", "exploit-code", "exploit-kit",
-        "malware", "ransomware", "virus", "trojan", "spyware",
-        "hacking", "hack-tool", "hacking-tool",
-        "pentest", "penetration-testing", "offensive-security",
-        "ctf-solutions", "ctf-writeup",
-        "keylogger", "rootkit", "botnet",
-        "dos", "ddos", "denial-of-service",
-        "rat", "remote-access-trojan",
-        "stealer", "password-stealer", "credential-stealer",
+        "exploit",
+        "exploitation",
+        "exploit-code",
+        "exploit-kit",
+        "malware",
+        "ransomware",
+        "virus",
+        "trojan",
+        "spyware",
+        "hacking",
+        "hack-tool",
+        "hacking-tool",
+        "pentest",
+        "penetration-testing",
+        "offensive-security",
+        "ctf-solutions",
+        "ctf-writeup",
+        "keylogger",
+        "rootkit",
+        "botnet",
+        "dos",
+        "ddos",
+        "denial-of-service",
+        "rat",
+        "remote-access-trojan",
+        "stealer",
+        "password-stealer",
+        "credential-stealer",
         "phishing",
     }
 )
@@ -67,10 +87,25 @@ _CREDENTIAL_PATTERNS = [
 # OSI-recognised license identifiers (lowercase)
 _OSI_LICENSES = frozenset(
     {
-        "mit", "apache-2.0", "gpl-2.0", "gpl-3.0", "lgpl-2.1", "lgpl-3.0",
-        "bsd-2-clause", "bsd-3-clause", "mpl-2.0", "cddl-1.0", "epl-2.0",
-        "agpl-3.0", "unlicense", "isc", "cc0-1.0", "eupl-1.1", "eupl-1.2",
-        "0bsd", "ncsa",
+        "mit",
+        "apache-2.0",
+        "gpl-2.0",
+        "gpl-3.0",
+        "lgpl-2.1",
+        "lgpl-3.0",
+        "bsd-2-clause",
+        "bsd-3-clause",
+        "mpl-2.0",
+        "cddl-1.0",
+        "epl-2.0",
+        "agpl-3.0",
+        "unlicense",
+        "isc",
+        "cc0-1.0",
+        "eupl-1.1",
+        "eupl-1.2",
+        "0bsd",
+        "ncsa",
     }
 )
 
@@ -182,7 +217,10 @@ class EligibilityService:
             checks.append(PolicyCheckResult("config_excluded_topics", True, True))
 
         # Repository size hard limit
-        if self._settings.safety_max_repo_size_kb > 0 and size_kb > self._settings.safety_max_repo_size_kb:
+        if (
+            self._settings.safety_max_repo_size_kb > 0
+            and size_kb > self._settings.safety_max_repo_size_kb
+        ):
             reason = f"size_too_large:{size_kb}kb>{self._settings.safety_max_repo_size_kb}kb"
             checks.append(PolicyCheckResult("size_limit", False, True, reason))
             hard_blocked = True
@@ -225,8 +263,15 @@ class EligibilityService:
 
         # Language
         allowed_langs = self._settings.get_discovery_languages()
-        if allowed_langs and primary_language:
-            if primary_language not in allowed_langs:
+        if allowed_langs:
+            if not primary_language:
+                # Missing language metadata when a language filter is active — cannot
+                # confirm eligibility; reject rather than silently passing.
+                reason = "language_unknown"
+                checks.append(PolicyCheckResult("language", False, False, reason))
+                hard_blocked = True
+                rejection_reasons.append(reason)
+            elif primary_language not in allowed_langs:
                 reason = f"unsupported_language:{primary_language}"
                 checks.append(PolicyCheckResult("language", False, True, reason))
                 hard_blocked = True
@@ -237,15 +282,26 @@ class EligibilityService:
             checks.append(PolicyCheckResult("language", True, False, primary_language or "unknown"))
 
         # Recency
-        if self._settings.discovery_max_staleness_days > 0 and last_pushed_at:
-            cutoff = datetime.now(UTC) - timedelta(days=self._settings.discovery_max_staleness_days)
-            if last_pushed_at < cutoff:
-                reason = f"stale_repository:last_push={last_pushed_at.date()}"
+        if self._settings.discovery_max_staleness_days > 0:
+            if last_pushed_at is None:
+                # Missing recency metadata — cannot confirm the repo is fresh enough.
+                reason = "last_pushed_at_unknown"
                 checks.append(PolicyCheckResult("recency", False, False, reason))
                 hard_blocked = True
                 rejection_reasons.append(reason)
             else:
-                checks.append(PolicyCheckResult("recency", True, False, str(last_pushed_at.date())))
+                cutoff = datetime.now(UTC) - timedelta(
+                    days=self._settings.discovery_max_staleness_days
+                )
+                if last_pushed_at < cutoff:
+                    reason = f"stale_repository:last_push={last_pushed_at.date()}"
+                    checks.append(PolicyCheckResult("recency", False, False, reason))
+                    hard_blocked = True
+                    rejection_reasons.append(reason)
+                else:
+                    checks.append(
+                        PolicyCheckResult("recency", True, False, str(last_pushed_at.date()))
+                    )
         else:
             checks.append(PolicyCheckResult("recency", True, False, "recency_check_disabled"))
 

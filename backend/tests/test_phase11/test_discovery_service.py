@@ -1,9 +1,6 @@
 """Tests for discovery service filter logic (Phase 11)."""
+
 from __future__ import annotations
-
-from datetime import UTC, datetime, timedelta
-
-import pytest
 
 from app.core.config import Settings
 from app.services.discovery_service import GitHubDiscoveryService, build_criteria_snapshot

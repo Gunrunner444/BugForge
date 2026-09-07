@@ -1,4 +1,5 @@
 """GitHub Integration domain models — Phase 9."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

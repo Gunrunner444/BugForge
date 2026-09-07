@@ -8,10 +8,11 @@ Security:
   - All returned data is treated as untrusted until after eligibility screening.
   - Rate-limit headers are observed; we back off on 403/429.
 """
+
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -25,10 +26,27 @@ _GITHUB_API_BASE = "https://api.github.com"
 _SEARCH_PER_PAGE = 30  # GitHub max per page for search
 _OSI_LICENSES = frozenset(
     {
-        "mit", "apache-2.0", "gpl-2.0", "gpl-3.0", "lgpl-2.1", "lgpl-3.0",
-        "bsd-2-clause", "bsd-3-clause", "mpl-2.0", "cddl-1.0", "epl-2.0",
-        "agpl-3.0", "unlicense", "isc", "cc0-1.0", "eupl-1.1", "eupl-1.2",
-        "ms-pl", "ms-rl", "0bsd", "ncsa",
+        "mit",
+        "apache-2.0",
+        "gpl-2.0",
+        "gpl-3.0",
+        "lgpl-2.1",
+        "lgpl-3.0",
+        "bsd-2-clause",
+        "bsd-3-clause",
+        "mpl-2.0",
+        "cddl-1.0",
+        "epl-2.0",
+        "agpl-3.0",
+        "unlicense",
+        "isc",
+        "cc0-1.0",
+        "eupl-1.1",
+        "eupl-1.2",
+        "ms-pl",
+        "ms-rl",
+        "0bsd",
+        "ncsa",
     }
 )
 
@@ -84,39 +102,6 @@ class GitHubDiscoveryService:
             headers["Authorization"] = f"Bearer {self._settings.github_token}"
         return headers
 
-    def _build_search_query(self) -> str:
-        """Build a GitHub search query from current discovery settings."""
-        parts: list[str] = []
-
-        # Stars filter
-        if self._settings.discovery_max_stars > 0:
-            parts.append(
-                f"stars:{self._settings.discovery_min_stars}..{self._settings.discovery_max_stars}"
-            )
-        else:
-            parts.append(f"stars:>={self._settings.discovery_min_stars}")
-
-        # Archived / fork
-        if self._settings.discovery_skip_archived:
-            parts.append("archived:false")
-        if self._settings.discovery_skip_forks:
-            parts.append("fork:false")
-
-        # Language filter (OR-join multiple languages)
-        languages = self._settings.get_discovery_languages()
-        if len(languages) == 1:
-            parts.append(f"language:{languages[0]}")
-        # If multiple languages: we let GitHub return any; we filter post-fetch.
-        # The search API only supports one "language:" per query, so
-        # we iterate per-language if needed (done at the call site).
-
-        # Recency
-        if self._settings.discovery_max_staleness_days > 0:
-            cutoff = datetime.now(UTC) - timedelta(days=self._settings.discovery_max_staleness_days)
-            parts.append(f"pushed:>{cutoff.strftime('%Y-%m-%d')}")
-
-        return " ".join(parts)
-
     async def discover(self, max_pages: int = 5) -> DiscoveryResult:
         """Run one discovery sweep and return discovered repos.
 
@@ -162,8 +147,11 @@ class GitHubDiscoveryService:
                         result.api_requests += 1
                         self._update_rate_limit(result, response)
 
-                        if response.status_code == 403:
-                            logger.warning("GitHub rate limit hit (403); stopping discovery.")
+                        if response.status_code in {403, 429}:
+                            logger.warning(
+                                "GitHub rate limit hit (%d); stopping discovery.",
+                                response.status_code,
+                            )
                             result.error = "github_rate_limit"
                             return result
 
@@ -207,8 +195,8 @@ class GitHubDiscoveryService:
                     if len(items) < _SEARCH_PER_PAGE:
                         break
 
-                    # Polite sleep to avoid secondary rate-limit hammering
-                    time.sleep(1)
+                    # Polite async sleep to avoid secondary rate-limit hammering
+                    await asyncio.sleep(1)
 
         return result
 
@@ -255,7 +243,10 @@ class GitHubDiscoveryService:
         # Size limit
         size_raw = item.get("size", 0)
         size_kb = int(size_raw) if isinstance(size_raw, (int, float)) else 0
-        if self._settings.discovery_max_size_kb > 0 and size_kb > self._settings.discovery_max_size_kb:
+        if (
+            self._settings.discovery_max_size_kb > 0
+            and size_kb > self._settings.discovery_max_size_kb
+        ):
             return False
 
         # License (OSI check)

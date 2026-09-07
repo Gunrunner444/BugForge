@@ -1,4 +1,5 @@
 """Tests for the AI provider abstraction, prompt builder, and debugging API."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,7 +48,11 @@ class TestMockProvider:
         h = response.hypotheses[0]
         assert 0.0 <= h.confidence <= 1.0
         assert h.confidence_label in (
-            "confirmed", "highly_likely", "likely", "possible", "insufficient_evidence"
+            "confirmed",
+            "highly_likely",
+            "likely",
+            "possible",
+            "insufficient_evidence",
         )
 
     async def test_returns_insufficient_evidence_with_no_tests(self) -> None:
@@ -67,8 +72,15 @@ class TestMockProvider:
             project_name="P",
             repository_path="/tmp",
             failing_tests=[
-                TestFailureEvidence(node_id=f"t{i}", test_file=None, test_name=f"t{i}",
-                                    traceback=None, stdout=None, stderr=None, duration_seconds=None)
+                TestFailureEvidence(
+                    node_id=f"t{i}",
+                    test_file=None,
+                    test_name=f"t{i}",
+                    traceback=None,
+                    stdout=None,
+                    stderr=None,
+                    duration_seconds=None,
+                )
                 for i in range(5)
             ],
             static_findings=[],
@@ -83,9 +95,15 @@ class TestMockProvider:
             project_name="P",
             repository_path="/tmp",
             failing_tests=[
-                TestFailureEvidence(node_id="t", test_file="src/calc.py", test_name="t",
-                                    traceback="AssertionError", stdout=None, stderr=None,
-                                    duration_seconds=0.1)
+                TestFailureEvidence(
+                    node_id="t",
+                    test_file="src/calc.py",
+                    test_name="t",
+                    traceback="AssertionError",
+                    stdout=None,
+                    stderr=None,
+                    duration_seconds=0.1,
+                )
             ],
             static_findings=[
                 StaticFindingEvidence(
@@ -179,7 +197,9 @@ class TestPromptBuilder:
 class TestDebuggingAPI:
     async def test_start_debugging_session_returns_202(self, client, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
-        proj = await client.post("/api/v1/projects", json={"name": "DBG", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects", json={"name": "DBG", "repository_path": str(repo)}
+        )
         assert proj.status_code == 201
         project_id = proj.json()["id"]
 
@@ -191,7 +211,9 @@ class TestDebuggingAPI:
 
     async def test_get_debugging_session(self, client, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
-        proj = await client.post("/api/v1/projects", json={"name": "DBG2", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects", json={"name": "DBG2", "repository_path": str(repo)}
+        )
         project_id = proj.json()["id"]
 
         start = await client.post(f"/api/v1/projects/{project_id}/debug", json={})
@@ -205,7 +227,9 @@ class TestDebuggingAPI:
 
     async def test_list_debugging_sessions(self, client, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
-        proj = await client.post("/api/v1/projects", json={"name": "DBG3", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects", json={"name": "DBG3", "repository_path": str(repo)}
+        )
         project_id = proj.json()["id"]
 
         await client.post(f"/api/v1/projects/{project_id}/debug", json={})
@@ -222,14 +246,14 @@ class TestDebuggingAPI:
         assert resp.status_code == 404
 
     async def test_get_nonexistent_session(self, client) -> None:
-        resp = await client.get(
-            "/api/v1/debugging/00000000-0000-0000-0000-000000000000"
-        )
+        resp = await client.get("/api/v1/debugging/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
 
     async def test_hypotheses_endpoint(self, client, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
-        proj = await client.post("/api/v1/projects", json={"name": "HYP", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects", json={"name": "HYP", "repository_path": str(repo)}
+        )
         project_id = proj.json()["id"]
         start = await client.post(f"/api/v1/projects/{project_id}/debug", json={})
         session_id = start.json()["id"]

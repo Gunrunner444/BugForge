@@ -3,6 +3,7 @@ Patch validator — ensures AI-generated patches are safe before application.
 
 Generated patches are UNTRUSTED AI output. Never apply without validation.
 """
+
 from __future__ import annotations
 
 import re
@@ -115,7 +116,7 @@ def _extract_diff_paths(diff: str) -> list[str]:
     for line in diff.splitlines():
         for prefix in ("--- a/", "+++ b/", "--- ", "+++ "):
             if line.startswith(prefix):
-                raw = line[len(prefix):].strip()
+                raw = line[len(prefix) :].strip()
                 # Strip git sentinel /dev/null
                 if raw and raw != "/dev/null":
                     paths.append(raw)

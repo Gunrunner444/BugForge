@@ -3,6 +3,7 @@
 GET  /api/v1/ai/status   — probe current AI provider
 POST /api/v1/ai/test     — send a test prompt
 """
+
 from __future__ import annotations
 
 import logging

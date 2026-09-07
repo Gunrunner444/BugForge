@@ -11,6 +11,7 @@ OpenAI-compatible endpoint — just set:
   AI_MODEL=qwen2.5-coder:7b   (or any model you have pulled)
   AI_API_KEY=                  (empty is fine for Ollama)
 """
+
 from __future__ import annotations
 
 import logging
@@ -56,10 +57,12 @@ def create_provider(settings: Settings) -> LLMProvider:
 
     if provider_name == "mock":
         from app.ai.mock_provider import MockLLMProvider
+
         return MockLLMProvider()
 
     if provider_name == "anthropic":
         from app.ai.anthropic_provider import AnthropicProvider
+
         return AnthropicProvider(
             api_key=api_key,
             model=model,
@@ -71,6 +74,7 @@ def create_provider(settings: Settings) -> LLMProvider:
 
     if provider_name in {"openai", "ollama", "openai_compatible"}:
         from app.ai.openai_provider import OpenAIProvider
+
         # Ollama default base URL when none is configured
         resolved_base = base_url
         if not resolved_base and provider_name == "ollama":

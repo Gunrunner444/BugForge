@@ -1,4 +1,5 @@
 """Repository layer for GitHub domain objects — Phase 9."""
+
 from __future__ import annotations
 
 from uuid import UUID

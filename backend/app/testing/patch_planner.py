@@ -4,6 +4,7 @@ Patch planner — uses the LLM provider to generate repair patches.
 All repository content passed to the AI is labeled as untrusted data.
 Generated patches must be validated before application.
 """
+
 from __future__ import annotations
 
 import json
@@ -100,7 +101,11 @@ class PatchPlanner:
         ]
 
         if reproduction_summary:
-            parts += ["## REPRODUCTION EVIDENCE (BugForge tool output — trusted)", reproduction_summary, ""]
+            parts += [
+                "## REPRODUCTION EVIDENCE (BugForge tool output — trusted)",
+                reproduction_summary,
+                "",
+            ]
 
         if existing_test_failures:
             parts.append("## FAILING TESTS (BugForge tool output — trusted)")
@@ -113,7 +118,7 @@ class PatchPlanner:
             parts.append("\n## STATIC FINDINGS (BugForge tool output — trusted)")
             for f in static_findings[:5]:
                 parts.append(
-                    f"- [{f.get('severity','?').upper()}] {f.get('file','')}:{f.get('line','')} {f.get('message','')}"
+                    f"- [{f.get('severity', '?').upper()}] {f.get('file', '')}:{f.get('line', '')} {f.get('message', '')}"
                 )
 
         if affected_files_content:

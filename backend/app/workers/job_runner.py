@@ -5,6 +5,7 @@ The current implementation (FastAPIBackgroundRunner) uses FastAPI's BackgroundTa
 A future implementation can swap in Celery, RQ, or a custom worker queue
 without changing the analysis or test-run services.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

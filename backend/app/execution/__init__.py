@@ -56,4 +56,3 @@ class ExecutorFactory:
                 "(development only — do not use with untrusted code)"
             )
         return LocalTestExecutor()
-

@@ -1,4 +1,5 @@
 """Static analysis engine — orchestrates rules across files."""
+
 from __future__ import annotations
 
 import logging

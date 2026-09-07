@@ -1,4 +1,5 @@
 """Patch Verification domain models — Phase 8 Patch Verification."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -29,7 +30,7 @@ class PatchVerification(Base):
         ForeignKey("patch_candidates.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
-        unique=True,   # one verification record per candidate
+        unique=True,  # one verification record per candidate
     )
     session_id: Mapped[UUID] = mapped_column(
         ForeignKey("repair_sessions.id", ondelete="CASCADE"),
@@ -69,9 +70,13 @@ class PatchVerification(Base):
     # Static analysis
     baseline_static_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # success | timeout | environment_error | report_error | not_run
-    baseline_test_execution_status: Mapped[str] = mapped_column(String(30), nullable=False, default="not_run")
+    baseline_test_execution_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="not_run"
+    )
     # success | error | not_run
-    baseline_static_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
+    baseline_static_analysis_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_run"
+    )
     # JSON array of normalized finding identity strings (analyzer:category:file)
     baseline_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     baseline_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -95,9 +100,13 @@ class PatchVerification(Base):
     # Static analysis
     post_static_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # success | timeout | environment_error | report_error | not_run
-    post_test_execution_status: Mapped[str] = mapped_column(String(30), nullable=False, default="not_run")
+    post_test_execution_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="not_run"
+    )
     # success | error | not_run
-    post_static_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
+    post_static_analysis_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_run"
+    )
     post_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     post_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 

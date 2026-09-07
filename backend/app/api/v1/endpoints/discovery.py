@@ -5,6 +5,7 @@ GET  /api/v1/discovery/runs         — list recent discovery runs
 GET  /api/v1/discovery/runs/{id}    — get one run
 GET  /api/v1/discovery/settings     — read current discovery config
 """
+
 from __future__ import annotations
 
 import logging

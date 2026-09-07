@@ -51,15 +51,11 @@ class AnalysisService:
 
         try:
             start_time = time.monotonic()
-            analysis_result = await asyncio.to_thread(
-                self._analyzer.analyze, Path(repository_path)
-            )
+            analysis_result = await asyncio.to_thread(self._analyzer.analyze, Path(repository_path))
             duration = time.monotonic() - start_time
 
             # Run static analysis on the files collected during repo analysis
-            all_file_paths = [
-                fr.absolute_path for fr in analysis_result.file_results
-            ]
+            all_file_paths = [fr.absolute_path for fr in analysis_result.file_results]
             static_findings = await asyncio.to_thread(
                 self._static_engine.analyze_repository,
                 Path(repository_path),

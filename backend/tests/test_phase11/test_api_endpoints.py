@@ -3,13 +3,11 @@
 Uses SQLite in-memory database (via aiosqlite) and does not require
 a real PostgreSQL connection or GitHub token.
 """
-from __future__ import annotations
 
-from unittest.mock import patch
+from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import AsyncClient
 
 from app.main import app
 

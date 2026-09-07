@@ -4,6 +4,7 @@ GET  /api/v1/autonomous/runs        — list runs
 GET  /api/v1/autonomous/runs/{id}   — get one run
 POST /api/v1/autonomous/runs/{id}/cancel — cancel a running analysis
 """
+
 from __future__ import annotations
 
 import logging

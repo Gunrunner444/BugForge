@@ -26,7 +26,9 @@ async def get_reproduction_session(
     repo = ReproductionRepository(db)
     s = await repo.get_by_id(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reproduction session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reproduction session not found"
+        )
     return BugReproductionDetailResponse(
         **BugReproductionSessionResponse.model_validate(s).model_dump(),
         attempts=[ReproductionAttemptResponse.model_validate(a) for a in s.attempts],
@@ -41,5 +43,7 @@ async def list_attempts(
     repo = ReproductionRepository(db)
     s = await repo.get_by_id(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reproduction session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reproduction session not found"
+        )
     return [ReproductionAttemptResponse.model_validate(a) for a in s.attempts]

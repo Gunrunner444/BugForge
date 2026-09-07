@@ -5,6 +5,7 @@ Three new tables:
   discovery_runs         — a single discovery sweep (records what was found).
   autonomous_analysis_runs — one analysis run against a candidate.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # RepositoryCandidate
 # ---------------------------------------------------------------------------
+
 
 class RepositoryCandidate(Base):
     """A public GitHub repository that the discovery system has encountered.
@@ -84,7 +86,9 @@ class RepositoryCandidate(Base):
     # Analysis tracking
     analysis_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
     last_analyzed_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    last_analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_analyzed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
@@ -110,6 +114,7 @@ class RepositoryCandidate(Base):
 # ---------------------------------------------------------------------------
 # DiscoveryRun
 # ---------------------------------------------------------------------------
+
 
 class DiscoveryRun(Base):
     """Records one GitHub repository-search sweep."""
@@ -145,6 +150,7 @@ class DiscoveryRun(Base):
 # ---------------------------------------------------------------------------
 # AutonomousAnalysisRun
 # ---------------------------------------------------------------------------
+
 
 class AutonomousAnalysisRun(Base):
     """One autonomous analysis of a RepositoryCandidate.

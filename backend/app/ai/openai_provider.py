@@ -9,6 +9,7 @@ Security:
   - Prompts are sent over TLS.
   - Repository content is labeled as untrusted data (see PromptBuilder).
 """
+
 from __future__ import annotations
 
 import json
@@ -90,7 +91,9 @@ class OpenAIProvider(LLMProvider):
             duration_seconds=time.monotonic() - start,
         )
 
-    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+    async def generate_structured(
+        self, system_prompt: str, user_message: str
+    ) -> StructuredTextResponse:
         start = time.monotonic()
         try:
             raw, usage = await self._call_api(system_prompt, user_message)
@@ -177,7 +180,9 @@ class OpenAIProvider(LLMProvider):
         if response.status_code == 429:
             raise httpx.HTTPStatusError("Rate limited", request=response.request, response=response)
         if response.status_code == 401:
-            raise httpx.HTTPStatusError("Unauthorized — check AI_API_KEY", request=response.request, response=response)
+            raise httpx.HTTPStatusError(
+                "Unauthorized — check AI_API_KEY", request=response.request, response=response
+            )
         response.raise_for_status()
 
         data = response.json()

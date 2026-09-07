@@ -1,4 +1,5 @@
 """Tests for Phase 7: Automated Repair Engine."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -173,13 +174,7 @@ class TestPatchValidator:
     def test_diff_references_undeclared_file_rejected(self) -> None:
         from app.testing.patch_validator import validate_patch
 
-        diff = (
-            "--- a/src/module.py\n"
-            "+++ b/src/module.py\n"
-            "@@ -1 +1 @@\n"
-            "-x\n"
-            "+y\n"
-        )
+        diff = "--- a/src/module.py\n+++ b/src/module.py\n@@ -1 +1 @@\n-x\n+y\n"
         result = validate_patch(diff, ["src/other.py"])
         assert not result.valid
 
@@ -206,15 +201,21 @@ class TestPatchPlanner:
 
         async def _fake_generate(system_prompt: str, user_msg: str) -> StructuredTextResponse:
             return StructuredTextResponse(
-                content="", provider="mock", model="mock-v1",
-                usage=AIUsage(), duration_seconds=0.0, error="Simulated error"
+                content="",
+                provider="mock",
+                model="mock-v1",
+                usage=AIUsage(),
+                duration_seconds=0.0,
+                error="Simulated error",
             )
 
         from app.ai.mock_provider import MockLLMProvider
+
         mock = MockLLMProvider()
         mock.generate_patch = _fake_generate  # type: ignore[method-assign]
 
         import app.ai as _ai_module
+
         orig = _ai_module.get_provider
         _ai_module.get_provider = lambda: mock  # type: ignore[assignment]
 

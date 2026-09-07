@@ -1,4 +1,5 @@
 """Python static-analysis rules using the built-in ast module."""
+
 from __future__ import annotations
 
 import ast
@@ -129,7 +130,10 @@ class BroadExceptionCatchRule(AnalyzerRule):
             if exc_type not in ("Exception", "BaseException"):
                 continue
             # If the body only passes or logs without re-raising, flag it
-            body_has_raise = any(isinstance(n, ast.Raise) for n in ast.walk(ast.Module(body=node.body, type_ignores=[])))
+            body_has_raise = any(
+                isinstance(n, ast.Raise)
+                for n in ast.walk(ast.Module(body=node.body, type_ignores=[]))
+            )
             if not body_has_raise:
                 findings.append(
                     Finding(
@@ -233,7 +237,10 @@ class HardcodedCredentialRule(AnalyzerRule):
             if _CRED_PATTERN.search(line):
                 # Skip obvious placeholders
                 lower = line.lower()
-                if any(p in lower for p in ("example", "your_", "placeholder", "change_me", "xxxx", "todo")):
+                if any(
+                    p in lower
+                    for p in ("example", "your_", "placeholder", "change_me", "xxxx", "todo")
+                ):
                     continue
                 findings.append(
                     Finding(
@@ -277,7 +284,9 @@ class UnreachableCodeRule(AnalyzerRule):
         findings: list[Finding] = []
         for node in ast.walk(tree):
             body: list[ast.stmt] | None = None
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.If, ast.For, ast.While, ast.With)):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.If, ast.For, ast.While, ast.With)
+            ):
                 body = getattr(node, "body", None)
             if body is None:
                 continue
@@ -299,7 +308,6 @@ class UnreachableCodeRule(AnalyzerRule):
                     )
                     break  # only report first unreachable per block
         return findings
-
 
 
 # All rules exported from this module

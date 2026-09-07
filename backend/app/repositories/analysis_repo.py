@@ -18,7 +18,9 @@ class AnalysisRepository:
         self.session = session
 
     async def create(self, project_id: UUID, repository_path: str) -> Analysis:
-        analysis = Analysis(project_id=project_id, repository_path=repository_path, status="pending")
+        analysis = Analysis(
+            project_id=project_id, repository_path=repository_path, status="pending"
+        )
         self.session.add(analysis)
         await self.session.flush()
         await self.session.refresh(analysis)

@@ -4,6 +4,7 @@ AI provider abstraction — Phase 4 AI Debugging Engine.
 All interactions with language models go through this interface.
 No AI vendor SDK is imported at the module level; implementations are lazy.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -137,8 +138,7 @@ class LLMProvider(ABC):
 
     @property
     @abstractmethod
-    def model_name(self) -> str:
-        ...
+    def model_name(self) -> str: ...
 
     @abstractmethod
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
@@ -165,7 +165,9 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+    async def generate_structured(
+        self, system_prompt: str, user_message: str
+    ) -> StructuredTextResponse:
         """Generic structured generation for reproduction planning and other tasks."""
         ...
 

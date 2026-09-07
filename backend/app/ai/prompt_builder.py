@@ -5,6 +5,7 @@ SECURITY: All repository content (source code, comments, test names, etc.)
 is treated as untrusted data and wrapped in explicit markers. The system
 prompt instructs the model to treat tagged content as data, not instructions.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

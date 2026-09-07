@@ -1,4 +1,5 @@
 """Tests for the TestRunnerService and pytest parser."""
+
 from __future__ import annotations
 
 import json
@@ -66,7 +67,11 @@ class TestPytestParser:
     def test_node_id_splitting(self) -> None:
         report = self._make_report(
             tests=[
-                {"nodeid": "tests/test_calc.py::TestClass::test_method", "outcome": "passed", "duration": 0.01},
+                {
+                    "nodeid": "tests/test_calc.py::TestClass::test_method",
+                    "outcome": "passed",
+                    "duration": 0.01,
+                },
             ],
             summary={"total": 1, "passed": 1},
         )
@@ -173,7 +178,9 @@ class TestLocalExecutor:
         assert "artifact.txt" in result.artifact_contents
         assert result.artifact_contents["artifact.txt"] == "hello"
 
-    async def test_secrets_not_inherited(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_secrets_not_inherited(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """SECRET_KEY must be stripped from the subprocess environment."""
         monkeypatch.setenv("SECRET_KEY", "should_not_leak")
 
@@ -182,7 +189,11 @@ class TestLocalExecutor:
         executor = LocalTestExecutor()
         result = await executor.execute(
             ExecutionConfig(
-                command=["python3", "-c", "import os; print(os.environ.get('SECRET_KEY','MISSING'))"],
+                command=[
+                    "python3",
+                    "-c",
+                    "import os; print(os.environ.get('SECRET_KEY','MISSING'))",
+                ],
                 working_directory=str(tmp_path),
                 timeout_seconds=10,
             )
@@ -198,5 +209,5 @@ class TestExecutorFactory:
         executor = ExecutorFactory.create()
         # Should return some concrete executor without raising
         from app.execution.base import TestExecutor
-        assert isinstance(executor, TestExecutor)
 
+        assert isinstance(executor, TestExecutor)

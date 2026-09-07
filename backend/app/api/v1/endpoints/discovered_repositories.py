@@ -5,6 +5,7 @@ GET  /api/v1/repositories/discovered/counts     — status counts
 GET  /api/v1/repositories/discovered/{id}       — get one candidate
 POST /api/v1/repositories/discovered/{id}/analyze — queue autonomous analysis
 """
+
 from __future__ import annotations
 
 import logging
@@ -140,8 +141,6 @@ async def trigger_analysis(
     await db.commit()
     await db.refresh(run)
 
-    background_tasks.add_task(
-        _run_autonomous_analysis, candidate_id, run.id, request.force_rescan
-    )
+    background_tasks.add_task(_run_autonomous_analysis, candidate_id, run.id, request.force_rescan)
     logger.info("Autonomous run %s queued for candidate %s.", run.id, candidate_id)
     return AutonomousRunResponse.model_validate(run)

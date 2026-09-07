@@ -79,7 +79,9 @@ class DebuggingHypothesis(Base):
         nullable=False,
     )
 
-    session: Mapped[DebuggingSession] = relationship("DebuggingSession", back_populates="hypotheses")
+    session: Mapped[DebuggingSession] = relationship(
+        "DebuggingSession", back_populates="hypotheses"
+    )
 
 
 class AIModelCall(Base):

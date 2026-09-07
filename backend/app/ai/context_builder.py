@@ -7,6 +7,7 @@ context necessary, not the entire repository.
 Security: All file paths are validated to be within the repository root
 before any content is read.
 """
+
 from __future__ import annotations
 
 import logging
@@ -60,9 +61,7 @@ class ContextBuilder:
             max_hypotheses=settings.ai_max_hypotheses,
         )
 
-    async def _load_failing_tests(
-        self, test_run_id: UUID | None
-    ) -> list[TestFailureEvidence]:
+    async def _load_failing_tests(self, test_run_id: UUID | None) -> list[TestFailureEvidence]:
         if test_run_id is None:
             return []
         from sqlalchemy import select
@@ -139,7 +138,11 @@ class ContextBuilder:
         result = await self._session.execute(
             select(DBFinding)
             .where(DBFinding.analysis_id == analysis_id)
-            .where(DBFinding.file_path.in_(path_strs) if path_strs else DBFinding.analysis_id == analysis_id)
+            .where(
+                DBFinding.file_path.in_(path_strs)
+                if path_strs
+                else DBFinding.analysis_id == analysis_id
+            )
             .order_by(DBFinding.severity.desc(), DBFinding.line)
             .limit(20)
         )
@@ -158,9 +161,7 @@ class ContextBuilder:
             for r in rows
         ]
 
-    def _load_source_files(
-        self, paths: list[Path], repo_root: Path
-    ) -> list[SourceFileEvidence]:
+    def _load_source_files(self, paths: list[Path], repo_root: Path) -> list[SourceFileEvidence]:
         sources: list[SourceFileEvidence] = []
         char_budget = settings.ai_max_context_chars // 2  # half budget for sources
 

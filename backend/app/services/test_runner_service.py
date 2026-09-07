@@ -4,6 +4,7 @@ Test runner service — Phase 2 entry point.
 Discovers pytest, executes it via the configured TestExecutor, retrieves
 the structured JSON report, and persists results.
 """
+
 from __future__ import annotations
 
 import logging
@@ -109,12 +110,16 @@ class TestRunnerService:
 
         with tempfile.TemporaryDirectory(prefix="bugforge_run_") as output_dir:
             report_write_path = self._executor.get_artifact_write_path(
-                ExecutionConfig(command=[], working_directory=repository_path, output_dir=output_dir),
+                ExecutionConfig(
+                    command=[], working_directory=repository_path, output_dir=output_dir
+                ),
                 _REPORT_FILENAME,
             )
 
             command = [
-                python_exe, "-m", "pytest",
+                python_exe,
+                "-m",
+                "pytest",
                 "--tb=short",
                 f"--json-report-file={report_write_path}",
                 "-q",
@@ -144,9 +149,7 @@ class TestRunnerService:
                 if parsed.total == 0 and not parsed.results:
                     logger.debug("JSON report parsed but contains no tests")
             else:
-                logger.warning(
-                    "No JSON report produced for test run; falling back to text parsing"
-                )
+                logger.warning("No JSON report produced for test run; falling back to text parsing")
                 parsed = self._parse_text_output(stdout, stderr)
 
             if exec_result.timed_out:
@@ -187,4 +190,3 @@ class TestRunnerService:
                     run.errors = count
         run.total = run.passed + run.failed + run.skipped + run.errors
         return run
-

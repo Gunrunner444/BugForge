@@ -1,4 +1,5 @@
 """Repair domain models — Phase 7 Automated Repair."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

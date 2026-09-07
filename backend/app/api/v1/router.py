@@ -29,4 +29,3 @@ api_router.include_router(discovery_router)
 api_router.include_router(discovered_repos_router)
 api_router.include_router(autonomous_router)
 api_router.include_router(ai_router)
-

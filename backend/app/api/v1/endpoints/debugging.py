@@ -44,7 +44,9 @@ async def get_debugging_session(
     repo = DebuggingRepository(db)
     ds = await repo.get_by_id(session_id)
     if ds is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debugging session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Debugging session not found"
+        )
 
     hypotheses = [DebuggingHypothesisResponse.from_orm_row(h) for h in ds.hypotheses]
     from app.schemas.debugging import AIModelCallResponse
@@ -75,5 +77,7 @@ async def list_hypotheses(
     repo = DebuggingRepository(db)
     ds = await repo.get_by_id(session_id)
     if ds is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debugging session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Debugging session not found"
+        )
     return [DebuggingHypothesisResponse.from_orm_row(h) for h in ds.hypotheses]

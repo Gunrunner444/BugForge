@@ -36,9 +36,7 @@ class Analysis(Base):
         nullable=False,
     )
 
-    project: Mapped[Project] = relationship(
-        "Project", back_populates="analyses"
-    )
+    project: Mapped[Project] = relationship("Project", back_populates="analyses")
     files: Mapped[list[RepositoryFile]] = relationship(
         "RepositoryFile",
         back_populates="analysis",
@@ -98,7 +96,9 @@ class CodeEntity(Base):
     docstring: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_async: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     decorators: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
-    parameters: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True, default=list)
+    parameters: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True, default=list
+    )
     return_annotation: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parent_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

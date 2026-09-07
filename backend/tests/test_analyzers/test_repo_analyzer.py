@@ -102,10 +102,7 @@ class TestRepoAnalyzer:
     def test_parses_python_entities(self, sample_repo: Path) -> None:
         result = RepoAnalyzer().analyze(sample_repo)
         all_entities = [
-            e
-            for fr in result.file_results
-            if fr.parse_result
-            for e in fr.parse_result.entities
+            e for fr in result.file_results if fr.parse_result for e in fr.parse_result.entities
         ]
         entity_names = {e.name for e in all_entities}
         assert "Calculator" in entity_names
@@ -115,10 +112,7 @@ class TestRepoAnalyzer:
     def test_parses_imports(self, sample_repo: Path) -> None:
         result = RepoAnalyzer().analyze(sample_repo)
         all_imports = [
-            i
-            for fr in result.file_results
-            if fr.parse_result
-            for i in fr.parse_result.imports
+            i for fr in result.file_results if fr.parse_result for i in fr.parse_result.imports
         ]
         modules = {i.module for i in all_imports}
         assert "os" in modules
@@ -127,10 +121,7 @@ class TestRepoAnalyzer:
     def test_import_classification(self, sample_repo: Path) -> None:
         result = RepoAnalyzer().analyze(sample_repo)
         all_imports = [
-            i
-            for fr in result.file_results
-            if fr.parse_result
-            for i in fr.parse_result.imports
+            i for fr in result.file_results if fr.parse_result for i in fr.parse_result.imports
         ]
         by_module = {i.module: i for i in all_imports}
         assert by_module["os"].import_type == "stdlib"
@@ -156,5 +147,7 @@ class TestRepoAnalyzer:
 
     def test_line_counts_populated(self, sample_repo: Path) -> None:
         result = RepoAnalyzer().analyze(sample_repo)
-        python_files = [f for f in result.file_results if f.language == "python" and f.file_type != "config"]
+        python_files = [
+            f for f in result.file_results if f.language == "python" and f.file_type != "config"
+        ]
         assert all(f.line_count > 0 for f in python_files)

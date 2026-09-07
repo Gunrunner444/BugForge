@@ -1,4 +1,5 @@
 """Tests for Phase 5: test generation, validator, and test-gen API."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -106,6 +107,7 @@ class TestPathNormalization:
         outside = tmp_path / "other.py"
         outside.touch()
         import pytest
+
         with pytest.raises(ValueError, match="not inside"):
             to_relative_path(outside, root)
 
@@ -141,9 +143,7 @@ class TestTestGenerationAPI:
             "/api/v1/projects", json={"name": "TG2", "repository_path": str(repo)}
         )
         project_id = proj.json()["id"]
-        start = await client.post(
-            f"/api/v1/projects/{project_id}/test-generation", json={}
-        )
+        start = await client.post(f"/api/v1/projects/{project_id}/test-generation", json={})
         session_id = start.json()["id"]
 
         resp = await client.get(f"/api/v1/test-generation/{session_id}")
@@ -156,9 +156,7 @@ class TestTestGenerationAPI:
             "/api/v1/projects", json={"name": "TG3", "repository_path": str(repo)}
         )
         project_id = proj.json()["id"]
-        start = await client.post(
-            f"/api/v1/projects/{project_id}/test-generation", json={}
-        )
+        start = await client.post(f"/api/v1/projects/{project_id}/test-generation", json={})
         session_id = start.json()["id"]
 
         resp = await client.get(f"/api/v1/test-generation/{session_id}/tests")
@@ -173,9 +171,7 @@ class TestTestGenerationAPI:
         assert resp.status_code == 404
 
     async def test_get_nonexistent_session(self, client) -> None:
-        resp = await client.get(
-            "/api/v1/test-generation/00000000-0000-0000-0000-000000000000"
-        )
+        resp = await client.get("/api/v1/test-generation/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
 
 

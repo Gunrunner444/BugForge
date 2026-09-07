@@ -1,4 +1,5 @@
 """Test generation service — Phase 5 orchestration."""
+
 from __future__ import annotations
 
 import ast
@@ -42,8 +43,12 @@ class TestGenerationService:
 
         try:
             req = await self._build_request(
-                project_name, repository_path, test_run_id, analysis_id,
-                debugging_session_id, project_id,
+                project_name,
+                repository_path,
+                test_run_id,
+                analysis_id,
+                debugging_session_id,
+                project_id,
             )
             provider = get_provider()
             generator = TestGenerator(provider)
@@ -65,7 +70,9 @@ class TestGenerationService:
                 await repo.update_status(session_id, "completed")
                 await db.commit()
 
-            logger.info("Test generation session %s completed — %d candidates", session_id, len(candidates))
+            logger.info(
+                "Test generation session %s completed — %d candidates", session_id, len(candidates)
+            )
 
         except Exception as exc:
             logger.exception("Test generation session %s failed: %s", session_id, exc)
@@ -134,13 +141,18 @@ class TestGenerationService:
         rows = result.scalars().all()
         return [
             {
-                "category": r.category, "severity": r.severity,
-                "file": r.file_path, "line": r.line, "message": r.message,
+                "category": r.category,
+                "severity": r.severity,
+                "file": r.file_path,
+                "line": r.line,
+                "message": r.message,
             }
             for r in rows
         ]
 
-    async def _load_hypotheses(self, db: Any, debugging_session_id: UUID | None) -> list[dict[str, Any]]:
+    async def _load_hypotheses(
+        self, db: Any, debugging_session_id: UUID | None
+    ) -> list[dict[str, Any]]:
         if debugging_session_id is None:
             return []
         import json
@@ -161,12 +173,14 @@ class TestGenerationService:
                 rec_tests = json.loads(r.recommended_tests)
             except Exception:
                 rec_tests = []
-            hyps.append({
-                "id": str(r.id),
-                "root_cause": r.root_cause,
-                "confidence_label": r.confidence_label,
-                "recommended_tests": rec_tests,
-            })
+            hyps.append(
+                {
+                    "id": str(r.id),
+                    "root_cause": r.root_cause,
+                    "confidence_label": r.confidence_label,
+                    "recommended_tests": rec_tests,
+                }
+            )
         return hyps
 
     def _build_source_summaries(self, repository_path: str) -> list[dict[str, Any]]:
@@ -178,7 +192,10 @@ class TestGenerationService:
         py_files = list(repo_root.rglob("*.py"))[:20]
 
         for py_file in py_files:
-            if any(part.startswith(".") or part in ("__pycache__", ".venv", "venv") for part in py_file.parts):
+            if any(
+                part.startswith(".") or part in ("__pycache__", ".venv", "venv")
+                for part in py_file.parts
+            ):
                 continue
             try:
                 src = py_file.read_text(encoding="utf-8", errors="replace")
@@ -193,12 +210,14 @@ class TestGenerationService:
 
             for node in _ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    summaries.append({
-                        "file": rel,
-                        "symbol": node.name,
-                        "signature": _ast.unparse(node).split("\n")[0][:120],
-                        "docstring": _ast.get_docstring(node) or "",
-                    })
+                    summaries.append(
+                        {
+                            "file": rel,
+                            "symbol": node.name,
+                            "signature": _ast.unparse(node).split("\n")[0][:120],
+                            "docstring": _ast.get_docstring(node) or "",
+                        }
+                    )
                     if len(summaries) >= 30:
                         return summaries
         return summaries
@@ -221,9 +240,7 @@ class TestGenerationService:
 
         # 2. Execute if valid
         if validation.valid:
-            exec_status, exec_output = await self._execute_candidate(
-                candidate, repository_path
-            )
+            exec_status, exec_output = await self._execute_candidate(candidate, repository_path)
             quality_score, quality_notes = compute_quality_score(
                 candidate.test_code, candidate.target_symbol
             )
@@ -263,7 +280,15 @@ class TestGenerationService:
 
                 executor = ExecutorFactory.create()
                 config = ExecutionConfig(
-                    command=[sys.executable, "-m", "pytest", "test_generated.py", "-v", "--tb=short", "-q"],
+                    command=[
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        "test_generated.py",
+                        "-v",
+                        "--tb=short",
+                        "-q",
+                    ],
                     working_directory=tmpdir,
                     timeout_seconds=_EXECUTION_TIMEOUT,
                     output_dir=tmpdir,

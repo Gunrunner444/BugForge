@@ -9,6 +9,7 @@ Security-critical tests including:
  - Delivery idempotency
  - Ownership chain validation
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -222,9 +223,7 @@ class TestDeliverySecurityConstraints:
         project_id = proj.json()["id"]
 
         # Try to deliver a non-existent candidate — must be 404
-        resp = await client.post(
-            f"/api/v1/projects/{project_id}/github/deliver/{uuid4()}"
-        )
+        resp = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{uuid4()}")
         assert resp.status_code in (400, 404)
 
     async def test_deliver_requires_verified_decision(self, client: Any) -> None:
@@ -246,7 +245,6 @@ class TestDeliverySecurityConstraints:
 
         # Directly create a rejected verification record
         async with async_session_factory() as db:
-
             rs = RepairSession(project_id=_to_uuid(project_id), status="completed")
             db.add(rs)
             await db.flush()
@@ -284,9 +282,7 @@ class TestDeliverySecurityConstraints:
             await db.commit()
             candidate_id = pc.id
 
-        resp = await client.post(
-            f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}"
-        )
+        resp = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}")
         # Must be rejected — not verified
         assert resp.status_code == 400
         assert "verified" in resp.json()["detail"].lower()
@@ -314,18 +310,27 @@ class TestDeliverySecurityConstraints:
             await db.flush()
 
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
 
             pv = PatchVerification(
-                candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(project_id),
-                status="inconclusive", verification_decision="inconclusive",
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(project_id),
+                status="inconclusive",
+                verification_decision="inconclusive",
             )
             db.add(pv)
             gr = GitHubRepository(
-                project_id=_to_uuid(project_id), owner="octocat", repo="hello-world",
-                default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True,
+                project_id=_to_uuid(project_id),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
             )
             db.add(gr)
             await db.commit()
@@ -350,10 +355,12 @@ class TestDeliverySecurityConstraints:
         (repo_b / "x.py").write_text("x = 1\n")
 
         proj_a = await client.post(
-            "/api/v1/projects", json={"name": f"ProjA_{uuid4().hex[:6]}", "repository_path": str(repo_a)}
+            "/api/v1/projects",
+            json={"name": f"ProjA_{uuid4().hex[:6]}", "repository_path": str(repo_a)},
         )
         proj_b = await client.post(
-            "/api/v1/projects", json={"name": f"ProjB_{uuid4().hex[:6]}", "repository_path": str(repo_b)}
+            "/api/v1/projects",
+            json={"name": f"ProjB_{uuid4().hex[:6]}", "repository_path": str(repo_b)},
         )
         project_a_id = proj_a.json()["id"]
         project_b_id = proj_b.json()["id"]
@@ -364,17 +371,26 @@ class TestDeliverySecurityConstraints:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
             pv = PatchVerification(
-                candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(project_a_id),
-                status="verified", verification_decision="verified",
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(project_a_id),
+                status="verified",
+                verification_decision="verified",
             )
             db.add(pv)
             gr = GitHubRepository(
-                project_id=_to_uuid(project_b_id), owner="octocat", repo="hello-world",
-                default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True,
+                project_id=_to_uuid(project_b_id),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
             )
             db.add(gr)
             await db.commit()
@@ -409,17 +425,26 @@ class TestDeliverySecurityConstraints:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
             pv = PatchVerification(
-                candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(project_id),
-                status="verified", verification_decision="verified",
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(project_id),
+                status="verified",
+                verification_decision="verified",
             )
             db.add(pv)
             gr = GitHubRepository(
-                project_id=_to_uuid(project_id), owner="octocat", repo="hello-world",
-                default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True,
+                project_id=_to_uuid(project_id),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
             )
             db.add(gr)
             await db.commit()
@@ -428,7 +453,8 @@ class TestDeliverySecurityConstraints:
         # Mock a valid GitHub token so delivery proceeds to the pipeline stage
         with mpatch.object(
             __import__("app.core.config", fromlist=["settings"]).settings,
-            "github_token", "ghp_fake_test_token",
+            "github_token",
+            "ghp_fake_test_token",
         ):
             resp = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}")
 
@@ -462,35 +488,51 @@ class TestDeliverySecurityConstraints:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
             pv = PatchVerification(
-                candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(project_id),
-                status="verified", verification_decision="verified",
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(project_id),
+                status="verified",
+                verification_decision="verified",
             )
             db.add(pv)
             gr = GitHubRepository(
-                project_id=_to_uuid(project_id), owner="octocat", repo="hello-world",
-                default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True,
+                project_id=_to_uuid(project_id),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
             )
             db.add(gr)
             await db.commit()
             candidate_id = pc.id
 
         import app.core.config as _cfg
+
         # Mock pipeline so delivery stays in "pending" between both requests
         async def _noop_pipeline(self_: TAny, delivery_id: UUID) -> None:
             pass
 
-        with mpatch.object(_cfg.settings, "github_token", "ghp_fake_test_token"), \
-             mpatch.object(
-                 __import__("app.services.github_service", fromlist=["GitHubService"]).GitHubService,
-                 "run_delivery_pipeline",
-                 _noop_pipeline,
-             ):
-            resp1 = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}")
-            resp2 = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}")
+        with (
+            mpatch.object(_cfg.settings, "github_token", "ghp_fake_test_token"),
+            mpatch.object(
+                __import__("app.services.github_service", fromlist=["GitHubService"]).GitHubService,
+                "run_delivery_pipeline",
+                _noop_pipeline,
+            ),
+        ):
+            resp1 = await client.post(
+                f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}"
+            )
+            resp2 = await client.post(
+                f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}"
+            )
 
         assert resp1.status_code == 202
         assert resp2.status_code == 202
@@ -517,12 +559,17 @@ class TestDeliverySecurityConstraints:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
             pv = PatchVerification(
-                candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(project_id),
-                status="verified", verification_decision="verified",
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(project_id),
+                status="verified",
+                verification_decision="verified",
             )
             db.add(pv)
             await db.commit()
@@ -530,7 +577,10 @@ class TestDeliverySecurityConstraints:
 
         resp = await client.post(f"/api/v1/projects/{project_id}/github/deliver/{candidate_id}")
         assert resp.status_code == 400
-        assert "github" in resp.json()["detail"].lower() or "connected" in resp.json()["detail"].lower()
+        assert (
+            "github" in resp.json()["detail"].lower()
+            or "connected" in resp.json()["detail"].lower()
+        )
 
 
 # ── Unit tests: Patch hash mismatch ──────────────────────────────────────────
@@ -801,6 +851,7 @@ class TestGitHubURLValidation:
 
     def _v(self, url: str) -> None:
         from app.services.github_service import _validate_github_url
+
         _validate_github_url(url)
 
     # ── VALID cases (should NOT raise) ───────────────────────────────
@@ -977,7 +1028,10 @@ class TestSecurityInvariants:
         repo = Path("/tmp") / f"inv1_{uuid4().hex[:8]}"
         repo.mkdir(exist_ok=True)
         (repo / "x.py").write_text("x = 1\n")
-        proj = await client.post("/api/v1/projects", json={"name": f"Inv1_{uuid4().hex[:6]}", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv1_{uuid4().hex[:6]}", "repository_path": str(repo)},
+        )
         pid = proj.json()["id"]
 
         async with async_session_factory() as db:
@@ -985,18 +1039,28 @@ class TestSecurityInvariants:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="pending", validation_status="pending")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="pending", validation_status="pending"
+            )
             db.add(pc)
             await db.flush()
             # No PatchVerification created — candidate is unverified
-            gr = GitHubRepository(project_id=_to_uuid(pid), owner="octocat", repo="hello-world",
-                                  default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True)
+            gr = GitHubRepository(
+                project_id=_to_uuid(pid),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
+            )
             db.add(gr)
             await db.commit()
             cid = pc.id
 
         resp = await client.post(f"/api/v1/projects/{pid}/github/deliver/{cid}")
-        assert resp.status_code in (400, 404), "Invariant 1: unverified candidate must not be deliverable"
+        assert resp.status_code in (400, 404), (
+            "Invariant 1: unverified candidate must not be deliverable"
+        )
 
     # Invariant 2: Rejected candidate can never be delivered
     async def test_invariant_2_rejected_cannot_be_delivered(self, client: Any) -> None:
@@ -1008,7 +1072,10 @@ class TestSecurityInvariants:
         repo = Path("/tmp") / f"inv2_{uuid4().hex[:8]}"
         repo.mkdir(exist_ok=True)
         (repo / "x.py").write_text("x = 1\n")
-        proj = await client.post("/api/v1/projects", json={"name": f"Inv2_{uuid4().hex[:6]}", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv2_{uuid4().hex[:6]}", "repository_path": str(repo)},
+        )
         pid = proj.json()["id"]
 
         async with async_session_factory() as db:
@@ -1016,14 +1083,27 @@ class TestSecurityInvariants:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="rejected", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="rejected", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
-            pv = PatchVerification(candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(pid),
-                                   status="rejected", verification_decision="rejected")
+            pv = PatchVerification(
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(pid),
+                status="rejected",
+                verification_decision="rejected",
+            )
             db.add(pv)
-            gr = GitHubRepository(project_id=_to_uuid(pid), owner="octocat", repo="hello-world",
-                                  default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True)
+            gr = GitHubRepository(
+                project_id=_to_uuid(pid),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
+            )
             db.add(gr)
             await db.commit()
             cid = pc.id
@@ -1042,7 +1122,10 @@ class TestSecurityInvariants:
         repo = Path("/tmp") / f"inv3_{uuid4().hex[:8]}"
         repo.mkdir(exist_ok=True)
         (repo / "x.py").write_text("x = 1\n")
-        proj = await client.post("/api/v1/projects", json={"name": f"Inv3_{uuid4().hex[:6]}", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv3_{uuid4().hex[:6]}", "repository_path": str(repo)},
+        )
         pid = proj.json()["id"]
 
         async with async_session_factory() as db:
@@ -1050,14 +1133,27 @@ class TestSecurityInvariants:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
-            pv = PatchVerification(candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(pid),
-                                   status="inconclusive", verification_decision="inconclusive")
+            pv = PatchVerification(
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(pid),
+                status="inconclusive",
+                verification_decision="inconclusive",
+            )
             db.add(pv)
-            gr = GitHubRepository(project_id=_to_uuid(pid), owner="octocat", repo="hello-world",
-                                  default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True)
+            gr = GitHubRepository(
+                project_id=_to_uuid(pid),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
+            )
             db.add(gr)
             await db.commit()
             cid = pc.id
@@ -1071,7 +1167,9 @@ class TestSecurityInvariants:
         from app.services.github_service import _patch_hash
 
         verified_diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-        tampered_diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+import os; os.system('evil')\n"
+        tampered_diff = (
+            "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+import os; os.system('evil')\n"
+        )
         assert _patch_hash(verified_diff) != _patch_hash(tampered_diff), (
             "Invariant 4: tampered patch MUST produce a different hash"
         )
@@ -1089,7 +1187,10 @@ class TestSecurityInvariants:
         repo = Path("/tmp") / f"inv7_{uuid4().hex[:8]}"
         repo.mkdir(exist_ok=True)
         (repo / "x.py").write_text("x = 1\n")
-        proj = await client.post("/api/v1/projects", json={"name": f"Inv7_{uuid4().hex[:6]}", "repository_path": str(repo)})
+        proj = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv7_{uuid4().hex[:6]}", "repository_path": str(repo)},
+        )
         pid = proj.json()["id"]
 
         fake_token = "ghp_FAKESECRETTOKEN_MUST_NOT_APPEAR"
@@ -1099,33 +1200,51 @@ class TestSecurityInvariants:
             db.add(rs)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc = PatchCandidate(session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc = PatchCandidate(
+                session_id=rs.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc)
             await db.flush()
-            pv = PatchVerification(candidate_id=pc.id, session_id=rs.id, project_id=_to_uuid(pid),
-                                   status="verified", verification_decision="verified")
+            pv = PatchVerification(
+                candidate_id=pc.id,
+                session_id=rs.id,
+                project_id=_to_uuid(pid),
+                status="verified",
+                verification_decision="verified",
+            )
             db.add(pv)
-            gr = GitHubRepository(project_id=_to_uuid(pid), owner="octocat", repo="hello-world",
-                                  default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True)
+            gr = GitHubRepository(
+                project_id=_to_uuid(pid),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
+            )
             db.add(gr)
             await db.commit()
             cid = pc.id
 
         import app.core.config as _cfg
+
         async def _noop(self_: Any, delivery_id: UUID) -> None:
             pass
 
-        with mpatch.object(_cfg.settings, "github_token", fake_token), \
-             mpatch.object(
-                 __import__("app.services.github_service", fromlist=["GitHubService"]).GitHubService,
-                 "run_delivery_pipeline", _noop,
-             ):
+        with (
+            mpatch.object(_cfg.settings, "github_token", fake_token),
+            mpatch.object(
+                __import__("app.services.github_service", fromlist=["GitHubService"]).GitHubService,
+                "run_delivery_pipeline",
+                _noop,
+            ),
+        ):
             resp = await client.post(f"/api/v1/projects/{pid}/github/deliver/{cid}")
 
         assert resp.status_code == 202
         data = resp.json()
         # Serialize full response to string and check token does not appear
         import json as _json
+
         serialized = _json.dumps(data)
         assert fake_token not in serialized, (
             "Invariant 7: GitHub token must NEVER appear in a delivery response"
@@ -1147,8 +1266,14 @@ class TestSecurityInvariants:
         repo_a = sorted(Path("/tmp").glob("inv9_a_*"))[-1]
         repo_b = sorted(Path("/tmp").glob("inv9_b_*"))[-1]
 
-        proj_a = await client.post("/api/v1/projects", json={"name": f"Inv9A_{uuid4().hex[:6]}", "repository_path": str(repo_a)})
-        proj_b = await client.post("/api/v1/projects", json={"name": f"Inv9B_{uuid4().hex[:6]}", "repository_path": str(repo_b)})
+        proj_a = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv9A_{uuid4().hex[:6]}", "repository_path": str(repo_a)},
+        )
+        proj_b = await client.post(
+            "/api/v1/projects",
+            json={"name": f"Inv9B_{uuid4().hex[:6]}", "repository_path": str(repo_b)},
+        )
         pid_a, pid_b = proj_a.json()["id"], proj_b.json()["id"]
 
         async with async_session_factory() as db:
@@ -1156,14 +1281,27 @@ class TestSecurityInvariants:
             db.add(rs_a)
             await db.flush()
             diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
-            pc_a = PatchCandidate(session_id=rs_a.id, patch_diff=diff, status="completed", validation_status="valid")
+            pc_a = PatchCandidate(
+                session_id=rs_a.id, patch_diff=diff, status="completed", validation_status="valid"
+            )
             db.add(pc_a)
             await db.flush()
-            pv_a = PatchVerification(candidate_id=pc_a.id, session_id=rs_a.id, project_id=_to_uuid(pid_a),
-                                     status="verified", verification_decision="verified")
+            pv_a = PatchVerification(
+                candidate_id=pc_a.id,
+                session_id=rs_a.id,
+                project_id=_to_uuid(pid_a),
+                status="verified",
+                verification_decision="verified",
+            )
             db.add(pv_a)
-            gr_b = GitHubRepository(project_id=_to_uuid(pid_b), owner="octocat", repo="hello-world",
-                                    default_branch="main", html_url="https://github.com/octocat/hello-world", connected=True)
+            gr_b = GitHubRepository(
+                project_id=_to_uuid(pid_b),
+                owner="octocat",
+                repo="hello-world",
+                default_branch="main",
+                html_url="https://github.com/octocat/hello-world",
+                connected=True,
+            )
             db.add(gr_b)
             await db.commit()
             cid_a = pc_a.id
@@ -1217,4 +1355,3 @@ class TestSecurityInvariants:
         assert branch_created_pos > checkout_pos, (
             "Invariant 12: 'branch_created' must be set AFTER git checkout -b"
         )
-

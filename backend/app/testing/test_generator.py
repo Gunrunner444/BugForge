@@ -4,6 +4,7 @@ AI-backed test generation.
 IMPORTANT: All generated code is untrusted. It must be validated and executed
 only inside the existing sandbox (TestExecutor) before being considered useful.
 """
+
 from __future__ import annotations
 
 import json
@@ -117,14 +118,14 @@ class TestGenerator:
             parts.append("\n## STATIC FINDINGS (BugForge tool output — trusted)")
             for f in req.static_findings[:10]:
                 parts.append(
-                    f"- [{f.get('severity','?').upper()}] {f.get('file','')}:{f.get('line','')} "
-                    f"{f.get('message','')}"
+                    f"- [{f.get('severity', '?').upper()}] {f.get('file', '')}:{f.get('line', '')} "
+                    f"{f.get('message', '')}"
                 )
 
         if req.hypotheses:
             parts.append("\n## AI HYPOTHESES (generated — not verified)")
             for h in req.hypotheses[:3]:
-                parts.append(f"- {h.get('root_cause','')} ({h.get('confidence_label','')})")
+                parts.append(f"- {h.get('root_cause', '')} ({h.get('confidence_label', '')})")
                 tests = h.get("recommended_tests", [])
                 if tests:
                     parts.append(f"  Recommended: {', '.join(tests[:3])}")
@@ -135,10 +136,10 @@ class TestGenerator:
             budget = self._max_chars - len("\n".join(parts))
             for s in req.source_summaries:
                 snippet = (
-                    f"\n[REPOSITORY_DATA]\nFile: {s.get('file','')}\n"
-                    f"Symbol: {s.get('symbol','')}\n"
-                    f"Signature: {s.get('signature','')}\n"
-                    f"Docstring: {s.get('docstring','')[:200]}\n[/REPOSITORY_DATA]"
+                    f"\n[REPOSITORY_DATA]\nFile: {s.get('file', '')}\n"
+                    f"Symbol: {s.get('symbol', '')}\n"
+                    f"Signature: {s.get('signature', '')}\n"
+                    f"Docstring: {s.get('docstring', '')[:200]}\n[/REPOSITORY_DATA]"
                 )
                 if len(snippet) > budget:
                     break
@@ -162,6 +163,7 @@ class TestGenerator:
         except json.JSONDecodeError:
             # Try to extract JSON from text (Anthropic may wrap in prose)
             import re
+
             match = re.search(r"\{.*\}", raw_json, re.DOTALL)
             if match:
                 try:
@@ -210,7 +212,7 @@ def _mock_test_generation_response() -> str:
                     "test_code": (
                         "import pytest\n\n\n"
                         "def test_divide_by_zero_raises_zero_division_error():\n"
-                        "    \"\"\"[AI-GENERATED] Verifies divide(x, 0) raises ZeroDivisionError.\"\"\"\n"
+                        '    """[AI-GENERATED] Verifies divide(x, 0) raises ZeroDivisionError."""\n'
                         "    from src.calculator import Calculator\n\n"
                         "    calc = Calculator()\n"
                         "    with pytest.raises(ZeroDivisionError):\n"
@@ -226,7 +228,7 @@ def _mock_test_generation_response() -> str:
                     "rationale": "The factorial method has an off-by-one error: range(1, n) misses the last factor.",
                     "test_code": (
                         "def test_factorial_five_equals_120():\n"
-                        "    \"\"\"[AI-GENERATED] factorial(5) should return 120.\"\"\"\n"
+                        '    """[AI-GENERATED] factorial(5) should return 120."""\n'
                         "    from src.calculator import Calculator\n\n"
                         "    calc = Calculator()\n"
                         "    assert calc.factorial(5) == 120\n"

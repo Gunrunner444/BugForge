@@ -1,9 +1,8 @@
 """Tests for the repository eligibility / safety-screening service (Phase 11)."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-
-import pytest
 
 from app.core.config import Settings
 from app.services.eligibility_service import EligibilityService
@@ -403,4 +402,85 @@ def test_prompt_injection_in_description_does_not_affect_result() -> None:
         last_pushed_at=recent_push(),
     )
     # Description is not evaluated by the deterministic eligibility check
+    assert result.is_eligible
+
+
+# ---------------------------------------------------------------------------
+# Missing metadata must not silently pass safety checks
+# ---------------------------------------------------------------------------
+
+
+def test_missing_language_not_eligible_when_filter_active() -> None:
+    """When a language filter is configured, a repo with no language metadata
+    cannot be confirmed eligible — it must not silently pass the check."""
+    svc = EligibilityService(make_settings(discovery_languages="Python,JavaScript"))
+    result = svc.assess(
+        full_name="myorg/unknown-lang",
+        owner="myorg",
+        stars=1_000,
+        is_fork=False,
+        is_archived=False,
+        primary_language=None,  # GitHub returned no language
+        license_key="mit",
+        size_kb=1_000,
+        topics=[],
+        last_pushed_at=recent_push(),
+    )
+    assert not result.is_eligible
+    assert "language_unknown" in (result.rejection_reason or "")
+
+
+def test_missing_language_ok_when_all_languages_allowed() -> None:
+    """When no language filter is configured, missing language metadata is fine."""
+    svc = EligibilityService(make_settings(discovery_languages=""))
+    result = svc.assess(
+        full_name="myorg/no-lang",
+        owner="myorg",
+        stars=1_000,
+        is_fork=False,
+        is_archived=False,
+        primary_language=None,
+        license_key="mit",
+        size_kb=1_000,
+        topics=[],
+        last_pushed_at=recent_push(),
+    )
+    assert result.is_eligible
+
+
+def test_missing_last_pushed_at_not_eligible_when_recency_active() -> None:
+    """When a staleness filter is configured, a repo with no pushed_at metadata
+    cannot be confirmed fresh — it must not silently pass the recency check."""
+    svc = EligibilityService(make_settings(discovery_max_staleness_days=365))
+    result = svc.assess(
+        full_name="myorg/no-recency",
+        owner="myorg",
+        stars=1_000,
+        is_fork=False,
+        is_archived=False,
+        primary_language="Python",
+        license_key="mit",
+        size_kb=1_000,
+        topics=[],
+        last_pushed_at=None,  # GitHub returned no pushed_at
+    )
+    assert not result.is_eligible
+    assert "last_pushed_at_unknown" in (result.rejection_reason or "")
+
+
+def test_missing_last_pushed_at_ok_when_recency_disabled() -> None:
+    """When the recency filter is disabled, missing pushed_at is acceptable."""
+    svc = EligibilityService(make_settings(discovery_max_staleness_days=0))
+    result = svc.assess(
+        full_name="myorg/no-recency",
+        owner="myorg",
+        stars=1_000,
+        is_fork=False,
+        is_archived=False,
+        primary_language="Python",
+        license_key="mit",
+        size_kb=1_000,
+        topics=[],
+        last_pushed_at=None,
+    )
     assert result.is_eligible

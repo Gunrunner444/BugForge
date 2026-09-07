@@ -11,7 +11,9 @@ class PythonLanguageAnalyzer:
     def __init__(self) -> None:
         self._parser = PythonParser()
 
-    def analyze_file(self, file_path: Path, local_packages: frozenset[str] | None = None) -> ParseResult:
+    def analyze_file(
+        self, file_path: Path, local_packages: frozenset[str] | None = None
+    ) -> ParseResult:
         result = self._parser.parse_file(file_path)
         if local_packages:
             for imp in result.imports:

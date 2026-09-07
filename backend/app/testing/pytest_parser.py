@@ -1,4 +1,5 @@
 """Parse pytest JSON report output into structured TestResult records."""
+
 from __future__ import annotations
 
 import json

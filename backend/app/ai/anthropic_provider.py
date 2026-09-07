@@ -6,6 +6,7 @@ API reference: https://docs.anthropic.com/en/api/messages
 
 Security: API key is never logged. Only forward explicitly listed env overrides to analyzed repositories.
 """
+
 from __future__ import annotations
 
 import logging
@@ -82,7 +83,9 @@ class AnthropicProvider(LLMProvider):
             duration_seconds=time.monotonic() - start,
         )
 
-    async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+    async def generate_structured(
+        self, system_prompt: str, user_message: str
+    ) -> StructuredTextResponse:
         start = time.monotonic()
         try:
             raw, usage = await self._call_api(system_prompt, user_message)
@@ -162,7 +165,11 @@ class AnthropicProvider(LLMProvider):
         if response.status_code == 429:
             raise httpx.HTTPStatusError("Rate limited", request=response.request, response=response)
         if response.status_code in (401, 403):
-            raise httpx.HTTPStatusError("Unauthorized — check ANTHROPIC_API_KEY", request=response.request, response=response)
+            raise httpx.HTTPStatusError(
+                "Unauthorized — check ANTHROPIC_API_KEY",
+                request=response.request,
+                response=response,
+            )
         response.raise_for_status()
 
         data = response.json()
@@ -192,6 +199,7 @@ def _extract_json_from_text(text: str) -> str:
         return text
     # Look for ```json ... ``` blocks
     import re
+
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)

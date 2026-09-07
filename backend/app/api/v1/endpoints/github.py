@@ -1,4 +1,5 @@
 """GitHub Integration API endpoints — Phase 9."""
+
 from __future__ import annotations
 
 import logging
@@ -96,7 +97,10 @@ async def connect_github_repo(
     github_repo_repo = GitHubRepositoryRepo(db)
     gr = await github_repo_repo.get_by_id(gr_id)
     if gr is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Repository not found after creation")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Repository not found after creation",
+        )
     return _repo_response(gr)
 
 
@@ -191,7 +195,9 @@ async def deliver_candidate(
     delivery_repo = GitHubDeliveryRepo(db)
     delivery = await delivery_repo.get_by_id(delivery_id)
     if delivery is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Delivery record not found")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Delivery record not found"
+        )
     return _delivery_response(delivery)
 
 

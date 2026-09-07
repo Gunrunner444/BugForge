@@ -25,7 +25,9 @@ async def get_test_generation_session(
     repo = TestGenerationRepository(db)
     s = await repo.get_session(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test generation session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Test generation session not found"
+        )
     return TestGenerationSessionResponse.model_validate(s)
 
 
@@ -38,7 +40,9 @@ async def list_generated_tests(
 ) -> PaginatedGeneratedTestsResponse:
     repo = TestGenerationRepository(db)
     if await repo.get_session(session_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test generation session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Test generation session not found"
+        )
     tests, total = await repo.list_tests(session_id, offset=offset, limit=limit)
     return PaginatedGeneratedTestsResponse(
         items=tests,  # type: ignore[arg-type]

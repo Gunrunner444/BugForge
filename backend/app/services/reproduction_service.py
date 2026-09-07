@@ -1,4 +1,5 @@
 """Bug reproduction service — Phase 6 orchestration."""
+
 from __future__ import annotations
 
 import logging
@@ -184,7 +185,9 @@ class BugReproductionService:
                 )
             await db.commit()
 
-    async def _load_failing_tests(self, db: Any, debugging_session_id: UUID) -> list[dict[str, Any]]:
+    async def _load_failing_tests(
+        self, db: Any, debugging_session_id: UUID
+    ) -> list[dict[str, Any]]:
         from sqlalchemy import select
 
         from app.models.debugging import DebuggingSession
@@ -245,9 +248,7 @@ class BugReproductionService:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for n in range(1, total + 1):
-            result = await self._single_attempt(
-                code, repository_path, n, expected_failure_pattern
-            )
+            result = await self._single_attempt(code, repository_path, n, expected_failure_pattern)
             results.append(result)
         return results
 

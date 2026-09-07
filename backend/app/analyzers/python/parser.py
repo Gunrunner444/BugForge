@@ -97,7 +97,9 @@ class PythonParser:
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 relative = (node.level or 0) > 0
-                import_type = "relative" if relative else self._classify_module(module, relative=False)
+                import_type = (
+                    "relative" if relative else self._classify_module(module, relative=False)
+                )
                 for alias in node.names:
                     result.imports.append(
                         ImportInfo(
@@ -121,9 +123,7 @@ class PythonParser:
     # Code entities
     # ------------------------------------------------------------------
 
-    def _extract_entities(
-        self, tree: ast.AST, result: ParseResult, parent: str | None
-    ) -> None:
+    def _extract_entities(self, tree: ast.AST, result: ParseResult, parent: str | None) -> None:
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
                 result.entities.append(self._build_class_entity(node, parent))
@@ -185,9 +185,7 @@ class PythonParser:
                     names.append(result)
         return names
 
-    def _parameters(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef
-    ) -> list[ParameterInfo]:
+    def _parameters(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ParameterInfo]:
         params: list[ParameterInfo] = []
         args = node.args
         num_args = len(args.args)

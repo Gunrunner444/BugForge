@@ -5,6 +5,7 @@ WARNING: This executor does NOT sandbox the executed code.
          Only use it with trusted repositories in development environments.
          Never run untrusted repository code on a production BugForge host.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -110,4 +111,3 @@ class LocalTestExecutor(TestExecutor):
             duration_seconds=duration,
             artifact_contents=artifacts,
         )
-

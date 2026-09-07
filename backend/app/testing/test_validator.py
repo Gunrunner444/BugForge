@@ -4,6 +4,7 @@ before execution in the sandbox.
 
 Generated tests are UNTRUSTED AI output. Never execute without validation.
 """
+
 from __future__ import annotations
 
 import ast
@@ -159,7 +160,8 @@ def compute_quality_score(code: str, target_symbol: str) -> tuple[float, str]:
     # Check for assertions
     assertions = [n for n in ast.walk(tree) if isinstance(n, ast.Assert)]
     raises_calls = [
-        n for n in ast.walk(tree)
+        n
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
         and n.func.attr in ("raises", "warns")
@@ -171,8 +173,7 @@ def compute_quality_score(code: str, target_symbol: str) -> tuple[float, str]:
     else:
         # Check for trivially-true assertions like `assert True`
         trivial = sum(
-            1 for a in assertions
-            if isinstance(a.test, ast.Constant) and a.test.value is True
+            1 for a in assertions if isinstance(a.test, ast.Constant) and a.test.value is True
         )
         if trivial and trivial == len(assertions):
             score -= 0.3

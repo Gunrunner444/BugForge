@@ -1,4 +1,5 @@
 """Repair service — Phase 7 Automated Repair orchestration."""
+
 from __future__ import annotations
 
 import json
@@ -90,9 +91,7 @@ class RepairService:
             async with async_session_factory() as db:
                 repo = RepairRepository(db)
                 if best_id is not None:
-                    await repo.update_candidate(
-                        best_id, disposition="best"
-                    )
+                    await repo.update_candidate(best_id, disposition="best")
                 await repo.complete_session(session_id, len(plans), best_id)
                 await db.commit()
 
@@ -310,9 +309,7 @@ class RepairService:
 
         async with async_session_factory() as db:
             repo = RepairRepository(db)
-            await repo.update_candidate(
-                candidate_id, status="applying", validation_status="valid"
-            )
+            await repo.update_candidate(candidate_id, status="applying", validation_status="valid")
             await db.commit()
 
         # 2. Run inside disposable workspace
@@ -413,9 +410,7 @@ class RepairService:
         tests_failed = post_tests["failed"] + post_tests["error"]
 
         # ── Static analysis delta ──────────────────────────────────────
-        new_static_findings = self._static_analysis_delta(
-            workspace.repo_root, plan.changed_files
-        )
+        new_static_findings = self._static_analysis_delta(workspace.repo_root, plan.changed_files)
 
         # ── Score ──────────────────────────────────────────────────────
         score = self._compute_score(
@@ -444,7 +439,9 @@ class RepairService:
                 new_static_findings=new_static_findings,
                 score=round(score, 3),
                 disposition=disposition,
-                completed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                completed_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ),
             )
             await db.commit()
 
@@ -490,11 +487,23 @@ class RepairService:
                 # Validate before execution
                 validation = validate_test_code(code)
                 if not validation.valid:
-                    return {"exit_code": -2, "stdout": "", "stderr": f"Validation failed: {validation.error}"}
+                    return {
+                        "exit_code": -2,
+                        "stdout": "",
+                        "stderr": f"Validation failed: {validation.error}",
+                    }
 
                 executor = ExecutorFactory.create()
                 config = ExecutionConfig(
-                    command=["python3", "-m", "pytest", "test_reproducer.py", "-v", "--tb=short", "-q"],
+                    command=[
+                        "python3",
+                        "-m",
+                        "pytest",
+                        "test_reproducer.py",
+                        "-v",
+                        "--tb=short",
+                        "-q",
+                    ],
                     working_directory=tmpdir,
                     timeout_seconds=60,
                     output_dir=tmpdir,
@@ -511,16 +520,19 @@ class RepairService:
         except Exception as exc:
             return {"exit_code": -1, "stdout": "", "stderr": str(exc), "timed_out": False}
 
-    async def _run_existing_tests(
-        self, workspace_repo: str
-    ) -> dict[str, Any]:
+    async def _run_existing_tests(self, workspace_repo: str) -> dict[str, Any]:
         """Run the project's test suite and return a structured result with node IDs."""
         from app.execution import ExecutorFactory
         from app.execution.base import ExecutionConfig
 
         empty: dict[str, Any] = {
-            "total": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0,
-            "passing_ids": [], "failing_ids": [],
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "error": 0,
+            "skipped": 0,
+            "passing_ids": [],
+            "failing_ids": [],
         }
         try:
             with tempfile.TemporaryDirectory(prefix="bugforge_suite_") as tmpdir:
@@ -599,9 +611,7 @@ class RepairService:
         return count == 0, count
 
     @staticmethod
-    def _static_analysis_delta(
-        repository_path: str, changed_files: list[str]
-    ) -> int:
+    def _static_analysis_delta(repository_path: str, changed_files: list[str]) -> int:
         """Run static analysis on changed files and return the count of new findings.
 
         This runs synchronously since the engine is CPU-bound and cheap.
@@ -612,7 +622,8 @@ class RepairService:
         try:
             repo_path = Path(repository_path)
             file_paths = [
-                repo_path / f for f in changed_files
+                repo_path / f
+                for f in changed_files
                 if (repo_path / f).is_file() and f.endswith(".py")
             ]
             if not file_paths:

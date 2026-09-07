@@ -1,4 +1,5 @@
 """Pydantic schemas for discovery / autonomous analysis API (v1.1.0)."""
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,4 +1,5 @@
 """Pydantic schemas for GitHub Integration — Phase 9."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,6 +10,7 @@ from pydantic import BaseModel, field_validator
 
 class GitHubConnectRequest(BaseModel):
     """Request to connect a GitHub repository to a project."""
+
     owner: str
     repo: str
 

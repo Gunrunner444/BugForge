@@ -1,4 +1,5 @@
 """Base rule interface for all static-analysis rules."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

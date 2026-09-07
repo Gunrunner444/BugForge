@@ -3,6 +3,7 @@ Execution abstraction — all test execution goes through this interface.
 
 Never call subprocess or docker directly from outside this module.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -81,4 +82,3 @@ class TestExecutor(ABC):
         if config.output_dir is None:
             raise ValueError("output_dir must be set before calling get_artifact_write_path")
         return f"{config.output_dir}/{filename}"
-

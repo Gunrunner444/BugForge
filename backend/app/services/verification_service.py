@@ -11,6 +11,7 @@ Evidence-first patch verification pipeline:
   8. Score and decide — ALL required stages must succeed
   9. Persist full evidence record
 """
+
 from __future__ import annotations
 
 import json
@@ -135,9 +136,7 @@ class VerificationService:
 
         async with async_session_factory() as db:
             ver_repo = VerificationRepository(db)
-            await ver_repo.update(
-                verification_id, status="running", started_at=datetime.now(UTC)
-            )
+            await ver_repo.update(verification_id, status="running", started_at=datetime.now(UTC))
             await db.commit()
 
         try:
@@ -191,7 +190,9 @@ class VerificationService:
         # ── Security check ────────────────────────────────────────────
         validation = validate_patch(patch_diff, changed_files)
         security_passed = validation.valid
-        security_issues: list[str] = [] if security_passed else [validation.error or "Validation failed"]
+        security_issues: list[str] = (
+            [] if security_passed else [validation.error or "Validation failed"]
+        )
         extra_issues = _security_check(patch_diff, changed_files)
         if extra_issues:
             security_passed = False
@@ -379,9 +380,7 @@ class VerificationService:
             expected_failure_pattern: str | None = None
 
             if repair_session and repair_session.reproduction_session_id:
-                repro = await db.get(
-                    BugReproductionSession, repair_session.reproduction_session_id
-                )
+                repro = await db.get(BugReproductionSession, repair_session.reproduction_session_id)
                 if repro:
                     expected_failure_pattern = repro.expected_failure_pattern
                     if repro.attempts:
@@ -423,8 +422,13 @@ class VerificationService:
                 executor = ExecutorFactory.create()
                 config = ExecutionConfig(
                     command=[
-                        "python3", "-m", "pytest", "test_reproducer.py",
-                        "-v", "--tb=short", "-q",
+                        "python3",
+                        "-m",
+                        "pytest",
+                        "test_reproducer.py",
+                        "-v",
+                        "--tb=short",
+                        "-q",
                     ],
                     working_directory=tmpdir,
                     timeout_seconds=60,
@@ -434,7 +438,9 @@ class VerificationService:
                 )
                 result = await executor.execute(config)
                 evidence = (result.stdout + result.stderr)[:_OUTPUT_LIMIT]
-                reproduced = _classify_reproduction(result.exit_code, evidence, expected_failure_pattern)
+                reproduced = _classify_reproduction(
+                    result.exit_code, evidence, expected_failure_pattern
+                )
                 return reproduced, evidence
         except Exception as exc:
             return None, f"Reproducer execution error: {exc}"
@@ -451,8 +457,12 @@ class VerificationService:
             with tempfile.TemporaryDirectory(prefix="bugforge_vts_") as tmpdir:
                 config = ExecutionConfig(
                     command=[
-                        "python3", "-m", "pytest", "/bugforge-workspace",
-                        "--tb=no", "-q",
+                        "python3",
+                        "-m",
+                        "pytest",
+                        "/bugforge-workspace",
+                        "--tb=no",
+                        "-q",
                         "--json-report",
                         "--json-report-file=/bugforge-output/report.json",
                     ],
@@ -516,6 +526,7 @@ class VerificationService:
 
 # ── Module-level pure helpers ─────────────────────────────────────────────────
 
+
 def _classify_reproduction(
     exit_code: int, output: str, expected_failure_pattern: str | None
 ) -> bool | None:
@@ -539,8 +550,7 @@ def _run_static_analysis(workspace_repo: str, changed_files: list[str]) -> _Stat
     try:
         repo_path = Path(workspace_repo)
         file_paths = [
-            repo_path / f for f in changed_files
-            if (repo_path / f).is_file() and f.endswith(".py")
+            repo_path / f for f in changed_files if (repo_path / f).is_file() and f.endswith(".py")
         ]
         if not file_paths:
             return _StaticAnalysisResult(status="success", count=0, finding_ids=[])
@@ -564,9 +574,7 @@ def _run_static_analysis(workspace_repo: str, changed_files: list[str]) -> _Stat
         )
 
 
-def _compare_findings(
-    baseline_ids: list[str], post_ids: list[str]
-) -> tuple[list[str], list[str]]:
+def _compare_findings(baseline_ids: list[str], post_ids: list[str]) -> tuple[list[str], list[str]]:
     """Return (new_finding_ids, resolved_finding_ids) using set difference."""
     baseline_set = set(baseline_ids)
     post_set = set(post_ids)
@@ -589,9 +597,7 @@ def _compare_tests(
     return newly_failing, recovered, len(newly_failing)
 
 
-def _determine_bug_fixed(
-    baseline_repro: bool | None, post_repro: bool | None
-) -> bool | None:
+def _determine_bug_fixed(baseline_repro: bool | None, post_repro: bool | None) -> bool | None:
     if baseline_repro is True and post_repro is False:
         return True
     if baseline_repro is True and post_repro is True:
@@ -616,7 +622,9 @@ def _security_check(patch_diff: str, changed_files: list[str]) -> list[str]:
     if _CI_CONFIG_PATTERN.search(patch_diff):
         issues.append("Patch modifies CI/security configuration files")
     added_lines = "\n".join(
-        line for line in patch_diff.splitlines() if line.startswith("+") and not line.startswith("+++")
+        line
+        for line in patch_diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
     )
     if _DANGEROUS_PATTERNS.search(added_lines):
         issues.append("Patch adds potentially dangerous code patterns")

@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     discovery_excluded_topics: str = "exploit,hack,malware,pentest,ctf"
     # comma-separated owner logins to exclude
     discovery_excluded_owners: str = ""
+    # permanent workspace root for cloned repositories (empty = auto-select)
+    autonomous_workspace_dir: str = ""
 
     # -------------------------------------------------------------------
     # Eligibility / Safety Policy (v1.1.0)
@@ -122,11 +124,13 @@ class Settings(BaseSettings):
     @field_validator("secret_key")
     @classmethod
     def validate_secret_key(cls, v: str, info: object) -> str:
-        env = getattr(getattr(info, "data", {}), "get", lambda k, d=None: d)("environment", "development")
+        env = getattr(getattr(info, "data", {}), "get", lambda k, d=None: d)(
+            "environment", "development"
+        )
         if v == _UNSAFE_DEFAULT_KEY and env == "production":
             raise ValueError(
                 "SECRET_KEY must be set to a secure random value in production. "
-                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+                'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
             )
         return v
 

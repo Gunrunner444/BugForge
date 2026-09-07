@@ -1,10 +1,12 @@
 """Tests for Phase 8: Patch Verification."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from uuid import uuid4
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -13,13 +15,13 @@ def _make_repo(tmp_path: Path) -> Path:
     (repo / "tests").mkdir()
     (repo / "tests" / "__init__.py").write_text("")
     (repo / "tests" / "test_calc.py").write_text(
-        "from calc import divide\n"
-        "def test_divide(): assert divide(10, 2) == 5\n"
+        "from calc import divide\ndef test_divide(): assert divide(10, 2) == 5\n"
     )
     return repo
 
 
 # ── Verification Service Unit Tests ──────────────────────────────────────────
+
 
 class TestVerificationPureHelpers:
     def test_classify_reproduction_exit_0(self) -> None:
@@ -35,7 +37,10 @@ class TestVerificationPureHelpers:
     def test_classify_reproduction_exit_1_pattern_matches(self) -> None:
         from app.services.verification_service import _classify_reproduction
 
-        assert _classify_reproduction(1, "ZeroDivisionError: division by zero", "ZeroDivisionError") is True
+        assert (
+            _classify_reproduction(1, "ZeroDivisionError: division by zero", "ZeroDivisionError")
+            is True
+        )
 
     def test_classify_reproduction_exit_1_pattern_missing(self) -> None:
         from app.services.verification_service import _classify_reproduction
@@ -196,6 +201,7 @@ class TestVerificationPureHelpers:
 
 # ── Repair Workspace Updated Tests ───────────────────────────────────────────
 
+
 class TestRepairWorkspaceV2:
     def test_hunk_mismatch_fails_closed(self, tmp_path: Path) -> None:
         """Hunk mismatch must be rejected, not silently ignored."""
@@ -223,13 +229,7 @@ class TestRepairWorkspaceV2:
         (tmp_path / "calc.py").write_text("x = 1\n")
 
         with RepairWorkspace.create(str(tmp_path)) as ws:
-            diff = (
-                "--- a/../../../etc/passwd\n"
-                "+++ b/../../../etc/passwd\n"
-                "@@ -1 +1 @@\n"
-                "-x\n"
-                "+y\n"
-            )
+            diff = "--- a/../../../etc/passwd\n+++ b/../../../etc/passwd\n@@ -1 +1 @@\n-x\n+y\n"
             ok, err = ws.apply_patch(diff)
             assert not ok
 
@@ -244,7 +244,7 @@ class TestRepairWorkspaceV2:
                 "--- a/f.py\n"
                 "+++ b/f.py\n"
                 "@@ -1,2 +1,2 @@\n"
-                " def WRONG_CONTEXT():\n"   # context doesn't match
+                " def WRONG_CONTEXT():\n"  # context doesn't match
                 "-    return 1\n"
                 "+    return 2\n"
             )
@@ -253,6 +253,7 @@ class TestRepairWorkspaceV2:
 
 
 # ── Regression detection unit tests ──────────────────────────────────────────
+
 
 class TestRepairServiceHelpers:
     def test_compare_test_runs_no_regression(self) -> None:
@@ -292,7 +293,9 @@ class TestRepairServiceHelpers:
         from app.services.repair_service import RepairService
 
         svc = RepairService()
-        assert svc._classify_reproduction({"exit_code": 1, "stdout": "", "stderr": ""}, None) is True
+        assert (
+            svc._classify_reproduction({"exit_code": 1, "stdout": "", "stderr": ""}, None) is True
+        )
 
     def test_classify_reproduction_exit_1_pattern_match(self) -> None:
         from app.services.repair_service import RepairService
@@ -317,31 +320,24 @@ class TestRepairServiceHelpers:
 
 # ── Verification API Tests ────────────────────────────────────────────────────
 
+
 class TestVerificationAPI:
     async def test_get_nonexistent_verification_returns_404(self, client) -> None:
-        resp = await client.get(
-            f"/api/v1/verification/{uuid4()}"
-        )
+        resp = await client.get(f"/api/v1/verification/{uuid4()}")
         assert resp.status_code == 404
 
     async def test_get_verification_by_nonexistent_candidate_returns_404(self, client) -> None:
-        resp = await client.get(
-            f"/api/v1/verification/by-candidate/{uuid4()}"
-        )
+        resp = await client.get(f"/api/v1/verification/by-candidate/{uuid4()}")
         assert resp.status_code == 404
 
     async def test_start_verification_nonexistent_candidate_404(self, client) -> None:
         session_id = uuid4()
         candidate_id = uuid4()
-        resp = await client.post(
-            f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify"
-        )
+        resp = await client.post(f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify")
         assert resp.status_code == 404
 
     async def test_list_verifications_nonexistent_session_404(self, client) -> None:
-        resp = await client.get(
-            f"/api/v1/repair/{uuid4()}/verifications"
-        )
+        resp = await client.get(f"/api/v1/repair/{uuid4()}/verifications")
         assert resp.status_code == 404
 
     async def test_start_and_retrieve_verification(self, client, tmp_path: Path) -> None:
@@ -354,9 +350,7 @@ class TestVerificationAPI:
         project_id = proj.json()["id"]
 
         # Create a repair session with a candidate
-        repair_resp = await client.post(
-            f"/api/v1/projects/{project_id}/repair", json={}
-        )
+        repair_resp = await client.post(f"/api/v1/projects/{project_id}/repair", json={})
         assert repair_resp.status_code == 202
         session_id = repair_resp.json()["id"]
 
@@ -381,9 +375,7 @@ class TestVerificationAPI:
         assert "status" in data
 
         # Retrieve verification
-        get_resp = await client.get(
-            f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify"
-        )
+        get_resp = await client.get(f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify")
         assert get_resp.status_code == 200
         assert get_resp.json()["id"] == data["id"]
 
@@ -400,9 +392,7 @@ class TestVerificationAPI:
             json={"name": "VerifyIdempotent", "repository_path": str(repo)},
         )
         project_id = proj.json()["id"]
-        repair_resp = await client.post(
-            f"/api/v1/projects/{project_id}/repair", json={}
-        )
+        repair_resp = await client.post(f"/api/v1/projects/{project_id}/repair", json={})
         session_id = repair_resp.json()["id"]
 
         cands_resp = await client.get(f"/api/v1/repair/{session_id}/candidates")
@@ -412,12 +402,8 @@ class TestVerificationAPI:
 
         candidate_id = candidates[0]["id"]
 
-        r1 = await client.post(
-            f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify"
-        )
-        r2 = await client.post(
-            f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify"
-        )
+        r1 = await client.post(f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify")
+        r2 = await client.post(f"/api/v1/repair/{session_id}/candidates/{candidate_id}/verify")
         assert r1.status_code in (200, 202)
         assert r2.status_code in (200, 202)
         assert r1.json()["id"] == r2.json()["id"]

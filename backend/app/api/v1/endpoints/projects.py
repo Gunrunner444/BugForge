@@ -166,9 +166,7 @@ async def list_project_analyses(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     analysis_repo = AnalysisRepository(db)
-    analyses, total = await analysis_repo.list_for_project(
-        project_id, offset=offset, limit=limit
-    )
+    analyses, total = await analysis_repo.list_for_project(project_id, offset=offset, limit=limit)
 
     items = []
     for a in analyses:
@@ -187,7 +185,12 @@ async def list_project_analyses(
             )
         )
 
-    return {"items": [i.model_dump() for i in items], "total": total, "offset": offset, "limit": limit}
+    return {
+        "items": [i.model_dump() for i in items],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.post(
@@ -212,9 +215,7 @@ async def start_test_run(
     from app.workers.job_runner import FastAPIBackgroundRunner
 
     run_repo = TestRunRepository(db)
-    run = await run_repo.create(
-        project_id=project.id, repository_path=project.repository_path
-    )
+    run = await run_repo.create(project_id=project.id, repository_path=project.repository_path)
     await db.commit()
     await db.refresh(run)
 

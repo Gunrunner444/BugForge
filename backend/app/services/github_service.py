@@ -10,6 +10,7 @@ Security invariants enforced here:
  - Default branch is NEVER modified directly.
  - PRs are never automatically merged.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -154,7 +155,7 @@ def _git_auth_env(token: str) -> Iterator[dict[str, str]]:
         script_path = os.path.join(tmpdir, "askpass")
         script = (
             "#!/bin/sh\n"
-            "case \"$1\" in\n"
+            'case "$1" in\n'
             "  *Username*) printf '%s' 'x-access-token' ;;\n"
             f"  *) printf '%s' \"$(cat '{tok_escaped}')\" ;;\n"
             "esac\n"
@@ -169,8 +170,14 @@ def _git_auth_env(token: str) -> Iterator[dict[str, str]]:
         # Prevent system-wide credential helpers from interfering
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         # Strip BugForge secrets so the subprocess never sees them
-        for _k in ("GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-                   "SECRET_KEY", "DATABASE_URL", "POSTGRES_PASSWORD"):
+        for _k in (
+            "GITHUB_TOKEN",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "SECRET_KEY",
+            "DATABASE_URL",
+            "POSTGRES_PASSWORD",
+        ):
             env.pop(_k, None)
 
         yield env
@@ -183,7 +190,9 @@ def _plain_clone_url(owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
-def _git(args: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _git(
+    args: list[str], cwd: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a git command with argument array (never shell=True)."""
     return subprocess.run(
         ["git"] + args,
@@ -279,7 +288,9 @@ class GitHubService:
         from app.repositories.project_repo import ProjectRepository
 
         if not settings.github_token:
-            raise ValueError("GitHub token is not configured (set GITHUB_TOKEN environment variable)")
+            raise ValueError(
+                "GitHub token is not configured (set GITHUB_TOKEN environment variable)"
+            )
 
         # Validate owner/repo names to prevent injection
         _validate_github_owner_repo(owner, repo)
@@ -407,7 +418,8 @@ class GitHubService:
             delivery_repo = GitHubDeliveryRepo(db)
             existing_delivery = await delivery_repo.get_by_candidate(candidate_id)
             if existing_delivery is not None and existing_delivery.status not in (
-                "failed", "aborted",
+                "failed",
+                "aborted",
             ):
                 return existing_delivery.id
 
@@ -449,7 +461,9 @@ class GitHubService:
             delivery = await delivery_repo.get_by_id(delivery_id)
             if delivery is None:
                 raise ValueError(f"Delivery {delivery_id} not found")
-            await delivery_repo.update(delivery_id, status="preparing", started_at=datetime.now(UTC))
+            await delivery_repo.update(
+                delivery_id, status="preparing", started_at=datetime.now(UTC)
+            )
             await db.commit()
 
         tmpdir: str | None = None
@@ -469,9 +483,7 @@ class GitHubService:
                 ver_repo = VerificationRepository(db)
                 verification = await ver_repo.get_by_candidate(delivery.candidate_id)
                 if verification is None or verification.verification_decision != "verified":
-                    raise ValueError(
-                        "Verification is no longer 'verified' — delivery aborted"
-                    )
+                    raise ValueError("Verification is no longer 'verified' — delivery aborted")
 
                 patch_diff = candidate.patch_diff or ""
 
@@ -544,9 +556,7 @@ class GitHubService:
 
             final_ok = await _run_final_tests(clone_dir)
             if not final_ok:
-                raise RuntimeError(
-                    "Final pre-push test run failed — patch not delivered"
-                )
+                raise RuntimeError("Final pre-push test run failed — patch not delivered")
 
             # ── Commit ────────────────────────────────────────────────
             async with async_session_factory() as db:
@@ -660,6 +670,7 @@ class GitHubService:
             if tmpdir is not None:
                 try:
                     import shutil as _shutil
+
                     _shutil.rmtree(tmpdir, ignore_errors=True)
                 except Exception:
                     pass
@@ -690,7 +701,16 @@ async def _run_final_tests(repo_dir: str) -> bool:
 
     executor = ExecutorFactory.create()
     config = ExecutionConfig(
-        command=["python3", "-m", "pytest", "--tb=no", "-q", "--no-header", "-p", "no:cacheprovider"],
+        command=[
+            "python3",
+            "-m",
+            "pytest",
+            "--tb=no",
+            "-q",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+        ],
         working_directory=repo_dir,
         timeout_seconds=120,
     )

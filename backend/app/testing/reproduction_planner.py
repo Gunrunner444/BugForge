@@ -4,6 +4,7 @@ Reproduction planner — uses AI to generate a strategy and reproducer code.
 All repository content passed to the AI is labeled as untrusted data.
 Generated reproducer code must be validated before sandbox execution.
 """
+
 from __future__ import annotations
 
 import json
@@ -103,7 +104,7 @@ class ReproductionPlanner:
             parts.append("\n## STATIC FINDINGS (BugForge tool output — trusted)")
             for f in static_findings[:5]:
                 parts.append(
-                    f"- [{f.get('severity','?').upper()}] {f.get('file','')}:{f.get('line','')} {f.get('message','')}"
+                    f"- [{f.get('severity', '?').upper()}] {f.get('file', '')}:{f.get('line', '')} {f.get('message', '')}"
                 )
         parts.append("\nGenerate a minimal reproducer test.")
         return "\n".join(parts)
@@ -113,6 +114,7 @@ class ReproductionPlanner:
             data = json.loads(raw)
         except json.JSONDecodeError:
             import re
+
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if not match:
                 return None

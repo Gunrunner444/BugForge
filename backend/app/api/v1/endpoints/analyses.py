@@ -124,7 +124,9 @@ async def list_analysis_imports(
 @router.get("/{analysis_id}/findings", response_model=PaginatedFindingsResponse)
 async def list_analysis_findings(
     analysis_id: UUID,
-    severity: str | None = Query(None, description="Filter by severity (info/low/medium/high/critical)"),
+    severity: str | None = Query(
+        None, description="Filter by severity (info/low/medium/high/critical)"
+    ),
     category: str | None = Query(None, description="Filter by rule category"),
     offset: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=1000),
@@ -144,4 +146,3 @@ async def list_analysis_findings(
         offset=offset,
         limit=limit,
     )
-

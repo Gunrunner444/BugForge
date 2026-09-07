@@ -1,4 +1,5 @@
 """Tests for Phase 6: Bug Reproduction Engine."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,9 +27,7 @@ class TestReproductionAPI:
             "/api/v1/projects", json={"name": "Repro2", "repository_path": str(repo)}
         )
         project_id = proj.json()["id"]
-        start = await client.post(
-            f"/api/v1/projects/{project_id}/reproduction", json={}
-        )
+        start = await client.post(f"/api/v1/projects/{project_id}/reproduction", json={})
         session_id = start.json()["id"]
 
         resp = await client.get(f"/api/v1/reproduction/{session_id}")
@@ -43,9 +42,7 @@ class TestReproductionAPI:
             "/api/v1/projects", json={"name": "Repro3", "repository_path": str(repo)}
         )
         project_id = proj.json()["id"]
-        start = await client.post(
-            f"/api/v1/projects/{project_id}/reproduction", json={}
-        )
+        start = await client.post(f"/api/v1/projects/{project_id}/reproduction", json={})
         session_id = start.json()["id"]
 
         resp = await client.get(f"/api/v1/reproduction/{session_id}/attempts")
@@ -72,9 +69,7 @@ class TestReproductionAPI:
         assert resp.status_code == 404
 
     async def test_nonexistent_session_returns_404(self, client) -> None:
-        resp = await client.get(
-            "/api/v1/reproduction/00000000-0000-0000-0000-000000000000"
-        )
+        resp = await client.get("/api/v1/reproduction/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
 
     async def test_custom_attempt_count(self, client, tmp_path: Path) -> None:
@@ -111,15 +106,21 @@ class TestReproductionPlanner:
 
         async def _fake_generate(system_prompt: str, user_msg: str) -> StructuredTextResponse:
             return StructuredTextResponse(
-                content="", provider="mock", model="mock-v1",
-                usage=AIUsage(), duration_seconds=0.0, error="Simulated error"
+                content="",
+                provider="mock",
+                model="mock-v1",
+                usage=AIUsage(),
+                duration_seconds=0.0,
+                error="Simulated error",
             )
 
         from app.ai.mock_provider import MockLLMProvider
+
         mock = MockLLMProvider()
         mock.generate_structured = _fake_generate  # type: ignore[method-assign]
 
         import app.ai as _ai_module
+
         orig = _ai_module.get_provider
         _ai_module.get_provider = lambda: mock  # type: ignore[assignment]
 

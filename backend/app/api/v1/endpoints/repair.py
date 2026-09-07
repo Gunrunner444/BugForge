@@ -28,7 +28,9 @@ async def get_repair_session(
     repo = RepairRepository(db)
     s = await repo.get_session_by_id(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found"
+        )
     candidates = [PatchCandidateResponse.from_orm_with_files(c) for c in s.candidates]
     base = RepairSessionResponse.model_validate(s)
     return RepairSessionDetailResponse(**base.model_dump(), candidates=candidates)
@@ -42,7 +44,9 @@ async def list_candidates(
     repo = RepairRepository(db)
     s = await repo.get_session_by_id(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found"
+        )
     return [PatchCandidateResponse.from_orm_with_files(c) for c in s.candidates]
 
 
@@ -55,7 +59,9 @@ async def get_candidate(
     repo = RepairRepository(db)
     c = await repo.get_candidate(candidate_id)
     if c is None or c.session_id != session_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found"
+        )
     return PatchCandidateResponse.from_orm_with_files(c)
 
 
@@ -79,7 +85,9 @@ async def start_verification(
     repair_repo = RepairRepository(db)
     candidate = await repair_repo.get_candidate(candidate_id)
     if candidate is None or candidate.session_id != session_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found"
+        )
 
     ver_repo = VerificationRepository(db)
     existing = await ver_repo.get_by_candidate(candidate_id)
@@ -91,7 +99,9 @@ async def start_verification(
 
     repair_session = await repair_repo.get_session_by_id(session_id)
     if repair_session is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found"
+        )
 
     v = await ver_repo.create(
         candidate_id=candidate_id,
@@ -123,12 +133,16 @@ async def get_candidate_verification(
     repair_repo = RepairRepository(db)
     candidate = await repair_repo.get_candidate(candidate_id)
     if candidate is None or candidate.session_id != session_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Patch candidate not found"
+        )
 
     ver_repo = VerificationRepository(db)
     v = await ver_repo.get_by_candidate(candidate_id)
     if v is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No verification found for this candidate")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No verification found for this candidate"
+        )
     return VerificationResponse.from_orm(v)
 
 
@@ -144,7 +158,9 @@ async def list_session_verifications(
     repair_repo = RepairRepository(db)
     s = await repair_repo.get_session_by_id(session_id)
     if s is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repair session not found"
+        )
 
     ver_repo = VerificationRepository(db)
     verifications = await ver_repo.list_for_session(session_id)

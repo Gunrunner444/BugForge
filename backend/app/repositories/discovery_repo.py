@@ -1,4 +1,5 @@
 """Data-access layer for discovery domain objects (v1.1.0)."""
+
 from __future__ import annotations
 
 import json
@@ -30,15 +31,11 @@ class DiscoveryRunRepository:
         return run
 
     async def get_by_id(self, run_id: UUID) -> DiscoveryRun | None:
-        result = await self.session.execute(
-            select(DiscoveryRun).where(DiscoveryRun.id == run_id)
-        )
+        result = await self.session.execute(select(DiscoveryRun).where(DiscoveryRun.id == run_id))
         return result.scalar_one_or_none()
 
     async def list_recent(self, limit: int = 20, offset: int = 0) -> tuple[list[DiscoveryRun], int]:
-        total_result = await self.session.execute(
-            select(func.count()).select_from(DiscoveryRun)
-        )
+        total_result = await self.session.execute(select(func.count()).select_from(DiscoveryRun))
         total = total_result.scalar_one()
         result = await self.session.execute(
             select(DiscoveryRun)
@@ -163,9 +160,7 @@ class RepositoryCandidateRepository:
 
     async def get_by_github_id(self, github_repo_id: int) -> RepositoryCandidate | None:
         result = await self.session.execute(
-            select(RepositoryCandidate).where(
-                RepositoryCandidate.github_repo_id == github_repo_id
-            )
+            select(RepositoryCandidate).where(RepositoryCandidate.github_repo_id == github_repo_id)
         )
         return result.scalar_one_or_none()
 
@@ -188,10 +183,14 @@ class RepositoryCandidateRepository:
             count_q = count_q.where(RepositoryCandidate.eligibility_status == status)
         total = (await self.session.execute(count_q)).scalar_one()
         items = (
-            await self.session.execute(
-                q.order_by(RepositoryCandidate.stars.desc()).offset(offset).limit(limit)
+            (
+                await self.session.execute(
+                    q.order_by(RepositoryCandidate.stars.desc()).offset(offset).limit(limit)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(items), total
 
     async def update_eligibility(
@@ -243,8 +242,9 @@ class RepositoryCandidateRepository:
 
     async def count_by_status(self) -> dict[str, int]:
         result = await self.session.execute(
-            select(RepositoryCandidate.eligibility_status, func.count())
-            .group_by(RepositoryCandidate.eligibility_status)
+            select(RepositoryCandidate.eligibility_status, func.count()).group_by(
+                RepositoryCandidate.eligibility_status
+            )
         )
         return {row[0]: row[1] for row in result.all()}
 
@@ -283,9 +283,7 @@ class AutonomousAnalysisRunRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list_for_candidate(
-        self, candidate_id: UUID
-    ) -> list[AutonomousAnalysisRun]:
+    async def list_for_candidate(self, candidate_id: UUID) -> list[AutonomousAnalysisRun]:
         result = await self.session.execute(
             select(AutonomousAnalysisRun)
             .where(AutonomousAnalysisRun.candidate_id == candidate_id)
@@ -306,12 +304,14 @@ class AutonomousAnalysisRunRepository:
             count_q = count_q.where(AutonomousAnalysisRun.status == status)
         total = (await self.session.execute(count_q)).scalar_one()
         items = (
-            await self.session.execute(
-                q.order_by(AutonomousAnalysisRun.created_at.desc())
-                .offset(offset)
-                .limit(limit)
+            (
+                await self.session.execute(
+                    q.order_by(AutonomousAnalysisRun.created_at.desc()).offset(offset).limit(limit)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(items), total
 
     async def update_status(
@@ -340,9 +340,7 @@ class AutonomousAnalysisRunRepository:
         for k, v in counters.items():
             values[k] = v
         await self.session.execute(
-            update(AutonomousAnalysisRun)
-            .where(AutonomousAnalysisRun.id == run_id)
-            .values(**values)
+            update(AutonomousAnalysisRun).where(AutonomousAnalysisRun.id == run_id).values(**values)
         )
         await self.session.flush()
 
@@ -369,7 +367,14 @@ class AutonomousAnalysisRunRepository:
 
     async def has_active_run_for_candidate(self, candidate_id: UUID) -> bool:
         """Return True if there is already a non-terminal run for this candidate."""
-        active_statuses = ("queued", "screening", "acquiring", "static_analyzing", "ai_analyzing", "finding_validation")
+        active_statuses = (
+            "queued",
+            "screening",
+            "acquiring",
+            "static_analyzing",
+            "ai_analyzing",
+            "finding_validation",
+        )
         result = await self.session.execute(
             select(func.count())
             .select_from(AutonomousAnalysisRun)

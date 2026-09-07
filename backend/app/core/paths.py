@@ -4,6 +4,7 @@ Centralized path utilities.
 All user-facing and persisted paths must be repository-relative.
 Never expose absolute host filesystem paths in API responses, findings, or stored records.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,9 +19,7 @@ def to_relative_path(absolute: Path, repo_root: Path) -> str:
         rel = absolute.resolve().relative_to(repo_root.resolve())
         return rel.as_posix()
     except ValueError:
-        raise ValueError(
-            f"Path {absolute} is not inside repository root {repo_root}"
-        ) from None
+        raise ValueError(f"Path {absolute} is not inside repository root {repo_root}") from None
 
 
 def is_within_repo(path: Path, repo_root: Path) -> bool:

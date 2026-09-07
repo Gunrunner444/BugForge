@@ -1,12 +1,13 @@
 """Tests for the AI provider factory and health check (Phase 11)."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.config import Settings
 from app.ai.factory import check_ai_health, create_provider
+from app.core.config import Settings
 
 
 def make_settings(**overrides: object) -> Settings:

@@ -1,4 +1,5 @@
 """Repository for PatchVerification records — Phase 8."""
+
 from __future__ import annotations
 
 import json
@@ -82,7 +83,9 @@ class VerificationRepository:
         await self.update(
             verification_id,
             baseline_reproduced=reproduced,
-            baseline_reproduction_evidence=reproduction_evidence[:4096] if reproduction_evidence else None,
+            baseline_reproduction_evidence=reproduction_evidence[:4096]
+            if reproduction_evidence
+            else None,
             baseline_tests_total=tests.get("total", 0),
             baseline_tests_passed=tests.get("passed", 0),
             baseline_tests_failed=tests.get("failed", 0),
@@ -114,7 +117,9 @@ class VerificationRepository:
         await self.update(
             verification_id,
             post_patch_reproduced=reproduced,
-            post_patch_reproduction_evidence=reproduction_evidence[:4096] if reproduction_evidence else None,
+            post_patch_reproduction_evidence=reproduction_evidence[:4096]
+            if reproduction_evidence
+            else None,
             post_tests_total=tests.get("total", 0),
             post_tests_passed=tests.get("passed", 0),
             post_tests_failed=tests.get("failed", 0),
@@ -150,8 +155,12 @@ class VerificationRepository:
             regression_count=regression_count,
             new_static_introduced=new_static_introduced,
             static_resolved=static_resolved,
-            new_finding_ids_json=json.dumps(new_finding_ids) if new_finding_ids is not None else None,
-            resolved_finding_ids_json=json.dumps(resolved_finding_ids) if resolved_finding_ids is not None else None,
+            new_finding_ids_json=json.dumps(new_finding_ids)
+            if new_finding_ids is not None
+            else None,
+            resolved_finding_ids_json=json.dumps(resolved_finding_ids)
+            if resolved_finding_ids is not None
+            else None,
         )
 
     async def set_security(

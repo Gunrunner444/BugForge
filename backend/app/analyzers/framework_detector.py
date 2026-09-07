@@ -96,7 +96,9 @@ _JS_FRAMEWORKS: list[dict[str, Any]] = [
 
 class FrameworkDetector:
     def detect(self, repo_root: Path, all_file_paths: list[Path]) -> list[FrameworkInfo]:
-        relative_paths = {p.relative_to(repo_root) for p in all_file_paths if p.is_relative_to(repo_root)}
+        relative_paths = {
+            p.relative_to(repo_root) for p in all_file_paths if p.is_relative_to(repo_root)
+        }
         {str(p) for p in relative_paths}
         file_names = {p.name for p in relative_paths}
         dir_names = {str(part) for p in relative_paths for part in p.parts[:-1]}
@@ -151,7 +153,12 @@ class FrameworkDetector:
                 score += 0.2
 
         # Check pyproject.toml / requirements.txt / setup.cfg for package names
-        for config_file in ["pyproject.toml", "requirements.txt", "requirements-dev.txt", "setup.cfg"]:
+        for config_file in [
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "setup.cfg",
+        ]:
             config_path = repo_root / config_file
             if config_path.exists():
                 try:

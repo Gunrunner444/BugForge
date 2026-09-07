@@ -1,4 +1,5 @@
 """Tests for Phase 3 static analysis rules and engine."""
+
 from __future__ import annotations
 
 import textwrap
@@ -32,7 +33,9 @@ class TestMutableDefaultArgument:
         assert len(findings) == 1
 
     def test_immutable_default_clean(self, tmp_path: Path) -> None:
-        findings = _findings(MutableDefaultArgumentRule(), "def foo(x=None): pass\ndef bar(y=42): pass", tmp_path)
+        findings = _findings(
+            MutableDefaultArgumentRule(), "def foo(x=None): pass\ndef bar(y=42): pass", tmp_path
+        )
         assert findings == []
 
     def test_syntax_error_returns_empty(self, tmp_path: Path) -> None:
@@ -81,7 +84,9 @@ class TestComparisonToNone:
         assert len(findings) == 1
 
     def test_is_none_clean(self, tmp_path: Path) -> None:
-        findings = _findings(ComparisonToNoneRule(), "if x is None: pass\nif y is not None: pass", tmp_path)
+        findings = _findings(
+            ComparisonToNoneRule(), "if x is None: pass\nif y is not None: pass", tmp_path
+        )
         assert findings == []
 
 
@@ -96,7 +101,9 @@ class TestHardcodedCredential:
         assert findings == []
 
     def test_env_var_clean(self, tmp_path: Path) -> None:
-        findings = _findings(HardcodedCredentialRule(), 'password = os.environ.get("PASSWORD")', tmp_path)
+        findings = _findings(
+            HardcodedCredentialRule(), 'password = os.environ.get("PASSWORD")', tmp_path
+        )
         assert findings == []
 
 
@@ -145,7 +152,9 @@ class TestStaticAnalysisEngine:
 
         py_file = tmp_path / "code.py"
         py_file.write_text("def foo(x=[]): pass\n")
-        findings = StaticAnalysisEngine(rules=[MutableDefaultArgumentRule()]).analyze_repository(tmp_path, [py_file])
+        findings = StaticAnalysisEngine(rules=[MutableDefaultArgumentRule()]).analyze_repository(
+            tmp_path, [py_file]
+        )
         assert len(findings) == 1
 
 
@@ -172,17 +181,13 @@ class TestFindings:
         assert "total" in data
 
     async def test_findings_nonexistent_analysis(self, client) -> None:
-        resp = await client.get(
-            "/api/v1/analyses/00000000-0000-0000-0000-000000000000/findings"
-        )
+        resp = await client.get("/api/v1/analyses/00000000-0000-0000-0000-000000000000/findings")
         assert resp.status_code == 404
 
 
 def _make_repo(tmp_path: Path) -> Path:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "__init__.py").write_text("")
-    (tmp_path / "src" / "buggy.py").write_text(
-        "def foo(x=[]):\n    if x == None: pass\n"
-    )
+    (tmp_path / "src" / "buggy.py").write_text("def foo(x=[]):\n    if x == None: pass\n")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='sample'\n")
     return tmp_path

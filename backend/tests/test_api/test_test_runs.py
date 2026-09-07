@@ -1,4 +1,5 @@
 """API tests for test-run endpoints."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,8 +9,7 @@ def _build_sample_repo(tmp_path: Path) -> Path:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "__init__.py").write_text("")
     (tmp_path / "tests" / "test_sample.py").write_text(
-        "def test_pass(): assert 1 + 1 == 2\n"
-        "def test_fail(): assert 1 == 2\n"
+        "def test_pass(): assert 1 + 1 == 2\ndef test_fail(): assert 1 == 2\n"
     )
     (tmp_path / "pyproject.toml").write_text("[project]\nname='sample'\n")
     return tmp_path
@@ -77,13 +77,9 @@ class TestTestRunAPI:
         assert data["total"] >= 1
 
     async def test_start_test_run_nonexistent_project(self, client) -> None:
-        resp = await client.post(
-            "/api/v1/projects/00000000-0000-0000-0000-000000000000/tests/run"
-        )
+        resp = await client.post("/api/v1/projects/00000000-0000-0000-0000-000000000000/tests/run")
         assert resp.status_code == 404
 
     async def test_get_nonexistent_test_run(self, client) -> None:
-        resp = await client.get(
-            "/api/v1/test-runs/00000000-0000-0000-0000-000000000000"
-        )
+        resp = await client.get("/api/v1/test-runs/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
