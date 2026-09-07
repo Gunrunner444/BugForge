@@ -146,36 +146,57 @@ class RepairWorkspace:
     ) -> str | None:
         """Apply hunks to a file. Return error string or None on success."""
         result = list(original)
+        # Cumulative line-count delta after applying previous hunks
         offset = 0
 
         for orig_start, hunk in hunks:
-            removed: list[str] = []
-            added: list[str] = []
+            # Walk through all hunk lines tracking position sequentially.
+            # context lines and removed lines each advance by one in the original;
+            # added lines insert new content without advancing the original position.
+            read_pos = orig_start + offset   # current cursor in result[]
+            new_segment: list[str] = []       # replacement lines for this hunk
+            orig_lines_consumed = 0           # how many result lines this hunk replaces
+
             for h in hunk:
-                if h.startswith("-"):
-                    removed.append(h[1:])
-                elif h.startswith("+"):
-                    added.append(h[1:])
-                # context lines (space-prefixed) are skipped
+                if h.startswith(" "):         # context line
+                    ctx = h[1:].rstrip("\n")
+                    actual = result[read_pos].rstrip("\n") if read_pos < len(result) else ""
+                    if actual != ctx:
+                        return (
+                            f"Context mismatch in {rel_path} at line {orig_start + orig_lines_consumed + 1}: "
+                            f"expected {ctx!r}, got {actual!r}; patch rejected"
+                        )
+                    new_segment.append(result[read_pos] if result[read_pos].endswith("\n")
+                                       else result[read_pos] + "\n")
+                    read_pos += 1
+                    orig_lines_consumed += 1
+                elif h.startswith("-"):       # removed line
+                    removed = h[1:].rstrip("\n")
+                    actual = result[read_pos].rstrip("\n") if read_pos < len(result) else ""
+                    if actual != removed:
+                        return (
+                            f"Hunk mismatch in {rel_path} at line {orig_start + orig_lines_consumed + 1}: "
+                            f"expected {removed!r}, got {actual!r}; patch rejected"
+                        )
+                    # Don't add to new_segment — line is deleted
+                    read_pos += 1
+                    orig_lines_consumed += 1
+                elif h.startswith("+"):       # added line
+                    added = h[1:]
+                    if not added.endswith("\n"):
+                        added += "\n"
+                    new_segment.append(added)
 
-            insert_at = orig_start + offset
-            # Validate that removed lines match
-            actual = [ln.rstrip("\n") for ln in result[insert_at : insert_at + len(removed)]]
-            expected = [ln.rstrip("\n") for ln in removed]
-            if actual != expected:
-                # Soft mismatch: allow if removed is empty (pure addition)
-                if removed:
-                    logger.debug(
-                        "Hunk mismatch at %s line %d: expected %r got %r",
-                        rel_path, orig_start + 1, expected[:3], actual[:3],
-                    )
+            hunk_start = orig_start + offset
+            result[hunk_start : hunk_start + orig_lines_consumed] = new_segment
+            offset += len(new_segment) - orig_lines_consumed
 
-            # Apply: replace removed lines with added lines
-            new_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in added]
-            result[insert_at : insert_at + len(removed)] = new_lines
-            offset += len(added) - len(removed)
-
-        target = self._repo_root / rel_path
+        target = (self._repo_root / rel_path).resolve()
+        # Ensure resolved path stays inside workspace (prevent traversal)
+        try:
+            target.relative_to(self._repo_root.resolve())
+        except ValueError:
+            return f"Patch path '{rel_path}' escapes workspace root; patch rejected"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(result), encoding="utf-8")
         return None

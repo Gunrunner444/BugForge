@@ -414,3 +414,84 @@ export interface RepairSessionsListResponse {
   offset: number;
   limit: number;
 }
+
+// ── Patch Verification (v0.8) ──────────────────────────────────────────────
+
+export type VerificationDecision =
+  | "verified"
+  | "rejected"
+  | "inconclusive"
+  | "environment_failed"
+  | "baseline_failed";
+
+export type VerificationStatus =
+  | "pending"
+  | "running"
+  | "baseline_failed"
+  | "applying"
+  | "testing"
+  | "analyzing"
+  | "comparing"
+  | "verified"
+  | "rejected"
+  | "inconclusive"
+  | "environment_failed";
+
+export interface PatchVerification {
+  id: string;
+  candidate_id: string;
+  session_id: string;
+  project_id: string;
+  status: VerificationStatus;
+  error_message: string | null;
+
+  // baseline
+  baseline_reproduced: boolean | null;
+  baseline_reproduction_evidence: string | null;
+  baseline_tests_total: number;
+  baseline_tests_passed: number;
+  baseline_tests_failed: number;
+  baseline_tests_error: number;
+  baseline_tests_skipped: number;
+  baseline_passing_ids: string[];
+  baseline_failing_ids: string[];
+  baseline_static_findings: number;
+
+  // patch application
+  patch_applied: boolean | null;
+  patch_apply_error: string | null;
+
+  // post-patch
+  post_patch_reproduced: boolean | null;
+  post_patch_reproduction_evidence: string | null;
+  post_tests_total: number;
+  post_tests_passed: number;
+  post_tests_failed: number;
+  post_tests_error: number;
+  post_tests_skipped: number;
+  post_passing_ids: string[];
+  post_failing_ids: string[];
+  post_static_findings: number;
+
+  // comparison
+  target_bug_fixed: boolean | null;
+  newly_failing_ids: string[];
+  recovered_ids: string[];
+  regression_count: number;
+  new_static_introduced: number;
+  static_resolved: number;
+
+  // security
+  security_passed: boolean | null;
+  security_issues: string[];
+
+  // decision
+  verification_score: number | null;
+  verification_decision: VerificationDecision | null;
+  decision_reasons: string[];
+  evidence_summary: string | null;
+
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}

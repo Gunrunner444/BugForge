@@ -12,6 +12,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.project import Project
+    from app.models.verification import PatchVerification
 
 
 class RepairSession(Base):
@@ -124,4 +125,10 @@ class PatchCandidate(Base):
         "RepairSession",
         back_populates="candidates",
         foreign_keys=[session_id],
+    )
+    verification: Mapped[PatchVerification | None] = relationship(
+        "PatchVerification",
+        back_populates="candidate",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

@@ -186,6 +186,7 @@ class RepairService:
                     parts.append(f"Expected failure: {repro.expected_failure_pattern}")
                 evidence["reproduction_summary"] = " | ".join(parts)
                 evidence["reproducer_code"] = None
+                evidence["expected_failure_pattern"] = repro.expected_failure_pattern
                 if repro.attempts:
                     for attempt in repro.attempts:
                         if attempt.reproduced and attempt.reproducer_code:
@@ -352,13 +353,17 @@ class RepairService:
 
         # ── Pre-patch baseline ─────────────────────────────────────────
         reproducer_code = evidence.get("reproducer_code")
+        expected_failure_pattern: str | None = evidence.get("expected_failure_pattern")
         pre_reproduced: bool | None = None
         pre_stdout = ""
 
         if reproducer_code:
             pre_result = await self._run_reproducer(reproducer_code, workspace.repo_root)
-            pre_reproduced = pre_result["exit_code"] == 1
+            pre_reproduced = self._classify_reproduction(pre_result, expected_failure_pattern)
             pre_stdout = pre_result.get("stdout", "")[:_OUTPUT_LIMIT]
+
+        # ── Existing test suite — baseline (pre-patch) ─────────────────
+        baseline_tests = await self._run_existing_tests(workspace.repo_root)
 
         # ── Apply patch ────────────────────────────────────────────────
         async with async_session_factory() as db:
@@ -394,15 +399,22 @@ class RepairService:
 
         if reproducer_code:
             post_result = await self._run_reproducer(reproducer_code, workspace.repo_root)
-            post_reproduced = post_result["exit_code"] == 1
+            post_reproduced = self._classify_reproduction(post_result, expected_failure_pattern)
             post_stdout = post_result.get("stdout", "")[:_OUTPUT_LIMIT]
             # Bug is fixed if it reproduced before and doesn't reproduce now
             if pre_reproduced is not None:
                 bug_fixed = pre_reproduced and not post_reproduced
 
-        # ── Existing test suite ────────────────────────────────────────
-        tests_total, tests_passed, tests_failed, no_regressions, regression_count = (
-            await self._run_existing_tests(workspace.repo_root)
+        # ── Existing test suite — post-patch ──────────────────────────
+        post_tests = await self._run_existing_tests(workspace.repo_root)
+        no_regressions, regression_count = self._compare_test_runs(baseline_tests, post_tests)
+        tests_total = post_tests["total"]
+        tests_passed = post_tests["passed"]
+        tests_failed = post_tests["failed"] + post_tests["error"]
+
+        # ── Static analysis delta ──────────────────────────────────────
+        new_static_findings = self._static_analysis_delta(
+            workspace.repo_root, plan.changed_files
         )
 
         # ── Score ──────────────────────────────────────────────────────
@@ -410,6 +422,7 @@ class RepairService:
             bug_fixed=bug_fixed,
             no_regressions=no_regressions,
             regression_count=regression_count,
+            new_static_findings=new_static_findings,
         )
         disposition = "accepted" if score > 0.3 else "rejected"
 
@@ -428,6 +441,7 @@ class RepairService:
                 existing_tests_failed=tests_failed,
                 no_regressions=no_regressions,
                 regression_count=regression_count,
+                new_static_findings=new_static_findings,
                 score=round(score, 3),
                 disposition=disposition,
                 completed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
@@ -435,6 +449,34 @@ class RepairService:
             await db.commit()
 
         return score
+
+    def _classify_reproduction(
+        self, run_result: dict[str, Any], expected_failure_pattern: str | None
+    ) -> bool | None:
+        """Determine whether the reproducer confirmed the bug is present.
+
+        Semantics:
+          - exit_code == 1   : pytest ran and tests failed  → likely reproduced
+          - exit_code == 0   : all tests passed             → not reproduced
+          - exit_code < 0    : execution error              → unknown (return None)
+          - exit_code >  1   : pytest internal error / collection error → None
+        If an expected_failure_pattern is known, the output must also match it.
+        """
+        ec = run_result.get("exit_code", -1)
+        if ec < 0:
+            return None
+        if ec == 0:
+            return False
+        if ec != 1:
+            # exit 2-5: interrupted / collection error — not a definitive test failure
+            return None
+        # ec == 1: tests actually ran and failed
+        if expected_failure_pattern:
+            combined = (run_result.get("stdout", "") + run_result.get("stderr", "")).lower()
+            if expected_failure_pattern.lower() not in combined:
+                # A different failure — inconclusive
+                return None
+        return True
 
     async def _run_reproducer(self, code: str, workspace_repo: str) -> dict[str, Any]:
         from app.execution import ExecutorFactory
@@ -471,11 +513,15 @@ class RepairService:
 
     async def _run_existing_tests(
         self, workspace_repo: str
-    ) -> tuple[int, int, int, bool | None, int]:
-        """Run the project's test suite and return (total, passed, failed, no_regressions, regression_count)."""
+    ) -> dict[str, Any]:
+        """Run the project's test suite and return a structured result with node IDs."""
         from app.execution import ExecutorFactory
         from app.execution.base import ExecutionConfig
 
+        empty: dict[str, Any] = {
+            "total": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0,
+            "passing_ids": [], "failing_ids": [],
+        }
         try:
             with tempfile.TemporaryDirectory(prefix="bugforge_suite_") as tmpdir:
                 executor = ExecutorFactory.create()
@@ -498,34 +544,92 @@ class RepairService:
                 )
                 exec_result = await executor.execute(config)
 
-                # Try to parse JSON report
                 report_json = exec_result.artifact_contents.get("report.json", "")
                 if report_json:
                     try:
                         report = json.loads(report_json)
                         summary = report.get("summary", {})
-                        total = summary.get("total", 0)
-                        passed = summary.get("passed", 0)
-                        failed = summary.get("failed", 0) + summary.get("error", 0)
-                        no_regressions = failed == 0
-                        return total, passed, failed, no_regressions, failed
+                        passing_ids: list[str] = []
+                        failing_ids: list[str] = []
+                        for t in report.get("tests", []):
+                            nid = t.get("nodeid", "")
+                            outcome = t.get("outcome", "")
+                            if outcome == "passed":
+                                passing_ids.append(nid)
+                            elif outcome in ("failed", "error"):
+                                failing_ids.append(nid)
+                        return {
+                            "total": summary.get("total", 0),
+                            "passed": summary.get("passed", 0),
+                            "failed": summary.get("failed", 0),
+                            "error": summary.get("error", 0),
+                            "skipped": summary.get("skipped", 0),
+                            "passing_ids": passing_ids,
+                            "failing_ids": failing_ids,
+                        }
                     except (json.JSONDecodeError, KeyError):
                         pass
 
-                # Fallback: infer from exit code
+                # Fallback: infer from exit code only
                 if exec_result.exit_code == 0:
-                    return 0, 0, 0, True, 0
-                return 0, 0, 0, None, 0
+                    return {**empty, "passed": 1}  # something passed
+                return empty
 
         except Exception as exc:
             logger.warning("Existing test run failed: %s", exc)
-            return 0, 0, 0, None, 0
+            return empty
+
+    @staticmethod
+    def _compare_test_runs(
+        baseline: dict[str, Any], post: dict[str, Any]
+    ) -> tuple[bool | None, int]:
+        """Compare two test-run results.
+
+        Returns (no_regressions, regression_count).
+        A regression is a test that was passing before but is now failing/erroring.
+        Pre-existing failures are not regressions.
+        """
+        baseline_passing = set(baseline.get("passing_ids", []))
+        post_failing = set(post.get("failing_ids", []))
+        if not baseline_passing and not post_failing:
+            # No data → inconclusive
+            return None, 0
+        newly_failing = baseline_passing & post_failing
+        count = len(newly_failing)
+        return count == 0, count
+
+    @staticmethod
+    def _static_analysis_delta(
+        repository_path: str, changed_files: list[str]
+    ) -> int:
+        """Run static analysis on changed files and return the count of new findings.
+
+        This runs synchronously since the engine is CPU-bound and cheap.
+        Returns 0 if analysis cannot be run.
+        """
+        from app.analysis.engine import StaticAnalysisEngine
+
+        try:
+            repo_path = Path(repository_path)
+            file_paths = [
+                repo_path / f for f in changed_files
+                if (repo_path / f).is_file() and f.endswith(".py")
+            ]
+            if not file_paths:
+                return 0
+            engine = StaticAnalysisEngine()
+            findings = engine.analyze_repository(repo_path, file_paths)
+            return len(findings)
+        except Exception as exc:
+            logger.warning("Static analysis delta failed: %s", exc)
+            return 0
 
     def _compute_score(
         self,
         bug_fixed: bool | None,
         no_regressions: bool | None,
         regression_count: int,
+        new_static_findings: int = 0,
     ) -> float:
         """Composite score 0.0–1.0 based on verification evidence.
 
@@ -533,13 +637,13 @@ class RepairService:
           - Bug fixed (pre reproduced, post not reproduced): +0.7
           - No regressions in existing tests: +0.3
           - Each regression: -0.1 (capped at -0.3)
+          - Each new static finding: -0.05 (capped at -0.2)
         """
         score = 0.0
 
         if bug_fixed is True:
             score += 0.7
         elif bug_fixed is False:
-            # Patch didn't fix the bug — score stays at 0 for this component
             pass
         # None means we couldn't verify (no reproducer available)
 
@@ -548,6 +652,9 @@ class RepairService:
         elif no_regressions is False:
             penalty = min(regression_count * 0.1, 0.3)
             score -= penalty
+
+        if new_static_findings > 0:
+            score -= min(new_static_findings * 0.05, 0.2)
 
         return round(max(0.0, min(1.0, score)), 3)
 

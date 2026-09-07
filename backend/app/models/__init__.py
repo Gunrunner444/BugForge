@@ -7,6 +7,7 @@ from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
 from app.models.test_generation import GeneratedTest, TestGenerationSession
 from app.models.test_run import TestResult, TestRun
+from app.models.verification import PatchVerification
 
 __all__ = [
     "Base", "Project", "Analysis", "RepositoryFile", "CodeEntity", "ImportRecord",
@@ -15,4 +16,5 @@ __all__ = [
     "TestGenerationSession", "GeneratedTest",
     "BugReproductionSession", "BugReproductionAttempt",
     "RepairSession", "PatchCandidate",
+    "PatchVerification",
 ]

@@ -16,6 +16,7 @@ from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
 from app.models.test_generation import GeneratedTest, TestGenerationSession  # noqa: F401
 from app.models.test_run import TestResult, TestRun  # noqa: F401
+from app.models.verification import PatchVerification  # noqa: F401
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 

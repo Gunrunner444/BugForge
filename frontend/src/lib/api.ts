@@ -13,6 +13,7 @@ import type {
   ImportRecord,
   PaginatedResponse,
   PatchCandidate,
+  PatchVerification,
   Project,
   ProjectListResponse,
   RepairSession,
@@ -246,5 +247,19 @@ export const api = {
 
     candidate: (sessionId: string, candidateId: string) =>
       request<PatchCandidate>(`/api/v1/repair/${sessionId}/candidates/${candidateId}`),
+
+    startVerification: (sessionId: string, candidateId: string) =>
+      request<PatchVerification>(
+        `/api/v1/repair/${sessionId}/candidates/${candidateId}/verify`,
+        { method: "POST" }
+      ),
+
+    getVerification: (sessionId: string, candidateId: string) =>
+      request<PatchVerification>(
+        `/api/v1/repair/${sessionId}/candidates/${candidateId}/verify`
+      ),
+
+    listVerifications: (sessionId: string) =>
+      request<PatchVerification[]>(`/api/v1/repair/${sessionId}/verifications`),
   },
 };

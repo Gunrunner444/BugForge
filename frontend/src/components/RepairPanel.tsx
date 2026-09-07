@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import type { PatchCandidate, RepairSession } from "@/lib/types";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
+import VerificationPanel from "@/components/VerificationPanel";
 import { formatDate } from "@/lib/utils";
 
 interface Props {
@@ -24,7 +25,7 @@ const STATUS_STYLES: Record<string, string> = {
   pending: "text-slate-500",
 };
 
-function CandidateCard({ candidate }: { candidate: PatchCandidate }) {
+function CandidateCard({ candidate, sessionId }: { candidate: PatchCandidate; sessionId: string }) {
   const [showDiff, setShowDiff] = useState(false);
   const disp = DISPOSITION_STYLES[candidate.disposition] ?? DISPOSITION_STYLES.pending;
 
@@ -130,6 +131,16 @@ function CandidateCard({ candidate }: { candidate: PatchCandidate }) {
               {candidate.patch_diff}
             </pre>
           )}
+        </div>
+      )}
+
+      {/* v0.8 Patch Verification */}
+      {candidate.status === "completed" && (
+        <div className="border-t border-slate-100 pt-3 mt-3">
+          <p className="text-xs font-medium text-slate-600 mb-2 uppercase tracking-wide">
+            Patch Verification
+          </p>
+          <VerificationPanel sessionId={sessionId} candidate={candidate} />
         </div>
       )}
     </div>
@@ -301,7 +312,7 @@ export default function RepairPanel({ projectId }: Props) {
                     Patch Candidates ({selected.candidates.length})
                   </h3>
                   {selected.candidates.map((c) => (
-                    <CandidateCard key={c.id} candidate={c} />
+                    <CandidateCard key={c.id} candidate={c} sessionId={selected.id} />
                   ))}
                 </div>
               ) : selected.status === "completed" ? (
