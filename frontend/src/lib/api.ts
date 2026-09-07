@@ -24,6 +24,8 @@ import type {
   TestRun,
   TestRunListResponse,
   TestResultListResponse,
+  GitHubRepository,
+  GitHubDelivery,
 } from "./types";
 
 const BASE_URL =
@@ -261,5 +263,31 @@ export const api = {
 
     listVerifications: (sessionId: string) =>
       request<PatchVerification[]>(`/api/v1/repair/${sessionId}/verifications`),
+  },
+
+  github: {
+    getRepo: (projectId: string) =>
+      request<GitHubRepository>(`/api/v1/projects/${projectId}/github`),
+
+    connect: (projectId: string, owner: string, repo: string) =>
+      request<GitHubRepository>(`/api/v1/projects/${projectId}/github/connect`, {
+        method: "POST",
+        body: JSON.stringify({ owner, repo }),
+      }),
+
+    disconnect: (projectId: string) =>
+      request<void>(`/api/v1/projects/${projectId}/github`, { method: "DELETE" }),
+
+    deliver: (projectId: string, candidateId: string) =>
+      request<GitHubDelivery>(
+        `/api/v1/projects/${projectId}/github/deliver/${candidateId}`,
+        { method: "POST" }
+      ),
+
+    listDeliveries: (projectId: string) =>
+      request<GitHubDelivery[]>(`/api/v1/projects/${projectId}/github/deliveries`),
+
+    getDelivery: (deliveryId: string) =>
+      request<GitHubDelivery>(`/api/v1/github/deliveries/${deliveryId}`),
   },
 };

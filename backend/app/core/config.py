@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "0.7.0"
+    version: str = "0.9.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     ai_timeout_seconds: int = 60
     ai_max_retries: int = 2
     ai_max_hypotheses: int = 3
+
+    # GitHub Integration — credentials come from environment only, never committed
+    # Server-side credential for v0.9 server-to-server flows
+    github_token: str = ""
+    # Optional: GitHub App auth (future)
+    github_app_id: str = ""
+    github_app_private_key: str = ""
 
     @field_validator("log_level")
     @classmethod

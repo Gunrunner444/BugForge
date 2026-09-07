@@ -15,22 +15,6 @@ router = APIRouter(prefix="/verification", tags=["Patch Verification"])
 logger = logging.getLogger(__name__)
 
 
-@router.post(
-    "/{verification_id}",
-    status_code=status.HTTP_200_OK,
-    summary="Retrieve a verification record by ID",
-)
-async def get_verification(
-    verification_id: UUID,
-    db: AsyncSession = Depends(get_db),
-) -> VerificationResponse:
-    repo = VerificationRepository(db)
-    v = await repo.get_by_id(verification_id)
-    if v is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification not found")
-    return VerificationResponse.from_orm(v)
-
-
 @router.get(
     "/{verification_id}",
     response_model=VerificationResponse,

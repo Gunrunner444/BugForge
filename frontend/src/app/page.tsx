@@ -28,16 +28,16 @@ export default function HomePage() {
       <div className="mt-20 grid grid-cols-1 sm:grid-cols-3 gap-8 max-w-4xl mx-auto text-left">
         {[
           {
-            title: "Repository Analysis",
-            desc: "Detect languages, frameworks, and project structure. Parse Python source files and extract functions, classes, and imports.",
+            title: "Evidence-First Debugging",
+            desc: "Every AI hypothesis is a candidate until executable evidence verifies it. No unverified patch is ever pushed to GitHub.",
           },
           {
-            title: "Structured Results",
-            desc: "Every finding is backed by evidence — file paths, line numbers, and code entities. No guessing.",
+            title: "Automated Repair",
+            desc: "Phase 7 repair generates patch candidates. Phase 8 verification runs before/after test suites and static analysis. Only verified patches can be delivered.",
           },
           {
-            title: "Extensible Foundation",
-            desc: "Phase 1 delivers the analyzer core. Phases 2–8 add test execution, AI debugging, automated repair, and GitHub integration.",
+            title: "GitHub Integration",
+            desc: "Phase 9 delivers verified patches as pull requests. Unverified, rejected, or inconclusive candidates are blocked from delivery.",
           },
         ].map((card) => (
           <div key={card.title} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">

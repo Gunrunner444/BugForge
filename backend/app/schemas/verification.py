@@ -20,6 +20,10 @@ class VerificationResponse(BaseModel):
     status: str
     error_message: str | None
 
+    # execution metadata
+    executor_type: str | None
+    schema_version: int
+
     # baseline
     baseline_reproduced: bool | None
     baseline_reproduction_evidence: str | None
@@ -31,6 +35,10 @@ class VerificationResponse(BaseModel):
     baseline_passing_ids: list[str]
     baseline_failing_ids: list[str]
     baseline_static_findings: int
+    baseline_test_execution_status: str
+    baseline_static_analysis_status: str
+    baseline_finding_ids: list[str]
+    baseline_duration_seconds: float | None
 
     # patch application
     patch_applied: bool | None
@@ -47,6 +55,10 @@ class VerificationResponse(BaseModel):
     post_passing_ids: list[str]
     post_failing_ids: list[str]
     post_static_findings: int
+    post_test_execution_status: str
+    post_static_analysis_status: str
+    post_finding_ids: list[str]
+    post_duration_seconds: float | None
 
     # comparison
     target_bug_fixed: bool | None
@@ -55,6 +67,8 @@ class VerificationResponse(BaseModel):
     regression_count: int
     new_static_introduced: int
     static_resolved: int
+    new_finding_ids: list[str]
+    resolved_finding_ids: list[str]
 
     # security
     security_passed: bool | None
@@ -93,6 +107,8 @@ class VerificationResponse(BaseModel):
             project_id=v.project_id,
             status=v.status,
             error_message=v.error_message,
+            executor_type=v.executor_type,
+            schema_version=v.schema_version,
             baseline_reproduced=v.baseline_reproduced,
             baseline_reproduction_evidence=v.baseline_reproduction_evidence,
             baseline_tests_total=v.baseline_tests_total,
@@ -103,6 +119,10 @@ class VerificationResponse(BaseModel):
             baseline_passing_ids=_parse(v.baseline_passing_ids_json),
             baseline_failing_ids=_parse(v.baseline_failing_ids_json),
             baseline_static_findings=v.baseline_static_findings,
+            baseline_test_execution_status=v.baseline_test_execution_status,
+            baseline_static_analysis_status=v.baseline_static_analysis_status,
+            baseline_finding_ids=_parse(v.baseline_finding_ids_json),
+            baseline_duration_seconds=v.baseline_duration_seconds,
             patch_applied=v.patch_applied,
             patch_apply_error=v.patch_apply_error,
             post_patch_reproduced=v.post_patch_reproduced,
@@ -115,12 +135,18 @@ class VerificationResponse(BaseModel):
             post_passing_ids=_parse(v.post_passing_ids_json),
             post_failing_ids=_parse(v.post_failing_ids_json),
             post_static_findings=v.post_static_findings,
+            post_test_execution_status=v.post_test_execution_status,
+            post_static_analysis_status=v.post_static_analysis_status,
+            post_finding_ids=_parse(v.post_finding_ids_json),
+            post_duration_seconds=v.post_duration_seconds,
             target_bug_fixed=v.target_bug_fixed,
             newly_failing_ids=_parse(v.newly_failing_ids_json),
             recovered_ids=_parse(v.recovered_ids_json),
             regression_count=v.regression_count,
             new_static_introduced=v.new_static_introduced,
             static_resolved=v.static_resolved,
+            new_finding_ids=_parse(v.new_finding_ids_json),
+            resolved_finding_ids=_parse(v.resolved_finding_ids_json),
             security_passed=v.security_passed,
             security_issues=_parse(v.security_issues_json),
             verification_score=v.verification_score,
@@ -135,4 +161,3 @@ class VerificationResponse(BaseModel):
 
 class StartVerificationRequest(BaseModel):
     """Request body for starting verification of a patch candidate."""
-    pass  # No body required; candidate_id comes from the path

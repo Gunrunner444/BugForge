@@ -480,6 +480,20 @@ export interface PatchVerification {
   regression_count: number;
   new_static_introduced: number;
   static_resolved: number;
+  new_finding_ids: string[];
+  resolved_finding_ids: string[];
+
+  // execution metadata
+  executor_type: string | null;
+  schema_version: number;
+  baseline_test_execution_status: string;
+  baseline_static_analysis_status: string;
+  baseline_finding_ids: string[];
+  baseline_duration_seconds: number | null;
+  post_test_execution_status: string;
+  post_static_analysis_status: string;
+  post_finding_ids: string[];
+  post_duration_seconds: number | null;
 
   // security
   security_passed: boolean | null;
@@ -491,6 +505,54 @@ export interface PatchVerification {
   decision_reasons: string[];
   evidence_summary: string | null;
 
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+// ── GitHub Integration (v0.9) ──────────────────────────────────────────────
+
+export interface GitHubRepository {
+  id: string;
+  project_id: string;
+  owner: string;
+  repo: string;
+  github_id: number | null;
+  default_branch: string;
+  html_url: string;
+  connected: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type DeliveryStatus =
+  | "pending"
+  | "preparing"
+  | "final_verification"
+  | "branch_created"
+  | "committing"
+  | "pushing"
+  | "pr_created"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export interface GitHubDelivery {
+  id: string;
+  project_id: string;
+  candidate_id: string;
+  verification_id: string;
+  owner: string;
+  repo: string;
+  base_branch: string;
+  delivery_branch: string;
+  commit_sha: string | null;
+  pull_request_number: number | null;
+  pull_request_url: string | null;
+  verified_patch_hash: string;
+  delivered_patch_hash: string | null;
+  status: DeliveryStatus;
+  error_message: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

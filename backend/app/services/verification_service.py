@@ -6,9 +6,9 @@ Evidence-first patch verification pipeline:
   3. Record baseline reproduction + test suite + static analysis
   4. Apply patch to workspace
   5. Record post-patch reproduction + test suite + static analysis
-  6. Compare before / after
+  6. Compare before / after (by identity, not only count)
   7. Run security checks
-  8. Score and decide
+  8. Score and decide — ALL required stages must succeed
   9. Persist full evidence record
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import tempfile
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,59 @@ logger = logging.getLogger(__name__)
 
 _OUTPUT_LIMIT = 4_096
 _WORKSPACE_CONTAINER_PATH = "/bugforge-workspace"
+
+
+# ── Structured result types ───────────────────────────────────────────────────
+
+
+@dataclass
+class _TestRunResult:
+    """Result of running the project test suite in an isolated workspace."""
+
+    # success | timeout | environment_error | report_error | not_run
+    execution_status: str
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    error: int = 0
+    skipped: int = 0
+    passing_ids: list[str] = field(default_factory=list)
+    failing_ids: list[str] = field(default_factory=list)
+    duration_seconds: float = 0.0
+    executor_type: str = "none"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "passed": self.passed,
+            "failed": self.failed,
+            "error": self.error,
+            "skipped": self.skipped,
+            "passing_ids": self.passing_ids,
+            "failing_ids": self.failing_ids,
+        }
+
+    @property
+    def succeeded(self) -> bool:
+        return self.execution_status == "success"
+
+
+@dataclass
+class _StaticAnalysisResult:
+    """Result of running static analysis on a workspace."""
+
+    # success | error | not_run
+    status: str
+    count: int = 0
+    finding_ids: list[str] = field(default_factory=list)
+    error_message: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "success"
+
+
+# ── Service ───────────────────────────────────────────────────────────────────
 
 
 class VerificationService:
@@ -46,7 +100,6 @@ class VerificationService:
             if candidate is None:
                 raise ValueError(f"Candidate {candidate_id} not found")
 
-            # Guard: only verify candidates that passed validation
             if candidate.validation_status not in (None, "valid"):
                 raise ValueError(
                     f"Candidate {candidate_id} has validation_status={candidate.validation_status!r}; "
@@ -60,7 +113,6 @@ class VerificationService:
 
             project_id = repair_session.project_id
 
-            # Create verification record (idempotent — skip if one already exists)
             ver_repo = VerificationRepository(db)
             existing = await ver_repo.get_by_candidate(candidate_id)
             if existing is not None:
@@ -74,7 +126,6 @@ class VerificationService:
             verification_id = v.id
             await db.commit()
 
-        # Run asynchronously in a background-safe way (called by job runner)
         await self._run_pipeline(verification_id, candidate_id)
         return verification_id
 
@@ -90,7 +141,6 @@ class VerificationService:
             await db.commit()
 
         try:
-            # ── Load context ──────────────────────────────────────────
             context = await self._load_context(candidate_id)
             repository_path = context["repository_path"]
             patch_diff = context["patch_diff"]
@@ -98,7 +148,6 @@ class VerificationService:
             reproducer_code = context["reproducer_code"]
             expected_failure_pattern = context["expected_failure_pattern"]
 
-            # ── Create disposable workspace ───────────────────────────
             from app.testing.repair_workspace import RepairWorkspace
 
             workspace = RepairWorkspace.create(repository_path)
@@ -139,11 +188,10 @@ class VerificationService:
         from app.repositories.verification_repo import VerificationRepository
         from app.testing.patch_validator import validate_patch
 
-        # ── Security check (before doing anything) ────────────────────
+        # ── Security check ────────────────────────────────────────────
         validation = validate_patch(patch_diff, changed_files)
         security_passed = validation.valid
         security_issues: list[str] = [] if security_passed else [validation.error or "Validation failed"]
-        # Additional security checks
         extra_issues = _security_check(patch_diff, changed_files)
         if extra_issues:
             security_passed = False
@@ -162,24 +210,16 @@ class VerificationService:
                     completed_at=datetime.now(UTC),
                 )
                 await db.commit()
-            else:
-                await ver_repo.update(verification_id, status="baseline_failed")
-                await db.commit()
-
-        if not security_passed:
-            return
-
-        # ── Baseline: pre-patch state ─────────────────────────────────
-        async with async_session_factory() as db:
-            ver_repo = VerificationRepository(db)
+                return
             await ver_repo.update(verification_id, status="running")
             await db.commit()
 
+        # ── Baseline: pre-patch state ─────────────────────────────────
         baseline_repro, baseline_evidence = await self._run_reproducer(
             reproducer_code, workspace.repo_root, expected_failure_pattern
         )
         baseline_tests = await self._run_tests(workspace.repo_root)
-        baseline_static = _count_static_findings(workspace.repo_root, changed_files)
+        baseline_static = _run_static_analysis(workspace.repo_root, changed_files)
 
         async with async_session_factory() as db:
             ver_repo = VerificationRepository(db)
@@ -187,8 +227,13 @@ class VerificationService:
                 verification_id,
                 reproduced=baseline_repro,
                 reproduction_evidence=baseline_evidence,
-                tests=baseline_tests,
-                static_findings=baseline_static,
+                tests=baseline_tests.as_dict(),
+                static_findings=baseline_static.count,
+                test_execution_status=baseline_tests.execution_status,
+                static_analysis_status=baseline_static.status,
+                finding_ids=baseline_static.finding_ids,
+                duration_seconds=baseline_tests.duration_seconds,
+                executor_type=baseline_tests.executor_type,
             )
             await ver_repo.update(verification_id, status="applying")
             await db.commit()
@@ -219,7 +264,7 @@ class VerificationService:
             reproducer_code, workspace.repo_root, expected_failure_pattern
         )
         post_tests = await self._run_tests(workspace.repo_root)
-        post_static = _count_static_findings(workspace.repo_root, changed_files)
+        post_static = _run_static_analysis(workspace.repo_root, changed_files)
 
         async with async_session_factory() as db:
             ver_repo = VerificationRepository(db)
@@ -227,17 +272,26 @@ class VerificationService:
                 verification_id,
                 reproduced=post_repro,
                 reproduction_evidence=post_evidence,
-                tests=post_tests,
-                static_findings=post_static,
+                tests=post_tests.as_dict(),
+                static_findings=post_static.count,
+                test_execution_status=post_tests.execution_status,
+                static_analysis_status=post_static.status,
+                finding_ids=post_static.finding_ids,
+                duration_seconds=post_tests.duration_seconds,
             )
             await ver_repo.update(verification_id, status="comparing")
             await db.commit()
 
         # ── Compare ───────────────────────────────────────────────────
         target_bug_fixed = _determine_bug_fixed(baseline_repro, post_repro)
-        newly_failing, recovered, regression_count = _compare_tests(baseline_tests, post_tests)
-        new_static = max(0, post_static - baseline_static)
-        resolved_static = max(0, baseline_static - post_static)
+        newly_failing, recovered, regression_count = _compare_tests(
+            baseline_tests.as_dict(), post_tests.as_dict()
+        )
+        new_static = max(0, post_static.count - baseline_static.count)
+        resolved_static = max(0, baseline_static.count - post_static.count)
+        new_finding_ids, resolved_finding_ids = _compare_findings(
+            baseline_static.finding_ids, post_static.finding_ids
+        )
 
         async with async_session_factory() as db:
             ver_repo = VerificationRepository(db)
@@ -249,6 +303,8 @@ class VerificationService:
                 regression_count=regression_count,
                 new_static_introduced=new_static,
                 static_resolved=resolved_static,
+                new_finding_ids=new_finding_ids,
+                resolved_finding_ids=resolved_finding_ids,
             )
             await db.commit()
 
@@ -260,13 +316,17 @@ class VerificationService:
             new_static_introduced=new_static,
             security_passed=security_passed,
             post_repro=post_repro,
+            baseline_test_exec_ok=baseline_tests.succeeded,
+            post_test_exec_ok=post_tests.succeeded,
+            baseline_static_ok=baseline_static.succeeded,
+            post_static_ok=post_static.succeeded,
         )
         evidence_summary = _build_evidence_summary(
             baseline_repro=baseline_repro,
             post_repro=post_repro,
             target_bug_fixed=target_bug_fixed,
-            baseline_tests=baseline_tests,
-            post_tests=post_tests,
+            baseline_tests=baseline_tests.as_dict(),
+            post_tests=post_tests.as_dict(),
             newly_failing=newly_failing,
             regression_count=regression_count,
             new_static_introduced=new_static,
@@ -275,6 +335,10 @@ class VerificationService:
             security_issues=security_issues,
             decision=decision,
             reasons=reasons,
+            baseline_test_exec_status=baseline_tests.execution_status,
+            post_test_exec_status=post_tests.execution_status,
+            baseline_static_status=baseline_static.status,
+            post_static_status=post_static.status,
         )
 
         async with async_session_factory() as db:
@@ -288,8 +352,6 @@ class VerificationService:
                 completed_at=datetime.now(UTC),
             )
             await db.commit()
-
-    # ── Helpers ──────────────────────────────────────────────────────────────
 
     async def _load_context(self, candidate_id: UUID) -> dict[str, Any]:
         from app.database import async_session_factory
@@ -342,7 +404,6 @@ class VerificationService:
         workspace_repo: str,
         expected_failure_pattern: str | None,
     ) -> tuple[bool | None, str]:
-        """Run the reproducer and return (reproduced, evidence_text)."""
         if not code:
             return None, "No reproducer available"
 
@@ -378,18 +439,16 @@ class VerificationService:
         except Exception as exc:
             return None, f"Reproducer execution error: {exc}"
 
-    async def _run_tests(self, workspace_repo: str) -> dict[str, Any]:
-        """Run the project test suite and return structured results."""
+    async def _run_tests(self, workspace_repo: str) -> _TestRunResult:
+        """Run the project test suite; always returns an explicit execution status."""
         from app.execution import ExecutorFactory
         from app.execution.base import ExecutionConfig
 
-        empty: dict[str, Any] = {
-            "total": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0,
-            "passing_ids": [], "failing_ids": [],
-        }
         try:
+            executor = ExecutorFactory.create()
+            executor_type = type(executor).__name__.replace("TestExecutor", "").lower()
+
             with tempfile.TemporaryDirectory(prefix="bugforge_vts_") as tmpdir:
-                executor = ExecutorFactory.create()
                 config = ExecutionConfig(
                     command=[
                         "python3", "-m", "pytest", "/bugforge-workspace",
@@ -405,38 +464,54 @@ class VerificationService:
                 )
                 exec_result = await executor.execute(config)
 
-                report_json = exec_result.artifact_contents.get("report.json", "")
-                if report_json:
-                    try:
-                        report = json.loads(report_json)
-                        summary = report.get("summary", {})
-                        passing_ids: list[str] = []
-                        failing_ids: list[str] = []
-                        for t in report.get("tests", []):
-                            nid = t.get("nodeid", "")
-                            outcome = t.get("outcome", "")
-                            if outcome == "passed":
-                                passing_ids.append(nid)
-                            elif outcome in ("failed", "error"):
-                                failing_ids.append(nid)
-                        return {
-                            "total": summary.get("total", 0),
-                            "passed": summary.get("passed", 0),
-                            "failed": summary.get("failed", 0),
-                            "error": summary.get("error", 0),
-                            "skipped": summary.get("skipped", 0),
-                            "passing_ids": passing_ids,
-                            "failing_ids": failing_ids,
-                        }
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+                if exec_result.timed_out:
+                    return _TestRunResult(
+                        execution_status="timeout",
+                        executor_type=executor_type,
+                        duration_seconds=exec_result.duration_seconds,
+                    )
 
-                if exec_result.exit_code == 0:
-                    return {**empty, "passed": 1}
-                return empty
+                report_json = exec_result.artifact_contents.get("report.json", "")
+                if not report_json:
+                    return _TestRunResult(
+                        execution_status="report_error",
+                        executor_type=executor_type,
+                        duration_seconds=exec_result.duration_seconds,
+                    )
+
+                try:
+                    report = json.loads(report_json)
+                    summary = report.get("summary", {})
+                    passing_ids: list[str] = []
+                    failing_ids: list[str] = []
+                    for t in report.get("tests", []):
+                        nid = t.get("nodeid", "")
+                        outcome = t.get("outcome", "")
+                        if outcome == "passed":
+                            passing_ids.append(nid)
+                        elif outcome in ("failed", "error"):
+                            failing_ids.append(nid)
+                    return _TestRunResult(
+                        execution_status="success",
+                        total=summary.get("total", 0),
+                        passed=summary.get("passed", 0),
+                        failed=summary.get("failed", 0),
+                        error=summary.get("error", 0),
+                        skipped=summary.get("skipped", 0),
+                        passing_ids=passing_ids,
+                        failing_ids=failing_ids,
+                        duration_seconds=exec_result.duration_seconds,
+                        executor_type=executor_type,
+                    )
+                except (json.JSONDecodeError, KeyError):
+                    return _TestRunResult(
+                        execution_status="report_error",
+                        executor_type=executor_type,
+                        duration_seconds=exec_result.duration_seconds,
+                    )
         except Exception as exc:
             logger.warning("Test run failed: %s", exc)
-            return empty
+            return _TestRunResult(execution_status="environment_error")
 
 
 # ── Module-level pure helpers ─────────────────────────────────────────────────
@@ -457,7 +532,8 @@ def _classify_reproduction(
     return True
 
 
-def _count_static_findings(workspace_repo: str, changed_files: list[str]) -> int:
+def _run_static_analysis(workspace_repo: str, changed_files: list[str]) -> _StaticAnalysisResult:
+    """Run static analysis; always returns explicit status, never silently returns 0 on failure."""
     from app.analysis.engine import StaticAnalysisEngine
 
     try:
@@ -467,12 +543,36 @@ def _count_static_findings(workspace_repo: str, changed_files: list[str]) -> int
             if (repo_path / f).is_file() and f.endswith(".py")
         ]
         if not file_paths:
-            return 0
+            return _StaticAnalysisResult(status="success", count=0, finding_ids=[])
+
         engine = StaticAnalysisEngine()
-        return len(engine.analyze_repository(repo_path, file_paths))
+        findings = engine.analyze_repository(repo_path, file_paths)
+        # Normalized identity stable across line-number shifts
+        finding_ids = [f"{f.analyzer}:{f.category}:{f.file_path}" for f in findings]
+        return _StaticAnalysisResult(
+            status="success",
+            count=len(findings),
+            finding_ids=finding_ids,
+        )
     except Exception as exc:
         logger.warning("Static analysis failed: %s", exc)
-        return 0
+        return _StaticAnalysisResult(
+            status="error",
+            count=0,
+            finding_ids=[],
+            error_message=str(exc),
+        )
+
+
+def _compare_findings(
+    baseline_ids: list[str], post_ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Return (new_finding_ids, resolved_finding_ids) using set difference."""
+    baseline_set = set(baseline_ids)
+    post_set = set(post_ids)
+    new_ids = sorted(post_set - baseline_set)
+    resolved_ids = sorted(baseline_set - post_set)
+    return new_ids, resolved_ids
 
 
 def _compare_tests(
@@ -513,10 +613,8 @@ _CI_CONFIG_PATTERN = re.compile(
 def _security_check(patch_diff: str, changed_files: list[str]) -> list[str]:
     """Additional security checks beyond PatchValidator."""
     issues: list[str] = []
-    # Check for modification of CI/security config
     if _CI_CONFIG_PATTERN.search(patch_diff):
         issues.append("Patch modifies CI/security configuration files")
-    # Check for suspicious patterns in all added lines
     added_lines = "\n".join(
         line for line in patch_diff.splitlines() if line.startswith("+") and not line.startswith("+++")
     )
@@ -532,20 +630,43 @@ def _compute_verification(
     new_static_introduced: int,
     security_passed: bool,
     post_repro: bool | None,
+    *,
+    baseline_test_exec_ok: bool = True,
+    post_test_exec_ok: bool = True,
+    baseline_static_ok: bool = True,
+    post_static_ok: bool = True,
 ) -> tuple[float, str, list[str]]:
-    """Return (score, decision, reasons)."""
+    """Return (score, decision, reasons).
+
+    A patch CANNOT become 'verified' unless all required verification stages
+    completed successfully.  Infrastructure failures return 'inconclusive'.
+    """
     reasons: list[str] = []
     score = 0.0
 
-    # Hard failures
     if not security_passed:
         return 0.0, "rejected", ["Security validation failed"]
+
+    if not baseline_test_exec_ok:
+        reasons.append("Baseline test execution failed — cannot verify regressions")
+        return 0.0, "inconclusive", reasons
+
+    if not post_test_exec_ok:
+        reasons.append("Post-patch test execution failed — cannot verify regressions")
+        return 0.0, "inconclusive", reasons
+
+    if not baseline_static_ok:
+        reasons.append("Baseline static analysis failed — cannot compare findings")
+        return 0.0, "inconclusive", reasons
+
+    if not post_static_ok:
+        reasons.append("Post-patch static analysis failed — cannot compare findings")
+        return 0.0, "inconclusive", reasons
 
     if baseline_repro is False:
         reasons.append("Baseline did not reproduce the target bug — baseline invalid")
         return 0.0, "baseline_failed", reasons
 
-    # Bug fixed component (high weight)
     if target_bug_fixed is True:
         score += 0.7
         reasons.append("Target bug no longer reproduces after patch")
@@ -554,7 +675,6 @@ def _compute_verification(
     else:
         reasons.append("Bug fix status inconclusive (no reproducer available)")
 
-    # Regression component
     if regression_count == 0:
         score += 0.3
         reasons.append("No regression in existing tests")
@@ -563,7 +683,6 @@ def _compute_verification(
         score -= penalty
         reasons.append(f"{regression_count} regression(s): newly failing test(s) introduced")
 
-    # Static analysis penalty
     if new_static_introduced > 0:
         penalty = min(new_static_introduced * 0.05, 0.2)
         score -= penalty
@@ -571,7 +690,6 @@ def _compute_verification(
 
     score = round(max(0.0, min(1.0, score)), 3)
 
-    # Decision
     if target_bug_fixed is True and regression_count == 0 and security_passed:
         decision = "verified"
     elif target_bug_fixed is None:
@@ -597,6 +715,10 @@ def _build_evidence_summary(
     security_issues: list[str],
     decision: str,
     reasons: list[str],
+    baseline_test_exec_status: str = "success",
+    post_test_exec_status: str = "success",
+    baseline_static_status: str = "success",
+    post_static_status: str = "success",
 ) -> str:
     lines = [
         "=== PATCH VERIFICATION EVIDENCE ===",
@@ -604,15 +726,19 @@ def _build_evidence_summary(
         "",
         "--- Baseline (pre-patch) ---",
         f"  Bug reproduced: {baseline_repro}",
+        f"  Test execution status: {baseline_test_exec_status}",
         f"  Tests: {baseline_tests.get('total', 0)} total, "
         f"{baseline_tests.get('passed', 0)} passed, "
         f"{baseline_tests.get('failed', 0) + baseline_tests.get('error', 0)} failed",
+        f"  Static analysis status: {baseline_static_status}",
         "",
         "--- Post-patch ---",
         f"  Bug reproduced: {post_repro}",
+        f"  Test execution status: {post_test_exec_status}",
         f"  Tests: {post_tests.get('total', 0)} total, "
         f"{post_tests.get('passed', 0)} passed, "
         f"{post_tests.get('failed', 0) + post_tests.get('error', 0)} failed",
+        f"  Static analysis status: {post_static_status}",
         "",
         "--- Comparison ---",
         f"  Target bug fixed: {target_bug_fixed}",
@@ -630,10 +756,7 @@ def _build_evidence_summary(
     if security_issues:
         for issue in security_issues:
             lines.append(f"  - {issue}")
-    lines += [
-        "",
-        "--- Reasons ---",
-    ]
+    lines += ["", "--- Reasons ---"]
     for r in reasons:
         lines.append(f"  - {r}")
     return "\n".join(lines)

@@ -48,6 +48,11 @@ class PatchVerification(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ---------- execution metadata -------------------------------------------
+    # docker | local | none
+    executor_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+
     # ---------- baseline (pre-patch) -----------------------------------------
     # Reproduction
     baseline_reproduced: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -63,6 +68,13 @@ class PatchVerification(Base):
     baseline_failing_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Static analysis
     baseline_static_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # success | timeout | environment_error | report_error | not_run
+    baseline_test_execution_status: Mapped[str] = mapped_column(String(30), nullable=False, default="not_run")
+    # success | error | not_run
+    baseline_static_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
+    # JSON array of normalized finding identity strings (analyzer:category:file)
+    baseline_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    baseline_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # ---------- patch application --------------------------------------------
     patch_applied: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -82,6 +94,12 @@ class PatchVerification(Base):
     post_failing_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Static analysis
     post_static_findings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # success | timeout | environment_error | report_error | not_run
+    post_test_execution_status: Mapped[str] = mapped_column(String(30), nullable=False, default="not_run")
+    # success | error | not_run
+    post_static_analysis_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
+    post_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # ---------- comparison results -------------------------------------------
     target_bug_fixed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -91,6 +109,9 @@ class PatchVerification(Base):
     regression_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     new_static_introduced: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     static_resolved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # JSON arrays of finding identity strings for identity-based comparison
+    new_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_finding_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ---------- security checks ----------------------------------------------
     security_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

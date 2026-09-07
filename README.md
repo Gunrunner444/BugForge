@@ -8,16 +8,18 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 
 ## Phase Status
 
-| Phase | Description | Status |
+| Version | Description | Status |
 |---|---|---|
-| 1 | Repository Analyzer | ✅ Complete |
-| 2 | Test Runner | ✅ Complete |
-| 3 | Static Analysis | ✅ Complete |
-| 4 | AI Debugging Engine | ✅ Complete |
-| 5 | Automatic Test Generation | ✅ Complete |
-| 6 | Bug Reproduction Engine | ✅ Complete |
-| 7 | Automated Repair | ✅ Complete |
-| 8 | GitHub Integration | Planned |
+| v0.1.0 | Repository Analyzer | ✅ Complete |
+| v0.2.0 | Test Runner | ✅ Complete |
+| v0.3.0 | Static Analysis | ✅ Complete |
+| v0.4.0 | AI Debugging Engine | ✅ Complete |
+| v0.5.0 | Automatic Test Generation | ✅ Complete |
+| v0.6.0 | Bug Reproduction Engine | ✅ Complete |
+| v0.7.0 | Automated Repair | ✅ Complete |
+| v0.8.0 | Patch Verification | ✅ Complete |
+| v0.9.0 | GitHub Integration | 🚧 In Progress |
+| v1.0.0 | Full AI Debugging Platform | Planned |
 
 ---
 
@@ -83,6 +85,37 @@ Repository
        ├─ Composite scoring (bug_fixed 0.7 + no_regressions 0.3)
        ├─ Candidate ranking
        └─ RepairSession / PatchCandidate persistence
+
+  └─ Patch Verification (Phase 8)
+       ├─ Evidence-first verification pipeline
+       ├─ Baseline + post-patch test execution with explicit status
+       │    (success / timeout / environment_error / report_error / not_run)
+       ├─ Static analysis with identity-based finding comparison
+       │    (analyzer:category:file — stable across line-number shifts)
+       ├─ Security validation (dangerous patterns, CI config modification)
+       ├─ Strengthened decision logic — ALL stages must succeed for 'verified'
+       ├─ Infrastructure failures → 'inconclusive', never 'verified'
+       ├─ Execution metadata persistence (executor type, duration, status)
+       └─ PatchVerification persistence with full evidence record
+
+  └─ GitHub Integration (Phase 9)
+       ├─ GitHubProvider / GitHubService abstraction
+       ├─ Server-side token credential (GITHUB_TOKEN env var, never in DB)
+       ├─ GitHubRepository — associates projects with GitHub repos (1:1)
+       ├─ Verified-only delivery — unverified/rejected/inconclusive blocked
+       ├─ Patch hash verification — delivered hash MUST match verified hash
+       ├─ Git operations via subprocess with argument arrays (no shell interpolation)
+       ├─ Branch creation (bugforge/fix/{candidate_id_short})
+       ├─ Branch name sanitization (injection prevention)
+       ├─ Final pre-push test verification
+       ├─ Commit creation with sanitized, evidence-based message
+       ├─ Push to delivery branch (default branch never modified)
+       ├─ PR creation via GitHub REST API (httpx)
+       ├─ Duplicate PR prevention
+       ├─ Token sanitization from all error messages and logs
+       ├─ Delivery idempotency (no duplicate active deliveries)
+       ├─ Complete delivery record persistence (GitHubDelivery)
+       └─ Delivery status separate from verification status
 ```
 
 ---

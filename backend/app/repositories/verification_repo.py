@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -70,8 +71,13 @@ class VerificationRepository:
         *,
         reproduced: bool | None,
         reproduction_evidence: str,
-        tests: dict,
+        tests: dict[str, Any],
         static_findings: int,
+        test_execution_status: str = "not_run",
+        static_analysis_status: str = "not_run",
+        finding_ids: list[str] | None = None,
+        duration_seconds: float | None = None,
+        executor_type: str | None = None,
     ) -> None:
         await self.update(
             verification_id,
@@ -85,6 +91,11 @@ class VerificationRepository:
             baseline_passing_ids_json=json.dumps(tests.get("passing_ids", [])),
             baseline_failing_ids_json=json.dumps(tests.get("failing_ids", [])),
             baseline_static_findings=static_findings,
+            baseline_test_execution_status=test_execution_status,
+            baseline_static_analysis_status=static_analysis_status,
+            baseline_finding_ids_json=json.dumps(finding_ids) if finding_ids is not None else None,
+            baseline_duration_seconds=duration_seconds,
+            executor_type=executor_type,
         )
 
     async def set_post_patch(
@@ -93,8 +104,12 @@ class VerificationRepository:
         *,
         reproduced: bool | None,
         reproduction_evidence: str,
-        tests: dict,
+        tests: dict[str, Any],
         static_findings: int,
+        test_execution_status: str = "not_run",
+        static_analysis_status: str = "not_run",
+        finding_ids: list[str] | None = None,
+        duration_seconds: float | None = None,
     ) -> None:
         await self.update(
             verification_id,
@@ -108,6 +123,10 @@ class VerificationRepository:
             post_passing_ids_json=json.dumps(tests.get("passing_ids", [])),
             post_failing_ids_json=json.dumps(tests.get("failing_ids", [])),
             post_static_findings=static_findings,
+            post_test_execution_status=test_execution_status,
+            post_static_analysis_status=static_analysis_status,
+            post_finding_ids_json=json.dumps(finding_ids) if finding_ids is not None else None,
+            post_duration_seconds=duration_seconds,
         )
 
     async def set_comparison(
@@ -120,6 +139,8 @@ class VerificationRepository:
         regression_count: int,
         new_static_introduced: int,
         static_resolved: int,
+        new_finding_ids: list[str] | None = None,
+        resolved_finding_ids: list[str] | None = None,
     ) -> None:
         await self.update(
             verification_id,
@@ -129,6 +150,8 @@ class VerificationRepository:
             regression_count=regression_count,
             new_static_introduced=new_static_introduced,
             static_resolved=static_resolved,
+            new_finding_ids_json=json.dumps(new_finding_ids) if new_finding_ids is not None else None,
+            resolved_finding_ids_json=json.dumps(resolved_finding_ids) if resolved_finding_ids is not None else None,
         )
 
     async def set_security(
