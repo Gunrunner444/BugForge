@@ -14,13 +14,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -73,13 +78,49 @@ def _validate_branch_name(branch: str) -> None:
 
 
 def _validate_github_url(url: str) -> None:
-    """Raise ValueError if the URL is not a valid github.com HTTPS URL."""
-    if not url.startswith("https://"):
-        raise ValueError("Repository URL must use HTTPS")
-    # strip credentials if present
-    stripped = re.sub(r"https://[^@]+@", "https://", url)
-    if _GITHUB_HOST not in stripped:
-        raise ValueError(f"URL does not appear to be a github.com URL: {url!r}")
+    """Raise ValueError if the URL is not a valid github.com HTTPS URL.
+
+    Requires:
+    - HTTPS scheme
+    - Hostname exactly 'github.com' (no subdomain spoofing, no path-based tricks)
+    - No embedded credentials (userinfo component)
+    - No non-standard port
+    - No query parameters or fragments
+    - At least a two-component path (owner/repo)
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        raise ValueError(f"Could not parse URL: {url!r}") from exc
+
+    if parsed.scheme != "https":
+        raise ValueError(f"Repository URL must use HTTPS, got scheme {parsed.scheme!r}")
+
+    # Reject any embedded credentials — they could be used for SSRF-style attacks
+    if parsed.username or parsed.password:
+        raise ValueError(f"URL must not contain embedded credentials: {url!r}")
+
+    # Hostname must be exactly 'github.com' — substring checks are insufficient
+    hostname = (parsed.hostname or "").lower()
+    if hostname != _GITHUB_HOST:
+        raise ValueError(
+            f"URL hostname must be exactly '{_GITHUB_HOST}', got {hostname!r}: {url!r}"
+        )
+
+    # Reject non-standard ports (443 is implicit for HTTPS)
+    if parsed.port is not None and parsed.port != 443:
+        raise ValueError(f"URL must not specify a non-standard port: {url!r}")
+
+    # Reject query parameters and fragments
+    if parsed.query:
+        raise ValueError(f"URL must not contain query parameters: {url!r}")
+    if parsed.fragment:
+        raise ValueError(f"URL must not contain URL fragments: {url!r}")
+
+    # Path must contain at least owner/repo
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if len(path_parts) < 2:  # noqa: PLR2004
+        raise ValueError(f"URL must contain an owner/repo path: {url!r}")
 
 
 def _sanitize_commit_message(msg: str) -> str:
@@ -88,9 +129,58 @@ def _sanitize_commit_message(msg: str) -> str:
     return msg[:500].strip()
 
 
-def _remote_url(owner: str, repo: str, token: str) -> str:
-    """Build authenticated HTTPS remote URL.  Never log this value."""
-    return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+@contextmanager
+def _git_auth_env(token: str) -> Iterator[dict[str, str]]:
+    """Context manager that provisions a temporary GIT_ASKPASS helper.
+
+    Supplies GitHub credentials via GIT_ASKPASS rather than embedding the
+    token in the remote URL (which would expose it in git error messages,
+    process arguments, and shell history).
+
+    Yields an env dict suitable for passing to _git().  The temp directory
+    (including the token file) is removed when the context manager exits.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="bugforge_cred_")
+    try:
+        os.chmod(tmpdir, 0o700)
+        tok_path = os.path.join(tmpdir, ".token")
+        with open(tok_path, "w") as _f:
+            _f.write(token)
+        os.chmod(tok_path, 0o600)
+
+        # The ASKPASS script reads the token from a separate file so the
+        # token never appears in the script text itself.
+        tok_escaped = tok_path.replace("'", "'\\''")
+        script_path = os.path.join(tmpdir, "askpass")
+        script = (
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  *Username*) printf '%s' 'x-access-token' ;;\n"
+            f"  *) printf '%s' \"$(cat '{tok_escaped}')\" ;;\n"
+            "esac\n"
+        )
+        with open(script_path, "w") as _f:
+            _f.write(script)
+        os.chmod(script_path, stat.S_IRWXU)
+
+        env = dict(os.environ)
+        env["GIT_ASKPASS"] = script_path
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        # Prevent system-wide credential helpers from interfering
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        # Strip BugForge secrets so the subprocess never sees them
+        for _k in ("GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                   "SECRET_KEY", "DATABASE_URL", "POSTGRES_PASSWORD"):
+            env.pop(_k, None)
+
+        yield env
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _plain_clone_url(owner: str, repo: str) -> str:
+    """Return the plain (no-credentials) HTTPS clone URL for a GitHub repo."""
+    return f"https://github.com/{owner}/{repo}.git"
 
 
 def _git(args: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -412,25 +502,28 @@ class GitHubService:
             # ── Clone repository ──────────────────────────────────────
             tmpdir = tempfile.mkdtemp(prefix="bugforge_gh_")
             clone_dir = str(Path(tmpdir) / "repo")
-            remote_url = _remote_url(owner, repo, token)
+            clone_url = _plain_clone_url(owner, repo)
 
-            result = _git(
-                ["clone", "--depth", "1", "--branch", base_branch, remote_url, clone_dir]
-            )
-            if result.returncode != 0:
-                sanitized_err = _sanitize_token(result.stderr, token)
-                raise RuntimeError(f"git clone failed: {sanitized_err}")
-
-            async with async_session_factory() as db:
-                delivery_repo = GitHubDeliveryRepo(db)
-                await delivery_repo.update(delivery_id, status="branch_created")
-                await db.commit()
+            with _git_auth_env(token) as auth_env:
+                result = _git(
+                    ["clone", "--depth", "1", "--branch", base_branch, clone_url, clone_dir],
+                    env=auth_env,
+                )
+                if result.returncode != 0:
+                    sanitized_err = _sanitize_token(result.stderr, token)
+                    raise RuntimeError(f"git clone failed: {sanitized_err}")
 
             # ── Create delivery branch ────────────────────────────────
             result = _git(["checkout", "-b", delivery_branch], cwd=clone_dir)
             if result.returncode != 0:
                 sanitized_err = _sanitize_token(result.stderr, token)
                 raise RuntimeError(f"git checkout failed: {sanitized_err}")
+
+            # branch_created is set AFTER the branch is confirmed to exist
+            async with async_session_factory() as db:
+                delivery_repo = GitHubDeliveryRepo(db)
+                await delivery_repo.update(delivery_id, status="branch_created")
+                await db.commit()
 
             # ── Apply verified patch ──────────────────────────────────
             from app.testing.repair_workspace import RepairWorkspace
@@ -494,17 +587,14 @@ class GitHubService:
                 )
                 await db.commit()
 
-            result = _git(["push", "origin", delivery_branch], cwd=clone_dir)
-            if result.returncode != 0:
-                sanitized_err = _sanitize_token(result.stderr, token)
-                raise RuntimeError(f"git push failed: {sanitized_err}")
+            with _git_auth_env(token) as push_env:
+                result = _git(["push", "origin", delivery_branch], cwd=clone_dir, env=push_env)
+                if result.returncode != 0:
+                    sanitized_err = _sanitize_token(result.stderr, token)
+                    raise RuntimeError(f"git push failed: {sanitized_err}")
 
             # ── Create PR via GitHub API ───────────────────────────────
-            async with async_session_factory() as db:
-                delivery_repo = GitHubDeliveryRepo(db)
-                await delivery_repo.update(delivery_id, status="pr_created")
-                await db.commit()
-
+            # pr_created is set only AFTER GitHub confirms the PR exists
             client = _GitHubClient(token)
 
             # Check for existing PR to prevent duplicates
@@ -541,6 +631,14 @@ class GitHubService:
                     delivery_id,
                     pull_request_number=pr_number,
                     pull_request_url=pr_url,
+                    status="pr_created",
+                )
+                await db.commit()
+
+            async with async_session_factory() as db:
+                delivery_repo = GitHubDeliveryRepo(db)
+                await delivery_repo.update(
+                    delivery_id,
                     status="completed",
                     completed_at=datetime.now(UTC),
                 )
@@ -582,18 +680,22 @@ def _validate_github_owner_repo(owner: str, repo: str) -> None:
 
 
 async def _run_final_tests(repo_dir: str) -> bool:
-    """Run the test suite against the patched clone; returns True if tests pass."""
-    import subprocess as _sp
+    """Run the test suite against the patched clone via BugForge's execution abstraction.
 
-    result = _sp.run(
-        ["python3", "-m", "pytest", "--tb=no", "-q", "--no-header"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    Uses ExecutorFactory so production always runs inside the Docker sandbox;
+    never executes untrusted repository code directly on the BugForge host.
+    Raises RuntimeError in production when Docker is unavailable.
+    """
+    from app.execution import ExecutionConfig, ExecutorFactory
+
+    executor = ExecutorFactory.create()
+    config = ExecutionConfig(
+        command=["python3", "-m", "pytest", "--tb=no", "-q", "--no-header", "-p", "no:cacheprovider"],
+        working_directory=repo_dir,
+        timeout_seconds=120,
     )
-    return result.returncode == 0
+    result = await executor.execute(config)
+    return result.exit_code == 0 and not result.timed_out
 
 
 def _build_pr_body(

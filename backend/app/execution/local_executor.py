@@ -26,6 +26,7 @@ _STRIP_FROM_ENV: frozenset[str] = frozenset(
         "REDIS_URL",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
     }
 )
 
