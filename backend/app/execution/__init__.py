@@ -24,18 +24,32 @@ class ExecutorFactory:
 
     Preference order:
       1. DockerTestExecutor — when Docker is installed and reachable.
-      2. LocalTestExecutor  — fallback for development environments.
+      2. LocalTestExecutor  — fallback for *development* environments only.
 
     The LocalTestExecutor runs code directly on the host and is NOT safe for
-    production use with untrusted repositories.  It is provided only so that
-    local development works without Docker.
+    production use with untrusted repositories.  In production, Docker is
+    required; the factory raises RuntimeError rather than silently falling back.
     """
 
     @staticmethod
     def create(prefer_docker: bool = True) -> TestExecutor:
-        """Return the best synchronously-detectable executor."""
+        """Return the best synchronously-detectable executor.
+
+        Raises RuntimeError in production when Docker is unavailable to prevent
+        silent execution of untrusted code on the BugForge host.
+        """
+        from app.core.config import settings
+
         if prefer_docker and shutil.which("docker") is not None:
             return DockerTestExecutor()
+
+        if settings.environment == "production":
+            raise RuntimeError(
+                "Docker is required for sandboxed execution in production but was not found. "
+                "Install Docker or set ENVIRONMENT=development to allow local execution "
+                "(development-only — not safe for untrusted repositories)."
+            )
+
         if prefer_docker:
             logger.warning(
                 "Docker not found; falling back to LocalTestExecutor "

@@ -23,6 +23,7 @@ class ReproductionAttemptResponse(BaseModel):
     timed_out: bool
     reproduced: bool
     classification: str
+    evidence_matched: str | None
     created_at: datetime
 
 
@@ -42,6 +43,9 @@ class BugReproductionSessionResponse(BaseModel):
     final_classification: str | None
     strategy_summary: str | None
     error_message: str | None
+    target_behavior: str | None
+    expected_failure_pattern: str | None
+    observable_evidence: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

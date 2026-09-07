@@ -7,13 +7,14 @@ import type { Analysis, Project } from "@/lib/types";
 import AnalysisResults from "@/components/AnalysisResults";
 import DebuggingPanel from "@/components/DebuggingPanel";
 import ReproductionPanel from "@/components/ReproductionPanel";
+import RepairPanel from "@/components/RepairPanel";
 import TestGenerationPanel from "@/components/TestGenerationPanel";
 import TestRunPanel from "@/components/TestRunPanel";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 import Badge from "@/components/ui/Badge";
 import { formatDate } from "@/lib/utils";
 
-type PageTab = "analysis" | "tests" | "debug" | "generate" | "reproduce";
+type PageTab = "analysis" | "tests" | "debug" | "generate" | "reproduce" | "repair";
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -137,7 +138,7 @@ export default function ProjectDetailPage() {
 
       {/* Page-level tabs */}
       <div className="flex border-b border-slate-200 mb-6">
-        {(["analysis", "tests", "debug", "generate", "reproduce"] as PageTab[]).map((t) => (
+        {(["analysis", "tests", "debug", "generate", "reproduce", "repair"] as PageTab[]).map((t) => (
           <button
             key={t}
             onClick={() => setPageTab(t)}
@@ -147,7 +148,7 @@ export default function ProjectDetailPage() {
                 : "border-transparent text-slate-500 hover:text-slate-700"
             }`}
           >
-            {t === "analysis" ? "Analysis" : t === "tests" ? "Tests" : t === "debug" ? "AI Debugging" : t === "generate" ? "Test Generation" : "Bug Reproduction"}
+            {t === "analysis" ? "Analysis" : t === "tests" ? "Tests" : t === "debug" ? "AI Debugging" : t === "generate" ? "Test Generation" : t === "reproduce" ? "Bug Reproduction" : "Repair"}
           </button>
         ))}
       </div>
@@ -213,6 +214,9 @@ export default function ProjectDetailPage() {
 
       {/* Bug Reproduction tab */}
       {pageTab === "reproduce" && <ReproductionPanel projectId={id} />}
+
+      {/* Automated Repair tab */}
+      {pageTab === "repair" && <RepairPanel projectId={id} />}
     </div>
   );
 }

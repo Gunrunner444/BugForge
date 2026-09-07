@@ -147,10 +147,14 @@ class DockerTestExecutor(TestExecutor):
             "no-new-privileges",
             "-w",
             config.working_directory,
-            # Repository source is read-only
+            # Working directory (test files) — read-only inside container
             "-v",
             f"{config.working_directory}:{config.working_directory}:ro",
         ]
+
+        # Mount any additional read-only volumes (e.g. the analyzed repository)
+        for host_path, container_path in config.read_only_volumes.items():
+            args += ["-v", f"{host_path}:{container_path}:ro"]
 
         # Mount output_dir for artifact capture (read-write)
         if config.output_dir:

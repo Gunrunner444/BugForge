@@ -12,8 +12,11 @@ import type {
   GeneratedTestsListResponse,
   ImportRecord,
   PaginatedResponse,
+  PatchCandidate,
   Project,
   ProjectListResponse,
+  RepairSession,
+  RepairSessionsListResponse,
   RepositoryFile,
   TestGenerationSession,
   TestGenSessionsListResponse,
@@ -154,6 +157,25 @@ export const api = {
       request<ReproductionSessionsListResponse>(
         `/api/v1/projects/${id}/reproduction?offset=${offset}&limit=${limit}`,
       ),
+
+    startRepair: (
+      id: string,
+      opts: {
+        hypothesis_id?: string;
+        reproduction_session_id?: string;
+        debugging_session_id?: string;
+        max_candidates?: number;
+      } = {},
+    ) =>
+      request<RepairSession>(`/api/v1/projects/${id}/repair`, {
+        method: "POST",
+        body: JSON.stringify(opts),
+      }),
+
+    repairSessions: (id: string, offset = 0, limit = 20) =>
+      request<RepairSessionsListResponse>(
+        `/api/v1/projects/${id}/repair?offset=${offset}&limit=${limit}`,
+      ),
   },
 
   analyses: {
@@ -214,5 +236,15 @@ export const api = {
 
     attempts: (sessionId: string) =>
       request<BugReproductionSession>(`/api/v1/reproduction/${sessionId}/attempts`),
+  },
+
+  repair: {
+    get: (sessionId: string) => request<RepairSession>(`/api/v1/repair/${sessionId}`),
+
+    candidates: (sessionId: string) =>
+      request<PatchCandidate[]>(`/api/v1/repair/${sessionId}/candidates`),
+
+    candidate: (sessionId: string, candidateId: string) =>
+      request<PatchCandidate>(`/api/v1/repair/${sessionId}/candidates/${candidateId}`),
   },
 };

@@ -168,3 +168,13 @@ class LLMProvider(ABC):
     async def generate_structured(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
         """Generic structured generation for reproduction planning and other tasks."""
         ...
+
+    @abstractmethod
+    async def generate_patch(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+        """Generate a repair patch from evidence.
+
+        system_prompt contains BugForge instructions (trusted).
+        user_message contains evidence + [REPOSITORY_DATA] tagged untrusted content.
+        Returns a StructuredTextResponse whose content is a JSON patch plan.
+        """
+        ...

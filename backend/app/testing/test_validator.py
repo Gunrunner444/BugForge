@@ -9,9 +9,51 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 
-# Builtin names that indicate potentially dangerous generated code
+# Direct call names that indicate dangerous operations
 _DANGEROUS_NAMES = frozenset(
     {"exec", "eval", "__import__", "compile", "open", "os", "subprocess", "sys"}
+)
+
+# Modules that must not be imported by generated/reproducer code.
+# Docker isolation provides a second boundary, but we reject at validation time.
+_DANGEROUS_MODULES = frozenset(
+    {
+        "os",
+        "subprocess",
+        "socket",
+        "sys",
+        "shutil",
+        "pathlib",
+        "tempfile",
+        "pickle",
+        "shelve",
+        "marshal",
+        "importlib",
+        "ctypes",
+        "signal",
+        "gc",
+        "resource",
+        "platform",
+        "select",
+        "pty",
+        "termios",
+        "fcntl",
+        "pwd",
+        "grp",
+        "mmap",
+        "multiprocessing",
+        "threading",
+        "concurrent",
+        "asyncio",
+        "urllib",
+        "http",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "ftplib",
+        "smtplib",
+        "ssl",
+    }
 )
 
 
@@ -28,7 +70,8 @@ def validate_test_code(code: str) -> ValidationResult:
     Checks:
       1. Valid Python syntax
       2. Contains at least one test function (name starting with test_)
-      3. Does not use obviously dangerous builtins at the module level
+      3. Does not import dangerous modules
+      4. Does not call dangerous builtins directly or via aliases
     """
     if not code or not code.strip():
         return ValidationResult(valid=False, error="Generated code is empty")
@@ -54,7 +97,34 @@ def validate_test_code(code: str) -> ValidationResult:
             error="No test functions or test classes found (expected names starting with test_ or Test)",
         )
 
-    # 3. Reject obviously dangerous patterns at call-expression level
+    # 3. Reject imports of dangerous modules
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # Check the top-level module name (e.g. "os.path" → "os")
+                top = alias.name.split(".")[0]
+                if top in _DANGEROUS_MODULES:
+                    return ValidationResult(
+                        valid=False,
+                        error=f"Generated test imports dangerous module '{alias.name}'; rejecting for safety",
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0]
+            if top in _DANGEROUS_MODULES:
+                return ValidationResult(
+                    valid=False,
+                    error=f"Generated test imports from dangerous module '{module}'; rejecting for safety",
+                )
+            # Also reject wildcard imports from any module
+            for alias in node.names:
+                if alias.name == "*":
+                    return ValidationResult(
+                        valid=False,
+                        error=f"Generated test uses wildcard import from '{module}'; rejecting for safety",
+                    )
+
+    # 4. Reject dangerous builtins at call-expression level
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func

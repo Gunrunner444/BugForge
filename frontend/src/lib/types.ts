@@ -352,3 +352,65 @@ export interface ReproductionSessionsListResponse {
   offset: number;
   limit: number;
 }
+
+// ── Automated Repair ───────────────────────────────────────────────────────
+
+export type RepairStatus = "pending" | "running" | "completed" | "failed";
+export type CandidateDisposition = "pending" | "accepted" | "rejected" | "best";
+export type CandidateStatus =
+  | "pending"
+  | "validating"
+  | "applying"
+  | "verifying"
+  | "completed"
+  | "rejected";
+
+export interface PatchCandidate {
+  id: string;
+  session_id: string;
+  rank: number;
+  patch_provider: string | null;
+  patch_model: string | null;
+  patch_plan: string | null;
+  patch_diff: string | null;
+  changed_files: string[];
+  status: CandidateStatus;
+  validation_status: string | null;
+  validation_error: string | null;
+  pre_patch_reproduced: boolean | null;
+  post_patch_reproduced: boolean | null;
+  bug_fixed: boolean | null;
+  existing_tests_total: number | null;
+  existing_tests_passed: number | null;
+  existing_tests_failed: number | null;
+  no_regressions: boolean | null;
+  regression_count: number;
+  new_static_findings: number;
+  score: number | null;
+  disposition: CandidateDisposition;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface RepairSession {
+  id: string;
+  project_id: string;
+  debugging_session_id: string | null;
+  hypothesis_id: string | null;
+  reproduction_session_id: string | null;
+  status: RepairStatus;
+  total_candidates: number;
+  best_candidate_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  candidates?: PatchCandidate[];
+}
+
+export interface RepairSessionsListResponse {
+  items: RepairSession[];
+  total: number;
+  offset: number;
+  limit: number;
+}

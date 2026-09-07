@@ -12,6 +12,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     from app.models.analysis import Analysis
     from app.models.debugging import DebuggingSession
+    from app.models.repair import RepairSession
     from app.models.reproduction import BugReproductionSession
     from app.models.test_generation import TestGenerationSession
     from app.models.test_run import TestRun
@@ -69,4 +70,11 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="BugReproductionSession.created_at.desc()",
+    )
+
+    repair_sessions: Mapped[list[RepairSession]] = relationship(
+        "RepairSession",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="RepairSession.created_at.desc()",
     )

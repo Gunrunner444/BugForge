@@ -111,6 +111,9 @@ class OpenAIProvider(LLMProvider):
             duration_seconds=time.monotonic() - start,
         )
 
+    async def generate_patch(self, system_prompt: str, user_message: str) -> StructuredTextResponse:
+        return await self.generate_structured(system_prompt, user_message)
+
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
         from app.ai.prompt_builder import PromptBuilder
 

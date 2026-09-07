@@ -41,6 +41,10 @@ class BugReproductionSession(Base):
     )  # not_reproduced | inconclusive | intermittent | reproduced | consistently_reproduced
     strategy_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fields from the reproduction plan used for evidence-based classification
+    target_behavior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_failure_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observable_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -76,8 +80,10 @@ class BugReproductionAttempt(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reproduced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # reproduced | failed | error | timeout | environment_error | validator_rejected
+    # reproduced | failed | error | timeout | environment_error | validator_rejected | no_evidence
     classification: Mapped[str] = mapped_column(String(50), nullable=False, default="failed")
+    # Snippet from stdout/stderr that matched the expected failure pattern, if any
+    evidence_matched: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )

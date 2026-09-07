@@ -24,6 +24,10 @@ class ExecutionConfig:
     # For Docker: mounted into the container at OUTPUT_CONTAINER_PATH.
     # For Local: the command path and host path are identical.
     output_dir: str | None = None
+    # Additional host paths to mount read-only inside the container.
+    # Keys are absolute host paths; values are absolute container paths.
+    # Ignored by LocalTestExecutor (the host paths are already accessible).
+    read_only_volumes: dict[str, str] = field(default_factory=dict)
 
 
 # Container-side mount path for the output directory

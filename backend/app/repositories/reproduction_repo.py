@@ -93,6 +93,7 @@ class ReproductionRepository:
             timed_out=data.get("timed_out", False),
             reproduced=data.get("reproduced", False),
             classification=data.get("classification", "failed"),
+            evidence_matched=data.get("evidence_matched"),
         )
         self.session.add(attempt)
 

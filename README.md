@@ -1,8 +1,8 @@
 # BugForge
 
-**Evidence-first AI software debugging and automated test generation.**
+**Evidence-first AI software debugging, automated test generation, and automated code repair.**
 
-BugForge analyzes software repositories, runs tests, performs static analysis, collects evidence, and uses AI to reason about bugs and generate new tests. Every AI conclusion is labeled as a hypothesis — never as a confirmed fact — until executable evidence supports it.
+BugForge analyzes software repositories, runs tests, performs static analysis, collects evidence, uses AI to reason about bugs, generates reproducers, and proposes verified repair patches. Every AI conclusion is labeled as a hypothesis — never as a confirmed fact — until executable evidence supports it.
 
 ---
 
@@ -15,8 +15,8 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | 3 | Static Analysis | ✅ Complete |
 | 4 | AI Debugging Engine | ✅ Complete |
 | 5 | Automatic Test Generation | ✅ Complete |
-| 6 | Bug Reproduction Engine | 🚧 In progress |
-| 7 | Automated Repair | Planned |
+| 6 | Bug Reproduction Engine | ✅ Complete |
+| 7 | Automated Repair | ✅ Complete |
 | 8 | GitHub Integration | Planned |
 
 ---
@@ -37,7 +37,7 @@ Repository
        ├─ JSON report collection (pytest-json-report)
        ├─ LocalTestExecutor (dev/trusted repos)
        ├─ DockerTestExecutor (isolated containers)
-       └─ ExecutorFactory (selects best available)
+       └─ ExecutorFactory (production guard — raises if Docker unavailable)
 
   └─ Static Analysis (Phase 3)
        ├─ StaticAnalysisEngine (extensible rule pipeline)
@@ -58,10 +58,31 @@ Repository
 
   └─ Automatic Test Generation (Phase 5)
        ├─ TestGenerator (AI-based candidate generation)
-       ├─ TestValidator (syntax + safety check)
+       ├─ TestValidator (syntax + safety + import checks)
        ├─ Quality scorer
        ├─ Sandbox execution via TestExecutor
        └─ GeneratedTest persistence
+
+  └─ Bug Reproduction Engine (Phase 6)
+       ├─ ReproductionPlanner (AI-generated reproducers with prompt-injection defense)
+       ├─ TestValidator (rejects dangerous imports and calls)
+       ├─ Evidence-based classification (matches expected failure, not just exit code)
+       ├─ Multiple attempts with reproducibility classification
+       │    not_reproduced | inconclusive | intermittent | reproduced | consistently_reproduced
+       ├─ Docker executor with repository mount (read-only)
+       └─ BugReproductionSession / BugReproductionAttempt persistence
+
+  └─ Automated Repair (Phase 7)
+       ├─ PatchPlanner (AI-generated patches with prompt-injection defense)
+       ├─ PatchValidator (path traversal + dangerous code checks)
+       ├─ RepairWorkspace (disposable copy — NEVER modifies original repo)
+       ├─ Pre-patch baseline (confirms bug reproduces in workspace)
+       ├─ Patch application (unified diff)
+       ├─ Post-patch verification (confirms bug no longer reproduces)
+       ├─ Existing test suite regression check
+       ├─ Composite scoring (bug_fixed 0.7 + no_regressions 0.3)
+       ├─ Candidate ranking
+       └─ RepairSession / PatchCandidate persistence
 ```
 
 ---
