@@ -557,7 +557,7 @@ async def test_budget_exhaustion_and_loop_detection() -> None:
     async def _ok(_arguments: dict[str, object]) -> dict[str, object]:
         return {"quality": "success", "executed": True, "state": "completed"}
 
-    agent2.tools._executors["http_request"] = _ok  # type: ignore[assignment]
+    agent2.tools.replace_executor("http_request", _ok)
     req = ToolCallRequest(
         tool="http_request",
         arguments={"method": "GET", "url": "http://127.0.0.1/health"},

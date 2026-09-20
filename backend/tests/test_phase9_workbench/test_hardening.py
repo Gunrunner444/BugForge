@@ -387,3 +387,20 @@ async def test_export_endpoint_selects_finding(client) -> None:
     )
     assert whole.status_code == 200
     assert whole.json()["finding"] is None
+
+
+def test_operator_ownership_is_enforced() -> None:
+    from datetime import UTC, datetime
+
+    from fastapi import HTTPException
+
+    from app.api.v1.endpoints.security_agent import _assert_operator_owns
+    from app.security_testing.operator_auth import OperatorSession
+
+    alice = OperatorSession(identity="alice", authenticated_at=datetime.now(UTC))
+    bob = OperatorSession(identity="bob", authenticated_at=datetime.now(UTC))
+    _assert_operator_owns("alice", alice)
+    with pytest.raises(HTTPException) as exc:
+        _assert_operator_owns("alice", bob)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "session_operator_mismatch"

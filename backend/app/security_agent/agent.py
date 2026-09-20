@@ -105,11 +105,14 @@ class TimelineEvent:
     result: str = ""
     evidence_id: str = ""
     finding_id: str = ""
+    strategy: str = ""
+    state: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "time": self.created_at.isoformat(),
+            "timestamp": self.created_at.isoformat(),
             "event_type": self.event_type,
             "decision": self.decision,
             "tool": self.tool,
@@ -118,6 +121,8 @@ class TimelineEvent:
             "result": self.result,
             "evidence_id": self.evidence_id,
             "finding_id": self.finding_id,
+            "strategy": self.strategy,
+            "state": self.state,
         }
 
 
@@ -535,11 +540,11 @@ class SecurityResearchAgent:
         try:
             from app.security_agent.cost import consume_units_for, estimate_operation_cost
 
-            self.session.budget.consume("tool")
             remaining = int(self.session.budget.remaining().get("requests") or 0)
             estimate = estimate_operation_cost(
                 request.tool, dumped, spec, remaining_requests=remaining
             )
+            self.session.budget.consume("tool")
             kind, amount = consume_units_for(estimate)
             if kind != "tool" and amount:
                 self.session.budget.consume(kind, amount=amount)
@@ -554,7 +559,10 @@ class SecurityResearchAgent:
             "target": target,
             "reason": reason,
             "expected_evidence": spec.description,
-            "estimated_requests": 1 if spec.budget_kind in {"request", "fuzz"} else 0,
+            "estimated_requests": estimate.estimated_requests,
+            "estimated_units": estimate.estimated_units,
+            "estimate_unit": estimate.unit,
+            "is_estimate": True,
             "risk_level": spec.risk_level.value,
             "approval_required": bool(spec.requires_human_approval),
         }
@@ -1050,6 +1058,8 @@ class SecurityResearchAgent:
         )
 
     def _timeline(self, event_type: str, **fields: Any) -> None:
+        fields.setdefault("strategy", self.session.strategy)
+        fields.setdefault("state", self.session.state.value)
         self.session.timeline.append(TimelineEvent(event_type=event_type, **fields))
 
 

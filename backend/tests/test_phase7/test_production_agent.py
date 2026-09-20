@@ -256,7 +256,7 @@ async def test_evidence_and_proxy_inspect() -> None:
 async def test_browser_navigate_uses_adapter_and_scope() -> None:
     session = _session()
     agent = SecurityResearchAgent(session)
-    agent.tools._executors["browser_navigate"]  # bound
+    agent.tools.executor_for("browser_navigate")
     from app.security_agent.executors import ToolContext, bind_engine_tools
     from app.security_agent.tools import default_registry
 
@@ -688,7 +688,8 @@ async def test_stale_approvals_and_tool_approval_api(client, db_session: AsyncSe
     from app.api.v1.endpoints import security_agent as api
 
     agent = api._SESSIONS[session_id]
-    record = agent.session.engine.approvals._records[ApprovalKind.ENABLE_FUZZING]
+    record = agent.session.engine.approvals.get_record(ApprovalKind.ENABLE_FUZZING)
+    assert record is not None
     object.__setattr__(record, "expires_at", datetime.now(UTC) - timedelta(hours=1))
     assert agent.session.engine.approvals.is_granted(ApprovalKind.ENABLE_FUZZING) is False
 

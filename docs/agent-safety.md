@@ -61,5 +61,6 @@ requests, authorization, execution start/result, evidence created, hypothesis
 updates, reproduction, verification, approval, and pause/stop. Credentials
 never appear. Replay observations use `provenance=replay` and cannot verify
 a finding. Identity cookies and Authorization headers are stored as secret
-references, never as raw database values. The evidence graph is persisted as `research_evidence_node` /
+references, never as raw database values. Workbench control actions require
+the operator token and session ownership. The evidence graph is persisted as `research_evidence_node` /
 `research_evidence_edge` and reconstructed after restart.

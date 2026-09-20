@@ -14,7 +14,7 @@ from app.domain.findings import FindingStatus, SecurityFinding
 from app.repositories.security_agent_repo import SecurityAgentRepository
 from app.security_agent.agent import AgentDecision, ResearchSession, SecurityResearchAgent
 from app.security_agent.checkpoints import ResearchCheckpoint
-from app.security_agent.cost import estimate_operation_cost
+from app.security_agent.cost import consume_units_for, estimate_operation_cost
 from app.security_agent.orchestrator import AdvancedResearchOrchestrator
 from app.security_agent.project import SecurityResearchProject
 from app.security_agent.schemas import ResearchHypothesis, ToolCallRequest
@@ -101,6 +101,9 @@ def test_cost_estimate_matches_consume_units() -> None:
     assert api.estimated_requests == 8
     http = estimate_operation_cost("http_request", {"method": "GET", "url": "http://127.0.0.1/"})
     assert http.estimated_requests == 1
+    scanner = estimate_operation_cost("zap_scan", {}, remaining_requests=50)
+    assert scanner.estimated_requests == 50
+    assert consume_units_for(scanner) == ("tool", 1)
 
 
 @pytest.mark.asyncio
@@ -400,6 +403,17 @@ async def test_workbench_dashboard_and_timeline(client) -> None:
     )
     assert project.status_code == 200
     assert project.json()["state"] == "create"
+    project_id = project.json()["id"]
+    from app.api.v1.endpoints import security_agent as api
+
+    api._PROJECTS.pop(project_id, None)
+    restored_project = await client.get(
+        f"/api/v1/security-agent/research-projects/{project_id}",
+        headers=OPERATOR_HEADERS,
+    )
+    assert restored_project.status_code == 200
+    assert restored_project.json()["name"] == "lab-demo"
+    assert restored_project.json()["state"] == "create"
 
 
 def test_unavailable_capability_is_not_enabled() -> None:

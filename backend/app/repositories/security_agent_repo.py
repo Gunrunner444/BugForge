@@ -304,6 +304,8 @@ class SecurityAgentRepository:
         row.strategy = project.strategy
         row.state = project.state.value if hasattr(project.state, "value") else str(project.state)
         row.operator_identity = project.operator_identity
+        if getattr(project, "created_at", None) is not None:
+            row.created_at = project.created_at
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
 
@@ -628,7 +630,11 @@ def _finding_from_row(
     refs = list(row.evidence_ids or ())
     if graph is not None:
         refs = [ident for ident in refs if ident in graph.nodes]
-    status = FindingStatus(row.status)
+    status_raw = str(row.status or "potential")
+    try:
+        status = FindingStatus(status_raw)
+    except ValueError:
+        status = FindingStatus.POTENTIAL
     bundle = EvidenceBundle.from_items(items) if items else EvidenceBundle()
     live_items = [
         item

@@ -80,3 +80,24 @@ class SecurityResearchProject:
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+    @classmethod
+    def from_row(cls, row: Any) -> SecurityResearchProject:
+        try:
+            state = ResearchProjectState(str(row.state or "create"))
+        except ValueError:
+            state = ResearchProjectState.CREATE
+        return cls(
+            id=str(row.id),
+            name=row.name or "",
+            project_id=row.project_id or "",
+            target=row.target or "",
+            mode=row.mode or "lab",
+            program_handle=row.program_handle or "",
+            session_id=row.session_id or "",
+            strategy=row.strategy or "passive_recon",
+            operator_identity=row.operator_identity or "",
+            state=state,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )

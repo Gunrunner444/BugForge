@@ -115,6 +115,9 @@ class AdvancedResearchOrchestrator:
                 continue
             if not _linked_to_hypothesis(graph, hyp.id, evidence_id):
                 missing.append(f"{hyp.id}:unlinked:{evidence_id}")
+                linked = False
+            else:
+                linked = True
             provenance = str(getattr(node, "provenance", "") or "")
             if not provenance:
                 missing.append(f"{hyp.id}:invalid_provenance:{evidence_id}")
@@ -122,7 +125,8 @@ class AdvancedResearchOrchestrator:
             if provenance in _NON_LIVE_PROVENANCE:
                 missing.append(f"{hyp.id}:non_live_provenance:{evidence_id}")
                 continue
-            live_support.append(evidence_id)
+            if linked:
+                live_support.append(evidence_id)
         if not live_support:
             missing.append(f"{hyp.id}:no_evidence")
         if hyp.contradicting_evidence_ids:
@@ -349,8 +353,7 @@ def _linked_to_hypothesis(graph: Any, hypothesis_id: str, evidence_id: str) -> b
     extra = getattr(node, "extra", {}) if node is not None else {}
     if isinstance(extra, dict) and extra.get("hypothesis_id") == hypothesis_id:
         return True
-    # Supporting IDs listed on the hypothesis still count as linked when the
-    # evidence node exists; graph edges are the preferred record.
+    # Supporting IDs listed on a hypothesis are not a substitute for a graph link.
     return False
 
 

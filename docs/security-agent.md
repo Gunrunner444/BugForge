@@ -86,7 +86,8 @@ submit a report.
 Phase 9 adds a researcher workbench (dashboard, timeline, next-action review,
 identity/evidence explorers) and hardens identity secret handling, replay
 executor restoration, checkpoint revalidation, and deterministic export.
-See [research-workbench.md](research-workbench.md),
+Mutating session endpoints authenticate the operator token **and** check
+that the token identity owns the session. See [research-workbench.md](research-workbench.md),
 [identity-testing.md](identity-testing.md), and
 [evidence-workflow.md](evidence-workflow.md).
 

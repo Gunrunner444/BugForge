@@ -47,7 +47,15 @@ risk, whether approval is required, and the current scope decision.
 
 Estimates use the same units as budget consumption (`http_request` → 1
 request, `fuzz count=20` → 20 fuzz requests, `api_test max_tests=8` → 8
-requests).
+requests). Scanner review still shows a **request envelope estimate** for
+the operator; the session consumes one tool call plus measured scan
+duration after execution, not the full envelope up front. Planned,
+reserved, and consumed counters are tracked separately.
+
+Operator-authenticated workbench actions validate session ownership
+(`session_operator_mismatch` if another operator token is presented).
+Research projects persist to `security_research_projects` and reconstruct
+after process restart.
 
 ## Local lab
 

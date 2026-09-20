@@ -36,6 +36,12 @@ def timeline(
             continue
         if finding and event.finding_id != finding:
             continue
+        event_strategy = getattr(event, "strategy", "") or orch.session.strategy
+        event_state = getattr(event, "state", "") or orch.session.state.value
+        if strategy and event_strategy != strategy:
+            continue
+        if state and event_state != state:
+            continue
         payload = event.snapshot()
         payload["result"] = redact_text(str(payload.get("result") or ""))
         payload["decision"] = redact_text(str(payload.get("decision") or ""))

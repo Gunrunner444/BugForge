@@ -230,8 +230,7 @@ async def step_session(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     orch = _orchestrator_for(agent)
     async with _lock_for(session_id):
         try:
@@ -257,8 +256,7 @@ async def request_tool(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     orch = _orchestrator_for(agent)
     async with _lock_for(session_id):
         try:
@@ -352,7 +350,7 @@ async def grant_session_approval(
 ) -> dict[str, object]:
     if is_ai_operator(session.identity):
         raise HTTPException(status_code=403, detail="The AI cannot grant approvals")
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     try:
         kind = ApprovalKind(payload.kind)
     except ValueError as exc:
@@ -379,7 +377,7 @@ async def resume_session(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     if agent.session.state in RESUME_BLOCKED_STATES or agent.session.stopped:
         raise HTTPException(
             status_code=409,
@@ -447,8 +445,7 @@ async def set_strategy(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     orch = _orchestrator_for(agent)
     strategy = orch.recommend_strategy(payload.strategy)
     agent.session.strategy = strategy.value
@@ -464,8 +461,7 @@ async def mark_false_positive(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     orch = _orchestrator_for(agent)
     orch.record_false_positive(why=payload.why, evidence=payload.evidence, source=payload.source)
     memory = agent.session.memory or ResearchMemory(project_id=agent.session.project_id)
@@ -487,8 +483,7 @@ async def set_identity(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     pair = agent.session.identities or IdentityPair()
     ident = ResearchIdentity(
         label=payload.label,
@@ -513,8 +508,7 @@ async def create_checkpoint(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     ident = await SecurityAgentRepository(db).save_checkpoint(agent.session)
     await db.commit()
     return {"checkpoint_id": ident}
@@ -543,8 +537,7 @@ async def handoff_finding(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     finding = next(
         (item for item in agent.session.findings if str(item.id) == payload.finding_id), None
     )
@@ -563,10 +556,9 @@ async def replay_session(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
     if payload.live_network:
         raise HTTPException(status_code=403, detail="replay_default_is_offline")
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     replay = SessionReplay(live_network=False)
     for event in payload.events:
         replay.record(
@@ -611,7 +603,6 @@ async def create_research_project(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del db
     project = SecurityResearchProject(
         name=payload.name,
         project_id=payload.project_id,
@@ -622,6 +613,8 @@ async def create_research_project(
         operator_identity=session.identity,
     )
     _PROJECTS[project.id] = project
+    await SecurityAgentRepository(db).save_project(project)
+    await db.commit()
     return project.snapshot()
 
 
@@ -629,11 +622,9 @@ async def create_research_project(
 async def get_research_project(
     project_id: str,
     session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    project = _PROJECTS.get(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Unknown research project")
-    _assert_operator_owns(project.operator_identity, session)
+    project = await _require_research_project(project_id, db, operator=session)
     return project.snapshot()
 
 
@@ -644,10 +635,7 @@ async def transition_research_project(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    project = _PROJECTS.get(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Unknown research project")
-    _assert_operator_owns(project.operator_identity, session)
+    project = await _require_research_project(project_id, db, operator=session)
     try:
         project.transition(ResearchProjectState(payload.state))
     except (ValueError, RestrictedActivityError) as exc:
@@ -763,7 +751,7 @@ async def _require(
     session_id: str,
     db: AsyncSession,
     *,
-    operator: OperatorSession | None = None,
+    operator: OperatorSession,
 ) -> SecurityResearchAgent:
     agent = _SESSIONS.get(session_id)
     if agent is not None:
@@ -791,8 +779,25 @@ async def _require(
     return restored
 
 
-def _assert_operator_owns(owner: str, operator: OperatorSession | None) -> None:
-    if operator is None or not owner:
+async def _require_research_project(
+    project_id: str,
+    db: AsyncSession,
+    *,
+    operator: OperatorSession,
+) -> SecurityResearchProject:
+    project = _PROJECTS.get(project_id)
+    if project is None:
+        row = await SecurityAgentRepository(db).load_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Unknown research project")
+        project = SecurityResearchProject.from_row(row)
+        _PROJECTS[project.id] = project
+    _assert_operator_owns(project.operator_identity, operator)
+    return project
+
+
+def _assert_operator_owns(owner: str, operator: OperatorSession) -> None:
+    if not owner:
         return
     if owner != operator.identity:
         raise HTTPException(status_code=403, detail="session_operator_mismatch")
