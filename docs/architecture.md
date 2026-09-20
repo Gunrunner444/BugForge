@@ -108,17 +108,26 @@ name. Languages that cannot apply a given override keep their built-in rules.
 - `SOURCE` — count as source code in repository classification
 - `PARSE` — extract entities/imports
 - `ENTITY_EXTRACTION` / `IMPORT_EXTRACTION` — advertised when parse is real
-- `STATIC_ANALYSIS` — Python quality/static rules
+- `STATIC_ANALYSIS` — quality rules (Python AST; JavaScript/TypeScript comment-aware checks)
 - `SECURITY_ANALYSIS` — taint-aware security observations
 
 **Python** (`PythonAdapter`) wraps the existing parser and AST quality rules
 and also participates in security analysis via the Python AST syntax graph.
 
-**JavaScript, TypeScript, Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, and
-Swift** use `ProfileLanguageAdapter` plus a shared `SyntaxGraph` substrate
-(Python AST for Python; profile-driven parsers for the others). Tree-sitter
-can be plugged in later behind the same graph types. Auxiliary formats
-(Markdown, YAML, JSON, …) remain **detection only**.
+**JavaScript and TypeScript** use `ProfileLanguageAdapter` with the shared
+`SyntaxGraph` substrate plus JavaScript-specific quality rules (`==` vs `===`,
+`var`, empty `catch`, `with`). They do not reuse Python AST rules.
+
+**Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, and Swift** use
+`ProfileLanguageAdapter` without quality static analysis. Security analysis
+runs over the profile-driven graph. Auxiliary formats (Markdown, YAML, JSON,
+…) remain **detection only**.
+
+The generic parser is string-aware: comments and quoted text are not calls,
+`${}` interpolations are scanned as code, `?.` chains are qualified names,
+and `new Type(` constructors keep a `new ` prefix so sink patterns such as
+`new Function` still match. It is not a full language AST. Known limits:
+no macro expansion, limited nested generics, and intra-procedural taint only.
 
 The core asks the registry *what language is this?*, *can it parse?*, *what
 entities/imports exist?*, and *does it support security analysis?* without
@@ -337,7 +346,7 @@ The AI agent may attach a hypothesis. It cannot create a verified finding.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LANGUAGE_ANALYZERS` | empty | Quality analyzers (`STATIC_ANALYSIS`). Empty = Python. |
+| `LANGUAGE_ANALYZERS` | empty | Quality analyzers (`STATIC_ANALYSIS`). Empty = every adapter that actually implements static analysis. |
 | `AI_PROVIDER` | `mock` | Includes `mlx` for the local MLX server |
 | `MLX_BASE_URL` | `http://127.0.0.1:8080/v1` | Local MLX endpoint |
 | `MLX_MODEL` | `Qwen3.6-35B-A3B-8bit` | Configurable model id |

@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     ai_security_enabled: bool = True
 
     # Language analyzers that should run during static analysis.
-    # Empty = every registered adapter that implements STATIC_ANALYSIS (currently Python).
+    # Empty = every registered adapter that implements STATIC_ANALYSIS
+    # (Python plus JavaScript/TypeScript quality rules).
     # Comma-separated language ids, e.g. "python".
     language_analyzers: str = ""
 

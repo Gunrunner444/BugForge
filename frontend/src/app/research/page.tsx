@@ -28,6 +28,13 @@ export default function ResearchWorkbenchPage() {
     }
   }
 
+  function errorMessage(err: unknown, fallback: string): string {
+    if (!(err instanceof ApiError)) return fallback;
+    if (err.status === 401) return err.detail ?? "Unauthorized — operator token required";
+    if (err.status === 403) return err.detail ?? "Forbidden — operator is not allowed to do this";
+    return err.detail ?? err.message;
+  }
+
   async function createAndStart() {
     setBusy(true);
     setError(null);
@@ -51,7 +58,7 @@ export default function ResearchWorkbenchPage() {
       await api.research.override(id, { action: "change_strategy", strategy });
       await loadAll(id);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Failed to start research");
+      setError(errorMessage(err, "Failed to start research"));
     } finally {
       setBusy(false);
     }
@@ -82,7 +89,7 @@ export default function ResearchWorkbenchPage() {
     try {
       await loadAll(sessionId);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Refresh failed");
+      setError(errorMessage(err, "Refresh failed"));
     } finally {
       setBusy(false);
     }
@@ -91,11 +98,14 @@ export default function ResearchWorkbenchPage() {
   async function control(action: string, extra: Record<string, unknown> = {}) {
     if (!sessionId) return;
     setBusy(true);
+    setError(null);
+    rememberToken();
     try {
       await api.research.override(sessionId, { action, ...extra });
       await loadAll(sessionId);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Control failed");
+      setError(errorMessage(err, "Control failed"));
+    } finally {
       setBusy(false);
     }
   }
@@ -103,11 +113,14 @@ export default function ResearchWorkbenchPage() {
   async function step() {
     if (!sessionId) return;
     setBusy(true);
+    setError(null);
+    rememberToken();
     try {
       await api.research.step(sessionId);
       await loadAll(sessionId);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Step failed");
+      setError(errorMessage(err, "Step failed"));
+    } finally {
       setBusy(false);
     }
   }
@@ -124,7 +137,7 @@ export default function ResearchWorkbenchPage() {
       setReview(body);
       await loadAll(sessionId);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Review failed");
+      setError(errorMessage(err, "Review failed"));
     } finally {
       setBusy(false);
     }
@@ -137,7 +150,7 @@ export default function ResearchWorkbenchPage() {
       await api.research.exportPackage(sessionId);
       await loadAll(sessionId);
     } catch (err) {
-      setError(err instanceof ApiError ? (err.detail ?? err.message) : "Export failed");
+      setError(errorMessage(err, "Export failed"));
     } finally {
       setBusy(false);
     }
@@ -166,7 +179,12 @@ export default function ResearchWorkbenchPage() {
           <input
             className="mt-1 w-full border rounded px-2 py-1"
             value={operatorToken}
-            onChange={(event) => setOperatorToken(event.target.value)}
+            onChange={(event) => {
+              setOperatorToken(event.target.value);
+              if (typeof window !== "undefined" && event.target.value) {
+                sessionStorage.setItem("bugforge_operator_token", event.target.value);
+              }
+            }}
             type="password"
           />
         </label>
@@ -193,9 +211,14 @@ export default function ResearchWorkbenchPage() {
             value={mode}
             onChange={(event) => setMode(event.target.value)}
           >
-            <option value="lab">LAB</option>
-            <option value="live_hackerone">LIVE HackerOne</option>
+            <option value="lab">LAB (local only)</option>
+            <option value="live_hackerone">LIVE HackerOne (authorized scope)</option>
           </select>
+          {mode === "live_hackerone" ? (
+            <p className="text-xs text-amber-800 mt-1">
+              Live mode never runs without explicit scope and human approval. Default is dry-run.
+            </p>
+          ) : null}
         </label>
         <label className="text-sm">
           Strategy
@@ -273,7 +296,11 @@ export default function ResearchWorkbenchPage() {
             <button className="border px-3 py-1 rounded text-sm" onClick={() => void control("resume")} disabled={busy}>
               Resume
             </button>
-            <button className="border px-3 py-1 rounded text-sm" onClick={() => void control("stop")} disabled={busy}>
+            <button
+              className="border border-red-300 text-red-800 px-3 py-1 rounded text-sm"
+              onClick={() => void control("stop")}
+              disabled={busy}
+            >
               Stop
             </button>
             <button className="border px-3 py-1 rounded text-sm" onClick={() => void reviewNext()} disabled={busy}>
@@ -362,13 +389,29 @@ export default function ResearchWorkbenchPage() {
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <h2 className="font-medium mb-2">Findings</h2>
           <ul className="text-xs space-y-2">
-            {findings.map((item) => (
+            {findings.map((item) => {
+              const state = String(item.verification_state || item.status || "potential");
+              const verified = state.toLowerCase() === "verified";
+              return (
               <li key={String(item.id)} className="border-b border-slate-100 pb-2">
                 <div className="font-medium">{String(item.title)}</div>
                 <div>
-                  {String(item.verification_state)} · {String(item.vulnerability_class)} ·{" "}
-                  {String(item.severity)}
+                  <span
+                    className={
+                      verified
+                        ? "px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900"
+                        : "px-1.5 py-0.5 rounded bg-amber-100 text-amber-900"
+                    }
+                  >
+                    {verified ? "verified" : state}
+                  </span>{" "}
+                  · {String(item.vulnerability_class)} · {String(item.severity)}
                 </div>
+                {!verified ? (
+                  <p className="text-amber-800 mt-1">
+                    Potential only — reproduction evidence is required before verification.
+                  </p>
+                ) : null}
                 <button
                   className="mt-1 border px-2 py-0.5 rounded"
                   onClick={() => void control("reject_finding", { finding_id: item.id })}
@@ -376,7 +419,8 @@ export default function ResearchWorkbenchPage() {
                   Reject
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       </section>

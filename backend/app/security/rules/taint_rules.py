@@ -58,7 +58,7 @@ class TaintFlowRule(SecurityRule):
         for call in graph.calls:
             if not call_matches_sink(call, sink_patterns):
                 continue
-            if argument_is_constant(call.argument_text) and not call.dynamic:
+            if argument_is_constant(call.argument_text):
                 continue
             if _looks_parameterized(call.argument_text):
                 continue

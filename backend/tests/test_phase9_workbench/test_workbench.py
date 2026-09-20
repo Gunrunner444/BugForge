@@ -227,13 +227,8 @@ async def test_live_mode_safety_blocks(client) -> None:
             "reason": "probe",
         },
     )
-    assert blocked.status_code in {403, 200}
-    if blocked.status_code == 200:
-        assert (
-            blocked.json().get("authorization") in {None, "BLOCKED"}
-            or blocked.json().get("quality") in {"blocked", "unavailable"}
-            or "disabled" in str(blocked.json()).lower()
-        )
+    assert blocked.status_code == 403
+    assert "disabled" in str(blocked.json()).lower()
 
     escalate = await client.post(
         f"/api/v1/security-agent/sessions/{session_id}/approvals",
@@ -241,9 +236,9 @@ async def test_live_mode_safety_blocks(client) -> None:
             **OPERATOR_HEADERS,
             "X-BugForge-Operator-Token": OPERATOR_HEADERS["X-BugForge-Operator-Token"],
         },
-        json={"kind": "enable_active_testing", "note": "ai"},
+        json={"kind": "enable_active_testing", "note": "operator"},
     )
-    assert escalate.status_code in {200, 403}
+    assert escalate.status_code == 200
 
 
 def test_live_engine_blocks_unknown_and_unapproved() -> None:

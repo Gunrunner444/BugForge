@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.adapters.languages.base import LanguageAdapter
 from app.adapters.languages.profile import ProfileLanguageAdapter
+from app.analysis.javascript_analyzer import ALL_JAVASCRIPT_RULES
 from app.domain.language import LanguageCapability
 
 
@@ -53,6 +54,7 @@ class JavaScriptAdapter(ProfileLanguageAdapter):
             "javascript",
             "JavaScript",
             frozenset({".js", ".mjs", ".cjs", ".jsx"}),
+            rules=ALL_JAVASCRIPT_RULES,
         )
 
 
@@ -62,6 +64,7 @@ class TypeScriptAdapter(ProfileLanguageAdapter):
             "typescript",
             "TypeScript",
             frozenset({".ts", ".tsx"}),
+            rules=ALL_JAVASCRIPT_RULES,
         )
 
 

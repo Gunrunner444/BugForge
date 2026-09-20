@@ -67,12 +67,14 @@ class LanguageProfile:
     language_id: str
     display_name: str
     extensions: frozenset[str]
-    line_comment: str | None = "//"
+    line_comment: str | tuple[str, ...] | None = "//"
     block_comment: tuple[str, str] | None = ("/*", "*/")
     import_patterns: tuple[str, ...] = ()
     function_patterns: tuple[str, ...] = ()
     class_patterns: tuple[str, ...] = ()
     assignment_patterns: tuple[str, ...] = ()
+    # Keywords that invoke a callee without requiring parentheses (PHP echo, Ruby system).
+    bare_call_keywords: tuple[str, ...] = ()
     source_patterns: tuple[str, ...] = ()
     sql_sinks: tuple[str, ...] = ()
     command_sinks: tuple[str, ...] = ()

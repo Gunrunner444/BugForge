@@ -39,8 +39,10 @@ See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architec
 
 BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
-instead of hard-coded conditionals. Python quality analysis and twelve-language
-security analysis run through that catalog. Auxiliary formats stay detection-only.
+instead of hard-coded conditionals. Python quality analysis, JavaScript/TypeScript
+quality rules, and twelve-language security analysis run through that catalog.
+Auxiliary formats stay detection-only. See
+[docs/language-capability-matrix.md](docs/language-capability-matrix.md).
 
 Phase 2 adds:
 

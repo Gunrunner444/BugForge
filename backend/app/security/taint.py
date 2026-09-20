@@ -83,13 +83,20 @@ def argument_is_constant(argument_text: str) -> bool:
     text = argument_text.strip()
     if not text:
         return True
+    masked = _mask_strings(text)
     if any(
-        marker in text for marker in ("+", "${", "#{", "%s", "%d", "{}", ".format(", 'f"', "f'")
+        marker in masked for marker in ("+", "${", "#{", "%s", "%d", "{}", ".format(", 'f"', "f'")
     ):
         return False
     if text[0] in {'"', "'", "`"} and text[-1] == text[0]:
         return True
-    return False
+    return not any(ch.isalnum() for ch in masked)
+
+
+def _mask_strings(text: str) -> str:
+    from app.parsing.extract import _mask_strings as mask
+
+    return mask(text)
 
 
 def identifiers_in(text: str) -> Iterable[str]:

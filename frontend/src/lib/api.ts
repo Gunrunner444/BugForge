@@ -93,7 +93,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = await res.text().catch(() => undefined);
     }
-    throw new ApiError(res.status, `HTTP ${res.status}`, detail);
+    const label =
+      res.status === 401
+        ? "Unauthorized"
+        : res.status === 403
+          ? "Forbidden"
+          : `HTTP ${res.status}`;
+    throw new ApiError(res.status, label, detail);
   }
 
   if (res.status === 204) return undefined as unknown as T;
