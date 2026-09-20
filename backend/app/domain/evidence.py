@@ -23,6 +23,8 @@ class EvidenceKind(StrEnum):
     BROWSER = "browser"
     PROXY = "proxy"
     SCANNER = "scanner"
+    SCANNER_PLAN = "scanner_plan"
+    TOOL_STATUS = "tool_status"
     FUZZING = "fuzzing"
     API_TEST = "api_test"
     REPRODUCTION = "reproduction"
@@ -49,6 +51,8 @@ class EvidenceProvenance(StrEnum):
     HTTP_OBSERVATION = "http_observation"
     SCANNER_OBSERVATION = "scanner_observation"
     SCANNER_RESULT = "scanner_result"
+    SCANNER_PLAN = "scanner_plan"
+    TOOL_STATUS = "tool_status"
     API_TEST = "api_test"
     FUZZING_RESULT = "fuzzing_result"
     SCREENSHOT = "screenshot"
@@ -80,11 +84,12 @@ _KIND_TO_PROVENANCE: dict[EvidenceKind, EvidenceProvenance] = {
     EvidenceKind.TEST_FAILURE: EvidenceProvenance.EXECUTION,
     EvidenceKind.REPRODUCTION: EvidenceProvenance.REPRODUCTION,
     EvidenceKind.BROWSER: EvidenceProvenance.BROWSER_OBSERVATION,
-    EvidenceKind.SCREENSHOT: EvidenceProvenance.BROWSER_OBSERVATION,
     EvidenceKind.PROXY: EvidenceProvenance.HTTP_OBSERVATION,
     EvidenceKind.HTTP_REQUEST: EvidenceProvenance.HTTP_OBSERVATION,
     EvidenceKind.HTTP_RESPONSE: EvidenceProvenance.HTTP_OBSERVATION,
     EvidenceKind.SCANNER: EvidenceProvenance.SCANNER_RESULT,
+    EvidenceKind.SCANNER_PLAN: EvidenceProvenance.SCANNER_PLAN,
+    EvidenceKind.TOOL_STATUS: EvidenceProvenance.TOOL_STATUS,
     EvidenceKind.FUZZING: EvidenceProvenance.FUZZING_RESULT,
     EvidenceKind.API_TEST: EvidenceProvenance.API_TEST,
     EvidenceKind.LOG: EvidenceProvenance.LOG,

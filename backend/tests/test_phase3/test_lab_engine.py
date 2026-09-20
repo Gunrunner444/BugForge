@@ -89,7 +89,9 @@ async def test_fuzzing_respects_limits(lab_server: LabServer) -> None:
     engine.grant(ApprovalKind.ENABLE_FUZZING, operator="alice")
     fuzzer = FuzzingEngine(
         engine,
-        limits=FuzzLimits(request_limit=3, payload_count=10, max_body_size=2048),
+        limits=FuzzLimits(
+            request_limit=3, payload_count=10, max_body_size=2048, requests_per_second=20.0
+        ),
     )
     evidence = await fuzzer.fuzz(
         SeedRequest(method="GET", url=lab_server.origin + "/search?q=test"),

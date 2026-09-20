@@ -7,6 +7,7 @@ from app.api.v1.endpoints.debugging import router as debugging_router
 from app.api.v1.endpoints.discovered_repositories import router as discovered_repos_router
 from app.api.v1.endpoints.discovery import router as discovery_router
 from app.api.v1.endpoints.github import router as github_router
+from app.api.v1.endpoints.hackerone import router as hackerone_router
 from app.api.v1.endpoints.projects import router as projects_router
 from app.api.v1.endpoints.repair import router as repair_router
 from app.api.v1.endpoints.reproduction import router as reproduction_router
@@ -26,6 +27,7 @@ api_router.include_router(reproduction_router)
 api_router.include_router(repair_router)
 api_router.include_router(verification_router)
 api_router.include_router(github_router)
+api_router.include_router(hackerone_router)
 # v1.1.0 — Autonomous discovery
 api_router.include_router(discovery_router)
 api_router.include_router(discovered_repos_router)

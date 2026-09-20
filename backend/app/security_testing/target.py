@@ -7,6 +7,7 @@ Naive substring matching is forbidden: ``evil-example.com`` must not match
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import unquote, urlparse
@@ -20,10 +21,17 @@ class AssetType(StrEnum):
     CIDR = "cidr"
     OTHER = "other"
     SOURCE_CODE = "source_code"
+    EXECUTABLE = "executable"
     ANDROID_APP = "android_app"
     IOS_APP = "ios_app"
     HARDWARE = "hardware"
     OTHER_ASSET = "other_asset"
+    AI_MODEL = "ai_model"
+
+
+NETWORK_ASSET_TYPES = frozenset(
+    {AssetType.URL, AssetType.WILDCARD, AssetType.DOMAIN, AssetType.IP, AssetType.CIDR}
+)
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
@@ -126,9 +134,7 @@ class TargetNormalizer:
         default_port = _DEFAULT_PORTS.get(scheme)
         if port is None:
             port = default_port
-        path = parsed.path or "/"
-        if path != "/" and path.endswith("/"):
-            path = path.rstrip("/")
+        path = canonicalize_path(parsed.path or "/")
         query = parsed.query
         ip = str(_try_ip(hostname)) if _try_ip(hostname) else None
         netloc = _format_netloc(hostname, port, default_port)
@@ -168,8 +174,8 @@ def hostname_matches(host: str, patterns: tuple[str, ...]) -> bool:
 
 def path_matches(candidate_path: str, prefix: str) -> bool:
     """Prefix match on URL path segments, not raw substrings."""
-    left = _normalize_path(candidate_path)
-    right = _normalize_path(prefix)
+    left = canonicalize_path(candidate_path)
+    right = canonicalize_path(prefix)
     if right in {"", "/"}:
         return True
     if left == right:
@@ -215,13 +221,41 @@ def _normalize_hostname(host: str) -> str:
         return value
 
 
-def _normalize_path(path: str) -> str:
-    raw = unquote(path or "/")
+def canonicalize_path(path: str) -> str:
+    """Canonicalize a URL path for scope comparison.
+
+    Collapses ``.`` / ``..`` segments, duplicate slashes, trailing slashes,
+    and bounded percent-encoding (including encoded slashes). Equivalent
+    representations must compare equal so encoding cannot bypass scope.
+    """
+    raw = (path or "/").replace("\\", "/")
+    raw = _percent_decode_bounded(raw, rounds=3)
     if not raw.startswith("/"):
         raw = "/" + raw
-    if raw != "/" and raw.endswith("/"):
-        raw = raw.rstrip("/")
-    return raw
+    normalized = posixpath.normpath(raw)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if normalized != "/" and normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
+    return normalized or "/"
+
+
+def _percent_decode_bounded(value: str, *, rounds: int = 3) -> str:
+    current = value
+    for _ in range(max(1, rounds)):
+        decoded = unquote(current)
+        if decoded == current:
+            break
+        current = decoded
+    return current
+
+
+def _normalize_path(path: str) -> str:
+    return canonicalize_path(path)
+
+
+def try_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    return _try_ip(value)
 
 
 def _try_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:

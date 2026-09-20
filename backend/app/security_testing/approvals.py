@@ -35,14 +35,21 @@ class ApprovalRecord:
     granted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+_AI_OPERATORS = frozenset({"ai", "model", "llm", "assistant", "bugforge-ai", "qwen", "system"})
+
+
+def is_ai_operator(operator: str) -> bool:
+    return operator.strip().lower() in _AI_OPERATORS
+
+
 class HumanApprovalGate:
-    """In-memory approval ledger. Submission to HackerOne remains unimplemented."""
+    """In-memory approval ledger. AI operators cannot grant HackerOne submission."""
 
     def __init__(self) -> None:
         self._records: dict[ApprovalKind, ApprovalRecord] = {}
 
     def grant(self, kind: ApprovalKind, *, operator: str, note: str = "") -> ApprovalRecord:
-        if kind is ApprovalKind.SUBMIT_HACKERONE_REPORT:
+        if kind is ApprovalKind.SUBMIT_HACKERONE_REPORT and is_ai_operator(operator):
             raise RestrictedActivityError("hackerone_submission")
         record = ApprovalRecord(
             kind=kind, state=ApprovalState.GRANTED, operator=operator, note=note

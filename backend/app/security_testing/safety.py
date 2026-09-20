@@ -1,4 +1,6 @@
-"""Central SafetyController: conservative limits, dry-run, forbidden activities."""
+# BugForge's per-request RateLimiter applies to GatedHttpClient traffic.
+# External scanners have their own ScannerExecutionPolicy envelope; see
+# app.security_testing.scanner_policy.
 
 from __future__ import annotations
 

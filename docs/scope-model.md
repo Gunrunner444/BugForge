@@ -29,9 +29,15 @@ A `ProgramScope` contains structured include and exclude `ScopeRule`s:
   (`passive_only`, `no_automated_scanning`, `no_destructive`)
 - exclusions (host, URL, or path)
 
-HackerOne-oriented fields are present for later import (asset type,
-identifier, eligibility, instructions, exclusions, program id). This
-release does **not** call the HackerOne API.
+HackerOne-oriented fields are imported by Phase 4 (`HackerOneScopeProvider`
++ `HackerOneScopeEvaluator`). AI never decides HackerOne scope.
+
+Path comparison uses canonicalization (dot segments, duplicate slashes,
+bounded percent-decoding including encoded slashes). Exclusions go through
+the same `TargetNormalizer` as includes.
+
+Closed HackerOne programs deny unknown assets. Open programs still do not
+auto-authorize unknown assets.
 
 ## Authorization decision
 

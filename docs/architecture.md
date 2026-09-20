@@ -338,15 +338,32 @@ Target → TargetNormalizer → ScopeGuard → SafetyController → RateLimiter
 Default deny: no scope, unknown target, or missing active-testing permission.
 Local Lab mode is isolated from live-target mode. Human approval is required
 before enabling active testing on a live project, starting a live scan,
-fuzzing, higher-risk scanners, sending a generated PoC, or (later) submitting
-a HackerOne report.
+fuzzing, higher-risk scanners, sending a generated PoC, or submitting a
+HackerOne report (dry-run never creates a remote report).
 
-## What remains deferred
+Live testing adds a DNS stage: hostname → resolved IPs → network policy.
+An in-scope public name must not silently become a private/internal address.
 
-- HackerOne API scope sync and report submission
-- Full Playwright/ZAP/Nuclei execution when those binaries are absent
-  (adapters ingest results and still enforce BugForge scope)
-- Treating scanner alerts as verified program submissions
+`GatedHttpClient` disables HTTP redirects by default and re-authorizes every
+`Location`. Playwright installs a BrowserContext route policy so fetch/XHR/
+scripts/images/iframes/WebSockets cannot bypass `page.goto` authorization.
+
+External scanners (ZAP Automation Framework, Nuclei) may **execute** when a
+binary or test runner is present. A generated plan is `SCANNER_PLAN`
+(not verification evidence). Only ingested scanner output is
+`SCANNER_RESULT`. BugForge's per-request `RateLimiter` does not claim to
+see every request an external scanner process makes; `ScannerExecutionPolicy`
+is the envelope passed into the tool.
+
+HackerOne: [hackerone.md](hackerone.md), [reporting.md](reporting.md).
+
+## What remains operator-dependent
+
+- Real ZAP/Nuclei/Playwright/Qwen binaries (optional; CI uses fakes)
+- Real HackerOne credentials and a program the researcher may test
+- Human `HUMAN_APPROVED` before any HackerOne `POST /hackers/reports`
+
+CI does **not** require those binaries or credentials.
 
 ## Security tools
 

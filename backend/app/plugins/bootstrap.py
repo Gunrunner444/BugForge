@@ -137,11 +137,21 @@ def _register_reporting(catalog: PluginCatalog) -> None:
     catalog.report_providers.register(
         "local", LocalReportProvider, description="Local markdown report"
     )
+    from app.adapters.hackerone.provider import HackerOneProvider
+
+    catalog.report_providers.register(
+        "hackerone", HackerOneProvider, description="HackerOne Hacker API reporting"
+    )
 
 
 def _register_scope(catalog: PluginCatalog) -> None:
     catalog.scope_providers.register(
         "manual", ManualScopeProvider, description="Operator-supplied scope"
+    )
+    from app.adapters.hackerone.provider import HackerOneScopeProvider
+
+    catalog.scope_providers.register(
+        "hackerone", HackerOneScopeProvider, description="HackerOne structured scope"
     )
 
 

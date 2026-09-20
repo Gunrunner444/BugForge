@@ -4,7 +4,8 @@ Phase 3 adds **controlled, scope-aware security testing**. It is not
 unrestricted autonomous hacking. The human operator remains responsible for
 authorization and for any later disclosure.
 
-HackerOne report submission is **not implemented**.
+HackerOne report submission is implemented behind human review and dry-run.
+See [hackerone.md](hackerone.md) and [reporting.md](reporting.md).
 
 ## Local lab vs live
 
@@ -41,7 +42,7 @@ Required before:
 - enabling fuzzing
 - running a higher-risk scanner (ZAP active scan, Nuclei)
 - sending a generated proof-of-concept request
-- submitting a HackerOne report (gate exists; submission is not implemented)
+- submitting a HackerOne report (human operator; AI cannot approve)
 
 The AI may propose actions. `SafetyController` decides whether they are
 technically allowed. A human decides whether active research should begin.
@@ -61,10 +62,23 @@ vulnerabilities.
 
 Manual researcher notes join the same `EvidenceBundle`.
 
+## Scanner vs per-request rate limit
+
+`RateLimiter` applies to `GatedHttpClient` traffic (API tests, fuzzing, PoCs).
+ZAP and Nuclei generate their own packets. BugForge still decides whether
+they may run, which targets they may use, and the maximum envelope
+(`ScannerExecutionPolicy`: max targets, runtime, scanner rate, concurrency,
+allowed/denied templates, methods, destructive flag). The tool is configured
+with limits no looser than that envelope.
+
 ## Limitations
 
 - Playwright, ZAP, and Nuclei binaries are optional. Without them, adapters
-  still enforce scope and can ingest recorded output.
+  still enforce scope, emit a **plan** (`SCANNER_PLAN` / `TOOL_UNAVAILABLE`),
+  and can ingest recorded output. They do **not** invent scanner-result
+  evidence from authorization alone.
+- When binaries (or a test runner) are present, adapters execute and ingest
+  real output only.
 - Burp is ingest-only (HTTP history export). BugForge does not drive the GUI.
 - Default HTTP methods are `GET`, `HEAD`, `OPTIONS`. Destructive methods are
   off.

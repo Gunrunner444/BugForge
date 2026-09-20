@@ -23,7 +23,8 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | v1.1.0 | Autonomous Discovery | ✅ Complete |
 | Phase 1 | Adapter foundation (languages, AI, security tooling) | ✅ Complete |
 | Phase 2 | Local AI + multi-language security analysis | ✅ Complete |
-| Phase 3 | Authorized security testing infrastructure | ✅ Complete (no HackerOne submission) |
+| Phase 3 | Authorized security testing infrastructure | ✅ Implemented (execution + hardening in Phase 4) |
+| Phase 4 | HackerOne program integration | ✅ Implemented (gated submission; mock-tested) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -49,14 +50,18 @@ Phase 2 adds:
 
 Phase 3 adds **authorized, scope-aware security testing**. Every active
 operation must pass `ScopeGuard` → `SafetyController` → `RateLimiter`.
-HackerOne report submission is **not** implemented.
+External scanners run only inside a BugForge execution envelope. Phase 4
+adds HackerOne program lookup, structured scope sync, and a human-gated
+report workflow with dry-run (no report created) before optional real
+submission.
 
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),
 [docs/scope-model.md](docs/scope-model.md),
-[docs/tool-integrations.md](docs/tool-integrations.md). Live HackerOne
-submission remains unimplemented. Do not point this stack at real-world
-targets without an operator-approved program scope.
+[docs/tool-integrations.md](docs/tool-integrations.md),
+[docs/hackerone.md](docs/hackerone.md),
+[docs/reporting.md](docs/reporting.md). Do not point this stack at
+real-world targets without an operator-approved program scope.
 
 ```
 Repository
@@ -265,13 +270,30 @@ Full docs: `http://localhost:8000/docs`
 
 ## Roadmap
 
-Completed through Phase 3 (authorized security-testing infrastructure).
-Deliberately **not** implemented:
+There are two roadmaps. Do not mix them.
 
-- HackerOne API report submission (approval gate exists; nothing is sent)
+### Original debugging roadmap (complete)
+
+Repository analysis, test runner, static analysis, AI debugging, test
+generation, reproduction, repair, verification, GitHub integration, and
+autonomous discovery. That work is the **debugging** product.
+
+### Security testing roadmap
+
+| Phase | What it actually does |
+|---|---|
+| 1 | Adapter contracts and plugin catalog |
+| 2 | Local AI + multi-language **static** security analysis (potential/corroborated only) |
+| 3 | Authorized testing: ScopeGuard, SafetyController, lab vs live, gated HTTP, optional scanner **execution** when binaries exist |
+| 4 | HackerOne Hacker API: program lookup, structured scope sync, finding→draft, human review, dry-run, gated real submission |
+
+Deliberately **not** automatic:
+
 - Unrestricted autonomous scanning or a "hack everything" action
-- Treating AI or scanner alerts as verified vulnerabilities
-- Driving the Burp GUI or treating ZAP's own scope as authoritative
+- Treating AI, scanner plans, or scanner alerts as verified vulnerabilities
+- Driving the Burp GUI or treating ZAP/Nuclei's own scope as authoritative
+- Submitting HackerOne reports without HUMAN_APPROVED
+- Using HackerOne Report Assistant output as BugForge verified evidence
 
 Use Local Lab mode against loopback fixtures. Do not use this against live
 external targets until a human has configured structured scope, enabled

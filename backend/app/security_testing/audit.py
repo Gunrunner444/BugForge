@@ -1,13 +1,20 @@
-"""Append-only, hash-chained audit log for active testing actions."""
+"""Append-only, hash-chained audit log for active testing actions.
+
+Persistence is behind :class:`AuditLogStore`. The default store is in-memory.
+Secrets must never be written to events.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import uuid4
+
+from app.security_testing.secrets import redact_text
 
 
 def _canonical(payload: Mapping[str, object]) -> str:
@@ -37,12 +44,33 @@ class AuditEvent:
         return data
 
 
+class AuditLogStore(Protocol):
+    """Persistence interface. Implementations must not store secrets."""
+
+    def append(self, event: AuditEvent) -> None: ...
+
+    def load(self) -> Sequence[AuditEvent]: ...
+
+
+class InMemoryAuditStore:
+    def __init__(self) -> None:
+        self._events: list[AuditEvent] = []
+
+    def append(self, event: AuditEvent) -> None:
+        self._events.append(event)
+
+    def load(self) -> Sequence[AuditEvent]:
+        return tuple(self._events)
+
+
 class AuditLog:
     """Tamper-evident within the process: each entry hashes the previous hash."""
 
-    def __init__(self) -> None:
-        self._entries: list[AuditEvent] = []
-        self._head = "0" * 64
+    def __init__(self, store: AuditLogStore | None = None) -> None:
+        self._store: AuditLogStore = store or InMemoryAuditStore()
+        loaded = list(self._store.load())
+        self._entries: list[AuditEvent] = loaded
+        self._head = loaded[-1].entry_hash if loaded else "0" * 64
 
     def record(
         self,
@@ -62,13 +90,13 @@ class AuditLog:
         body = {
             "timestamp": timestamp.isoformat(),
             "project": project,
-            "target": target,
-            "scope_decision": scope_decision,
+            "target": redact_text(target),
+            "scope_decision": redact_text(scope_decision),
             "tool": tool,
-            "action": action,
+            "action": redact_text(action),
             "request_id": request_id,
             "rate_limit_decision": rate_limit_decision,
-            "result": result,
+            "result": redact_text(result),
             "evidence_id": evidence_id,
             "human_approval": human_approval,
             "prev_hash": self._head,
@@ -77,13 +105,13 @@ class AuditLog:
         event = AuditEvent(
             timestamp=timestamp,
             project=project,
-            target=target,
-            scope_decision=scope_decision,
+            target=redact_text(target),
+            scope_decision=redact_text(scope_decision),
             tool=tool,
-            action=action,
+            action=redact_text(action),
             request_id=request_id,
             rate_limit_decision=rate_limit_decision,
-            result=result,
+            result=redact_text(result),
             evidence_id=evidence_id,
             human_approval=human_approval,
             prev_hash=self._head,
@@ -91,6 +119,7 @@ class AuditLog:
         )
         self._entries.append(event)
         self._head = digest
+        self._store.append(event)
         return event
 
     def entries(self) -> tuple[AuditEvent, ...]:

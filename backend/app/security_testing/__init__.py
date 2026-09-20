@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.security_testing.approvals import ApprovalKind, HumanApprovalGate
+from app.security_testing.approvals import ApprovalKind, HumanApprovalGate, is_ai_operator
 from app.security_testing.audit import AuditLog
 from app.security_testing.engine import SecurityTestEngine, SecurityTestSession, TestingMode
 from app.security_testing.errors import (
@@ -39,4 +39,5 @@ __all__ = [
     "TargetNormalizer",
     "TestingMode",
     "ToolExecutionError",
+    "is_ai_operator",
 ]

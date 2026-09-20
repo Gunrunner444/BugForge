@@ -55,7 +55,8 @@ class SecurityStatusResponse(BaseModel):
     notes: str = (
         "Static and AI hypotheses remain potential or corroborated. "
         "They are not verified vulnerabilities. Active testing uses ScopeGuard "
-        "and requires human approval. HackerOne submission is not implemented."
+        "and requires human approval. HackerOne submission is gated behind "
+        "human review, dry-run validation, and HUMAN_APPROVED."
     )
 
 

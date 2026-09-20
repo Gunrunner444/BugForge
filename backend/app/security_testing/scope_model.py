@@ -18,6 +18,11 @@ class Eligibility(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ScopeMode(StrEnum):
+    CLOSED = "closed"
+    OPEN = "open"
+
+
 class TestingRestriction(StrEnum):
     __test__ = False
     NONE = "none"
@@ -43,6 +48,10 @@ class ScopeRule:
     program_id: str | None = None
     is_exclusion: bool = False
     max_severity: str | None = None
+    eligible_for_submission: bool = True
+    eligible_for_bounty: bool = False
+    structured_scope_id: str | None = None
+    reference: str | None = None
 
     def __post_init__(self) -> None:
         if not self.identifier.strip():
@@ -63,6 +72,9 @@ class ProgramScope:
     testing_restrictions: tuple[TestingRestriction, ...] = ()
     lab_mode: bool = False
     lab_hosts: tuple[str, ...] = ("localhost", "127.0.0.1", "::1")
+    scope_mode: ScopeMode = ScopeMode.CLOSED
+    open_scope_acknowledged: bool = False
+    open_scope_policy: str = ""
 
     @classmethod
     def closed(cls) -> ProgramScope:

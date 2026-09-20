@@ -396,4 +396,39 @@ export const api = {
         `/api/v1/security-testing/sessions/${projectId}/audit`,
       ),
   },
+
+  hackerone: {
+    status: () => request<Record<string, unknown>>("/api/v1/hackerone/status"),
+    sync: (handle: string, operator = "researcher") =>
+      request<Record<string, unknown>>("/api/v1/hackerone/programs/sync", {
+        method: "POST",
+        body: JSON.stringify({ handle, operator }),
+      }),
+    program: (handle: string) => request<Record<string, unknown>>(`/api/v1/hackerone/programs/${handle}`),
+    createDraft: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/hackerone/reports/drafts", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    review: (draftId: string, operator: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/review`, {
+        method: "POST",
+        body: JSON.stringify({ operator }),
+      }),
+    dryRun: (draftId: string, programHandle: string, operator: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/dry-run`, {
+        method: "POST",
+        body: JSON.stringify({ operator, program_handle: programHandle }),
+      }),
+    approve: (draftId: string, operator: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ operator }),
+      }),
+    submit: (draftId: string, programHandle: string, operator: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/submit`, {
+        method: "POST",
+        body: JSON.stringify({ operator, program_handle: programHandle }),
+      }),
+  },
 };

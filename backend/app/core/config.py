@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.3.0"
+    version: str = "1.4.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_app_id: str = ""
     github_app_private_key: str = ""
+
+    # HackerOne Hacker API — never expose these to the frontend
+    hackerone_api_username: str = ""
+    hackerone_api_token: str = ""
+    hackerone_api_base_url: str = "https://api.hackerone.com/v1"
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

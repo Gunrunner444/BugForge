@@ -22,9 +22,10 @@ _SECRET_HEADERS = {
     "apikey",
 }
 _PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|authorization)\s*[:=]\s*\S+"),
     re.compile(r"(?i)bearer\s+[a-z0-9._\-+=/]+"),
     re.compile(r"(?i)basic\s+[a-z0-9=+/]+"),
+    re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd|authorization)\s*[:=]\s*\S+"),
+    re.compile(r"(?i)(access_token|refresh_token|id_token)=([^&\s]+)"),
 )
 
 

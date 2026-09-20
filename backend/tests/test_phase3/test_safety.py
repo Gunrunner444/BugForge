@@ -76,14 +76,22 @@ def test_live_active_testing_requires_human_approval() -> None:
     assert denied.allowed is False
     assert denied.approval_required is True
     engine.grant(ApprovalKind.ENABLE_ACTIVE_TESTING, operator="alice")
+    from app.security_testing.dns import DnsAuthorizer, MappingResolver, ResolvedTargetPolicy
+
+    engine.dns = DnsAuthorizer(
+        policy=ResolvedTargetPolicy.live(),
+        resolver=MappingResolver({"example.com": ["93.184.216.34"]}),
+    )
     allowed = engine.authorize("https://example.com/", tool="http", active=True)
     assert allowed.allowed is True
 
 
-def test_hackerone_submission_cannot_be_approved() -> None:
+def test_hackerone_submission_requires_human_not_ai() -> None:
     engine = SecurityTestEngine.lab()
     with pytest.raises(RestrictedActivityError):
-        engine.grant(ApprovalKind.SUBMIT_HACKERONE_REPORT, operator="alice")
+        engine.grant(ApprovalKind.SUBMIT_HACKERONE_REPORT, operator="ai")
+    engine.grant(ApprovalKind.SUBMIT_HACKERONE_REPORT, operator="alice")
+    assert engine.approvals.is_granted(ApprovalKind.SUBMIT_HACKERONE_REPORT) is True
 
 
 def test_secret_redaction() -> None:

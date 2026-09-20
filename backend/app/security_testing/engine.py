@@ -10,8 +10,9 @@ from uuid import uuid4
 from app.domain.evidence import Evidence, EvidenceBundle
 from app.domain.findings import SecurityFinding
 from app.domain.scope import ScopeConstraint
-from app.security_testing.approvals import ApprovalKind, HumanApprovalGate
+from app.security_testing.approvals import ApprovalKind, HumanApprovalGate, is_ai_operator
 from app.security_testing.audit import AuditLog
+from app.security_testing.dns import DnsAuthorizer, ResolvedTargetPolicy
 from app.security_testing.errors import (
     ApprovalRequiredError,
     AuthorizationDeniedError,
@@ -21,6 +22,7 @@ from app.security_testing.http_client import GatedHttpClient
 from app.security_testing.rate_limit import RateLimiter
 from app.security_testing.runner import SecurityToolRunner
 from app.security_testing.safety import RestrictedActivity, SafetyController, SafetyLimits
+from app.security_testing.scanner_policy import ScannerExecutionPolicy
 from app.security_testing.scope_guard import ScopeGuard
 from app.security_testing.scope_model import AuthorizationDecision, ProgramScope
 
@@ -62,6 +64,9 @@ class SecurityTestEngine:
                 testing_restrictions=session.scope.testing_restrictions,
                 lab_mode=True,
                 lab_hosts=session.scope.lab_hosts,
+                scope_mode=session.scope.scope_mode,
+                open_scope_acknowledged=session.scope.open_scope_acknowledged,
+                open_scope_policy=session.scope.open_scope_policy,
             )
         if session.mode is TestingMode.LIVE and session.scope.lab_mode:
             raise RestrictedActivityError("out_of_scope")
@@ -69,6 +74,12 @@ class SecurityTestEngine:
         self.scope_guard = ScopeGuard(session.scope)
         self.safety = SafetyController(session.limits, dry_run=session.dry_run)
         self.rate_limiter = RateLimiter(session.limits)
+        self.scanner_policy = ScannerExecutionPolicy().tighten(session.limits)
+        self.dns = DnsAuthorizer(
+            policy=ResolvedTargetPolicy.lab()
+            if session.mode is TestingMode.LAB
+            else ResolvedTargetPolicy.live()
+        )
         self.approvals = HumanApprovalGate()
         self.audit = AuditLog()
         self.runner = SecurityToolRunner(self)
@@ -135,7 +146,7 @@ class SecurityTestEngine:
         self._apply_active_testing(operator=operator)
 
     def grant(self, kind: ApprovalKind, *, operator: str, note: str = "") -> None:
-        if kind is ApprovalKind.SUBMIT_HACKERONE_REPORT:
+        if kind is ApprovalKind.SUBMIT_HACKERONE_REPORT and is_ai_operator(operator):
             raise RestrictedActivityError("hackerone_submission")
         self.approvals.grant(kind, operator=operator, note=note)
         if kind is ApprovalKind.ENABLE_ACTIVE_TESTING:
@@ -156,6 +167,9 @@ class SecurityTestEngine:
             testing_restrictions=self.session.scope.testing_restrictions,
             lab_mode=self.session.scope.lab_mode,
             lab_hosts=self.session.scope.lab_hosts,
+            scope_mode=self.session.scope.scope_mode,
+            open_scope_acknowledged=self.session.scope.open_scope_acknowledged,
+            open_scope_policy=self.session.scope.open_scope_policy,
         )
         self.scope_guard = ScopeGuard(self.session.scope)
         self.audit.record(
@@ -238,6 +252,23 @@ class SecurityTestEngine:
         if not scope_decision.allowed:
             self._log_decision(scope_decision)
             return scope_decision
+        if self.session.mode is TestingMode.LIVE:
+            dns_decision = self.dns.authorize(
+                target, lab_mode=False, lab_hosts=self.session.scope.lab_hosts
+            )
+            if not dns_decision.allowed:
+                denied = AuthorizationDecision(
+                    allowed=False,
+                    reason=dns_decision.reason,
+                    target_original=target,
+                    method=method.upper(),
+                    tool=tool,
+                    matched_rule=scope_decision.matched_rule,
+                    program=scope_decision.program,
+                    dry_run=self.safety.dry_run,
+                )
+                self._log_decision(denied)
+                return denied
         safety = self.safety.check_request(
             target=target,
             method=method,

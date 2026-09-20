@@ -63,7 +63,8 @@ class TestingSessionResponse(BaseModel):
     notes: str = (
         "There is no unrestricted scan action. Every active operation shows "
         "its target, scope decision, tool, request limit, and approval state. "
-        "HackerOne submission is not implemented."
+        "HackerOne submission is gated: dry-run never creates a report, and "
+        "real submission requires HUMAN_APPROVED plus a human operator."
     )
 
 

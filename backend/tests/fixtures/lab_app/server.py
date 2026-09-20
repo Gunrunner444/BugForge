@@ -26,6 +26,28 @@ class LabAppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self._json(200, {"ok": True, "lab": True})
             return
+        if parsed.path == "/redirect/in-scope":
+            self._redirect("/health")
+            return
+        if parsed.path == "/redirect/out":
+            self._redirect("https://evil.example/")
+            return
+        if parsed.path == "/redirect/loop":
+            self._redirect("/redirect/loop")
+            return
+        if parsed.path == "/redirect/scheme":
+            host, port = self.server.server_address
+            self._redirect(f"https://{host}:{port}/health")
+            return
+        if parsed.path == "/redirect/port":
+            self._redirect("http://127.0.0.1:9/health")
+            return
+        if parsed.path == "/redirect/excluded":
+            self._redirect("/admin")
+            return
+        if parsed.path == "/admin":
+            self._json(200, {"admin": True})
+            return
         if parsed.path == "/login":
             self._html(
                 200,
@@ -87,6 +109,12 @@ class LabAppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 class LabServer:

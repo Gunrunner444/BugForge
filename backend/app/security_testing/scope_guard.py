@@ -7,6 +7,7 @@ from app.security_testing.lab import is_loopback_or_lab_host
 from app.security_testing.scope_model import (
     AuthorizationDecision,
     ProgramScope,
+    ScopeMode,
     ScopeRule,
     TestingRestriction,
 )
@@ -149,6 +150,16 @@ class ScopeGuard:
             )
         included, rule = self._included(target, method)
         if not included or rule is None:
+            if self.scope.scope_mode is ScopeMode.OPEN:
+                return self._deny(
+                    target,
+                    method,
+                    tool,
+                    "Open-scope program: unknown assets are not automatically authorized. "
+                    "An operator must approve an explicit active-testing policy before BugForge "
+                    "may test assets that are not in the structured scope list.",
+                    dry_run,
+                )
             return self._deny(target, method, tool, "UNKNOWN TARGET = DENY", dry_run)
         method_u = method.upper()
         if not self._method_allowed(method_u, rule):
@@ -211,14 +222,32 @@ class ScopeGuard:
                 return True, rule
         for rule in self.scope.includes:
             for extra in rule.exclusions:
-                if hostname_matches(target.hostname, (extra,)) or extra in {
-                    target.url,
-                    target.original,
-                }:
-                    return True, rule
-                if extra.startswith("/") and path_matches(target.path, extra):
+                if self._exclusion_token_matches(extra, target):
                     return True, rule
         return False, None
+
+    def _exclusion_token_matches(self, extra: str, target: NormalizedTarget) -> bool:
+        token = extra.strip()
+        if not token:
+            return False
+        if token.startswith("/"):
+            return path_matches(target.path, token)
+        try:
+            wanted = self.normalizer.normalize(token)
+        except ValueError:
+            return hostname_matches(target.hostname, (token,))
+        if wanted.cidr:
+            return hostname_matches(target.hostname or target.ip or "", (token,))
+        if wanted.ip and not wanted.scheme:
+            return hostname_matches(target.hostname or target.ip or "", (wanted.ip,))
+        if wanted.hostname and wanted.hostname != target.hostname:
+            return False
+        prefix = wanted.path if wanted.path not in {"", "/"} else ""
+        if prefix and not path_matches(target.path, prefix):
+            return False
+        if wanted.hostname:
+            return hostname_matches(target.hostname, (wanted.hostname,))
+        return False
 
     def _rule_matches(self, rule: ScopeRule, target: NormalizedTarget, method: str) -> bool:
         ident = rule.identifier.strip()
