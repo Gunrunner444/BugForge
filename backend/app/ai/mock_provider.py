@@ -50,7 +50,7 @@ class MockLLMProvider(LLMProvider):
             structured_output=True,
             structured_generation=True,
             text_generation=True,
-            tool_calls=False,
+            tool_calls=True,
             thinking=False,
             thinking_can_disable=True,
             supports_local_models=True,
@@ -231,6 +231,29 @@ class MockLLMProvider(LLMProvider):
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         start = time.monotonic()
+        if request.tools:
+            content = json.dumps(
+                {
+                    "kind": "tool",
+                    "tool": "http_request",
+                    "arguments": {"method": "GET", "url": "http://127.0.0.1/health"},
+                    "reason": "Observe the local lab health endpoint",
+                }
+            )
+            return CompletionResponse(
+                content=content,
+                provider=self.provider_name,
+                model=self.model_name,
+                usage=AIUsage(prompt_tokens=64, completion_tokens=128),
+                duration_seconds=time.monotonic() - start,
+                tool_calls=(
+                    {
+                        "tool": "http_request",
+                        "arguments": {"method": "GET", "url": "http://127.0.0.1/health"},
+                        "reason": "Observe the local lab health endpoint",
+                    },
+                ),
+            )
         lowered = (request.system_prompt or "").lower()
         if "security" in lowered and "hypothesis" in lowered:
             content = json.dumps(

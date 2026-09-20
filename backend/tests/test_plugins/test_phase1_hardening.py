@@ -451,7 +451,7 @@ async def test_mock_complete_and_capabilities() -> None:
     caps = provider.capabilities()
     assert caps.chat is True
     assert caps.structured_output is True
-    assert caps.tool_calls is False
+    assert caps.tool_calls is True
     assert caps.thinking_can_disable is True
     response = await provider.complete(
         CompletionRequest(system_prompt="sys", user_message="hello", json_mode=True)

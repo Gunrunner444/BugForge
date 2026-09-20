@@ -5,7 +5,10 @@ AI-assisted software security research and vulnerability verification
 platform. Phase 3 adds authorized, scope-aware security testing behind
 `ScopeGuard` and `SafetyController`. Debugging behavior is unchanged.
 
-HackerOne report submission is **intentionally not implemented**.
+HackerOne report submission is implemented behind human review, dry-run,
+operator authentication, and persisted duplicate protection. The Phase 6
+`SecurityResearchAgent` is a planner only: it cannot decide scope, verify
+findings, approve reports, or submit to HackerOne.
 
 ## Layering
 
@@ -262,6 +265,10 @@ state transition backed by independent observational or executable evidence.
 `is_in_scope(target)` means the host is on the allow-list (optional method
 filter). It does **not** authorize active testing.
 
+HackerOne scope evaluation is always `evaluate(program, target)`. There is
+no global active program. Program A's structured scope cannot be used for
+Program B.
+
 | Check | Meaning |
 |---|---|
 | `is_in_scope` | Host (and optional method) is allowed |
@@ -270,8 +277,8 @@ filter). It does **not** authorize active testing.
 | `rate_limit_per_minute` | Reserved for a later richer engine |
 
 `ManualScopeProvider` uses operator-supplied allow/deny lists. An empty
-allow-list denies every target. Remote HackerOne scope retrieval is not
-implemented.
+allow-list denies every target. HackerOne structured scope is imported by
+`HackerOneScopeProvider.get_scope_for(program)` / `evaluate(program, target)`.
 
 Browser `navigate`, fuzzer `fuzz`, and security-tool `active_scan` call
 `require_active_testing` before any implementation hook. Proxy
@@ -284,10 +291,18 @@ the public authorization wrapper by accident.
 
 `LocalReportProvider.render()` writes a local markdown document that
 distinguishes potential, corroborated, verified, and rejected findings and
-records human review state. `submitted_remotely` is always false. `submit()`
-raises `AdapterNotImplementedError`. `VulnerabilityReportDraft` prepares
-title, description, class, asset, source evidence, reproduction evidence, and
-impact for a later phase. BugForge is **not** HackerOne-ready.
+records human review state. `HackerOneProvider.submit()` still refuses
+auto-submit; the gated workflow is LOCAL_DRAFT → READY_FOR_REVIEW →
+HUMAN_APPROVED → dry-run or real `POST /hackers/reports`.
+
+## Guided security research agent (Phase 6)
+
+See [security-agent.md](security-agent.md), [agent-tools.md](agent-tools.md),
+and [agent-safety.md](agent-safety.md).
+
+The agent loop is Observe → Analyze → Hypothesize → Plan → Request tool →
+Authorization → Execute. Tool arguments are typed. ScopeGuard and
+SafetyController remain authoritative. Thinking traces are never evidence.
 
 ## Security analysis engine
 

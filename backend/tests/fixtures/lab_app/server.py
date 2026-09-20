@@ -73,6 +73,49 @@ class LabAppHandler(BaseHTTPRequestHandler):
             # Authentication issue: no check.
             self._json(200, {"secret": "lab-only-not-a-real-secret", "users": list(self.users)})
             return
+        if parsed.path == "/api/profile":
+            cookie = self.headers.get("Cookie") or ""
+            if "session=lab-session" not in cookie:
+                self._json(401, {"error": "auth required"})
+                return
+            self._json(200, {"id": "1", "name": "alice", "role": "user"})
+            return
+        if parsed.path.startswith("/api/orders/"):
+            order_id = parsed.path.rsplit("/", 1)[-1]
+            self._json(200, {"id": order_id, "owner": "anyone", "total": 42})
+            return
+        if parsed.path.startswith("/api/safe/orders/"):
+            cookie = self.headers.get("Cookie") or ""
+            if "session=lab-session" not in cookie:
+                self._json(401, {"error": "auth required"})
+                return
+            order_id = parsed.path.rsplit("/", 1)[-1]
+            if order_id != "1":
+                self._json(403, {"error": "forbidden"})
+                return
+            self._json(200, {"id": "1", "owner": "alice", "total": 10})
+            return
+        if parsed.path == "/xss/safe":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            escaped = (
+                query.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+            self._html(200, f"<html><body>Results for {escaped}</body></html>")
+            return
+        if parsed.path == "/api/echo":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            self._json(200, {"echo": query})
+            return
+        if parsed.path == "/api/safe/echo":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            if any(ch in query for ch in "<>\"';"):
+                self._json(400, {"error": "invalid input"})
+                return
+            self._json(200, {"echo": query})
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802

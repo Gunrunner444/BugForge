@@ -17,6 +17,10 @@ session. See [hackerone.md](hackerone.md) and [reporting.md](reporting.md).
 
 The two modes cannot be mixed in one session. A lab session cannot reach
 `example.com`. A live session cannot use lab isolation as a bypass.
+Lab permissions never apply to live HackerOne projects.
+
+The Phase 6 research agent uses the same tool APIs in both modes. There is
+no fully autonomous HackerOne mode.
 
 ## Authorization chain
 

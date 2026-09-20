@@ -30,7 +30,8 @@ A `ProgramScope` contains structured include and exclude `ScopeRule`s:
 - exclusions (host, URL, or path)
 
 HackerOne-oriented fields are imported by Phase 4+ (`HackerOneScopeProvider`
-+ `HackerOneScopeEvaluator`). AI never decides HackerOne scope.
++ `HackerOneScopeEvaluator`). Evaluation is always `evaluate(program, target)`.
+There is no single global active program. AI never decides HackerOne scope.
 
 HackerOne **structured scope** is the target allow-list. HackerOne
 **scope exclusions** are report-category / bounty exclusions; they are

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -106,7 +107,7 @@ class MlxProvider(LLMProvider):
             structured_output=True,
             structured_generation=True,
             text_generation=True,
-            tool_calls=False,
+            tool_calls=True,
             thinking=True,
             thinking_can_disable=True,
             reasoning=True,
@@ -189,6 +190,14 @@ class MlxProvider(LLMProvider):
                     thinking=thinking,
                     error=f"malformed_structured_output:{exc}",
                 )
+        tool_calls: tuple[Mapping[str, Any], ...] = ()
+        if request.tools:
+            try:
+                parsed = extract_json_object(content)
+                if isinstance(parsed, dict) and (parsed.get("tool") or parsed.get("name")):
+                    tool_calls = (parsed,)
+            except StructuredParseError:
+                tool_calls = ()
         return CompletionResponse(
             content=content,
             provider=self.provider_name,
@@ -196,6 +205,7 @@ class MlxProvider(LLMProvider):
             usage=usage,
             duration_seconds=time.monotonic() - start,
             thinking=thinking,
+            tool_calls=tool_calls,
         )
 
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:

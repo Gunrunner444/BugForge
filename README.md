@@ -26,6 +26,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 3 | Authorized security testing infrastructure | ✅ Implemented (execution + hardening in Phase 4) |
 | Phase 4 | HackerOne program integration | ✅ Implemented (gated submission; mock-tested) |
 | Phase 5 | HackerOne production readiness | ✅ Implemented (persistent state, numeric weaknesses, operator authorization) |
+| Phase 6 | Guided AI security research agent | ✅ Implemented (planner only; deterministic controls remain authoritative) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -55,14 +56,19 @@ External scanners run only inside a BugForge execution envelope. Phase 4
 adds HackerOne program lookup, structured scope sync, and a human-gated
 report workflow with dry-run (no report created) before optional real
 submission. Phase 5 persists that HackerOne state, binds approval to
-payload hashes, and uses program-specific numeric weakness IDs.
+payload hashes, and uses program-specific numeric weakness IDs. Phase 6
+adds a guided `SecurityResearchAgent` that plans tool actions; deterministic
+BugForge controls remain authoritative.
 
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),
 [docs/scope-model.md](docs/scope-model.md),
 [docs/tool-integrations.md](docs/tool-integrations.md),
 [docs/hackerone.md](docs/hackerone.md),
-[docs/reporting.md](docs/reporting.md). Do not point this stack at
+[docs/reporting.md](docs/reporting.md),
+[docs/security-agent.md](docs/security-agent.md),
+[docs/agent-tools.md](docs/agent-tools.md),
+[docs/agent-safety.md](docs/agent-safety.md). Do not point this stack at
 real-world targets without an operator-approved program scope.
 
 ```
