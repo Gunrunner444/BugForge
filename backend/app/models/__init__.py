@@ -2,6 +2,19 @@ from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFi
 from app.models.base import Base
 from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession
 from app.models.finding import DBFinding
+from app.models.hackerone import (
+    DBHackerOneApprovalEvent,
+    DBHackerOneAttachment,
+    DBHackerOneAuditEvent,
+    DBHackerOneProgram,
+    DBHackerOneReportDraft,
+    DBHackerOneReportIntent,
+    DBHackerOneScopeExclusion,
+    DBHackerOneStructuredScope,
+    DBHackerOneSubmission,
+    DBHackerOneSync,
+    DBHackerOneWeakness,
+)
 from app.models.project import Project
 from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
@@ -23,6 +36,17 @@ __all__ = [
     "DBFinding",
     "DBSecurityAuditEvent",
     "DBSecurityFinding",
+    "DBHackerOneApprovalEvent",
+    "DBHackerOneAttachment",
+    "DBHackerOneAuditEvent",
+    "DBHackerOneProgram",
+    "DBHackerOneReportDraft",
+    "DBHackerOneReportIntent",
+    "DBHackerOneScopeExclusion",
+    "DBHackerOneStructuredScope",
+    "DBHackerOneSubmission",
+    "DBHackerOneSync",
+    "DBHackerOneWeakness",
     "DebuggingSession",
     "DebuggingHypothesis",
     "AIModelCall",

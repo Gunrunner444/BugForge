@@ -12,6 +12,7 @@ from app.security_testing.errors import (
     SafetyLimitExceededError,
     ToolExecutionError,
 )
+from app.security_testing.operator_auth import OperatorSession, require_operator
 from app.security_testing.rate_limit import RateLimiter
 from app.security_testing.safety import SafetyController, SafetyLimits
 from app.security_testing.scope_guard import ScopeGuard
@@ -26,6 +27,7 @@ __all__ = [
     "AuthorizationDeniedError",
     "HumanApprovalGate",
     "NormalizedTarget",
+    "OperatorSession",
     "ProgramScope",
     "RateLimiter",
     "RestrictedActivityError",
@@ -40,4 +42,5 @@ __all__ = [
     "TestingMode",
     "ToolExecutionError",
     "is_ai_operator",
+    "require_operator",
 ]

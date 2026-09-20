@@ -65,15 +65,59 @@ class StructuredScopeRecord:
     reference: str | None = None
     original: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def numeric_id(self) -> int | None:
+        return parse_hackerone_id(self.id)
+
 
 @dataclass(frozen=True)
 class ScopeExclusionRecord:
+    """HackerOne report-category / reward exclusion. Not a target deny-list."""
+
     id: str
     category: str
     details: str
     created_at: str | None = None
     updated_at: str | None = None
     original: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WeaknessRecord:
+    """Program-specific HackerOne weakness. ``id`` is the numeric API id."""
+
+    id: int
+    name: str
+    description: str = ""
+    external_id: str = ""
+    original: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScopeSnapshot:
+    """Exact structured-scope snapshot that authorized a draft."""
+
+    program_handle: str
+    scope_version: int
+    structured_scope_id: int | None
+    asset_identifier: str
+    eligible_for_submission: bool
+    eligible_for_bounty: bool
+    in_scope: bool
+    matched_instructions: str = ""
+    snapshot_hash: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "program_handle": self.program_handle,
+            "scope_version": self.scope_version,
+            "structured_scope_id": self.structured_scope_id,
+            "asset_identifier": self.asset_identifier,
+            "eligible_for_submission": self.eligible_for_submission,
+            "eligible_for_bounty": self.eligible_for_bounty,
+            "in_scope": self.in_scope,
+            "matched_instructions": self.matched_instructions,
+        }
 
 
 @dataclass
@@ -91,9 +135,15 @@ class HackerOneProgram:
     instructions: str = ""
     structured_scopes: tuple[StructuredScopeRecord, ...] = ()
     exclusions: tuple[ScopeExclusionRecord, ...] = ()
+    weaknesses: tuple[WeaknessRecord, ...] = ()
     open_scope_policy: str = ""
     open_scope_acknowledged: bool = False
     active_testing_approved: bool = False
+    scope_version: int = 0
+    scope_sync_complete: bool = False
+    scope_count: int = 0
+    last_scope_id: str | None = None
+    continuation_state: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -109,6 +159,10 @@ class HackerOneProgram:
             "requires_severity": self.requires_severity,
             "scope_count": len(self.structured_scopes),
             "exclusion_count": len(self.exclusions),
+            "weakness_count": len(self.weaknesses),
+            "scope_version": self.scope_version,
+            "scope_sync_complete": self.scope_sync_complete,
+            "last_scope_id": self.last_scope_id,
             "active_testing_approved": self.active_testing_approved,
             "open_scope_acknowledged": self.open_scope_acknowledged,
         }
@@ -126,3 +180,18 @@ def node_id(node: object) -> str:
     if isinstance(node, dict):
         return str(node.get("id") or "")
     return ""
+
+
+def parse_hackerone_id(value: object) -> int | None:
+    """Parse a HackerOne numeric resource id. CWE strings are never valid ids."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    parsed = int(text)
+    return parsed if parsed > 0 else None

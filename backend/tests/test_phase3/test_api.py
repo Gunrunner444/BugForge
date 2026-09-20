@@ -41,14 +41,21 @@ async def test_security_testing_session_and_authorize(client: AsyncClient) -> No
     assert denied.json()["allowed"] is False
     report = await client.post(
         "/api/v1/security-testing/sessions/proj-lab/approvals",
+        headers={"X-BugForge-Operator-Token": "test-operator-token"},
         json={"kind": "submit_hackerone_report", "operator": "alice"},
     )
     assert report.status_code == 200
+    missing = await client.post(
+        "/api/v1/security-testing/sessions/proj-lab/approvals",
+        json={"kind": "submit_hackerone_report", "operator": "alice"},
+    )
+    assert missing.status_code == 401
     ai_report = await client.post(
         "/api/v1/security-testing/sessions/proj-lab/approvals",
+        headers={"X-BugForge-Operator-Token": "wrong"},
         json={"kind": "submit_hackerone_report", "operator": "ai"},
     )
-    assert ai_report.status_code == 403
+    assert ai_report.status_code == 401
     audit = await client.get("/api/v1/security-testing/sessions/proj-lab/audit")
     assert audit.status_code == 200
     assert audit.json()["chain_valid"] is True

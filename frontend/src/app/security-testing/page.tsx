@@ -19,11 +19,10 @@ export default function SecurityTestingPage() {
   const [program, setProgram] = useState<Record<string, unknown> | null>(null);
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
   const [dryRun, setDryRun] = useState<Record<string, unknown> | null>(null);
-  const [operator, setOperator] = useState("researcher");
-  const [findingTitle, setFindingTitle] = useState("Verified lab finding");
-  const [findingTarget, setFindingTarget] = useState("https://example.com/");
+  const [operatorToken, setOperatorToken] = useState("");
+  const [findingId, setFindingId] = useState("");
   const [severity, setSeverity] = useState("medium");
-  const [weakness, setWeakness] = useState("cwe-79");
+  const [weakness, setWeakness] = useState("1338");
 
   async function createLab() {
     setBusy(true);
@@ -82,7 +81,8 @@ export default function SecurityTestingPage() {
     setBusy(true);
     setError(null);
     try {
-      const synced = await api.hackerone.sync(handle, operator);
+      if (operatorToken) sessionStorage.setItem("bugforge_operator_token", operatorToken);
+      const synced = await api.hackerone.sync(handle);
       setProgram(synced);
       await loadHackerOne();
     } catch (err) {
@@ -96,20 +96,13 @@ export default function SecurityTestingPage() {
     setBusy(true);
     setError(null);
     try {
+      if (operatorToken) sessionStorage.setItem("bugforge_operator_token", operatorToken);
       const created = await api.hackerone.createDraft({
         program_handle: handle,
-        operator,
+        project_id: projectId,
+        finding_id: findingId,
         severity,
-        weakness_id: weakness,
-        finding: {
-          title: findingTitle,
-          status: "verified",
-          target: findingTarget,
-          impact: "Documented lab impact",
-          reproduction: "Documented reproduction steps",
-          description: "Independently verified local finding",
-          evidence: [{ kind: "reproduction", source: "researcher", summary: "Reproduced locally" }],
-        },
+        weakness_id: weakness ? Number(weakness) : undefined,
       });
       setDraft(created);
       setDryRun(null);
@@ -124,7 +117,7 @@ export default function SecurityTestingPage() {
     if (!draft?.id) return;
     setBusy(true);
     try {
-      setDraft(await api.hackerone.review(String(draft.id), operator));
+      setDraft(await api.hackerone.review(String(draft.id), handle));
     } catch (err) {
       setError(err instanceof ApiError ? (err.detail ?? err.message) : "Review failed");
     } finally {
@@ -136,7 +129,7 @@ export default function SecurityTestingPage() {
     if (!draft?.id) return;
     setBusy(true);
     try {
-      setDryRun(await api.hackerone.dryRun(String(draft.id), handle, operator));
+      setDryRun(await api.hackerone.dryRun(String(draft.id), handle));
     } catch (err) {
       setError(err instanceof ApiError ? (err.detail ?? err.message) : "Dry-run failed");
     } finally {
@@ -148,7 +141,7 @@ export default function SecurityTestingPage() {
     if (!draft?.id) return;
     setBusy(true);
     try {
-      setDraft(await api.hackerone.approve(String(draft.id), operator));
+      setDraft(await api.hackerone.approve(String(draft.id), handle));
     } catch (err) {
       setError(err instanceof ApiError ? (err.detail ?? err.message) : "Approval failed");
     } finally {
@@ -160,7 +153,7 @@ export default function SecurityTestingPage() {
     if (!draft?.id) return;
     setBusy(true);
     try {
-      setDraft(await api.hackerone.submit(String(draft.id), handle, operator));
+      setDraft(await api.hackerone.submit(String(draft.id), handle));
     } catch (err) {
       setError(err instanceof ApiError ? (err.detail ?? err.message) : "Submit failed");
     } finally {
@@ -208,14 +201,18 @@ export default function SecurityTestingPage() {
       <section className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
         <h2 className="font-semibold text-slate-800">HackerOne Program</h2>
         <p className="text-xs text-slate-500">
-          Tokens stay in environment variables. Dry-run never creates a HackerOne report. Submit stays
-          disabled until deterministic checks pass and HUMAN_APPROVED exists.
+          Tokens stay in environment variables. Approval uses a local operator token, not a free-form
+          operator name. Dry-run never creates a HackerOne report. Submit stays disabled until
+          deterministic checks pass and HUMAN_APPROVED exists for the current payload hash.
         </p>
         <div className="grid md:grid-cols-3 gap-3">
           <Card title="Connection" value={h1?.configured ? "credentials configured" : "not configured"} />
           <Card title="Last scope sync" value={String(program?.fetched_at ?? "never")} />
           <Card title="Scope count" value={String(program?.scope_count ?? 0)} />
+          <Card title="Scope snapshot" value={String(program?.scope_version ?? "none")} />
           <Card title="Scope exclusions" value={String(program?.exclusion_count ?? 0)} />
+          <Card title="Weaknesses" value={String(program?.weakness_count ?? 0)} />
+          <Card title="Sync complete" value={program?.scope_sync_complete ? "yes" : "no"} />
           <Card title="Active testing" value={program?.active_testing_approved ? "approved" : "not approved"} />
           <Card title="Sync status" value={String(program?.sync_status ?? "unknown")} />
         </div>
@@ -225,8 +222,16 @@ export default function SecurityTestingPage() {
             <input className="mt-1 w-full border rounded px-2 py-1" value={handle} onChange={(e) => setHandle(e.target.value)} />
           </label>
           <label className="text-sm">
-            Operator
-            <input className="mt-1 w-full border rounded px-2 py-1" value={operator} onChange={(e) => setOperator(e.target.value)} />
+            Local operator token
+            <input
+              type="password"
+              className="mt-1 w-full border rounded px-2 py-1"
+              value={operatorToken}
+              onChange={(e) => {
+                setOperatorToken(e.target.value);
+                sessionStorage.setItem("bugforge_operator_token", e.target.value);
+              }}
+            />
           </label>
           <div className="flex items-end">
             <button type="button" onClick={syncProgram} disabled={busy || !handle} className="px-3 py-2 text-sm rounded border border-slate-300 hover:bg-slate-50">
@@ -236,12 +241,12 @@ export default function SecurityTestingPage() {
         </div>
         <div className="grid md:grid-cols-2 gap-3">
           <label className="text-sm">
-            Finding title
-            <input className="mt-1 w-full border rounded px-2 py-1" value={findingTitle} onChange={(e) => setFindingTitle(e.target.value)} />
+            Persisted finding id
+            <input className="mt-1 w-full border rounded px-2 py-1" value={findingId} onChange={(e) => setFindingId(e.target.value)} />
           </label>
           <label className="text-sm">
-            Finding target
-            <input className="mt-1 w-full border rounded px-2 py-1" value={findingTarget} onChange={(e) => setFindingTarget(e.target.value)} />
+            Project id
+            <input className="mt-1 w-full border rounded px-2 py-1" value={projectId} onChange={(e) => setProjectId(e.target.value)} />
           </label>
           <label className="text-sm">
             Severity
@@ -254,7 +259,7 @@ export default function SecurityTestingPage() {
             </select>
           </label>
           <label className="text-sm">
-            Weakness id
+            HackerOne weakness id (numeric)
             <input className="mt-1 w-full border rounded px-2 py-1" value={weakness} onChange={(e) => setWeakness(e.target.value)} />
           </label>
         </div>
@@ -281,9 +286,19 @@ export default function SecurityTestingPage() {
           </button>
         </div>
         {draft && (
-          <p className="text-xs text-slate-600">
-            Draft {String(draft.id)} — review {String(draft.human_review_state)} — submission {String(draft.submission_state)}
-          </p>
+          <div className="text-xs text-slate-600 space-y-1">
+            <p>
+              Draft {String(draft.id)} — DRAFT / {String(draft.human_review_state)} / {String(draft.submission_state)} / remote {String(draft.remote_state)}
+            </p>
+            <p>Payload hash: {String(draft.report_content_hash ?? "—")}</p>
+            <p>Evidence hash: {String(draft.evidence_hash ?? "—")}</p>
+            <p>Scope snapshot: {String(draft.scope_snapshot_hash ?? "—")}</p>
+            <p>
+              Weakness {String(draft.weakness_id ?? "—")} · Severity {String(draft.severity ?? "—")} · Target {String(draft.target ?? "—")} · Program {String(draft.program_handle ?? handle)}
+            </p>
+            <p>Approved by {String(draft.approved_by ?? "—")} at {String(draft.approval_timestamp ?? "—")}</p>
+            <pre className="bg-slate-50 border rounded p-3 overflow-auto max-h-40">{String(draft.vulnerability_information ?? "")}</pre>
+          </div>
         )}
         {dryRun && (
           <pre className="text-xs bg-slate-50 border rounded p-3 overflow-auto max-h-56">{JSON.stringify(dryRun, null, 2)}</pre>

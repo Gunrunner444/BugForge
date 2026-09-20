@@ -25,3 +25,13 @@ class HackerOneRateLimitError(HackerOneError):
 class HackerOneIdentityVerificationError(HackerOneError):
     def __init__(self, message: str = "HackerOne identity verification is required") -> None:
         super().__init__(message, status_code=403, code="identity_verification_required")
+
+
+class HackerOneUrlRejectedError(HackerOneError):
+    def __init__(self, message: str = "HackerOne client rejected an unauthorized URL") -> None:
+        super().__init__(message, status_code=400, code="url_rejected")
+
+
+class HackerOneSubmissionUnknownError(HackerOneError):
+    def __init__(self, message: str = "HackerOne submission outcome is unknown") -> None:
+        super().__init__(message, code="submission_outcome_unknown")

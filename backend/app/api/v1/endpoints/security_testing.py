@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.plugins import get_plugin_catalog
 from app.schemas.security_testing import (
@@ -19,6 +19,7 @@ from app.security_testing.errors import (
     ApprovalRequiredError,
     RestrictedActivityError,
 )
+from app.security_testing.operator_auth import OperatorSession, require_operator
 from app.security_testing.safety import SafetyLimits
 from app.security_testing.scope_model import ProgramScope, ScopeRule
 from app.security_testing.target import AssetType
@@ -76,14 +77,18 @@ async def get_session(project_id: str) -> TestingSessionResponse:
 
 
 @router.post("/sessions/{project_id}/approvals")
-async def grant_approval(project_id: str, payload: ApprovalRequest) -> dict[str, str]:
+async def grant_approval(
+    project_id: str,
+    payload: ApprovalRequest,
+    session: OperatorSession = Depends(require_operator),
+) -> dict[str, str]:
     engine = _engine(project_id)
     try:
         kind = ApprovalKind(payload.kind)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="unknown approval kind") from exc
     try:
-        engine.grant(kind, operator=payload.operator, note=payload.note)
+        engine.grant(kind, operator=session.identity, note=payload.note)
     except RestrictedActivityError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ApprovalRequiredError as exc:

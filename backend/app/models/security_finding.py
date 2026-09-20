@@ -45,6 +45,11 @@ class DBSecurityFinding(Base):
     observation_refs: Mapped[str] = mapped_column(Text, nullable=False, default="")
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     asset: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reproduction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_behavior: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_behavior: Mapped[str | None] = mapped_column(Text, nullable=True)
     report_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     report_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

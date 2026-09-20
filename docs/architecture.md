@@ -356,12 +356,15 @@ see every request an external scanner process makes; `ScannerExecutionPolicy`
 is the envelope passed into the tool.
 
 HackerOne: [hackerone.md](hackerone.md), [reporting.md](reporting.md).
+Program/scope/report state is persisted. Human approval is an operator
+token bound to payload, evidence, and scope hashes — not a free-form
+`operator` string.
 
 ## What remains operator-dependent
 
 - Real ZAP/Nuclei/Playwright/Qwen binaries (optional; CI uses fakes)
 - Real HackerOne credentials and a program the researcher may test
-- Human `HUMAN_APPROVED` before any HackerOne `POST /hackers/reports`
+- Human `HUMAN_APPROVED` (operator token + current hashes) before any HackerOne `POST /hackers/reports`
 
 CI does **not** require those binaries or credentials.
 

@@ -34,8 +34,11 @@ async def create_tables() -> None:
     import app.models.debugging  # noqa: F401
     import app.models.discovery  # noqa: F401
     import app.models.finding  # noqa: F401
+    import app.models.hackerone  # noqa: F401
     import app.models.project  # noqa: F401
     import app.models.reproduction  # noqa: F401
+    import app.models.security_audit  # noqa: F401
+    import app.models.security_finding  # noqa: F401
     import app.models.test_generation  # noqa: F401
     import app.models.test_run  # noqa: F401
     from app.models.base import Base  # noqa: PLC0415  (avoid circular at module level)

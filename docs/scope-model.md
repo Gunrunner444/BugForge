@@ -29,12 +29,19 @@ A `ProgramScope` contains structured include and exclude `ScopeRule`s:
   (`passive_only`, `no_automated_scanning`, `no_destructive`)
 - exclusions (host, URL, or path)
 
-HackerOne-oriented fields are imported by Phase 4 (`HackerOneScopeProvider`
+HackerOne-oriented fields are imported by Phase 4+ (`HackerOneScopeProvider`
 + `HackerOneScopeEvaluator`). AI never decides HackerOne scope.
 
+HackerOne **structured scope** is the target allow-list. HackerOne
+**scope exclusions** are report-category / bounty exclusions; they are
+not copied into `excluded_hosts` and do not deny a target merely because
+a hostname appears in exclusion details.
+
 Path comparison uses canonicalization (dot segments, duplicate slashes,
-bounded percent-decoding including encoded slashes). Exclusions go through
-the same `TargetNormalizer` as includes.
+bounded percent-decoding including encoded slashes). Program-scope
+exclusions (BugForge `ScopeRule` excludes) go through the same
+`TargetNormalizer` as includes. That is separate from HackerOne
+`scope_exclusions`.
 
 Closed HackerOne programs deny unknown assets. Open programs still do not
 auto-authorize unknown assets.

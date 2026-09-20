@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.4.0"
+    version: str = "1.5.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     hackerone_api_username: str = ""
     hackerone_api_token: str = ""
     hackerone_api_base_url: str = "https://api.hackerone.com/v1"
+
+    # Local operator authorization for HackerOne approval / live-testing gates.
+    # Never persist these values in the database.
+    bugforge_operator_token: str = ""
+    bugforge_operator_identity: str = ""
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

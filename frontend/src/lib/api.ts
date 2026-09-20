@@ -64,9 +64,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
-      headers: { "Content-Type": "application/json", ...init?.headers },
-      signal: controller.signal,
       ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(typeof window !== "undefined" && sessionStorage.getItem("bugforge_operator_token")
+          ? { "X-BugForge-Operator-Token": sessionStorage.getItem("bugforge_operator_token") as string }
+          : {}),
+        ...init?.headers,
+      },
+      signal: controller.signal,
     });
   } catch (err) {
     clearTimeout(timeoutId);
@@ -399,10 +405,10 @@ export const api = {
 
   hackerone: {
     status: () => request<Record<string, unknown>>("/api/v1/hackerone/status"),
-    sync: (handle: string, operator = "researcher") =>
+    sync: (handle: string) =>
       request<Record<string, unknown>>("/api/v1/hackerone/programs/sync", {
         method: "POST",
-        body: JSON.stringify({ handle, operator }),
+        body: JSON.stringify({ handle }),
       }),
     program: (handle: string) => request<Record<string, unknown>>(`/api/v1/hackerone/programs/${handle}`),
     createDraft: (body: Record<string, unknown>) =>
@@ -410,25 +416,30 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
-    review: (draftId: string, operator: string) =>
+    review: (draftId: string, programHandle: string) =>
       request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/review`, {
         method: "POST",
-        body: JSON.stringify({ operator }),
+        body: JSON.stringify({ program_handle: programHandle }),
       }),
-    dryRun: (draftId: string, programHandle: string, operator: string) =>
+    dryRun: (draftId: string, programHandle: string) =>
       request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/dry-run`, {
         method: "POST",
-        body: JSON.stringify({ operator, program_handle: programHandle }),
+        body: JSON.stringify({ program_handle: programHandle }),
       }),
-    approve: (draftId: string, operator: string) =>
+    approve: (draftId: string, programHandle: string) =>
       request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/approve`, {
         method: "POST",
-        body: JSON.stringify({ operator }),
+        body: JSON.stringify({ program_handle: programHandle }),
       }),
-    submit: (draftId: string, programHandle: string, operator: string) =>
+    submit: (draftId: string, programHandle: string) =>
       request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/submit`, {
         method: "POST",
-        body: JSON.stringify({ operator, program_handle: programHandle }),
+        body: JSON.stringify({ program_handle: programHandle }),
+      }),
+    reconcile: (draftId: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/reconcile`, {
+        method: "POST",
+        body: JSON.stringify({}),
       }),
   },
 };

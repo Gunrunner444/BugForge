@@ -4,8 +4,9 @@ Phase 3 adds **controlled, scope-aware security testing**. It is not
 unrestricted autonomous hacking. The human operator remains responsible for
 authorization and for any later disclosure.
 
-HackerOne report submission is implemented behind human review and dry-run.
-See [hackerone.md](hackerone.md) and [reporting.md](reporting.md).
+HackerOne report submission is implemented behind human review, dry-run,
+persisted duplicate protection, and an authenticated local operator
+session. See [hackerone.md](hackerone.md) and [reporting.md](reporting.md).
 
 ## Local lab vs live
 

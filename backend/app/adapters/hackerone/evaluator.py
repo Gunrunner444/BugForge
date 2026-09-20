@@ -1,13 +1,20 @@
-"""Deterministic HackerOne scope evaluator. AI never decides scope."""
+"""Deterministic HackerOne scope evaluator. AI never decides scope.
+
+Structured scope answers *where* an asset may be tested.
+Scope exclusions answer *which report categories* are not bounty-eligible.
+They are never treated as a target/domain deny-list.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.adapters.hackerone.hashes import scope_snapshot_hash
 from app.adapters.hackerone.models import (
     HackerOneProgram,
     ScopeExclusionRecord,
     ScopeMode,
+    ScopeSnapshot,
     StructuredScopeRecord,
 )
 from app.security_testing.target import (
@@ -18,6 +25,31 @@ from app.security_testing.target import (
     hostname_matches,
     path_matches,
 )
+
+
+@dataclass(frozen=True)
+class TargetScopeDecision:
+    """Whether a *target* is listed in current structured scope."""
+
+    in_scope: bool
+    reason: str
+    structured_scope_id: str | None = None
+    asset_type: str | None = None
+    asset_identifier: str | None = None
+    eligible_for_submission: bool = False
+    eligible_for_bounty: bool = False
+    matched_instructions: str = ""
+
+
+@dataclass(frozen=True)
+class ReportEligibilityDecision:
+    """Whether a *finding/report category* is eligible to submit / earn bounty."""
+
+    eligible_for_submission: bool
+    eligible_for_bounty: bool
+    reason: str
+    exclusion_categories: tuple[str, ...] = ()
+    matching_exclusions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -32,55 +64,153 @@ class HackerOneScopeDecision:
     in_scope: bool = False
     matched_instructions: str = ""
     exclusions_considered: tuple[str, ...] = ()
+    target_scope: TargetScopeDecision | None = None
+    report_eligibility: ReportEligibilityDecision | None = None
+
+    def snapshot(self, program: HackerOneProgram) -> ScopeSnapshot:
+        numeric = None
+        if self.structured_scope_id and self.structured_scope_id.isdigit():
+            numeric = int(self.structured_scope_id)
+        payload = {
+            "program_handle": program.handle,
+            "scope_version": program.scope_version,
+            "structured_scope_id": numeric,
+            "asset_identifier": self.asset_identifier or "",
+            "eligible_for_submission": self.eligible_for_submission,
+            "eligible_for_bounty": self.eligible_for_bounty,
+            "in_scope": self.in_scope,
+            "matched_instructions": self.matched_instructions,
+        }
+        return ScopeSnapshot(
+            program_handle=program.handle,
+            scope_version=program.scope_version,
+            structured_scope_id=numeric,
+            asset_identifier=self.asset_identifier or "",
+            eligible_for_submission=self.eligible_for_submission,
+            eligible_for_bounty=self.eligible_for_bounty,
+            in_scope=self.in_scope,
+            matched_instructions=self.matched_instructions,
+            snapshot_hash=scope_snapshot_hash(payload),
+        )
 
 
 class HackerOneScopeEvaluator:
     def __init__(self, normalizer: TargetNormalizer | None = None) -> None:
         self.normalizer = normalizer or TargetNormalizer()
 
-    def evaluate(self, program: HackerOneProgram, target: str) -> HackerOneScopeDecision:
-        exclusions = tuple(self._exclusion_hits(program.exclusions, target))
-        if exclusions:
-            return HackerOneScopeDecision(
-                allowed=False,
-                reason="Target matches a HackerOne scope exclusion",
-                exclusions_considered=exclusions,
+    def evaluate(
+        self,
+        program: HackerOneProgram,
+        target: str,
+        *,
+        vulnerability_class: str | None = None,
+    ) -> HackerOneScopeDecision:
+        target_decision = self.evaluate_target(program, target)
+        report_decision = self.evaluate_report_eligibility(
+            program, target_decision, vulnerability_class=vulnerability_class
+        )
+        allowed = target_decision.in_scope and report_decision.eligible_for_submission
+        reason = target_decision.reason
+        if target_decision.in_scope and not report_decision.eligible_for_submission:
+            reason = report_decision.reason
+        elif target_decision.in_scope and not report_decision.eligible_for_bounty:
+            reason = (
+                f"{target_decision.reason}; {report_decision.reason}"
+                if report_decision.reason
+                else target_decision.reason
             )
+        return HackerOneScopeDecision(
+            allowed=allowed,
+            reason=reason,
+            structured_scope_id=target_decision.structured_scope_id,
+            asset_type=target_decision.asset_type,
+            asset_identifier=target_decision.asset_identifier,
+            eligible_for_submission=report_decision.eligible_for_submission,
+            eligible_for_bounty=report_decision.eligible_for_bounty,
+            in_scope=target_decision.in_scope,
+            matched_instructions=target_decision.matched_instructions,
+            exclusions_considered=report_decision.matching_exclusions,
+            target_scope=target_decision,
+            report_eligibility=report_decision,
+        )
+
+    def evaluate_target(self, program: HackerOneProgram, target: str) -> TargetScopeDecision:
         match = self._match_structured(program.structured_scopes, target)
         if match is None:
             if program.scope_mode is ScopeMode.OPEN:
-                return HackerOneScopeDecision(
-                    allowed=False,
+                return TargetScopeDecision(
+                    in_scope=False,
                     reason=(
                         "Open-scope program: unknown assets are not automatically authorized. "
                         "An operator must approve an explicit active-testing policy before "
                         "BugForge may test assets that are not listed in structured scope."
                     ),
-                    exclusions_considered=exclusions,
                 )
-            return HackerOneScopeDecision(
-                allowed=False,
+            return TargetScopeDecision(
+                in_scope=False,
                 reason="Closed-scope program: unknown asset is denied",
-                exclusions_considered=exclusions,
             )
-        in_scope = True
-        # Eligible-for-bounty is independent of in-scope.
-        allowed = in_scope and match.eligible_for_submission
         reason = "In structured scope"
         if not match.eligible_for_submission:
             reason = "Asset is in structured scope but not eligible for submission"
-            allowed = False
-        return HackerOneScopeDecision(
-            allowed=allowed,
+        return TargetScopeDecision(
+            in_scope=True,
             reason=reason,
             structured_scope_id=match.id,
             asset_type=match.asset_type.value,
             asset_identifier=match.asset_identifier,
             eligible_for_submission=match.eligible_for_submission,
             eligible_for_bounty=match.eligible_for_bounty,
-            in_scope=in_scope,
             matched_instructions=match.instruction,
-            exclusions_considered=exclusions,
+        )
+
+    def evaluate_report_eligibility(
+        self,
+        program: HackerOneProgram,
+        target: TargetScopeDecision,
+        *,
+        vulnerability_class: str | None = None,
+    ) -> ReportEligibilityDecision:
+        if not target.in_scope:
+            return ReportEligibilityDecision(
+                eligible_for_submission=False,
+                eligible_for_bounty=False,
+                reason=target.reason,
+            )
+        submission = target.eligible_for_submission
+        bounty = target.eligible_for_bounty and submission
+        matched = _matching_exclusion_categories(program.exclusions, vulnerability_class)
+        if matched:
+            bounty = False
+            categories = tuple(item.category for item in matched)
+            return ReportEligibilityDecision(
+                eligible_for_submission=submission,
+                eligible_for_bounty=bounty,
+                reason=(
+                    "In scope and eligible for submission but not bounty eligible "
+                    f"due to program scope exclusion categories: {', '.join(categories)}"
+                    if submission
+                    else "Asset is in structured scope but not eligible for submission"
+                ),
+                exclusion_categories=categories,
+                matching_exclusions=tuple(item.id or item.category for item in matched),
+            )
+        if not submission:
+            return ReportEligibilityDecision(
+                eligible_for_submission=False,
+                eligible_for_bounty=False,
+                reason="Asset is in structured scope but not eligible for submission",
+            )
+        if not bounty:
+            return ReportEligibilityDecision(
+                eligible_for_submission=True,
+                eligible_for_bounty=False,
+                reason="In scope and eligible for submission but not bounty eligible",
+            )
+        return ReportEligibilityDecision(
+            eligible_for_submission=True,
+            eligible_for_bounty=True,
+            reason="In structured scope and eligible for submission and bounty",
         )
 
     def _match_structured(
@@ -130,39 +260,30 @@ class HackerOneScopeEvaluator:
         except ValueError:
             return None
 
-    def _exclusion_hits(
-        self, exclusions: tuple[ScopeExclusionRecord, ...], target: str
-    ) -> list[str]:
-        hits: list[str] = []
-        lowered = target.strip().lower()
-        hostname = ""
-        path = ""
-        parsed = self._try_network_target(target)
-        if parsed is not None:
-            hostname = parsed.hostname
-            path = parsed.path
-        for item in exclusions:
-            details = (item.details or "").strip()
-            if not details:
-                continue
-            token = details.lower()
-            if hostname and hostname_matches(hostname, (details,)):
-                hits.append(item.id or details)
-                continue
-            if details.startswith("/") and path and path_matches(path, details):
-                hits.append(item.id or details)
-                continue
-            try:
-                wanted = self.normalizer.normalize(details)
-            except ValueError:
-                if token in lowered:
-                    # Avoid naive substring on hostnames; only exact identifier equality.
-                    if details.strip().lower() == lowered:
-                        hits.append(item.id or details)
-                continue
-            if parsed is None:
-                continue
-            if wanted.hostname and hostname_matches(hostname, (wanted.hostname,)):
-                if wanted.path in {"", "/"} or path_matches(path, wanted.path):
-                    hits.append(item.id or details)
-        return hits
+
+def _matching_exclusion_categories(
+    exclusions: tuple[ScopeExclusionRecord, ...],
+    vulnerability_class: str | None,
+) -> tuple[ScopeExclusionRecord, ...]:
+    """Match report *categories*, never hostnames in exclusion details."""
+    if not vulnerability_class:
+        return ()
+    key = vulnerability_class.strip().lower().replace("_", " ").replace("-", " ")
+    tokens = {part for part in key.split() if part}
+    aliases = {
+        "sql injection": {"sqli", "sql", "injection"},
+        "cross site scripting": {"xss"},
+        "denial of service": {"dos", "ddos"},
+    }
+    hits: list[ScopeExclusionRecord] = []
+    for item in exclusions:
+        category = (item.category or "").strip().lower().replace("_", " ").replace("-", " ")
+        if not category:
+            continue
+        if category == key or key in category or category in key:
+            hits.append(item)
+            continue
+        extra = aliases.get(category, set())
+        if tokens & extra or key in extra:
+            hits.append(item)
+    return tuple(hits)

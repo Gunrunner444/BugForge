@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
 import pytest_asyncio
@@ -13,6 +14,19 @@ from app.models.base import Base
 from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession  # noqa: F401
 from app.models.finding import DBFinding  # noqa: F401
 from app.models.github import GitHubDelivery, GitHubRepository  # noqa: F401
+from app.models.hackerone import (  # noqa: F401
+    DBHackerOneApprovalEvent,
+    DBHackerOneAttachment,
+    DBHackerOneAuditEvent,
+    DBHackerOneProgram,
+    DBHackerOneReportDraft,
+    DBHackerOneReportIntent,
+    DBHackerOneScopeExclusion,
+    DBHackerOneStructuredScope,
+    DBHackerOneSubmission,
+    DBHackerOneSync,
+    DBHackerOneWeakness,
+)
 from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
 from app.models.security_audit import DBSecurityAuditEvent  # noqa: F401
@@ -20,6 +34,11 @@ from app.models.security_finding import DBSecurityFinding  # noqa: F401
 from app.models.test_generation import GeneratedTest, TestGenerationSession  # noqa: F401
 from app.models.test_run import TestResult, TestRun  # noqa: F401
 from app.models.verification import PatchVerification  # noqa: F401
+
+os.environ.setdefault("BUGFORGE_OPERATOR_TOKEN", "test-operator-token")
+os.environ.setdefault("BUGFORGE_OPERATOR_IDENTITY", "alice")
+
+OPERATOR_HEADERS = {"X-BugForge-Operator-Token": "test-operator-token"}
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
