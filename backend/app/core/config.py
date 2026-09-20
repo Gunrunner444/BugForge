@@ -7,8 +7,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _UNSAFE_DEFAULT_KEY = "change_me_in_production_please"
 
-# Valid AI provider identifiers (OpenAI-compatible means Ollama, LM Studio, etc.)
-_VALID_AI_PROVIDERS = {"mock", "openai", "anthropic", "ollama", "openai_compatible"}
+# Valid AI provider identifiers. Lookups go through the plugin catalog;
+# this set is the configuration allow-list (unknown values fail fast).
+_VALID_AI_PROVIDERS = {
+    "mock",
+    "openai",
+    "anthropic",
+    "ollama",
+    "openai_compatible",
+    "local",
+}
 
 
 class Settings(BaseSettings):
@@ -39,7 +47,7 @@ class Settings(BaseSettings):
     max_repo_files: int = 10_000
     analysis_timeout_seconds: int = 300
 
-    # AI provider: mock | openai | anthropic | ollama | openai_compatible
+    # AI provider: mock | openai | anthropic | ollama | openai_compatible | local
     ai_provider: str = "mock"
     ai_model: str = "gpt-4o-mini"
     # API key comes from environment only — never commit a real key
@@ -52,6 +60,11 @@ class Settings(BaseSettings):
     ai_timeout_seconds: int = 60
     ai_max_retries: int = 2
     ai_max_hypotheses: int = 3
+
+    # Language analyzers that should run during static analysis.
+    # Empty = every registered adapter that implements STATIC_ANALYSIS (currently Python).
+    # Comma-separated language ids, e.g. "python".
+    language_analyzers: str = ""
 
     # GitHub Integration — credentials come from environment only, never committed
     github_token: str = ""
@@ -149,6 +162,12 @@ class Settings(BaseSettings):
             raise ValueError(f"ai_provider must be one of {_VALID_AI_PROVIDERS}")
         return v
 
+    def get_enabled_language_analyzers(self) -> list[str]:
+        """Return configured language analyzer ids (empty = all capable adapters)."""
+        if not self.language_analyzers.strip():
+            return []
+        return [lang.strip().lower() for lang in self.language_analyzers.split(",") if lang.strip()]
+
     def get_discovery_languages(self) -> list[str]:
         """Return the allowed language list (empty = all languages permitted)."""
         if not self.discovery_languages.strip():
@@ -167,7 +186,7 @@ class Settings(BaseSettings):
 
     def is_local_ai(self) -> bool:
         """Return True when the AI provider runs locally (no cloud cost)."""
-        return self.ai_provider in {"mock", "ollama", "openai_compatible"}
+        return self.ai_provider in {"mock", "ollama", "openai_compatible", "local"}
 
 
 @lru_cache

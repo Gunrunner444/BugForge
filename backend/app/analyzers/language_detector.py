@@ -1,83 +1,35 @@
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
 
+from app.adapters.languages.registry import LanguageRegistry
+from app.domain.language import LanguageStats
 
-@dataclass
-class LanguageStats:
-    language: str
-    file_count: int
-    percentage: float
+__all__ = ["LanguageStats", "detect_languages", "language_for_path", "EXTENSION_MAP"]
 
 
-# Maps lowercase file extensions to canonical language names
-EXTENSION_MAP: dict[str, str] = {
-    ".py": "python",
-    ".pyi": "python",
-    ".js": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".java": "java",
-    ".go": "go",
-    ".rs": "rust",
-    ".rb": "ruby",
-    ".php": "php",
-    ".cs": "csharp",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".swift": "swift",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".sh": "shell",
-    ".bash": "shell",
-    ".zsh": "shell",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".json": "json",
-    ".toml": "toml",
-    ".md": "markdown",
-    ".rst": "restructuredtext",
-    ".html": "html",
-    ".htm": "html",
-    ".css": "css",
-    ".scss": "scss",
-    ".sass": "scss",
-    ".sql": "sql",
-    ".r": "r",
-    ".scala": "scala",
-    ".dart": "dart",
-    ".lua": "lua",
-    ".ex": "elixir",
-    ".exs": "elixir",
-}
+def _languages() -> LanguageRegistry:
+    from app.plugins import get_plugin_catalog
+
+    return get_plugin_catalog().languages
 
 
 def language_for_path(path: Path) -> str | None:
-    return EXTENSION_MAP.get(path.suffix.lower())
+    return _languages().language_id_for_path(path)
 
 
 def detect_languages(file_paths: list[Path]) -> list[LanguageStats]:
-    counts: Counter[str] = Counter()
-    for p in file_paths:
-        lang = language_for_path(p)
-        if lang:
-            counts[lang] += 1
+    return _languages().detect_languages(file_paths)
 
-    total = counts.total()
-    return [
-        LanguageStats(
-            language=lang,
-            file_count=count,
-            percentage=round(count / total * 100, 1) if total else 0.0,
-        )
-        for lang, count in counts.most_common()
-    ]
+
+def _legacy_extension_map() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for adapter in _languages().all_adapters():
+        for ext in adapter.file_extensions:
+            mapping[ext] = adapter.language_id
+    return mapping
+
+
+# Compatibility snapshot of adapter extensions. The registry is authoritative.
+EXTENSION_MAP: dict[str, str] = {}
+EXTENSION_MAP.update(_legacy_extension_map())

@@ -8,7 +8,12 @@ No AI vendor SDK is imported at the module level; implementations are lazy.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.ai.health import AIHealthStatus
+    from app.domain.evidence import EvidenceBundle
 
 # ---------------------------------------------------------------------------
 # Evidence types sent to the provider
@@ -55,6 +60,8 @@ class DebuggingRequest:
     static_findings: list[StaticFindingEvidence]
     source_files: list[SourceFileEvidence]
     max_hypotheses: int = 3
+    # Combined evidence for later security work. Never treated as verification.
+    evidence_bundle: EvidenceBundle | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -180,3 +187,19 @@ class LLMProvider(ABC):
         Returns a StructuredTextResponse whose content is a JSON patch plan.
         """
         ...
+
+    async def health(self) -> AIHealthStatus:
+        """Return a health report. Implementations must never include API keys."""
+        from app.ai.health import AIHealthStatus, default_capabilities
+
+        available = await self.is_available()
+        return AIHealthStatus(
+            provider=self.provider_name,
+            model=self.model_name,
+            is_local=False,
+            reachable=available,
+            configured=available,
+            model_available=None,
+            error=None if available else "provider unavailable",
+            capabilities=default_capabilities() if available else None,
+        )

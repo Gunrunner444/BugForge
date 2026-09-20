@@ -1,34 +1,51 @@
-"""Static analysis engine — orchestrates rules across files."""
+"""Static analysis engine — orchestrates language adapters across files."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from app.analysis.base import AnalyzerRule
 from app.analysis.finding import Finding
-from app.analysis.python_analyzer import ALL_PYTHON_RULES
 from app.core.config import settings
 from app.core.paths import to_relative_path
+from app.domain.language import LanguageCapability
+from app.plugins.errors import AdapterNotFoundError, UnsupportedCapabilityError
+
+if TYPE_CHECKING:
+    from app.adapters.languages.registry import LanguageRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class StaticAnalysisEngine:
-    """Runs registered rules against every supported source file in a repository."""
+    """Runs registered language analyzers against source files in a repository."""
 
     def __init__(self, rules: list[AnalyzerRule] | None = None) -> None:
-        # Default to all built-in Python rules
-        self._rules: list[AnalyzerRule] = rules if rules is not None else ALL_PYTHON_RULES
+        # Optional override keeps the previous "custom Python rules" API working.
+        self._rule_override: list[AnalyzerRule] | None = rules
 
     def analyze_repository(self, repo_path: Path, file_paths: list[Path]) -> list[Finding]:
-        """Run all rules over the supplied file paths. Returns findings with RELATIVE paths."""
-        findings: list[Finding] = []
-        python_files = [p for p in file_paths if p.suffix.lower() == ".py"]
+        """Run analyzers over the supplied file paths. Returns findings with RELATIVE paths."""
+        from app.plugins import get_plugin_catalog
 
-        for file_path in python_files:
-            for finding in self._analyze_file(file_path):
-                # Convert to repo-relative path so stored findings are portable
+        languages = get_plugin_catalog().languages
+        enabled_ids = self._resolve_enabled_analyzers(languages)
+
+        findings: list[Finding] = []
+        analyzed_files = 0
+
+        for file_path in file_paths:
+            adapter = languages.for_path(file_path)
+            if adapter is None or not adapter.supports(LanguageCapability.STATIC_ANALYSIS):
+                continue
+            if adapter.language_id not in enabled_ids:
+                continue
+
+            file_findings = self._analyze_file(file_path, adapter.language_id)
+            analyzed_files += 1
+            for finding in file_findings:
                 try:
                     finding.file_path = to_relative_path(Path(finding.file_path), repo_path)
                 except ValueError:
@@ -36,13 +53,40 @@ class StaticAnalysisEngine:
                 findings.append(finding)
 
         logger.info(
-            "Static analysis complete: %d findings across %d Python files",
+            "Static analysis complete: %d findings across %d analyzed files",
             len(findings),
-            len(python_files),
+            analyzed_files,
         )
         return findings
 
-    def _analyze_file(self, file_path: Path) -> list[Finding]:
+    def _resolve_enabled_analyzers(self, languages: LanguageRegistry) -> set[str]:
+        requested = settings.get_enabled_language_analyzers()
+        capable = {
+            adapter.language_id
+            for adapter in languages.all_adapters()
+            if adapter.supports(LanguageCapability.STATIC_ANALYSIS)
+        }
+        if not requested:
+            return capable
+
+        enabled: set[str] = set()
+        for name in requested:
+            if not languages.has(name):
+                raise AdapterNotFoundError("language", name, languages.available_ids())
+            adapter = languages.get(name)
+            if not adapter.supports(LanguageCapability.STATIC_ANALYSIS):
+                raise UnsupportedCapabilityError(
+                    adapter.language_id,
+                    LanguageCapability.STATIC_ANALYSIS,
+                    detail=(
+                        f"{adapter.display_name} is detected but has no analyzer yet. "
+                        "Remove it from LANGUAGE_ANALYZERS or implement the adapter."
+                    ),
+                )
+            enabled.add(adapter.language_id)
+        return enabled
+
+    def _analyze_file(self, file_path: Path, language_id: str) -> list[Finding]:
         try:
             size = file_path.stat().st_size
         except OSError:
@@ -58,11 +102,10 @@ class StaticAnalysisEngine:
             logger.warning("Cannot read %s for static analysis: %s", file_path, exc)
             return []
 
-        findings: list[Finding] = []
-        for rule in self._rules:
-            try:
-                findings.extend(rule.check_file(file_path, source))
-            except Exception as exc:
-                logger.warning("Rule %s failed on %s: %s", rule.RULE_ID, file_path, exc)
+        from app.adapters.languages.python import PythonAdapter
+        from app.plugins import get_plugin_catalog
 
-        return findings
+        adapter = get_plugin_catalog().languages.get(language_id)
+        if self._rule_override is not None and isinstance(adapter, PythonAdapter):
+            adapter = PythonAdapter(rules=self._rule_override)
+        return adapter.analyze_file(file_path, source)

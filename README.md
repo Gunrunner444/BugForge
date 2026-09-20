@@ -16,14 +16,24 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | v0.4.0 | AI Debugging Engine | ✅ Complete |
 | v0.5.0 | Automatic Test Generation | ✅ Complete |
 | v0.6.0 | Bug Reproduction Engine | ✅ Complete |
-| v0.7.0 | Automated Repair | ✅ Complete |
+| v0.7.0 | Repair Engine | ✅ Complete |
 | v0.8.0 | Patch Verification | ✅ Complete |
-| v0.9.0 | GitHub Integration | 🚧 In Progress |
-| v1.0.0 | Full AI Debugging Platform | Planned |
+| v0.9.0 | GitHub Integration | ✅ Complete |
+| v1.0.0 | Full AI Debugging Platform | ✅ Complete |
+| v1.1.0 | Autonomous Discovery | ✅ Complete |
+| Phase 1 | Adapter foundation (languages, AI, security tooling) | ✅ Complete |
+
+See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
 ---
 
 ## Architecture
+
+BugForge is organized around **adapters registered in a plugin catalog**. Core
+orchestration looks up languages, AI backends, and future security tools by id
+instead of hard-coded conditionals. Python analysis and the existing AI
+providers run through that catalog today; other languages are detected but not
+yet analyzed. Details: [docs/architecture.md](docs/architecture.md).
 
 ```
 Repository
@@ -156,11 +166,12 @@ Set in `.env` or environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AI_PROVIDER` | `mock` | `mock` / `openai` / `anthropic` |
+| `AI_PROVIDER` | `mock` | `mock` / `openai` / `anthropic` / `ollama` / `openai_compatible` / `local` |
 | `AI_MODEL` | `gpt-4o-mini` | Model name |
 | `AI_API_KEY` | *(empty)* | API key — never commit this |
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature |
 | `AI_TIMEOUT_SECONDS` | `60` | Request timeout |
+| `LANGUAGE_ANALYZERS` | *(empty)* | Comma-separated analyzer ids. Empty = all analyzers that implement static analysis (currently `python`) |
 
 The **mock provider** is always safe for development — no API key required.
 

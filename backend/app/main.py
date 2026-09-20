@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging(log_level=settings.log_level, use_json=settings.environment == "production")
     logger.info("BugForge API starting up (environment=%s)", settings.environment)
+    from app.plugins import get_plugin_catalog
+
+    catalog = get_plugin_catalog()
+    logger.info(
+        "Plugin catalog ready: languages=%s ai_providers=%s",
+        ",".join(catalog.languages.available_ids()),
+        ",".join(catalog.ai_providers.available_ids()),
+    )
     yield
     logger.info("BugForge API shutting down")
 

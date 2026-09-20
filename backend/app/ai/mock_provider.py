@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 
+from app.ai.health import AIHealthStatus, default_capabilities
 from app.ai.provider import (
     AIUsage,
     DebuggingRequest,
@@ -39,6 +40,17 @@ class MockLLMProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return True
+
+    async def health(self) -> AIHealthStatus:
+        return AIHealthStatus(
+            provider=self.provider_name,
+            model=self.model_name,
+            is_local=True,
+            reachable=True,
+            configured=True,
+            model_available=True,
+            capabilities=default_capabilities(),
+        )
 
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
         if self._delay:

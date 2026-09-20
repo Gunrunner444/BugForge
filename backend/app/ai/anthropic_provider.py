@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from app.ai.health import AIHealthStatus, default_capabilities
 from app.ai.openai_provider import _parse_hypotheses
 from app.ai.provider import (
     AIUsage,
@@ -60,6 +61,19 @@ class AnthropicProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return bool(self._api_key)
+
+    async def health(self) -> AIHealthStatus:
+        configured = bool(self._api_key)
+        return AIHealthStatus(
+            provider=self.provider_name,
+            model=self._model,
+            is_local=False,
+            reachable=configured,
+            configured=configured,
+            model_available=None,
+            error=None if configured else "AI_API_KEY not configured",
+            capabilities=default_capabilities(),
+        )
 
     async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
         start = time.monotonic()

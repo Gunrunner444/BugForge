@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from app.ai.health import AIHealthStatus, probe_openai_compatible
 from app.ai.provider import (
     AIUsage,
     DebuggingRequest,
@@ -69,6 +70,16 @@ class OpenAIProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return bool(self._api_key)
+
+    async def health(self) -> AIHealthStatus:
+        return await probe_openai_compatible(
+            provider=self.provider_name,
+            model=self._model,
+            base_url=self._base_url,
+            api_key=self._api_key,
+            is_local=False,
+            configured=bool(self._api_key),
+        )
 
     async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
         start = time.monotonic()
