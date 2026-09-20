@@ -69,9 +69,19 @@ hypotheses, tool calls, approvals, evidence graph nodes/edges, privilege
 snapshots, findings, timestamps, and errors. Secrets are never stored.
 
 `GET /security-agent/sessions/{id}` reconstructs the agent from the database
-after restart. Restored privileges are intersected with the current program
-scope: weaker current authorization wins. Stale active-testing approvals
-are not revived.
+after restart and requires the local operator token. Restored privileges are
+intersected with the current program scope: weaker current authorization wins.
+Stale active-testing approvals are not revived. Provider/model configuration
+is restored from the snapshot without API credentials.
+
+Phase 8 sits `AdvancedResearchOrchestrator` above the agent. It selects a
+research strategy, explains the next active action, compares isolated
+identities A/B, and never creates a second execution pipeline. Replay uses
+recorded results with **no live network**. Research memory stores sanitized
+observations only. Live HackerOne defaults: dry-run, scanners/fuzz disabled,
+human approval for higher-risk actions. The AI cannot change scope, enable
+active testing, grant approval, increase total budget, verify a finding, or
+submit a report.
 
 Every session has a budget loaded from settings (`max_tokens`,
 `max_scan_seconds`, tool/request/browser/fuzz/iteration caps). The AI may

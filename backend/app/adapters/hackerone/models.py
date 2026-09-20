@@ -51,7 +51,7 @@ def asset_type_from_hackerone(raw: str) -> AssetType:
     }
     if key in aliases:
         return aliases[key]
-    return HACKERONE_ASSET_MAP.get(key, AssetType.OTHER)
+    return HACKERONE_ASSET_MAP.get(key, AssetType.UNSUPPORTED)
 
 
 @dataclass(frozen=True)

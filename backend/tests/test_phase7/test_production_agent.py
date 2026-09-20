@@ -809,7 +809,8 @@ async def test_context_includes_evidence_not_just_timeline() -> None:
         kind="observation", provenance="http_observation", summary="saw cookie", source="http"
     )
     payload = agent.context_window()
-    assert payload["trusted"]["target"] == session.target
+    assert "target" not in payload["trusted"]
+    assert payload["untrusted"]["target"] == session.target
     assert payload["untrusted"]["evidence"]
     assert "timeline" not in payload["trusted"]
 
@@ -826,7 +827,9 @@ async def test_get_session_restores_from_database(client, db_session: AsyncSessi
     from app.api.v1.endpoints import security_agent as api
 
     api._SESSIONS.pop(session_id, None)
-    restored = await client.get(f"/api/v1/security-agent/sessions/{session_id}")
+    restored = await client.get(
+        f"/api/v1/security-agent/sessions/{session_id}", headers=OPERATOR_HEADERS
+    )
     assert restored.status_code == 200
     assert restored.json()["id"] == session_id
     assert session_id in api._SESSIONS

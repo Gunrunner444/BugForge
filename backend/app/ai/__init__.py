@@ -18,6 +18,7 @@ from app.ai.provider import (
     StaticFindingEvidence,
     TestFailureEvidence,
 )
+from app.ai.restore import restore_provider, snapshot_provider
 
 # Canonical architecture name; existing LLMProvider remains the ABC.
 AIProvider = LLMProvider
@@ -54,4 +55,6 @@ __all__ = [
     "ContextBuilder",
     "PromptBuilder",
     "get_provider",
+    "restore_provider",
+    "snapshot_provider",
 ]

@@ -22,10 +22,14 @@ from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
 from app.models.security_agent import (
     DBReproductionPlan,
+    DBResearchCheckpoint,
     DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
     DBResearchEvidenceNode,
+    DBResearchFinding,
     DBResearchHypothesis,
+    DBResearchIdentity,
+    DBResearchMemory,
     DBResearchSession,
     DBResearchTimelineEvent,
     DBResearchToolCall,
@@ -81,5 +85,9 @@ __all__ = [
     "DBResearchEvidenceLink",
     "DBResearchEvidenceNode",
     "DBResearchEvidenceEdge",
+    "DBResearchFinding",
+    "DBResearchMemory",
+    "DBResearchCheckpoint",
+    "DBResearchIdentity",
     "DBReproductionPlan",
 ]

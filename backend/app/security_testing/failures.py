@@ -37,16 +37,57 @@ class ToolExecutionState(StrEnum):
     OK = "ok"
 
 
-_SUCCESS_STATES = frozenset(
+_EXECUTION_SUCCESS_STATES = frozenset(
     {
         ToolExecutionState.OK,
         ToolExecutionState.COMPLETED,
         ToolExecutionState.RESULTS_AVAILABLE,
         ToolExecutionState.RESULTS_INGESTED,
-        ToolExecutionState.PLANNED,
-        ToolExecutionState.AUTHORIZED,
-        ToolExecutionState.DRY_RUN,
+    }
+)
+
+_RESULT_AVAILABLE_STATES = frozenset(
+    {
+        ToolExecutionState.RESULTS_AVAILABLE,
+        ToolExecutionState.RESULTS_INGESTED,
+        ToolExecutionState.COMPLETED,
+        ToolExecutionState.OK,
+    }
+)
+
+_PLANNING_STATES = frozenset(
+    {
         ToolExecutionState.NOT_REQUESTED,
+        ToolExecutionState.PLANNED,
+        ToolExecutionState.DRY_RUN,
+        ToolExecutionState.WAITING_FOR_APPROVAL,
+    }
+)
+
+_AUTHORIZATION_STATES = frozenset(
+    {
+        ToolExecutionState.AUTHORIZED,
+        ToolExecutionState.DENIED,
+        ToolExecutionState.INVALID_SCOPE,
+        ToolExecutionState.SAFETY_BLOCKED,
+        ToolExecutionState.APPROVAL_REQUIRED,
+        ToolExecutionState.WAITING_FOR_APPROVAL,
+    }
+)
+
+_TERMINAL_FAILURE_STATES = frozenset(
+    {
+        ToolExecutionState.TOOL_UNAVAILABLE,
+        ToolExecutionState.TIMEOUT,
+        ToolExecutionState.NETWORK_FAILURE,
+        ToolExecutionState.EXECUTION_ERROR,
+        ToolExecutionState.FAILED,
+        ToolExecutionState.AUTHENTICATION_FAILURE,
+        ToolExecutionState.RATE_LIMITED,
+        ToolExecutionState.MALFORMED_INPUT,
+        ToolExecutionState.DENIED,
+        ToolExecutionState.INVALID_SCOPE,
+        ToolExecutionState.SAFETY_BLOCKED,
     }
 )
 
@@ -64,5 +105,30 @@ class ToolExecutionResult:
         return False
 
     @property
+    def execution_success(self) -> bool:
+        """True only when the tool actually completed or produced ingestible results."""
+        return self.state in _EXECUTION_SUCCESS_STATES
+
+    @property
+    def result_available(self) -> bool:
+        return self.state in _RESULT_AVAILABLE_STATES
+
+    @property
+    def planning_state(self) -> bool:
+        return self.state in _PLANNING_STATES
+
+    @property
+    def authorization_state(self) -> bool:
+        return self.state in _AUTHORIZATION_STATES
+
+    @property
+    def terminal_failure(self) -> bool:
+        return self.state in _TERMINAL_FAILURE_STATES
+
+    @property
     def ok(self) -> bool:
-        return self.state in _SUCCESS_STATES
+        """Backward-compatible alias for actual execution success.
+
+        Planned, authorized, dry-run, and not-requested states are not success.
+        """
+        return self.execution_success

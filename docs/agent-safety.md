@@ -28,8 +28,10 @@ expired approvals are dropped.
 Web pages, HTML, JavaScript, comments, API responses, scanner output,
 HackerOne instructions, and repository content are untrusted. They are placed
 in explicit untrusted channels (`BUGFORGE_UNTRUSTED_*`) separate from trusted
-instructions. Keyword stripping is additional, not the only control. Target
-content cannot issue agent instructions.
+instructions. Only BugForge's immutable policy belongs in the trusted
+channel. Targets, program handles, HackerOne text, scope identifiers, source,
+HTTP, scanner output, hypotheses, and evidence are untrusted data. Keyword
+stripping is additional, not the only control.
 
 ## Loop protection
 

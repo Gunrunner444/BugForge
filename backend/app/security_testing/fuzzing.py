@@ -205,13 +205,21 @@ class FuzzingEngine:
 def _mutate(seed: SeedRequest, kind: MutationKind, payload: str, *, max_body: int) -> SeedRequest:
     if kind is MutationKind.QUERY:
         parsed = urlparse(seed.url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        if not query:
-            query = {"q": payload}
+        query_pairs = list(parse_qsl(parsed.query, keep_blank_values=True))
+        if not query_pairs:
+            query_pairs = [("q", payload)]
         else:
-            first = next(iter(query))
-            query[first] = payload
-        url = urlunparse(parsed._replace(query=urlencode(query)))
+            first_name = query_pairs[0][0]
+            mutated = False
+            rebuilt: list[tuple[str, str]] = []
+            for name, value in query_pairs:
+                if not mutated and name == first_name:
+                    rebuilt.append((name, payload))
+                    mutated = True
+                else:
+                    rebuilt.append((name, value))
+            query_pairs = rebuilt
+        url = urlunparse(parsed._replace(query=urlencode(query_pairs, doseq=True)))
         return replace(seed, url=url)
     if kind is MutationKind.PATH:
         parsed = urlparse(seed.url)

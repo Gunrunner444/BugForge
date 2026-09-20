@@ -31,8 +31,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="BugForge API",
-    description="AI-powered software debugging, testing, and automated code repair",
-    version="1.1.0",
+    description=(
+        "Evidence-first debugging and authorized security research. "
+        "The AI is advisory. ScopeGuard, SafetyController, and human approval "
+        "remain authoritative. Version 1.8 includes Phase 8 research intelligence."
+    ),
+    version="1.8.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,

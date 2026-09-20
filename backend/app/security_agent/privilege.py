@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -121,16 +122,65 @@ def capture_privileges(
 
 
 def scope_fingerprint(scope: ProgramScope) -> str:
-    raw = "|".join(
-        [
-            scope.program_name or "",
-            ",".join(sorted(rule.identifier for rule in scope.includes)),
-            ",".join(sorted(rule.identifier for rule in scope.excludes)),
-            str(scope.lab_mode),
-            str(scope.allow_active_testing),
-        ]
-    )
+    """Canonical hash of every authorization-relevant scope field.
+
+    Ordering cannot change the digest: rules are sorted and JSON is
+    serialized with sorted keys.
+    """
+    payload = {
+        "program_id": scope.program_id or "",
+        "program_name": scope.program_name or "",
+        "scope_mode": getattr(scope.scope_mode, "value", str(scope.scope_mode)),
+        "includes": [_rule_fingerprint(rule) for rule in _sorted_rules(scope.includes)],
+        "excludes": [_rule_fingerprint(rule) for rule in _sorted_rules(scope.excludes)],
+        "allowed_http_methods": sorted(method.upper() for method in scope.allowed_methods),
+        "allow_active_testing": bool(scope.allow_active_testing),
+        "testing_restrictions": sorted(
+            getattr(item, "value", str(item)) for item in scope.testing_restrictions
+        ),
+        "instructions": scope.instructions or "",
+        "open_scope_acknowledged": bool(scope.open_scope_acknowledged),
+        "open_scope_policy": scope.open_scope_policy or "",
+        "lab_mode": bool(scope.lab_mode),
+        "lab_hosts": sorted(scope.lab_hosts),
+        "network_policy": "lab" if scope.lab_mode else "live",
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _sorted_rules(rules: tuple[Any, ...]) -> tuple[Any, ...]:
+    return tuple(
+        sorted(
+            rules,
+            key=lambda rule: (
+                rule.identifier,
+                str(rule.structured_scope_id or ""),
+                str(getattr(rule.asset_type, "value", rule.asset_type)),
+            ),
+        )
+    )
+
+
+def _rule_fingerprint(rule: Any) -> dict[str, Any]:
+    return {
+        "identifier": rule.identifier,
+        "asset_type": getattr(rule.asset_type, "value", str(rule.asset_type)),
+        "structured_scope_id": rule.structured_scope_id or "",
+        "eligible_for_submission": bool(rule.eligible_for_submission),
+        "eligible_for_bounty": bool(rule.eligible_for_bounty),
+        "eligibility": getattr(rule.eligible, "value", str(rule.eligible)),
+        "allowed_methods": sorted(method.upper() for method in rule.allowed_methods),
+        "allow_active_testing": bool(rule.allow_active_testing),
+        "restriction": getattr(rule.restriction, "value", str(rule.restriction)),
+        "path_prefix": rule.path_prefix or "",
+        "instructions": rule.instructions or "",
+        "is_exclusion": bool(rule.is_exclusion),
+        "max_severity": rule.max_severity or "",
+        "program_id": rule.program_id or "",
+        "reference": rule.reference or "",
+        "exclusions": sorted(rule.exclusions),
+    }
 
 
 def program_scope_from_hackerone(program: HackerOneProgram) -> ProgramScope:
@@ -140,12 +190,15 @@ def program_scope_from_hackerone(program: HackerOneProgram) -> ProgramScope:
         identifier = (record.asset_identifier or "").strip()
         if not identifier:
             continue
+        asset_type = (
+            record.asset_type if isinstance(record.asset_type, AssetType) else AssetType.UNSUPPORTED
+        )
+        if asset_type is AssetType.OTHER:
+            asset_type = AssetType.UNSUPPORTED
         includes.append(
             ScopeRule(
                 identifier=identifier,
-                asset_type=record.asset_type
-                if isinstance(record.asset_type, AssetType)
-                else AssetType.DOMAIN,
+                asset_type=asset_type,
                 eligible=Eligibility.ELIGIBLE
                 if record.eligible_for_submission
                 else Eligibility.INELIGIBLE,
@@ -276,6 +329,8 @@ def expire_stale_privileges(snapshot: PrivilegeSnapshot) -> PrivilegeSnapshot:
 def apply_privilege_snapshot(engine: SecurityTestEngine, snapshot: PrivilegeSnapshot) -> None:
     engine.session.active_testing_enabled = snapshot.active_testing
     engine.session.fuzzing_enabled = snapshot.fuzzing
+    engine.session.dry_run = snapshot.dry_run
+    engine.safety.dry_run = snapshot.dry_run
     if snapshot.active_testing:
         engine.session.scope = ProgramScope(
             program_id=engine.session.scope.program_id,

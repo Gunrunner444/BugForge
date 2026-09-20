@@ -28,6 +28,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 5 | HackerOne production readiness | ✅ Implemented (persistent state, numeric weaknesses, operator authorization) |
 | Phase 6 | Guided AI security research agent | ✅ Implemented (planner; Phase 7 executes authorized tools) |
 | Phase 7 | Production security agent execution + evidence-driven verification | ✅ Implemented (lab-capable; live-capable with human approval; not unrestricted hacking) |
+| Phase 8 | Advanced security research + verification intelligence | ✅ Implemented (orchestrator, identities, replay, memory; AI remains advisory) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -60,10 +61,13 @@ submission. Phase 5 persists that HackerOne state, binds approval to
 payload hashes, and uses program-specific numeric weakness IDs. Phase 6
 adds a guided `SecurityResearchAgent` that plans tool actions. Phase 7
 executes those tools through the existing adapters, persists the evidence
-graph, and restores sessions after restart. Deterministic BugForge
+graph, and restores sessions after restart. Phase 8 adds an advanced
+research orchestrator, two-identity authorization comparison, replay,
+research memory, checkpoints, and evidence export. Deterministic BugForge
 controls remain authoritative. Tools that lack a binary (ZAP, Nuclei,
 Playwright) report `UNAVAILABLE` or ingest-only results — they are not
-stubs pretending to have scanned.
+stubs pretending to have scanned. Live HackerOne sessions default to dry-run
+with scanners and fuzzing disabled.
 
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),
@@ -299,6 +303,14 @@ autonomous discovery. That work is the **debugging** product.
 | 2 | Local AI + multi-language **static** security analysis (potential/corroborated only) |
 | 3 | Authorized testing: ScopeGuard, SafetyController, lab vs live, gated HTTP, optional scanner **execution** when binaries exist |
 | 4 | HackerOne Hacker API: program lookup, structured scope sync, finding→draft, human review, dry-run, gated real submission |
+| 5 | Persistent HackerOne state, numeric weaknesses, operator authorization, payload-bound approvals |
+| 6 | Guided `SecurityResearchAgent` planner. The AI cannot verify, approve, or submit |
+| 7 | Production tool execution through existing adapters, persisted evidence graph, session restore. ZAP/Nuclei/Playwright are live-capable **only when their binaries are present** |
+| 8 | Advanced research orchestrator, two-identity testing, replay, memory, checkpoints, evidence export. Live mode remains dry-run and human-controlled |
+
+In-memory `RateLimiter` is **per process**. Multiple API workers do not share
+a global per-target budget; production live mode should run one worker or
+place a shared limiter in front of BugForge.
 
 Deliberately **not** automatic:
 

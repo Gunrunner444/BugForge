@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.7.0"
+    version: str = "1.8.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     security_agent_source_excerpt_bytes: int = 32_768
     security_agent_source_max_lines: int = 200
     security_agent_approval_ttl_hours: int = 24
+    security_agent_lab_roots: list[str] = []
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

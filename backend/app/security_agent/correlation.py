@@ -120,3 +120,78 @@ def finding_fingerprint(
         ]
     )
     return sha256(material.encode("utf-8")).hexdigest()
+
+
+def stable_finding_identity(
+    *,
+    vulnerability_class: str,
+    target: str,
+    endpoint: str = "",
+    source_location: str = "",
+    asset: str = "",
+) -> str:
+    """Scanner-independent identity for the same underlying issue."""
+    return finding_fingerprint(
+        vulnerability_class=vulnerability_class,
+        target=target,
+        endpoint=endpoint or asset,
+        source_location=source_location,
+    )
+
+
+def propose_merge(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> dict[str, Any]:
+    """Deterministic merge *proposal*. Never auto-merges findings."""
+    left_id = stable_finding_identity(
+        vulnerability_class=str(left.get("vulnerability_class") or ""),
+        target=str(left.get("target") or ""),
+        endpoint=str(left.get("endpoint") or ""),
+        source_location=str(left.get("source_location") or ""),
+        asset=str(left.get("asset") or ""),
+    )
+    right_id = stable_finding_identity(
+        vulnerability_class=str(right.get("vulnerability_class") or ""),
+        target=str(right.get("target") or ""),
+        endpoint=str(right.get("endpoint") or ""),
+        source_location=str(right.get("source_location") or ""),
+        asset=str(right.get("asset") or ""),
+    )
+    same = left_id == right_id
+    reasons: list[str] = []
+    if (
+        str(left.get("vulnerability_class") or "").lower()
+        == str(right.get("vulnerability_class") or "").lower()
+    ):
+        reasons.append("same_vulnerability_class")
+    if str(left.get("endpoint") or left.get("target")) == str(
+        right.get("endpoint") or right.get("target")
+    ):
+        reasons.append("same_endpoint")
+    if str(left.get("source_location") or "") and str(left.get("source_location")) == str(
+        right.get("source_location") or ""
+    ):
+        reasons.append("same_source_location")
+    if str(left.get("asset") or "") and str(left.get("asset")) == str(right.get("asset") or ""):
+        reasons.append("same_hackerone_asset")
+    return {
+        "same_identity": same,
+        "left_id": left_id,
+        "right_id": right_id,
+        "reasons": reasons,
+        "auto_merged": False,
+    }
+
+
+def cross_session_matches(
+    current: list[dict[str, Any]],
+    previous: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
+    for left in current:
+        for right in previous:
+            proposal = propose_merge(left, right)
+            if proposal["same_identity"] or proposal["reasons"]:
+                proposals.append(proposal)
+    return proposals

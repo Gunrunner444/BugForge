@@ -48,6 +48,10 @@ UNTRUSTED_CHANNELS = frozenset(
         "UNTRUSTED_HACKERONE",
         "UNTRUSTED_API",
         "UNTRUSTED_PAGE",
+        "UNTRUSTED_TARGET",
+        "UNTRUSTED_PROGRAM",
+        "UNTRUSTED_SCOPE",
+        "UNTRUSTED_HYPOTHESIS",
     }
 )
 
@@ -98,3 +102,15 @@ def channel(name: str, body: str, *, trusted: bool = False) -> str:
         f"{cleaned}\n"
         f"{end}"
     )
+
+
+def estimate_tokens(text: str) -> int:
+    """Tokenizer-aware when tiktoken/MLX is available; otherwise ~4 chars/token."""
+    sample = text or ""
+    try:
+        import tiktoken
+
+        encoder = tiktoken.get_encoding("cl100k_base")
+        return len(encoder.encode(sample))
+    except Exception:
+        return max(1, (len(sample) + 3) // 4)

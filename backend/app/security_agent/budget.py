@@ -89,6 +89,27 @@ class SessionBudget:
             "scan_seconds": self.max_scan_seconds - self.scan_seconds,
         }
 
+    def reallocate(self, *, source: str, destination: str, amount: int) -> None:
+        """Move unused budget between categories. Cannot increase the total cap."""
+        if amount <= 0:
+            raise SafetyLimitExceededError("reallocate amount must be positive")
+        mapping = {
+            "tool": ("max_tool_calls", "tool_calls"),
+            "request": ("max_requests", "requests"),
+            "browser": ("max_browser_actions", "browser_actions"),
+            "fuzz": ("max_fuzz_requests", "fuzz_requests"),
+            "iteration": ("max_iterations", "iterations"),
+        }
+        if source not in mapping or destination not in mapping or source == destination:
+            raise SafetyLimitExceededError("invalid budget reallocation")
+        src_max, src_used = mapping[source]
+        dst_max, _dst_used = mapping[destination]
+        available = int(getattr(self, src_max)) - int(getattr(self, src_used))
+        if amount > available:
+            raise SafetyLimitExceededError("cannot reallocate more than remaining source budget")
+        setattr(self, src_max, int(getattr(self, src_max)) - amount)
+        setattr(self, dst_max, int(getattr(self, dst_max)) + amount)
+
     def exhausted(self) -> bool:
         rem = self.remaining()
         return any(float(value) <= 0 for value in rem.values())

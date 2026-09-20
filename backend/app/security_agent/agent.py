@@ -70,6 +70,8 @@ _FORBIDDEN_AI_ACTIONS = frozenset(
         "declare_in_scope",
         "enable_active_testing",
         "grant_approval",
+        "increase_budget",
+        "submit_report",
     }
 )
 
@@ -127,6 +129,38 @@ class FingerprintRecord:
 
 
 @dataclass
+class ToolCallRecord:
+    tool: str
+    arguments: dict[str, Any]
+    reason: str = ""
+    authorization: str = ""
+    authorization_reason: str = ""
+    execution_state: str = ""
+    result_quality: str = ""
+    result_summary: str = ""
+    evidence_ids: tuple[str, ...] = ()
+    error: str | None = None
+    id: str = field(default_factory=lambda: uuid4().hex)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "tool": self.tool,
+            "arguments": dict(self.arguments),
+            "reason": self.reason,
+            "authorization": self.authorization,
+            "authorization_reason": self.authorization_reason,
+            "execution_state": self.execution_state,
+            "result_quality": self.result_quality,
+            "result_summary": self.result_summary,
+            "evidence_ids": list(self.evidence_ids),
+            "error": self.error,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+@dataclass
 class ResearchSession:
     project_id: str
     target: str
@@ -145,6 +179,7 @@ class ResearchSession:
     tool_history: list[str] = field(default_factory=list)
     fingerprints: list[str] = field(default_factory=list)
     fingerprint_records: list[FingerprintRecord] = field(default_factory=list)
+    tool_call_records: list[ToolCallRecord] = field(default_factory=list)
     findings: list[SecurityFinding] = field(default_factory=list)
     disabled_tools: set[str] = field(default_factory=set)
     paused: bool = False
@@ -162,6 +197,10 @@ class ResearchSession:
     nuclei_runner: Any = None
     zap_binary: str | None = None
     nuclei_binary: str | None = None
+    next_action: dict[str, Any] | None = None
+    identities: Any = None
+    strategy: str = "passive_recon"
+    memory: Any = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -184,6 +223,19 @@ class ResearchSession:
             "stopped": self.stopped,
             "graph": self.graph.snapshot(),
             "disabled_tools": sorted(self.disabled_tools),
+            "next_action": dict(self.next_action) if self.next_action else None,
+            "findings": [
+                {
+                    "id": str(item.id),
+                    "title": item.title,
+                    "status": item.status.value,
+                    "target": item.target,
+                    "vulnerability_class": item.vulnerability_class,
+                }
+                for item in self.findings
+            ],
+            "tool_history": [item.snapshot() for item in self.tool_call_records],
+            "strategy": self.strategy,
         }
 
     def cancelled(self) -> bool:
@@ -462,6 +514,15 @@ class SecurityResearchAgent:
             self._timeline("tool", tool=request.tool, authorization="blocked", result=str(exc))
             raise
         self.session.state = ResearchState.EXECUTING
+        self.session.next_action = {
+            "tool": request.tool,
+            "target": target,
+            "reason": reason,
+            "expected_evidence": spec.description,
+            "estimated_requests": 1 if spec.budget_kind in {"request", "fuzz"} else 0,
+            "risk_level": spec.risk_level.value,
+            "approval_required": bool(spec.requires_human_approval),
+        }
         self._timeline(
             "execution_start", tool=request.tool, target=target, authorization="authorized"
         )
@@ -474,7 +535,10 @@ class SecurityResearchAgent:
             relation="executes",
         )
         try:
-            result = await self.tools.execute(request)
+            permit = self.tools.issue_permit(
+                request.tool, session_id=self.session.id, mode=self.session.mode
+            )
+            result = await self.tools.execute(request, permit=permit)
         except AuthorizationDeniedError as exc:
             self._timeline(
                 "execution_result",
@@ -529,9 +593,13 @@ class SecurityResearchAgent:
             )
             for evidence_id in result.get("evidence_ids") or []:
                 if evidence_id in self.session.graph.nodes:
-                    self.session.graph.link(exec_node.id, str(evidence_id), "produced")
+                    edge = (exec_node.id, str(evidence_id), "produced")
+                    if edge not in self.session.graph.edges:
+                        self.session.graph.link(exec_node.id, str(evidence_id), "produced")
             if result.get("evidence_id") and result["evidence_id"] in self.session.graph.nodes:
-                self.session.graph.link(exec_node.id, str(result["evidence_id"]), "produced")
+                edge = (exec_node.id, str(result["evidence_id"]), "produced")
+                if edge not in self.session.graph.edges:
+                    self.session.graph.link(exec_node.id, str(result["evidence_id"]), "produced")
         self.session.state = ResearchState.OBSERVING
         evidence_id = (
             observation.id if observation else str(result.get("evidence_id") or exec_node.id)
@@ -550,6 +618,23 @@ class SecurityResearchAgent:
         )
         self._remember_fingerprint(fingerprint, quality)
         self.session.tool_history.append(request.tool)
+        evidence_ids = tuple(
+            str(item)
+            for item in (result.get("evidence_ids") or ([evidence_id] if evidence_id else []))
+        )
+        self.session.tool_call_records.append(
+            ToolCallRecord(
+                tool=request.tool,
+                arguments=dict(dumped),
+                reason=reason,
+                authorization="AUTHORIZED",
+                authorization_reason="",
+                execution_state=str(result.get("state") or "completed"),
+                result_quality=quality,
+                result_summary=summary,
+                evidence_ids=evidence_ids,
+            )
+        )
         return {
             "authorization": "AUTHORIZED",
             "result": result,
@@ -753,7 +838,11 @@ class SecurityResearchAgent:
         return self.context.build(self.session)
 
     async def _llm_planner(self, session: ResearchSession) -> AgentDecision:
-        context = self.context.for_model(session)
+        schemas = json.dumps(self.tools.llm_tools(), default=str)
+        self.context.estimate(session, tool_schemas=schemas)
+        advertised = session.provider.capabilities()
+        limit = int(advertised.max_context_tokens or 8192)
+        context = self.context.for_model(session, max_context_tokens=limit)
         request = CompletionRequest(
             system_prompt=channel(
                 "TRUSTED_INSTRUCTIONS",
@@ -884,7 +973,12 @@ class SecurityResearchAgent:
             )
             hypothesis.supporting_evidence_ids = hypothesis.supporting_evidence_ids
             self.session.hypotheses.append(hypothesis)
-            self.session.graph.link(node.id, node.id, "self")
+            for evidence_id in hypothesis.supporting_evidence_ids:
+                if evidence_id in self.session.graph.nodes and evidence_id != node.id:
+                    self.session.graph.link(node.id, evidence_id, "supports")
+            for evidence_id in hypothesis.contradicting_evidence_ids:
+                if evidence_id in self.session.graph.nodes and evidence_id != node.id:
+                    self.session.graph.link(node.id, evidence_id, "contradicted_by")
         self.session.state = ResearchState.HYPOTHESIS_CREATED
         self._timeline("hypothesis", decision=hypothesis.title)
 
@@ -927,7 +1021,9 @@ def _tool_context(session: ResearchSession) -> ToolContext:
         session_id=session.id,
         mode=session.mode,
         program_handle=session.program_handle,
-        repo_root=Path(session.repo_root or ".").resolve(),
+        repo_root=Path(session.repo_root).resolve()
+        if session.repo_root
+        else Path("/nonexistent-bugforge-no-repo"),
         exchanges=session.exchanges,
         cancelled=session.cancelled,
         zap_runner=session.zap_runner,

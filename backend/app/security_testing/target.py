@@ -27,6 +27,7 @@ class AssetType(StrEnum):
     HARDWARE = "hardware"
     OTHER_ASSET = "other_asset"
     AI_MODEL = "ai_model"
+    UNSUPPORTED = "unsupported"
 
 
 NETWORK_ASSET_TYPES = frozenset(

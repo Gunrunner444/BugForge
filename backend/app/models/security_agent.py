@@ -62,6 +62,18 @@ class DBResearchSession(Base):
     evidence_edges: Mapped[list[DBResearchEvidenceEdge]] = relationship(
         "DBResearchEvidenceEdge", back_populates="session", cascade="all, delete-orphan"
     )
+    findings: Mapped[list[DBResearchFinding]] = relationship(
+        "DBResearchFinding", back_populates="session", cascade="all, delete-orphan"
+    )
+    memories: Mapped[list[DBResearchMemory]] = relationship(
+        "DBResearchMemory", back_populates="session", cascade="all, delete-orphan"
+    )
+    checkpoints: Mapped[list[DBResearchCheckpoint]] = relationship(
+        "DBResearchCheckpoint", back_populates="session", cascade="all, delete-orphan"
+    )
+    identities: Mapped[list[DBResearchIdentity]] = relationship(
+        "DBResearchIdentity", back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class DBResearchHypothesis(Base):
@@ -106,6 +118,8 @@ class DBResearchToolCall(Base):
     authorization: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     authorization_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     result_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    execution_state: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    result_quality: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     evidence_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -223,4 +237,90 @@ class DBResearchEvidenceEdge(Base):
 
     session: Mapped[DBResearchSession] = relationship(
         "DBResearchSession", back_populates="evidence_edges"
+    )
+
+
+class DBResearchFinding(Base):
+    __tablename__ = "research_findings"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    hypothesis_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="potential")
+    vulnerability_class: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    target: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    verification_state: Mapped[str] = mapped_column(String(64), nullable=False, default="potential")
+    evidence_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    reproduction_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False, default="low")
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    impact: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="findings"
+    )
+
+
+class DBResearchMemory(Base):
+    __tablename__ = "research_memory"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, default="observation")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession | None] = relationship(
+        "DBResearchSession", back_populates="memories"
+    )
+
+
+class DBResearchCheckpoint(Base):
+    __tablename__ = "research_checkpoints"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="checkpoints"
+    )
+
+
+class DBResearchIdentity(Base):
+    __tablename__ = "research_identities"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label: Mapped[str] = mapped_column(String(32), nullable=False, default="A")
+    cookies: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    storage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="identities"
     )

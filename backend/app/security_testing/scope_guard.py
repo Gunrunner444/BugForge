@@ -12,6 +12,7 @@ from app.security_testing.scope_model import (
     TestingRestriction,
 )
 from app.security_testing.target import (
+    NETWORK_ASSET_TYPES,
     AssetType,
     NormalizedTarget,
     TargetNormalizer,
@@ -172,6 +173,24 @@ class ScopeGuard:
                 matched=rule,
             )
         if active:
+            if rule.asset_type is AssetType.UNSUPPORTED:
+                return self._deny(
+                    target,
+                    method,
+                    tool,
+                    "UNSUPPORTED ASSET TYPE = DENY (explicit implementation required)",
+                    dry_run,
+                    matched=rule,
+                )
+            if rule.asset_type not in NETWORK_ASSET_TYPES:
+                return self._deny(
+                    target,
+                    method,
+                    tool,
+                    f"Asset type {rule.asset_type.value} cannot be actively tested",
+                    dry_run,
+                    matched=rule,
+                )
             if not self.scope.allow_active_testing and not rule.allow_active_testing:
                 return self._deny(
                     target,

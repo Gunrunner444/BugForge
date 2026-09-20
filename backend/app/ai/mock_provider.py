@@ -30,8 +30,9 @@ class MockLLMProvider(LLMProvider):
     Results are deterministic given the same input, making tests reproducible.
     """
 
-    def __init__(self, delay_seconds: float = 0.0) -> None:
+    def __init__(self, delay_seconds: float = 0.0, *, model_name: str = "mock-v1") -> None:
         self._delay = delay_seconds
+        self._model_name = model_name
 
     @property
     def provider_name(self) -> str:
@@ -39,7 +40,7 @@ class MockLLMProvider(LLMProvider):
 
     @property
     def model_name(self) -> str:
-        return "mock-v1"
+        return self._model_name
 
     async def is_available(self) -> bool:
         return True

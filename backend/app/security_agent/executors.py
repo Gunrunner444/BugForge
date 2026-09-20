@@ -638,14 +638,13 @@ def _api_test(ctx: ToolContext) -> Executor:
 
 
 def _safe_repo_path(root: Path, relative: str) -> Path:
-    cleaned = relative.replace("\\", "/").lstrip("/")
-    if not cleaned or cleaned.startswith(".."):
-        raise ValueError("path_traversal")
-    base = root.resolve()
-    candidate = (base / cleaned).resolve()
-    if not candidate.is_relative_to(base):
-        raise ValueError("path_traversal")
-    return candidate
+    from app.security_agent.repo_lock import safe_source_path
+    from app.security_testing.errors import RestrictedActivityError
+
+    try:
+        return safe_source_path(root, relative)
+    except RestrictedActivityError as exc:
+        raise ValueError(str(exc) or "path_traversal") from exc
 
 
 def _constraint(ctx: ToolContext) -> ScopeConstraint:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
@@ -13,6 +14,16 @@ from app.security_agent.states import ResearchMode, ToolCapability, ToolRiskLeve
 from app.security_testing.errors import RestrictedActivityError, SafetyLimitExceededError
 
 Executor = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class ExecutionPermit:
+    """Single-use proof that SecurityResearchAgent authorized this call."""
+
+    tool: str
+    session_id: str
+    mode: ResearchMode
+    nonce: str
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,7 @@ class ToolRegistry:
         self._specs: dict[str, ToolSpec] = {}
         self._executors: dict[str, Executor] = {}
         self._disabled: set[str] = set()
+        self._permits: dict[str, ExecutionPermit] = {}
 
     def register(self, spec: ToolSpec, executor: Executor) -> None:
         self._specs[spec.name] = spec
@@ -199,7 +211,25 @@ class ToolRegistry:
             return spec
         return spec
 
-    async def execute(self, request: ToolCallRequest) -> dict[str, Any]:
+    def issue_permit(self, name: str, *, session_id: str, mode: ResearchMode) -> ExecutionPermit:
+        spec = self.validate_capability(name, mode=mode)
+        if spec.capability is ToolCapability.PLANNING_ONLY:
+            raise RestrictedActivityError(f"planning_only:{name}")
+        permit = ExecutionPermit(tool=name, session_id=session_id, mode=mode, nonce=uuid4().hex)
+        self._permits[permit.nonce] = permit
+        return permit
+
+    async def execute(
+        self,
+        request: ToolCallRequest,
+        *,
+        permit: ExecutionPermit | None = None,
+    ) -> dict[str, Any]:
+        if permit is None:
+            raise RestrictedActivityError("direct_tool_execution_denied")
+        stored = self._permits.pop(permit.nonce, None)
+        if stored is None or stored != permit or stored.tool != request.tool:
+            raise RestrictedActivityError("invalid_or_spent_execution_permit")
         parsed = self.validate(request)
         executor = self._executors[request.tool]
         return await executor(parsed.model_dump())

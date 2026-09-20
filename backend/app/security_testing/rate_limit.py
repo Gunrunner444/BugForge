@@ -1,4 +1,13 @@
-"""Token-bucket / sliding-window rate limiter for active testing."""
+"""Per-process token-bucket / sliding-window rate limiter for active testing.
+
+This limiter is **in-memory and per process**. Multiple API workers do not
+share a global per-target budget. Production/live deployments must either:
+
+* run a single worker, or
+* put a shared limiter (Redis, database, or reverse-proxy) in front of BugForge.
+
+Do not treat these counters as cluster-wide guarantees.
+"""
 
 from __future__ import annotations
 

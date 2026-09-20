@@ -37,6 +37,10 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
     assert "security_research_hypotheses" in table_names
     assert "security_research_tool_calls" in table_names
     assert "security_reproduction_plans" in table_names
+    assert "research_findings" in table_names
+    assert "research_memory" in table_names
+    assert "research_checkpoints" in table_names
+    assert "research_identities" in table_names
     intent = Base.metadata.tables["hackerone_report_intents"]
     assert "local_status" in intent.c
     assert "remote_intent_id" in intent.c
@@ -47,14 +51,14 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
     assert "scope_content_hash" in program.c
 
 
-def test_alembic_revision_chain_includes_017() -> None:
+def test_alembic_revision_chain_includes_018() -> None:
     cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["017"]
-    revision = script.get_revision("017")
+    assert heads == ["018"]
+    revision = script.get_revision("018")
     assert revision is not None
-    assert revision.down_revision == "016"
+    assert revision.down_revision == "017"
 
 
 @pytest.mark.asyncio
@@ -69,6 +73,8 @@ async def test_sqlite_create_all_includes_phase6_tables(tmp_path: Path) -> None:
     assert "security_research_sessions" in names
     assert "research_evidence_node" in names
     assert "research_evidence_edge" in names
+    assert "research_findings" in names
+    assert "research_identities" in names
 
 
 def test_alembic_upgrade_downgrade_upgrade_postgres() -> None:

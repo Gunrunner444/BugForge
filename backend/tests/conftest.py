@@ -31,10 +31,14 @@ from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
 from app.models.security_agent import (  # noqa: F401
     DBReproductionPlan,
+    DBResearchCheckpoint,
     DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
     DBResearchEvidenceNode,
+    DBResearchFinding,
     DBResearchHypothesis,
+    DBResearchIdentity,
+    DBResearchMemory,
     DBResearchSession,
     DBResearchTimelineEvent,
     DBResearchToolCall,

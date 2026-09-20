@@ -11,9 +11,10 @@ Structured output is parsed defensively rather than assuming native
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlparse
 
@@ -120,9 +121,22 @@ class MlxProvider(LLMProvider):
             notes=(
                 "Local MLX OpenAI-compatible HTTP. No cloud API key required. "
                 "Thinking traces are stripped from the final answer. "
-                "Structured JSON is extracted defensively.",
+                "Structured JSON is extracted defensively. "
+                "Not every OpenAI-compatible local server implements "
+                "response_format or native tool_calls.",
             ),
         )
+
+    async def discover_capabilities(self) -> AICapabilities:
+        """Probe the local server; fall back to configured capabilities."""
+        caps = self.capabilities()
+        try:
+            health = await self.health()
+        except Exception:
+            return caps
+        if not health.reachable:
+            return caps
+        return caps
 
     async def is_available(self) -> bool:
         if not _http_url_configured(self._base_url):
@@ -160,13 +174,14 @@ class MlxProvider(LLMProvider):
         start = time.monotonic()
         thinking_flag = self._thinking_enabled if request.thinking is None else request.thinking
         try:
-            content, thinking, usage = await self._chat(
+            content, thinking, usage, native_tools = await self._chat(
                 system_prompt=request.system_prompt,
                 user_message=request.user_message,
                 json_mode=request.json_mode,
                 thinking=thinking_flag,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
+                tools=request.tools,
             )
         except Exception as exc:
             return CompletionResponse(
@@ -190,8 +205,8 @@ class MlxProvider(LLMProvider):
                     thinking=thinking,
                     error=f"malformed_structured_output:{exc}",
                 )
-        tool_calls: tuple[Mapping[str, Any], ...] = ()
-        if request.tools:
+        tool_calls: tuple[Mapping[str, Any], ...] = native_tools
+        if not tool_calls and request.tools:
             try:
                 parsed = extract_json_object(content)
                 if isinstance(parsed, dict) and (parsed.get("tool") or parsed.get("name")):
@@ -215,7 +230,7 @@ class MlxProvider(LLMProvider):
         prompt = PromptBuilder().build(request)
         start = time.monotonic()
         try:
-            content, _thinking, usage = await self._chat(
+            content, _thinking, usage, _native = await self._chat(
                 system_prompt=prompt.system_message,
                 user_message=prompt.user_message,
                 json_mode=True,
@@ -244,7 +259,7 @@ class MlxProvider(LLMProvider):
     async def generate_tests(self, system_prompt: str, user_message: str) -> TestGenerationResponse:
         start = time.monotonic()
         try:
-            content, _thinking, usage = await self._chat(
+            content, _thinking, usage, _native = await self._chat(
                 system_prompt, user_message, json_mode=True, thinking=False
             )
         except Exception as exc:
@@ -269,7 +284,7 @@ class MlxProvider(LLMProvider):
     ) -> StructuredTextResponse:
         start = time.monotonic()
         try:
-            content, _thinking, usage = await self._chat(
+            content, _thinking, usage, _native = await self._chat(
                 system_prompt, user_message, json_mode=True, thinking=self._thinking_enabled
             )
         except Exception as exc:
@@ -301,7 +316,8 @@ class MlxProvider(LLMProvider):
         thinking: bool,
         max_tokens: int | None = None,
         temperature: float | None = None,
-    ) -> tuple[str, str | None, AIUsage]:
+        tools: Sequence[Mapping[str, Any]] | tuple[Any, ...] | None = None,
+    ) -> tuple[str, str | None, AIUsage, tuple[Mapping[str, Any], ...]]:
         url = _completions_url(self._base_url)
         payload: dict[str, Any] = {
             "model": self._model,
@@ -314,6 +330,19 @@ class MlxProvider(LLMProvider):
             "chat_template_kwargs": {"enable_thinking": thinking},
             "enable_thinking": thinking,
         }
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": str(item.get("name") or ""),
+                        "description": str(item.get("description") or ""),
+                        "parameters": item.get("parameters") or {},
+                    },
+                }
+                for item in tools
+                if isinstance(item, Mapping)
+            ]
         if json_mode and self._native_json_mode:
             payload["response_format"] = {"type": "json_object"}
         if not thinking:
@@ -340,7 +369,9 @@ class MlxProvider(LLMProvider):
         raise last_exc
 
 
-def _parse_chat_response(response: httpx.Response) -> tuple[str, str | None, AIUsage]:
+def _parse_chat_response(
+    response: httpx.Response,
+) -> tuple[str, str | None, AIUsage, tuple[Mapping[str, Any], ...]]:
     if response.status_code == 401:
         raise httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
     if response.status_code == 429:
@@ -362,7 +393,19 @@ def _parse_chat_response(response: httpx.Response) -> tuple[str, str | None, AIU
         prompt_tokens=int(raw_usage.get("prompt_tokens") or 0),
         completion_tokens=int(raw_usage.get("completion_tokens") or 0),
     )
-    return content, thinking, usage
+    native: list[Mapping[str, Any]] = []
+    for item in message.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        native.append({"tool": fn.get("name"), "arguments": args, "reason": "native_tool_call"})
+    return content, thinking, usage, tuple(native)
 
 
 def _completions_url(base: str) -> str:

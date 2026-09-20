@@ -7,7 +7,28 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from app.security_testing.errors import RestrictedActivityError
 from app.security_testing.secrets import redact_text
+
+ALLOWED_RELATIONS = frozenset(
+    {
+        "supports",
+        "contradicted_by",
+        "executes",
+        "observes",
+        "produced",
+        "responds_to",
+        "validates",
+        "derived_from",
+        "same_issue_as",
+        "identity_diff",
+        "follows",
+    }
+)
+
+
+class GraphIntegrityError(RestrictedActivityError):
+    """Malformed evidence-graph mutation."""
 
 
 @dataclass
@@ -56,8 +77,13 @@ class EvidenceGraph:
         node_id: str | None = None,
         created_at: datetime | None = None,
     ) -> EvidenceNode:
+        ident = node_id or uuid4().hex
+        if ident in self.nodes:
+            raise GraphIntegrityError(f"duplicate_node:{ident}")
+        if relation not in ALLOWED_RELATIONS:
+            raise GraphIntegrityError(f"unknown_relation:{relation}")
         node = EvidenceNode(
-            id=node_id or uuid4().hex,
+            id=ident,
             kind=kind,
             provenance=provenance,
             summary=redact_text(summary)[:4000],
@@ -69,12 +95,20 @@ class EvidenceGraph:
         )
         self.nodes[node.id] = node
         if parent_id:
-            self.edges.append((parent_id, node.id, relation))
+            self.link(parent_id, node.id, relation)
         return node
 
     def link(self, source_id: str, dest_id: str, relation: str = "supports") -> None:
-        if source_id in self.nodes and dest_id in self.nodes:
-            self.edges.append((source_id, dest_id, relation))
+        if relation not in ALLOWED_RELATIONS:
+            raise GraphIntegrityError(f"unknown_relation:{relation}")
+        if source_id == dest_id:
+            raise GraphIntegrityError("self_edge_forbidden")
+        if source_id not in self.nodes or dest_id not in self.nodes:
+            raise GraphIntegrityError("invalid_node_reference")
+        edge = (source_id, dest_id, relation)
+        if edge in self.edges:
+            raise GraphIntegrityError("duplicate_edge")
+        self.edges.append(edge)
 
     def get(
         self, node_id: str, *, session_id: str | None = None, project_id: str | None = None
@@ -149,7 +183,7 @@ class EvidenceGraph:
                     }
                 )
                 for src, dst, _rel in self.edges:
-                    if dst == ident:
+                    if dst == ident and src != ident:
                         nxt.append(src)
             current = nxt
         return chain
@@ -162,10 +196,9 @@ class EvidenceGraph:
         return items[:limit]
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "nodes": [node.snapshot() for node in self.nodes.values()],
-            "edges": [{"from": src, "to": dst, "relation": rel} for src, dst, rel in self.edges],
-        }
+        nodes = [node.snapshot() for node in sorted(self.nodes.values(), key=lambda item: item.id)]
+        edges = [{"from": src, "to": dst, "relation": rel} for src, dst, rel in sorted(self.edges)]
+        return {"nodes": nodes, "edges": edges}
 
     @classmethod
     def from_snapshot(
@@ -180,7 +213,7 @@ class EvidenceGraph:
             return graph
         for raw in payload.get("nodes") or []:
             if not isinstance(raw, dict):
-                continue
+                raise GraphIntegrityError("malformed_node")
             created = raw.get("created_at")
             created_at = None
             if isinstance(created, str) and created:
@@ -188,26 +221,28 @@ class EvidenceGraph:
                     created_at = datetime.fromisoformat(created)
                 except ValueError:
                     created_at = None
+            ident = str(raw.get("id") or "")
+            if not ident:
+                raise GraphIntegrityError("missing_node_id")
             graph.add(
                 kind=str(raw.get("kind") or "observation"),
                 provenance=str(raw.get("provenance") or ""),
                 summary=str(raw.get("summary") or ""),
                 source=str(raw.get("source") or ""),
                 extra=dict(raw.get("extra") or {}),
-                node_id=str(raw.get("id") or uuid4().hex),
+                node_id=ident,
                 created_at=created_at,
             )
-            node = graph.nodes[str(raw.get("id"))]
+            node = graph.nodes[ident]
             node.session_id = str(raw.get("session_id") or session_id)
             node.project_id = str(raw.get("project_id") or project_id)
         for raw in payload.get("edges") or []:
             if not isinstance(raw, dict):
-                continue
+                raise GraphIntegrityError("malformed_edge")
             src = str(raw.get("from") or raw.get("source") or "")
             dst = str(raw.get("to") or raw.get("destination") or "")
             rel = str(raw.get("relation") or "supports")
-            if src and dst:
-                graph.edges.append((src, dst, rel))
+            graph.link(src, dst, rel)
         return graph
 
 

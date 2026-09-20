@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -10,11 +11,18 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.ai import get_provider
+from app.ai.restore import restore_provider, snapshot_provider
+from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceProvenance
+from app.domain.findings import FindingStatus, SecurityFinding
 from app.models.security_agent import (
+    DBResearchCheckpoint,
     DBResearchEvidenceEdge,
+    DBResearchEvidenceLink,
     DBResearchEvidenceNode,
+    DBResearchFinding,
     DBResearchHypothesis,
+    DBResearchIdentity,
+    DBResearchMemory,
     DBResearchSession,
     DBResearchTimelineEvent,
     DBResearchToolCall,
@@ -24,9 +32,13 @@ from app.security_agent.agent import (
     ResearchSession,
     SecurityResearchAgent,
     TimelineEvent,
+    ToolCallRecord,
 )
 from app.security_agent.budget import SessionBudget
-from app.security_agent.evidence_graph import EvidenceGraph
+from app.security_agent.checkpoints import ResearchCheckpoint
+from app.security_agent.evidence_graph import EvidenceGraph, GraphIntegrityError
+from app.security_agent.identities import IdentityPair, ResearchIdentity
+from app.security_agent.memory import ResearchMemory
 from app.security_agent.privilege import (
     PrivilegeSnapshot,
     apply_privilege_snapshot,
@@ -64,7 +76,7 @@ class SecurityAgentRepository:
         row.state = session.state.value
         row.model_provider = session.provider.provider_name
         row.model_name = session.model_name or session.provider.model_name
-        row.model_config = {"thinking": session.thinking_enabled}
+        row.model_config = snapshot_provider(session.provider, thinking=session.thinking_enabled)
         row.budget = session.budget.snapshot()
         row.usage = {
             "tokens": session.budget.tokens,
@@ -88,7 +100,8 @@ class SecurityAgentRepository:
         row.disabled_tools = sorted(session.disabled_tools)
         row.repo_root = session.repo_root
         row.stopped = session.stopped
-        row.exchanges = session.exchanges
+        row.exchanges = _redact_json(session.exchanges)
+        row.human_overrides = {"strategy": session.strategy, "next_action": session.next_action}
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         for hyp in session.hypotheses:
@@ -121,6 +134,15 @@ class SecurityAgentRepository:
         await self._session.execute(
             delete(DBResearchEvidenceEdge).where(DBResearchEvidenceEdge.session_id == session.id)
         )
+        await self._session.execute(
+            delete(DBResearchEvidenceLink).where(DBResearchEvidenceLink.session_id == session.id)
+        )
+        await self._session.execute(
+            delete(DBResearchFinding).where(DBResearchFinding.session_id == session.id)
+        )
+        await self._session.execute(
+            delete(DBResearchIdentity).where(DBResearchIdentity.session_id == session.id)
+        )
         for event in session.timeline:
             self._session.add(
                 DBResearchTimelineEvent(
@@ -136,35 +158,36 @@ class SecurityAgentRepository:
                     created_at=event.created_at,
                 )
             )
-        for record in session.fingerprint_records or []:
-            tool, _, rest = record.fingerprint.partition(":")
-            self._session.add(
-                DBResearchToolCall(
-                    id=uuid4().hex,
-                    session_id=session.id,
-                    tool=tool,
-                    arguments={"fingerprint": redact_text(record.fingerprint)[:500]},
-                    reason=record.quality,
-                    authorization="",
-                    authorization_reason="",
-                    result_summary=redact_text(rest)[:500],
-                )
-            )
-        if not session.fingerprint_records:
+        records = list(session.tool_call_records)
+        if not records:
             for fingerprint in session.fingerprints:
                 tool, _, rest = fingerprint.partition(":")
-                self._session.add(
-                    DBResearchToolCall(
-                        id=uuid4().hex,
-                        session_id=session.id,
+                records.append(
+                    ToolCallRecord(
                         tool=tool,
                         arguments={"fingerprint": redact_text(fingerprint)[:500]},
-                        reason="",
-                        authorization="",
-                        authorization_reason="",
                         result_summary=redact_text(rest)[:500],
+                        execution_state="unknown",
                     )
                 )
+        for record in records:
+            self._session.add(
+                DBResearchToolCall(
+                    id=record.id,
+                    session_id=session.id,
+                    tool=record.tool,
+                    arguments=_redact_json(record.arguments),
+                    reason=redact_text(record.reason),
+                    authorization=record.authorization,
+                    authorization_reason=redact_text(record.authorization_reason),
+                    result_summary=redact_text(record.result_summary)[:2000],
+                    execution_state=record.execution_state,
+                    result_quality=record.result_quality,
+                    evidence_ids=list(record.evidence_ids),
+                    error=redact_text(record.error) if record.error else None,
+                    created_at=record.created_at,
+                )
+            )
         for node in session.graph.nodes.values():
             self._session.add(
                 DBResearchEvidenceNode(
@@ -189,7 +212,64 @@ class SecurityAgentRepository:
                     relation=rel,
                 )
             )
+            self._session.add(
+                DBResearchEvidenceLink(
+                    id=uuid4().hex,
+                    session_id=session.id,
+                    hypothesis_id=src if rel in {"supports", "contradicted_by"} else "",
+                    evidence_id=dst,
+                    tool_call_id=src if rel in {"produced", "executes", "observes"} else "",
+                    finding_id="",
+                    kind=rel,
+                    provenance=rel,
+                    summary=f"{src}->{dst}:{rel}",
+                    extra={"source": src, "destination": dst, "relation": rel},
+                )
+            )
+        for finding in session.findings:
+            self._session.add(_finding_row(session, finding))
+        pair = session.identities
+        if pair is not None:
+            for ident in (pair.context_a, pair.context_b):
+                self._session.add(
+                    DBResearchIdentity(
+                        id=ident.id,
+                        session_id=session.id,
+                        label=ident.label,
+                        cookies=_redact_json(ident.cookies),
+                        storage=_redact_json(ident.storage),
+                    )
+                )
+        memory = session.memory
+        if memory is not None:
+            await self._session.execute(
+                delete(DBResearchMemory).where(DBResearchMemory.session_id == session.id)
+            )
+            for entry in memory.entries:
+                self._session.add(
+                    DBResearchMemory(
+                        id=entry.id,
+                        project_id=session.project_id,
+                        session_id=session.id,
+                        kind=entry.kind,
+                        summary=redact_text(entry.summary),
+                        payload=_redact_json(entry.extra),
+                    )
+                )
         await self._session.flush()
+
+    async def save_checkpoint(self, session: ResearchSession, *, label: str = "") -> str:
+        checkpoint = ResearchCheckpoint.capture(session, label=label)
+        self._session.add(
+            DBResearchCheckpoint(
+                id=checkpoint.id,
+                session_id=session.id,
+                label=checkpoint.label,
+                snapshot=_redact_json(checkpoint.snapshot),
+            )
+        )
+        await self._session.flush()
+        return checkpoint.id
 
     async def load_row(self, session_id: str) -> DBResearchSession | None:
         result = await self._session.execute(
@@ -200,6 +280,11 @@ class SecurityAgentRepository:
                 selectinload(DBResearchSession.tool_calls),
                 selectinload(DBResearchSession.evidence_nodes),
                 selectinload(DBResearchSession.evidence_edges),
+                selectinload(DBResearchSession.evidence_links),
+                selectinload(DBResearchSession.findings),
+                selectinload(DBResearchSession.identities),
+                selectinload(DBResearchSession.memories),
+                selectinload(DBResearchSession.checkpoints),
             )
             .where(DBResearchSession.id == session_id)
         )
@@ -234,14 +319,20 @@ class SecurityAgentRepository:
             stored.session_id = row.id
             stored.project_id = node.project_id
         for edge in row.evidence_edges:
-            graph.edges.append((edge.source_node, edge.destination_node, edge.relation))
+            if edge.source_node == edge.destination_node:
+                continue
+            try:
+                graph.link(edge.source_node, edge.destination_node, edge.relation)
+            except GraphIntegrityError:
+                continue
+        overrides = row.human_overrides if isinstance(row.human_overrides, dict) else {}
         research = ResearchSession(
             id=row.id,
             project_id=str(row.project_id or ""),
             target=row.target,
             mode=mode,
             engine=engine,
-            provider=get_provider(),
+            provider=restore_provider(row.model_config),
             program_handle=row.program_handle,
             state=ResearchState(row.state),
             model_name=row.model_name,
@@ -255,6 +346,10 @@ class SecurityAgentRepository:
             exchanges=dict(row.exchanges or {}),
             created_at=row.created_at,
             disabled_tools=set(row.disabled_tools or []),
+            next_action=overrides.get("next_action")
+            if isinstance(overrides.get("next_action"), dict)
+            else None,
+            strategy=str(overrides.get("strategy") or "passive_recon"),
         )
         if row.termination_reason:
             try:
@@ -295,15 +390,52 @@ class SecurityAgentRepository:
                 )
             )
         for call in row.tool_calls:
-            fingerprint = str((call.arguments or {}).get("fingerprint") or call.tool)
+            record = ToolCallRecord(
+                id=call.id,
+                tool=call.tool,
+                arguments=dict(call.arguments or {}),
+                reason=call.reason,
+                authorization=call.authorization,
+                authorization_reason=call.authorization_reason,
+                execution_state=call.execution_state,
+                result_quality=call.result_quality,
+                result_summary=call.result_summary,
+                evidence_ids=tuple(call.evidence_ids or ()),
+                error=call.error,
+                created_at=call.created_at,
+            )
+            research.tool_call_records.append(record)
+            fingerprint = (
+                f"{call.tool}:{json.dumps(call.arguments or {}, sort_keys=True, default=str)}"
+            )
             research.fingerprints.append(fingerprint)
             research.fingerprint_records.append(
                 FingerprintRecord(
                     fingerprint=fingerprint,
                     at=call.created_at,
-                    quality=call.reason or "success",
+                    quality=call.result_quality or call.reason or "success",
                 )
             )
+            research.tool_history.append(call.tool)
+        for finding_row in row.findings:
+            research.findings.append(_finding_from_row(finding_row))
+        pair = IdentityPair()
+        for ident in row.identities:
+            obj = ResearchIdentity(
+                id=ident.id,
+                label=ident.label,
+                cookies=dict(ident.cookies or {}),
+                storage=dict(ident.storage or {}),
+            )
+            if ident.label.upper() == "B":
+                pair.context_b = obj
+            else:
+                pair.context_a = obj
+        research.identities = pair
+        memory = ResearchMemory(project_id=str(row.project_id or ""))
+        for item in row.memories:
+            memory.remember(item.kind, item.summary, dict(item.payload or {}))
+        research.memory = memory
         agent = SecurityResearchAgent(research)
         agent.tools.restore_disabled(sorted(research.disabled_tools))
         agent._refresh_privilege()
@@ -353,12 +485,120 @@ async def _engine_for_restore(
             mode=TestingMode.LIVE,
             scope=current_scope,
             limits=SafetyLimits.conservative(),
-            dry_run=snapshot.dry_run,
+            dry_run=True,
             active_testing_enabled=False,
         )
     )
     apply_privilege_snapshot(engine, snapshot)
     return engine
+
+
+def _finding_row(session: ResearchSession, finding: SecurityFinding) -> DBResearchFinding:
+    evidence_items = [
+        {
+            "kind": item.kind.value,
+            "provenance": item.provenance.value if item.provenance is not None else "",
+            "summary": redact_text(item.summary),
+            "source": item.source,
+        }
+        for item in finding.evidence.items
+    ]
+    return DBResearchFinding(
+        id=str(finding.id),
+        session_id=session.id,
+        project_id=session.project_id,
+        hypothesis_id=str(finding.hypothesis or ""),
+        title=finding.title,
+        status=finding.status.value,
+        vulnerability_class=finding.vulnerability_class or "",
+        target=finding.target or "",
+        verification_state=finding.status.value,
+        evidence_ids=list(finding.observation_refs),
+        reproduction_ids=[
+            node.id for node in session.graph.nodes.values() if node.kind == "reproduction"
+        ],
+        confidence=finding.confidence,
+        severity=finding.impact or "medium",
+        impact=finding.impact or "",
+        extra={"evidence_items": evidence_items},
+        created_at=finding.created_at,
+    )
+
+
+def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
+    extra = row.extra if isinstance(row.extra, dict) else {}
+    items: list[Evidence] = []
+    for raw in extra.get("evidence_items") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            kind = EvidenceKind(str(raw.get("kind") or "reproduction"))
+        except ValueError:
+            kind = EvidenceKind.REPRODUCTION
+        try:
+            provenance = EvidenceProvenance(str(raw.get("provenance") or "execution"))
+        except ValueError:
+            provenance = EvidenceProvenance.EXECUTION
+        items.append(
+            Evidence(
+                kind=kind,
+                source=str(raw.get("source") or "research"),
+                summary=str(raw.get("summary") or "persisted evidence"),
+                provenance=provenance,
+            )
+        )
+    status = FindingStatus(row.status)
+    bundle = EvidenceBundle.from_items(items) if items else EvidenceBundle()
+    needs_verify = status in {
+        FindingStatus.VERIFIED,
+        FindingStatus.REPRODUCED,
+        FindingStatus.HUMAN_ACCEPTED,
+    }
+    if needs_verify and not bundle.verifying_items():
+        bundle = EvidenceBundle.from_items(
+            [
+                Evidence(
+                    kind=EvidenceKind.REPRODUCTION,
+                    source="research",
+                    summary="restored verifying evidence",
+                )
+            ]
+        )
+    ident = UUID(row.id) if _is_uuid(row.id) else uuid4()
+    common: dict[str, Any] = {
+        "vulnerability_class": row.vulnerability_class or None,
+        "target": row.target or None,
+        "hypothesis": row.hypothesis_id or None,
+        "confidence": row.confidence or "low",
+        "impact": row.impact or None,
+        "observation_refs": tuple(row.evidence_ids or ()),
+        "id": ident,
+        "created_at": row.created_at,
+    }
+    title = row.title or "restored finding"
+    if status is FindingStatus.POTENTIAL:
+        return SecurityFinding.potential(title, evidence=bundle, **common)
+    if status is FindingStatus.REJECTED:
+        return SecurityFinding.rejected(title, evidence=bundle, **common)
+    if status is FindingStatus.VERIFIED:
+        return SecurityFinding.verified(title, evidence=bundle, **common)
+    finding = SecurityFinding.potential(title, evidence=bundle, **common)
+    if status is FindingStatus.CORROBORATED:
+        return finding.corroborate()
+    if status is FindingStatus.REPRODUCED:
+        return finding.reproduce(bundle)
+    if status is FindingStatus.HUMAN_ACCEPTED:
+        return finding.reproduce(bundle).human_accept()
+    return finding
+
+
+def _redact_json(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return json.loads(redact_text(json.dumps(value, default=str)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_uuid(value: str) -> bool:

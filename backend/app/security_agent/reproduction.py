@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from app.security_agent.oracles import OracleType, artifact_hash, evaluate_oracle
 from app.security_agent.states import ReproductionOutcome
 from app.security_testing.engine import SecurityTestEngine
 from app.security_testing.errors import AuthorizationDeniedError, RestrictedActivityError
@@ -37,6 +38,11 @@ class ReproductionPlan:
     outcome: ReproductionOutcome = ReproductionOutcome.INCONCLUSIVE
     reproducibility_count: int = 1
     runs: tuple[str, ...] = ()
+    identity_context: str = ""
+    oracle_type: str = ""
+    request_hashes: tuple[str, ...] = ()
+    response_hashes: tuple[str, ...] = ()
+    cleanup_result: str = ""
     id: str = field(default_factory=lambda: uuid4().hex)
 
     def snapshot(self) -> dict[str, Any]:
@@ -44,6 +50,7 @@ class ReproductionPlan:
             "id": self.id,
             "preconditions": list(self.preconditions),
             "setup": self.setup,
+            "identity_context": self.identity_context,
             "actions": [
                 {
                     "method": item.method,
@@ -57,10 +64,14 @@ class ReproductionPlan:
             "actual_result": self.actual_result,
             "evidence_to_collect": list(self.evidence_to_collect),
             "cleanup": self.cleanup,
+            "cleanup_result": self.cleanup_result,
             "status": self.status,
             "outcome": self.outcome.value,
+            "oracle_type": self.oracle_type,
             "reproducibility_count": self.reproducibility_count,
             "runs": list(self.runs),
+            "request_hashes": list(self.request_hashes),
+            "response_hashes": list(self.response_hashes),
         }
 
 
@@ -155,6 +166,9 @@ class ReproductionEngine:
             body = redact_text(str(exchange.response_body or ""))[:2000]
             results.append(f"{action.method} {action.url} -> {status}")
             observed += 1
+            req_material = f"{action.method} {action.url} {action.content or ''}"
+            plan.request_hashes = plan.request_hashes + (artifact_hash(req_material),)
+            plan.response_hashes = plan.response_hashes + (artifact_hash(f"{status}:{body}"),)
             oracle_hit = _oracle_match(
                 plan,
                 action,
@@ -184,6 +198,8 @@ async def execute_reproduction(
 
 
 def _has_oracle(plan: ReproductionPlan) -> bool:
+    if (plan.oracle_type or "").strip():
+        return True
     if (plan.expected_result or "").strip():
         return True
     return any(
@@ -203,6 +219,20 @@ def _oracle_match(
 ) -> bool | None:
     """True = matched oracle, False = contradicted, None = status-only / no oracle."""
     expected_body = action.expected_body_contains or plan.expected_result
+    if plan.oracle_type:
+        try:
+            oracle = OracleType(plan.oracle_type)
+        except ValueError:
+            oracle = None
+        if oracle is not None:
+            actual: Any = body
+            expected: Any = expected_body
+            if oracle is OracleType.EXACT_RESPONSE:
+                actual = body
+            if oracle is OracleType.AUTHORIZATION_DIFFERENCE:
+                actual = status
+                expected = action.expected_status
+            return evaluate_oracle(oracle, expected=expected, actual=actual)
     if expected_body:
         present = expected_body.lower() in (body or "").lower()
         if action.expected_status is not None and status != action.expected_status:
