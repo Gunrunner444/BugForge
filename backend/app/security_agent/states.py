@@ -80,6 +80,57 @@ class HypothesisStatus(StrEnum):
     INCONCLUSIVE = "inconclusive"
 
 
+class EvidenceCompleteness(StrEnum):
+    """How far a hypothesis has actually progressed. ID counts are not strength."""
+
+    OBSERVATION_COMPLETE = "observation_complete"
+    HYPOTHESIS_SUPPORTED = "hypothesis_supported"
+    REPRODUCTION_REQUIRED = "reproduction_required"
+    REPRODUCED = "reproduced"
+    VERIFIED = "verified"
+    INCONCLUSIVE = "inconclusive"
+
+
+class ResearchProjectState(StrEnum):
+    """Local research-project lifecycle. Distinct from HackerOne remote states."""
+
+    CREATE = "create"
+    CONFIGURE = "configure"
+    SCOPE_SYNCED = "scope_synced"
+    READY = "ready"
+    RESEARCHING = "researching"
+    PAUSED = "paused"
+    FINDINGS = "findings"
+    REVIEW = "review"
+    HANDOFF = "handoff"
+    COMPLETE = "complete"
+
+
+class FindingWorkbenchState(StrEnum):
+    POTENTIAL = "potential"
+    CORROBORATED = "corroborated"
+    REQUIRES_REPRODUCTION = "requires_reproduction"
+    REPRODUCED = "reproduced"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+
+class ToolAvailability(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+
+
+class ToolEnablement(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class ToolApprovalStatus(StrEnum):
+    APPROVED = "approved"
+    NOT_APPROVED = "not_approved"
+
+
 class ToolAuthorization(StrEnum):
     AUTHORIZED = "authorized"
     BLOCKED = "blocked"

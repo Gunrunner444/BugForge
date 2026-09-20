@@ -18,6 +18,17 @@ class OracleType(StrEnum):
     SOURCE_RUNTIME_CONSISTENCY = "source_runtime_consistency"
 
 
+class AuthorizationOracle(StrEnum):
+    """Expected authorization behavior. A raw difference is never a vulnerability."""
+
+    OWNER_ONLY = "owner_only"
+    ROLE_REQUIRED = "role_required"
+    TENANT_ISOLATION = "tenant_isolation"
+    AUTHENTICATED_USER_ONLY = "authenticated_user_only"
+    PUBLIC_RESOURCE = "public_resource"
+    CUSTOM_EXPECTATION = "custom_expectation"
+
+
 def artifact_hash(payload: str | bytes) -> str:
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
     return sha256(data).hexdigest()

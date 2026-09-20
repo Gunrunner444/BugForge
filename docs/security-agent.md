@@ -83,6 +83,13 @@ human approval for higher-risk actions. The AI cannot change scope, enable
 active testing, grant approval, increase total budget, verify a finding, or
 submit a report.
 
+Phase 9 adds a researcher workbench (dashboard, timeline, next-action review,
+identity/evidence explorers) and hardens identity secret handling, replay
+executor restoration, checkpoint revalidation, and deterministic export.
+See [research-workbench.md](research-workbench.md),
+[identity-testing.md](identity-testing.md), and
+[evidence-workflow.md](evidence-workflow.md).
+
 Every session has a budget loaded from settings (`max_tokens`,
 `max_scan_seconds`, tool/request/browser/fuzz/iteration caps). The AI may
 *request* more budget but cannot grant it. Provider token usage is consumed

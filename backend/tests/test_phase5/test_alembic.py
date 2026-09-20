@@ -41,6 +41,7 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
     assert "research_memory" in table_names
     assert "research_checkpoints" in table_names
     assert "research_identities" in table_names
+    assert "security_research_projects" in table_names
     intent = Base.metadata.tables["hackerone_report_intents"]
     assert "local_status" in intent.c
     assert "remote_intent_id" in intent.c
@@ -51,11 +52,19 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
     assert "scope_content_hash" in program.c
 
 
-def test_alembic_revision_chain_includes_018() -> None:
+def test_alembic_revision_chain_includes_019() -> None:
     cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["018"]
+    assert heads == ["019"]
+    revision = script.get_revision("019")
+    assert revision is not None
+    assert revision.down_revision == "018"
+
+
+def test_alembic_revision_chain_includes_018() -> None:
+    cfg = Config("alembic.ini")
+    script = ScriptDirectory.from_config(cfg)
     revision = script.get_revision("018")
     assert revision is not None
     assert revision.down_revision == "017"
@@ -75,6 +84,7 @@ async def test_sqlite_create_all_includes_phase6_tables(tmp_path: Path) -> None:
     assert "research_evidence_edge" in names
     assert "research_findings" in names
     assert "research_identities" in names
+    assert "security_research_projects" in names
 
 
 def test_alembic_upgrade_downgrade_upgrade_postgres() -> None:

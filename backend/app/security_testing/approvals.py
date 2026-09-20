@@ -104,6 +104,18 @@ class HumanApprovalGate:
             return False
         return True
 
+    def get_record(self, kind: ApprovalKind) -> ApprovalRecord | None:
+        return self._records.get(kind)
+
+    def iter_records(self) -> dict[ApprovalKind, ApprovalRecord]:
+        return dict(self._records)
+
+    def load_record(self, record: ApprovalRecord) -> None:
+        self._records[record.kind] = record
+
+    def clear_records(self) -> None:
+        self._records.clear()
+
     def snapshot(self) -> dict[str, str]:
         return {kind.value: self.state_of(kind).value for kind in ApprovalKind}
 

@@ -19,7 +19,10 @@ The model is given `ToolSpec.for_llm()`: name, description, JSON schema,
 
 Capability states: `UNAVAILABLE`, `PLANNING_ONLY`, `EXECUTABLE`,
 `RESULTS_INGESTIBLE`. Planning or authorization is never labeled as a scan
-result.
+result. Separately, a tool may be `AVAILABLE` or `UNAVAILABLE` (installed),
+`ENABLED` or `DISABLED` (operator), `APPROVED` or not (human gate), and
+`AUTHORIZED` or `BLOCKED` (current target). Execution success is a fifth
+question.
 
 | Tool | Capability | Risk | Approval | Notes |
 |---|---|---|---|---|

@@ -37,6 +37,8 @@ class DBResearchSession(Base):
     repo_root: Mapped[str] = mapped_column(Text, nullable=False, default=".")
     stopped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     exchanges: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    operator_identity: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    research_project_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -73,6 +75,9 @@ class DBResearchSession(Base):
     )
     identities: Mapped[list[DBResearchIdentity]] = relationship(
         "DBResearchIdentity", back_populates="session", cascade="all, delete-orphan"
+    )
+    research_project: Mapped[DBResearchProject | None] = relationship(
+        "DBResearchProject", back_populates="session", uselist=False
     )
 
 
@@ -315,12 +320,50 @@ class DBResearchIdentity(Base):
         ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     label: Mapped[str] = mapped_column(String(32), nullable=False, default="A")
-    cookies: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    storage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    credential_ref: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    browser_context_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    http_session_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    storage_namespace: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    authentication_state: Mapped[str] = mapped_column(String(32), nullable=False, default="unauthenticated")
+    credential_provenance: Mapped[str] = mapped_column(String(64), nullable=False, default="none")
+    header_names: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    header_secret_refs: Mapped[dict[str, str] | None] = mapped_column(JSON, nullable=True)
+    cookie_names: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    cookie_secret_ref: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    storage_keys: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    storage_secret_ref: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
 
     session: Mapped[DBResearchSession] = relationship(
         "DBResearchSession", back_populates="identities"
+    )
+
+
+class DBResearchProject(Base):
+    __tablename__ = "security_research_projects"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    program_handle: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    target: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, default="lab")
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="passive_recon")
+    state: Mapped[str] = mapped_column(String(64), nullable=False, default="create")
+    operator_identity: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession | None] = relationship(
+        "DBResearchSession", back_populates="research_project"
     )

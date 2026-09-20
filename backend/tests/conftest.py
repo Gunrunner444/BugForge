@@ -39,6 +39,7 @@ from app.models.security_agent import (  # noqa: F401
     DBResearchHypothesis,
     DBResearchIdentity,
     DBResearchMemory,
+    DBResearchProject,
     DBResearchSession,
     DBResearchTimelineEvent,
     DBResearchToolCall,

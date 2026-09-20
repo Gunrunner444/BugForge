@@ -166,7 +166,27 @@ class ToolRegistry:
 
     def register(self, spec: ToolSpec, executor: Executor) -> None:
         self._specs[spec.name] = spec
-        self._executors[spec.name] = executor
+        self.bind_executor(spec.name, executor)
+
+    def bind_executor(self, name: str, executor: Executor) -> None:
+        """Public replacement for mutating ``_executors`` from other modules."""
+        self._executors[name] = executor
+
+    def replace_executor(self, name: str, executor: Executor) -> None:
+        if name not in self._specs and name not in self._executors:
+            raise RestrictedActivityError(f"unknown_tool:{name}")
+        self._executors[name] = executor
+
+    def executor_for(self, name: str) -> Executor:
+        if name not in self._executors:
+            raise RestrictedActivityError(f"unknown_tool:{name}")
+        return self._executors[name]
+
+    def clone_executors(self) -> dict[str, Executor]:
+        return dict(self._executors)
+
+    def restore_executors(self, executors: dict[str, Executor]) -> None:
+        self._executors = dict(executors)
 
     def replace_spec(self, spec: ToolSpec) -> None:
         if spec.name not in self._specs:
@@ -231,7 +251,7 @@ class ToolRegistry:
         if stored is None or stored != permit or stored.tool != request.tool:
             raise RestrictedActivityError("invalid_or_spent_execution_permit")
         parsed = self.validate(request)
-        executor = self._executors[request.tool]
+        executor = self.executor_for(request.tool)
         return await executor(parsed.model_dump())
 
     def catalog(self) -> list[dict[str, object]]:
@@ -239,9 +259,29 @@ class ToolRegistry:
             {
                 **spec.for_llm(),
                 "disabled": spec.name in self._disabled or spec.disabled,
+                "availability": (
+                    "unavailable"
+                    if spec.capability is ToolCapability.UNAVAILABLE
+                    else "available"
+                ),
+                "enablement": (
+                    "disabled"
+                    if spec.name in self._disabled or spec.disabled
+                    else "enabled"
+                ),
             }
             for spec in self._specs.values()
         ]
+
+    def is_disabled(self, name: str) -> bool:
+        spec = self._specs.get(name)
+        return name in self._disabled or bool(spec is not None and spec.disabled)
+
+    def is_available(self, name: str) -> bool:
+        spec = self._specs.get(name)
+        if spec is None:
+            return False
+        return spec.capability is not ToolCapability.UNAVAILABLE
 
     def restore_disabled(self, names: Sequence[str]) -> None:
         self._disabled = {name for name in names if name in self._specs}

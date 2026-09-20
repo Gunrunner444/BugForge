@@ -59,5 +59,7 @@ payload, or verification state.
 The research timeline records session state changes, model decisions, tool
 requests, authorization, execution start/result, evidence created, hypothesis
 updates, reproduction, verification, approval, and pause/stop. Credentials
-never appear. The evidence graph is persisted as `research_evidence_node` /
+never appear. Replay observations use `provenance=replay` and cannot verify
+a finding. Identity cookies and Authorization headers are stored as secret
+references, never as raw database values. The evidence graph is persisted as `research_evidence_node` /
 `research_evidence_edge` and reconstructed after restart.

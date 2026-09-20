@@ -403,6 +403,58 @@ export const api = {
       ),
   },
 
+  research: {
+    createSession: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/security-agent/sessions", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    getSession: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}`),
+    dashboard: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/dashboard`),
+    timeline: (id: string, params?: Record<string, string>) => {
+      const query = new URLSearchParams(params);
+      const suffix = query.toString() ? `?${query}` : "";
+      return request<Record<string, unknown>>(
+        `/api/v1/security-agent/sessions/${id}/timeline${suffix}`,
+      );
+    },
+    step: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/step`, {
+        method: "POST",
+      }),
+    override: (id: string, body: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/override`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    reviewNext: (id: string, body: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/next-action/review`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    findings: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/findings`),
+    evidence: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/evidence`),
+    graph: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/graph`),
+    identities: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/identities`),
+    exportPackage: (id: string, findingId?: string) => {
+      const suffix = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : "";
+      return request<Record<string, unknown>>(
+        `/api/v1/security-agent/sessions/${id}/export${suffix}`,
+      );
+    },
+    createProject: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/security-agent/research-projects", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  },
+
   hackerone: {
     status: () => request<Record<string, unknown>>("/api/v1/hackerone/status"),
     sync: (handle: string) =>

@@ -10,7 +10,9 @@ operator authentication, and persisted duplicate protection. The Phase 6
 `SecurityResearchAgent` plans tool actions. Phase 7 executes authorized
 tools through existing adapters, persists the evidence graph, and restores
 sessions after restart. Phase 8 adds `AdvancedResearchOrchestrator`, isolated
-research identities, replay, and export. The agent cannot decide scope,
+research identities, replay, and export. Phase 9 is the researcher workbench
+and Phase 8 hardening (secret references, authorization oracles, replay
+restoration). The agent cannot decide scope,
 verify findings, approve reports, increase total budget, or submit to
 HackerOne. Live HackerOne defaults: dry-run, no active testing, no fuzzing,
 scanners disabled. Rate limiting is per-process.

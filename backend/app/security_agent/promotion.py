@@ -132,6 +132,8 @@ def _evidence_from_graph(session: Any, hypothesis: ResearchHypothesis) -> list[E
         node = session.graph.nodes.get(evidence_id)
         if node is None:
             continue
+        if str(getattr(node, "provenance", "") or "") in {"replay", "ai_hypothesis"}:
+            continue
         kind = _kind_from_node(node.kind)
         items.append(
             Evidence(

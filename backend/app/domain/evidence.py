@@ -33,6 +33,7 @@ class EvidenceKind(StrEnum):
     HTTP_REQUEST = "http_request"
     HTTP_RESPONSE = "http_response"
     TEST_FAILURE = "test_failure"
+    REPLAY = "replay"
 
 
 class EvidenceProvenance(StrEnum):
@@ -57,6 +58,7 @@ class EvidenceProvenance(StrEnum):
     FUZZING_RESULT = "fuzzing_result"
     SCREENSHOT = "screenshot"
     LOG = "log"
+    REPLAY = "replay"
 
 
 # Provenance that can back a verified finding. AI text is never included.
@@ -94,6 +96,7 @@ _KIND_TO_PROVENANCE: dict[EvidenceKind, EvidenceProvenance] = {
     EvidenceKind.API_TEST: EvidenceProvenance.API_TEST,
     EvidenceKind.LOG: EvidenceProvenance.LOG,
     EvidenceKind.SCREENSHOT: EvidenceProvenance.SCREENSHOT,
+    EvidenceKind.REPLAY: EvidenceProvenance.REPLAY,
 }
 
 
@@ -126,6 +129,8 @@ class Evidence:
             return
         if self.provenance is EvidenceProvenance.AI_HYPOTHESIS:
             raise ValueError("AI hypothesis provenance cannot be attached to non-AI evidence kinds")
+        if self.provenance is EvidenceProvenance.REPLAY:
+            return
         object.__setattr__(self, "provenance", derived)
 
     @property

@@ -2,6 +2,12 @@
 
 BugForge findings and HackerOne reports are different objects.
 
+## Evidence packages
+
+Research export packages are canonical (sorted keys/nodes/edges, redacted
+secrets). `hashes.sha256` hashes that JSON excluding the hashes object.
+Export a whole session or `?finding_id=` for one finding (404 if unknown).
+
 ## Local reports
 
 `LocalReportProvider` renders markdown. It never uploads.

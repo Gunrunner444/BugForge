@@ -17,7 +17,9 @@ session. See [hackerone.md](hackerone.md) and [reporting.md](reporting.md).
 
 The two modes cannot be mixed in one session. A lab session cannot reach
 `example.com`. A live session cannot use lab isolation as a bypass.
-Lab permissions never apply to live HackerOne projects.
+Lab permissions never apply to live HackerOne projects. Phase 9 live safety
+tests cover missing scope, unknown assets, disabled active testing, missing
+approval, disabled tools, exhausted budget, and offline replay.
 
 The Phase 6–8 research agent uses the same tool APIs in both modes. There is
 no fully autonomous HackerOne mode. Live agent sessions are blocked unless

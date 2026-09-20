@@ -27,6 +27,14 @@ class SessionBudget:
     tokens: int = 0
     scan_seconds: float = 0.0
     extra_granted_by: str | None = None
+    planned_requests: int = 0
+    reserved_requests: int = 0
+    planned_fuzz_requests: int = 0
+    reserved_fuzz_requests: int = 0
+    planned_browser_actions: int = 0
+    reserved_browser_actions: int = 0
+    planned_tool_calls: int = 0
+    reserved_tool_calls: int = 0
 
     @classmethod
     def from_settings(cls) -> SessionBudget:
@@ -42,6 +50,39 @@ class SessionBudget:
             max_identical_calls=settings.security_agent_max_identical_tool_calls,
             identical_call_window_seconds=settings.security_agent_identical_call_window_seconds,
         )
+
+    def _bucket(self, unit: str) -> str:
+        if unit in {"requests", "request"}:
+            return "requests"
+        if unit in {"fuzz_requests", "fuzz"}:
+            return "fuzz_requests"
+        if unit in {"browser_actions", "browser"}:
+            return "browser_actions"
+        return "tool_calls"
+
+    def plan(self, unit: str, amount: int) -> None:
+        """Record a planner estimate. Does not consume budget."""
+        bucket = self._bucket(unit)
+        if bucket == "requests":
+            self.planned_requests += max(0, amount)
+        elif bucket == "fuzz_requests":
+            self.planned_fuzz_requests += max(0, amount)
+        elif bucket == "browser_actions":
+            self.planned_browser_actions += max(0, amount)
+        else:
+            self.planned_tool_calls += max(0, amount)
+
+    def reserve(self, unit: str, amount: int) -> None:
+        """Reserve estimated units before execution. Same units as consume()."""
+        bucket = self._bucket(unit)
+        if bucket == "requests":
+            self.reserved_requests = max(0, amount)
+        elif bucket == "fuzz_requests":
+            self.reserved_fuzz_requests = max(0, amount)
+        elif bucket == "browser_actions":
+            self.reserved_browser_actions = max(0, amount)
+        else:
+            self.reserved_tool_calls = max(0, amount)
 
     def consume(self, kind: str, *, amount: int = 1) -> None:
         if kind == "tool":
@@ -169,4 +210,25 @@ class SessionBudget:
             },
             "remaining": self.remaining(),
             "extra_granted_by": self.extra_granted_by,
+            "planned": {
+                "requests": self.planned_requests,
+                "fuzz_requests": self.planned_fuzz_requests,
+                "browser_actions": self.planned_browser_actions,
+                "tool_calls": self.planned_tool_calls,
+            },
+            "reserved": {
+                "requests": self.reserved_requests,
+                "fuzz_requests": self.reserved_fuzz_requests,
+                "browser_actions": self.reserved_browser_actions,
+                "tool_calls": self.reserved_tool_calls,
+            },
+            "consumed": {
+                "tool_calls": self.tool_calls,
+                "requests": self.requests,
+                "browser_actions": self.browser_actions,
+                "fuzz_requests": self.fuzz_requests,
+                "iterations": self.iterations,
+                "tokens": self.tokens,
+                "scan_seconds": self.scan_seconds,
+            },
         }

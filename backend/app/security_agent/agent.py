@@ -201,6 +201,9 @@ class ResearchSession:
     identities: Any = None
     strategy: str = "passive_recon"
     memory: Any = None
+    replay_mode: bool = False
+    operator_identity: str = ""
+    research_project_id: str = ""
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -236,6 +239,9 @@ class ResearchSession:
             ],
             "tool_history": [item.snapshot() for item in self.tool_call_records],
             "strategy": self.strategy,
+            "operator_identity": self.operator_identity,
+            "replay_mode": self.replay_mode,
+            "research_project_id": self.research_project_id,
         }
 
     def cancelled(self) -> bool:
@@ -285,6 +291,24 @@ class SecurityResearchAgent:
         self._timeline("human_override", decision=f"DISABLE_TOOL:{name}")
 
     def reject_finding(self, finding_id: str) -> None:
+        from app.domain.findings import SecurityFinding as DomainFinding
+
+        updated: list[Any] = []
+        for item in self.session.findings:
+            if str(item.id) == str(finding_id):
+                updated.append(
+                    DomainFinding.rejected(
+                        item.title,
+                        evidence=item.evidence,
+                        vulnerability_class=item.vulnerability_class,
+                        target=item.target,
+                        hypothesis=item.hypothesis,
+                        id=item.id,
+                    )
+                )
+            else:
+                updated.append(item)
+        self.session.findings = updated
         self._timeline(
             "human_override", decision=f"REJECT_FINDING:{finding_id}", finding_id=finding_id
         )
@@ -357,9 +381,16 @@ class SecurityResearchAgent:
             self.session.termination_reason = TerminationReason.MAX_ITERATIONS
             self.session.state = ResearchState.MAX_ITERATIONS
             return
-        verified = any(item.is_verified for item in self.session.findings)
-        reproduced = any(item.status.value == "reproduced" for item in self.session.findings)
-        if verified or reproduced:
+        verified = any(
+            item.is_verified
+            and item.evidence.verifying_items()
+            and not any(
+                getattr(ev.provenance, "value", str(ev.provenance)) == "replay"
+                for ev in item.evidence.items
+            )
+            for item in self.session.findings
+        )
+        if verified:
             self.session.termination_reason = TerminationReason.COMPLETED_SUCCESS
             self.session.state = ResearchState.COMPLETED_SUCCESS
             return
@@ -502,12 +533,16 @@ class SecurityResearchAgent:
                 "executed": False,
             }
         try:
+            from app.security_agent.cost import consume_units_for, estimate_operation_cost
+
             self.session.budget.consume("tool")
-            if spec.budget_kind != "tool":
-                amount = 1
-                if spec.budget_kind == "fuzz":
-                    amount = int(dumped.get("count") or 1)
-                self.session.budget.consume(spec.budget_kind, amount=amount)
+            remaining = int(self.session.budget.remaining().get("requests") or 0)
+            estimate = estimate_operation_cost(
+                request.tool, dumped, spec, remaining_requests=remaining
+            )
+            kind, amount = consume_units_for(estimate)
+            if kind != "tool" and amount:
+                self.session.budget.consume(kind, amount=amount)
         except SafetyLimitExceededError as exc:
             self.session.state = ResearchState.BUDGET_EXHAUSTED
             self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
@@ -585,7 +620,7 @@ class SecurityResearchAgent:
         ):
             observation = self.session.graph.add(
                 kind=EvidenceGraphKind.OBSERVATION.value,
-                provenance="execution",
+                provenance="replay" if self.session.replay_mode else "execution",
                 summary=redact_text(summary),
                 source=request.tool,
                 parent_id=exec_node.id,
@@ -965,12 +1000,17 @@ class SecurityResearchAgent:
                     self._timeline("hypothesis_update", decision=f"dedup:{existing.id}")
                     self.session.state = ResearchState.HYPOTHESIS_CREATED
                     return
-            node = self.session.graph.add(
-                kind=EvidenceGraphKind.HYPOTHESIS.value,
-                provenance="ai_hypothesis",
-                summary=hypothesis.title,
-                source="planner",
-            )
+            if hypothesis.id in self.session.graph.nodes:
+                node = self.session.graph.nodes[hypothesis.id]
+            else:
+                node = self.session.graph.add(
+                    kind=EvidenceGraphKind.HYPOTHESIS.value,
+                    provenance="ai_hypothesis",
+                    summary=hypothesis.title,
+                    source="planner",
+                    node_id=hypothesis.id,
+                    extra={"hypothesis_id": hypothesis.id},
+                )
             hypothesis.supporting_evidence_ids = hypothesis.supporting_evidence_ids
             self.session.hypotheses.append(hypothesis)
             for evidence_id in hypothesis.supporting_evidence_ids:

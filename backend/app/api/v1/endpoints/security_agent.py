@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,16 +15,27 @@ from app.models.project import Project
 from app.repositories.hackerone_repo import HackerOneRepository
 from app.repositories.security_agent_repo import SecurityAgentRepository
 from app.security_agent.agent import ResearchSession, SecurityResearchAgent
-from app.security_agent.export import export_package
+from app.security_agent.export import FindingNotFoundError, export_package
 from app.security_agent.handoff import prepare_hackerone_handoff
-from app.security_agent.identities import IdentityPair, ResearchIdentity
+from app.security_agent.identities import IdentityPair, ResearchIdentity, compare_identities
 from app.security_agent.memory import ResearchMemory
 from app.security_agent.orchestrator import AdvancedResearchOrchestrator
 from app.security_agent.privilege import program_scope_from_hackerone
+from app.security_agent.project import SecurityResearchProject
 from app.security_agent.replay import SessionReplay
 from app.security_agent.repo_lock import resolve_repo_root
 from app.security_agent.schemas import ToolCallRequest
-from app.security_agent.states import RESUME_BLOCKED_STATES, ResearchMode
+from app.security_agent.secrets import secrets_for
+from app.security_agent.states import RESUME_BLOCKED_STATES, ResearchMode, ResearchProjectState
+from app.security_agent.workbench import (
+    dashboard as workbench_dashboard,
+    evidence_explorer,
+    evidence_graph_view,
+    findings_workbench,
+    identity_workbench,
+    next_action_review,
+    timeline as workbench_timeline,
+)
 from app.security_testing.approvals import ApprovalKind, is_ai_operator
 from app.security_testing.engine import SecurityTestEngine, SecurityTestSession, TestingMode
 from app.security_testing.errors import (
@@ -40,6 +51,7 @@ router = APIRouter(prefix="/security-agent", tags=["Security Agent"])
 _SESSIONS: dict[str, SecurityResearchAgent] = {}
 _ORCHESTRATORS: dict[str, AdvancedResearchOrchestrator] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
+_PROJECTS: dict[str, SecurityResearchProject] = {}
 _LIVE_DISABLED = frozenset({"zap_scan", "nuclei_scan", "fuzz"})
 
 
@@ -63,6 +75,8 @@ class OverrideRequest(BaseModel):
     reason: str = ""
     extra_tool_calls: int = 0
     tool: str | None = None
+    finding_id: str | None = None
+    strategy: str | None = None
     source: str | None = None
     destination: str | None = None
     amount: int = 0
@@ -122,7 +136,6 @@ async def create_session(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    del session
     try:
         mode = ResearchMode(payload.mode)
     except ValueError as exc:
@@ -190,6 +203,7 @@ async def create_session(
         disabled_tools=disabled,
         identities=IdentityPair(),
         memory=ResearchMemory(project_id=payload.project_id),
+        operator_identity=session.identity,
     )
     agent = SecurityResearchAgent(research)
     agent.tools.restore_disabled(sorted(disabled))
@@ -248,7 +262,9 @@ async def request_tool(
     orch = _orchestrator_for(agent)
     async with _lock_for(session_id):
         try:
-            orch.explain_next(payload.tool, reason=payload.reason)
+            orch.explain_next(
+                payload.tool, reason=payload.reason, arguments=dict(payload.arguments)
+            )
             result = await agent.request_tool(
                 ToolCallRequest(
                     tool=payload.tool, arguments=dict(payload.arguments), reason=payload.reason
@@ -272,7 +288,7 @@ async def override_session(
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
-    agent = await _require(session_id, db)
+    agent = await _require(session_id, db, operator=session)
     action = payload.action.lower()
     if action == "pause":
         agent.pause(payload.reason)
@@ -307,6 +323,19 @@ async def override_session(
             )
         except SafetyLimitExceededError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif action == "reject_finding":
+        ident = payload.finding_id or payload.tool
+        if not ident:
+            raise HTTPException(status_code=400, detail="finding_id is required")
+        agent.reject_finding(ident)
+    elif action == "change_strategy":
+        strategy = payload.strategy or payload.reason
+        if not strategy:
+            raise HTTPException(status_code=400, detail="strategy is required")
+        orch = _orchestrator_for(agent)
+        orch.recommend_strategy(strategy)
+        agent.session.strategy = orch.strategy.value
+        agent._timeline("human_override", decision=f"CHANGE_STRATEGY:{strategy}")
     else:
         raise HTTPException(status_code=400, detail="Unknown override")
     await SecurityAgentRepository(db).save_session(agent.session)
@@ -370,9 +399,15 @@ async def timeline(
     session_id: str,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
+    tool: str | None = None,
+    finding: str | None = None,
+    strategy: str | None = None,
+    state: str | None = None,
 ) -> dict[str, object]:
     agent = await _require(session_id, db, operator=session)
-    return {"items": [item.snapshot() for item in agent.session.timeline]}
+    return workbench_timeline(
+        _orchestrator_for(agent), tool=tool, finding=finding, strategy=strategy, state=state
+    )
 
 
 @router.get("/sessions/{session_id}/tools")
@@ -392,7 +427,7 @@ async def dashboard(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     agent = await _require(session_id, db, operator=session)
-    return _orchestrator_for(agent).dashboard()
+    return workbench_dashboard(_orchestrator_for(agent))
 
 
 @router.get("/sessions/{session_id}/next-action")
@@ -461,6 +496,7 @@ async def set_identity(
         storage=dict(payload.storage),
         headers=dict(payload.headers),
     )
+    ident.ingest_secrets(secrets_for(agent.session.id))
     if payload.label.upper() == "B":
         pair.context_b = ident
     else:
@@ -489,10 +525,15 @@ async def export_session(
     session_id: str,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
+    finding_id: str | None = Query(default=None),
 ) -> dict[str, object]:
     agent = await _require(session_id, db, operator=session)
-    finding = agent.session.findings[0] if agent.session.findings else None
-    return export_package(agent.session, finding)
+    try:
+        if finding_id:
+            return export_package(agent.session, finding_id=finding_id)
+        return export_package(agent.session)
+    except FindingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Unknown finding") from exc
 
 
 @router.post("/sessions/{session_id}/handoff")
@@ -538,30 +579,223 @@ async def replay_session(
     return {"decisions": [item.kind for item in decisions], "session": agent.session.snapshot()}
 
 
+class ResearchProjectRequest(BaseModel):
+    name: str
+    project_id: str
+    target: str
+    mode: str = "lab"
+    program_handle: str = ""
+    strategy: str = "passive_recon"
+
+
+class IdentityCompareRequest(BaseModel):
+    method: str = "GET"
+    url: str
+    expectation: str
+    oracle: str = "owner_only"
+
+
+class WorkflowPlanRequest(BaseModel):
+    tool: str
+    arguments: dict[str, object] = {}
+    reason: str = ""
+
+
+class ProjectTransitionRequest(BaseModel):
+    state: str
+
+
+@router.post("/research-projects")
+async def create_research_project(
+    payload: ResearchProjectRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    del db
+    project = SecurityResearchProject(
+        name=payload.name,
+        project_id=payload.project_id,
+        target=payload.target,
+        mode=payload.mode,
+        program_handle=payload.program_handle,
+        strategy=payload.strategy,
+        operator_identity=session.identity,
+    )
+    _PROJECTS[project.id] = project
+    return project.snapshot()
+
+
+@router.get("/research-projects/{project_id}")
+async def get_research_project(
+    project_id: str,
+    session: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    project = _PROJECTS.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown research project")
+    _assert_operator_owns(project.operator_identity, session)
+    return project.snapshot()
+
+
+@router.post("/research-projects/{project_id}/transition")
+async def transition_research_project(
+    project_id: str,
+    payload: ProjectTransitionRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    project = _PROJECTS.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown research project")
+    _assert_operator_owns(project.operator_identity, session)
+    try:
+        project.transition(ResearchProjectState(payload.state))
+    except (ValueError, RestrictedActivityError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await SecurityAgentRepository(db).save_project(project)
+    await db.commit()
+    return project.snapshot()
+
+
+@router.get("/sessions/{session_id}/findings")
+async def session_findings(
+    session_id: str,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    return findings_workbench(_orchestrator_for(agent))
+
+
+@router.get("/sessions/{session_id}/evidence")
+async def session_evidence(
+    session_id: str,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    return evidence_explorer(_orchestrator_for(agent))
+
+
+@router.get("/sessions/{session_id}/graph")
+async def session_graph(
+    session_id: str,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    return evidence_graph_view(_orchestrator_for(agent))
+
+
+@router.get("/sessions/{session_id}/identities")
+async def session_identities(
+    session_id: str,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    return identity_workbench(_orchestrator_for(agent))
+
+
+@router.post("/sessions/{session_id}/identities/compare")
+async def compare_session_identities(
+    session_id: str,
+    payload: IdentityCompareRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    pair = agent.session.identities or IdentityPair()
+    try:
+        result = await compare_identities(
+            agent.session.engine,
+            pair,
+            method=payload.method,
+            url=payload.url,
+            expectation=payload.expectation,
+            oracle=payload.oracle,
+            session_id=agent.session.id,
+        )
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await SecurityAgentRepository(db).save_session(agent.session)
+    await db.commit()
+    return result.snapshot()
+
+
+@router.post("/sessions/{session_id}/next-action/review")
+async def review_next_action(
+    session_id: str,
+    payload: WorkflowPlanRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    return next_action_review(
+        _orchestrator_for(agent),
+        tool=payload.tool,
+        arguments=dict(payload.arguments),
+        reason=payload.reason,
+    )
+
+
+@router.post("/sessions/{session_id}/workflows/plan")
+async def plan_workflow(
+    session_id: str,
+    payload: WorkflowPlanRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    review = next_action_review(
+        _orchestrator_for(agent),
+        tool=payload.tool,
+        arguments=dict(payload.arguments),
+        reason=payload.reason or f"plan {payload.tool}",
+    )
+    review["execute"] = False
+    review["authorized_scan_is_not_successful_scan"] = True
+    review["alert_is_not_verified_vulnerability"] = True
+    return review
+
+
 async def _require(
     session_id: str,
     db: AsyncSession,
     *,
     operator: OperatorSession | None = None,
 ) -> SecurityResearchAgent:
-    del operator
     agent = _SESSIONS.get(session_id)
     if agent is not None:
         await _assert_project(agent.session.project_id, db)
+        _assert_operator_owns(agent.session.operator_identity, operator)
         return agent
     row_preview = await SecurityAgentRepository(db).load_row(session_id)
     if row_preview is None:
         raise HTTPException(status_code=404, detail="Unknown research session")
     await _assert_project(str(row_preview.project_id or ""), db)
+    _assert_operator_owns(row_preview.operator_identity, operator)
     program = None
     if row_preview.mode == ResearchMode.LIVE_HACKERONE.value and row_preview.program_handle:
         program = await HackerOneRepository(db).get_program(row_preview.program_handle)
+        if program is None:
+            raise HTTPException(
+                status_code=409,
+                detail="LIVE_SCOPE_MISSING: current HackerOne program record is required to resume",
+            )
     restored = await SecurityAgentRepository(db).reconstruct(session_id, current_program=program)
     if restored is None:
         raise HTTPException(status_code=404, detail="Unknown research session")
     _SESSIONS[session_id] = restored
     _orchestrator_for(restored)
     return restored
+
+
+def _assert_operator_owns(owner: str, operator: OperatorSession | None) -> None:
+    if operator is None or not owner:
+        return
+    if owner != operator.identity:
+        raise HTTPException(status_code=403, detail="session_operator_mismatch")
 
 
 async def _assert_project(project_id: str, db: AsyncSession) -> None:

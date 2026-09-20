@@ -54,16 +54,16 @@ class ToolContext:
 
 
 def bind_engine_tools(ctx: ToolContext, registry: ToolRegistry) -> ToolRegistry:
-    registry._executors["http_request"] = _http_request(ctx)
-    registry._executors["browser_navigate"] = _browser_navigate(ctx)
-    registry._executors["source_inspect"] = _source_inspect(ctx)
-    registry._executors["evidence_inspect"] = _evidence_inspect(ctx)
-    registry._executors["zap_scan"] = _zap_scan(ctx)
-    registry._executors["nuclei_scan"] = _nuclei_scan(ctx)
-    registry._executors["fuzz"] = _fuzz(ctx)
-    registry._executors["reproduce"] = _reproduce(ctx)
-    registry._executors["proxy_evidence"] = _proxy_evidence(ctx)
-    registry._executors["api_test"] = _api_test(ctx)
+    registry.bind_executor("http_request", _http_request(ctx))
+    registry.bind_executor("browser_navigate", _browser_navigate(ctx))
+    registry.bind_executor("source_inspect", _source_inspect(ctx))
+    registry.bind_executor("evidence_inspect", _evidence_inspect(ctx))
+    registry.bind_executor("zap_scan", _zap_scan(ctx))
+    registry.bind_executor("nuclei_scan", _nuclei_scan(ctx))
+    registry.bind_executor("fuzz", _fuzz(ctx))
+    registry.bind_executor("reproduce", _reproduce(ctx))
+    registry.bind_executor("proxy_evidence", _proxy_evidence(ctx))
+    registry.bind_executor("api_test", _api_test(ctx))
     _apply_availability(ctx, registry)
     return registry
 

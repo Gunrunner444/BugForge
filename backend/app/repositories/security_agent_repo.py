@@ -23,6 +23,7 @@ from app.models.security_agent import (
     DBResearchHypothesis,
     DBResearchIdentity,
     DBResearchMemory,
+    DBResearchProject,
     DBResearchSession,
     DBResearchTimelineEvent,
     DBResearchToolCall,
@@ -101,6 +102,8 @@ class SecurityAgentRepository:
         row.repo_root = session.repo_root
         row.stopped = session.stopped
         row.exchanges = _redact_json(session.exchanges)
+        row.operator_identity = session.operator_identity
+        row.research_project_id = session.research_project_id
         row.human_overrides = {"strategy": session.strategy, "next_action": session.next_action}
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
@@ -230,16 +233,32 @@ class SecurityAgentRepository:
             self._session.add(_finding_row(session, finding))
         pair = session.identities
         if pair is not None:
+            from app.security_agent.secrets import secrets_for
+
+            store = secrets_for(session.id)
             for ident in (pair.context_a, pair.context_b):
+                ident.ingest_secrets(store)
+                snap = ident.snapshot()
                 self._session.add(
                     DBResearchIdentity(
                         id=ident.id,
                         session_id=session.id,
                         label=ident.label,
-                        cookies=_redact_json(ident.cookies),
-                        storage=_redact_json(ident.storage),
+                        credential_ref=ident.credential_ref,
+                        browser_context_id=ident.browser_context_id,
+                        http_session_id=ident.http_session_id,
+                        storage_namespace=ident.storage_namespace,
+                        authentication_state=ident.authentication_state,
+                        credential_provenance=ident.credential_provenance,
+                        header_names=list(ident.header_names),
+                        header_secret_refs=dict(ident.header_secret_refs),
+                        cookie_names=list(ident.cookie_names),
+                        cookie_secret_ref=ident.cookie_secret_ref,
+                        storage_keys=list(ident.storage_keys),
+                        storage_secret_ref=ident.storage_secret_ref,
                     )
                 )
+                del snap
         memory = session.memory
         if memory is not None:
             await self._session.execute(
@@ -270,6 +289,26 @@ class SecurityAgentRepository:
         )
         await self._session.flush()
         return checkpoint.id
+
+    async def save_project(self, project: Any) -> None:
+        row = await self._session.get(DBResearchProject, project.id)
+        if row is None:
+            row = DBResearchProject(id=project.id)
+            self._session.add(row)
+        row.name = project.name
+        row.project_id = project.project_id
+        row.session_id = project.session_id or None
+        row.program_handle = project.program_handle
+        row.target = project.target
+        row.mode = project.mode
+        row.strategy = project.strategy
+        row.state = project.state.value if hasattr(project.state, "value") else str(project.state)
+        row.operator_identity = project.operator_identity
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+
+    async def load_project(self, project_id: str) -> DBResearchProject | None:
+        return await self._session.get(DBResearchProject, project_id)
 
     async def load_row(self, session_id: str) -> DBResearchSession | None:
         result = await self._session.execute(
@@ -350,6 +389,8 @@ class SecurityAgentRepository:
             if isinstance(overrides.get("next_action"), dict)
             else None,
             strategy=str(overrides.get("strategy") or "passive_recon"),
+            operator_identity=row.operator_identity or "",
+            research_project_id=row.research_project_id or "",
         )
         if row.termination_reason:
             try:
@@ -418,14 +459,39 @@ class SecurityAgentRepository:
             )
             research.tool_history.append(call.tool)
         for finding_row in row.findings:
-            research.findings.append(_finding_from_row(finding_row))
+            research.findings.append(_finding_from_row(finding_row, graph=graph))
         pair = IdentityPair()
         for ident in row.identities:
+            auth_state = ident.authentication_state or "unauthenticated"
+            if ident.cookie_secret_ref or ident.header_secret_refs:
+                from app.security_agent.secrets import secrets_for
+
+                store = secrets_for(row.id)
+                available = all(
+                    store.available(ref)
+                    for ref in (
+                        [ident.cookie_secret_ref, ident.storage_secret_ref]
+                        + list((ident.header_secret_refs or {}).values())
+                    )
+                    if ref
+                )
+                if not available:
+                    auth_state = "unavailable"
             obj = ResearchIdentity(
                 id=ident.id,
                 label=ident.label,
-                cookies=dict(ident.cookies or {}),
-                storage=dict(ident.storage or {}),
+                credential_ref=ident.credential_ref or "",
+                browser_context_id=ident.browser_context_id or "",
+                http_session_id=ident.http_session_id or "",
+                storage_namespace=ident.storage_namespace or "",
+                authentication_state=auth_state,
+                credential_provenance=ident.credential_provenance or "none",
+                header_names=tuple(ident.header_names or ()),
+                header_secret_refs=dict(ident.header_secret_refs or {}),
+                cookie_names=tuple(ident.cookie_names or ()),
+                cookie_secret_ref=ident.cookie_secret_ref or "",
+                storage_keys=tuple(ident.storage_keys or ()),
+                storage_secret_ref=ident.storage_secret_ref or "",
             )
             if ident.label.upper() == "B":
                 pair.context_b = obj
@@ -434,7 +500,12 @@ class SecurityAgentRepository:
         research.identities = pair
         memory = ResearchMemory(project_id=str(row.project_id or ""))
         for item in row.memories:
-            memory.remember(item.kind, item.summary, dict(item.payload or {}))
+            memory.restore_entry(
+                entry_id=item.id,
+                kind=item.kind,
+                summary=item.summary,
+                extra=dict(item.payload or {}),
+            )
         research.memory = memory
         agent = SecurityResearchAgent(research)
         agent.tools.restore_disabled(sorted(research.disabled_tools))
@@ -463,7 +534,10 @@ async def _engine_for_restore(
     if current_program is not None:
         current_scope = program_scope_from_hackerone(current_program)
         current_handle = current_program.handle
+        if not current_program.structured_scopes:
+            current_scope = ProgramScope(program_name=current_handle, lab_mode=False)
     else:
+        # Live restore without a current program record: empty scope (fail closed).
         current_scope = ProgramScope(program_name=handle, lab_mode=False)
         current_handle = handle
     if persisted:
@@ -525,7 +599,9 @@ def _finding_row(session: ResearchSession, finding: SecurityFinding) -> DBResear
     )
 
 
-def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
+def _finding_from_row(
+    row: DBResearchFinding, *, graph: EvidenceGraph | None = None
+) -> SecurityFinding:
     extra = row.extra if isinstance(row.extra, dict) else {}
     items: list[Evidence] = []
     for raw in extra.get("evidence_items") or []:
@@ -539,6 +615,8 @@ def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
             provenance = EvidenceProvenance(str(raw.get("provenance") or "execution"))
         except ValueError:
             provenance = EvidenceProvenance.EXECUTION
+        if provenance is EvidenceProvenance.REPLAY:
+            kind = EvidenceKind.REPLAY
         items.append(
             Evidence(
                 kind=kind,
@@ -547,22 +625,25 @@ def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
                 provenance=provenance,
             )
         )
+    refs = list(row.evidence_ids or ())
+    if graph is not None:
+        refs = [ident for ident in refs if ident in graph.nodes]
     status = FindingStatus(row.status)
     bundle = EvidenceBundle.from_items(items) if items else EvidenceBundle()
-    needs_verify = status in {
+    live_items = [
+        item
+        for item in bundle.verifying_items()
+        if item.provenance is not EvidenceProvenance.REPLAY
+    ]
+    claimed_verified = status in {
         FindingStatus.VERIFIED,
         FindingStatus.REPRODUCED,
         FindingStatus.HUMAN_ACCEPTED,
     }
-    if needs_verify and not bundle.verifying_items():
+    if claimed_verified and not live_items:
+        status = FindingStatus.POTENTIAL
         bundle = EvidenceBundle.from_items(
-            [
-                Evidence(
-                    kind=EvidenceKind.REPRODUCTION,
-                    source="research",
-                    summary="restored verifying evidence",
-                )
-            ]
+            [item for item in items if item.provenance is not EvidenceProvenance.REPLAY]
         )
     ident = UUID(row.id) if _is_uuid(row.id) else uuid4()
     common: dict[str, Any] = {
@@ -571,7 +652,7 @@ def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
         "hypothesis": row.hypothesis_id or None,
         "confidence": row.confidence or "low",
         "impact": row.impact or None,
-        "observation_refs": tuple(row.evidence_ids or ()),
+        "observation_refs": tuple(refs),
         "id": ident,
         "created_at": row.created_at,
     }
@@ -581,14 +662,23 @@ def _finding_from_row(row: DBResearchFinding) -> SecurityFinding:
     if status is FindingStatus.REJECTED:
         return SecurityFinding.rejected(title, evidence=bundle, **common)
     if status is FindingStatus.VERIFIED:
-        return SecurityFinding.verified(title, evidence=bundle, **common)
+        try:
+            return SecurityFinding.verified(title, evidence=bundle, **common)
+        except ValueError:
+            return SecurityFinding.potential(title, evidence=bundle, **common)
     finding = SecurityFinding.potential(title, evidence=bundle, **common)
     if status is FindingStatus.CORROBORATED:
         return finding.corroborate()
     if status is FindingStatus.REPRODUCED:
-        return finding.reproduce(bundle)
+        try:
+            return finding.reproduce(bundle)
+        except ValueError:
+            return finding
     if status is FindingStatus.HUMAN_ACCEPTED:
-        return finding.reproduce(bundle).human_accept()
+        try:
+            return finding.reproduce(bundle).human_accept()
+        except ValueError:
+            return finding
     return finding
 
 

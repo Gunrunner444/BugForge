@@ -19,6 +19,9 @@ The HackerOne token never appears in the frontend, audit log, findings,
 report evidence, or the database. Ordinary project records store program
 handles, scope snapshots, and report ids — not credentials.
 
+Research-session handoff uses `HackerOneScopeEvaluator` (never substring
+matching) and still requires a human operator before submission.
+
 ## What BugForge will and will not do
 
 | Action | Behavior |

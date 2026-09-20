@@ -29,6 +29,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 6 | Guided AI security research agent | ✅ Implemented (planner; Phase 7 executes authorized tools) |
 | Phase 7 | Production security agent execution + evidence-driven verification | ✅ Implemented (lab-capable; live-capable with human approval; not unrestricted hacking) |
 | Phase 8 | Advanced security research + verification intelligence | ✅ Implemented (orchestrator, identities, replay, memory; AI remains advisory) |
+| Phase 9 | Security research workbench + end-to-end validation | ✅ Implemented (hardening + researcher workflow; live remains human-controlled) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -63,7 +64,10 @@ adds a guided `SecurityResearchAgent` that plans tool actions. Phase 7
 executes those tools through the existing adapters, persists the evidence
 graph, and restores sessions after restart. Phase 8 adds an advanced
 research orchestrator, two-identity authorization comparison, replay,
-research memory, checkpoints, and evidence export. Deterministic BugForge
+research memory, checkpoints, and evidence export. Phase 9 hardens that
+stack (identity secret references, authorization oracles, replay restoration,
+checkpoint revalidation, deterministic export) and adds a researcher
+workbench. Deterministic BugForge
 controls remain authoritative. Tools that lack a binary (ZAP, Nuclei,
 Playwright) report `UNAVAILABLE` or ingest-only results — they are not
 stubs pretending to have scanned. Live HackerOne sessions default to dry-run
@@ -77,7 +81,10 @@ Details: [docs/architecture.md](docs/architecture.md),
 [docs/reporting.md](docs/reporting.md),
 [docs/security-agent.md](docs/security-agent.md),
 [docs/agent-tools.md](docs/agent-tools.md),
-[docs/agent-safety.md](docs/agent-safety.md). Do not point this stack at
+[docs/agent-safety.md](docs/agent-safety.md),
+[docs/research-workbench.md](docs/research-workbench.md),
+[docs/identity-testing.md](docs/identity-testing.md),
+[docs/evidence-workflow.md](docs/evidence-workflow.md). Do not point this stack at
 real-world targets without an operator-approved program scope.
 
 ```
