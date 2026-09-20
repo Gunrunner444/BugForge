@@ -294,7 +294,9 @@ async def test_application_restart_preserves_state(db_session: AsyncSession) -> 
             reason="owner field",
         )
     )
-    node = session.graph.add(kind="observation", provenance="execution", summary="200", node_id="e1")
+    node = session.graph.add(
+        kind="observation", provenance="execution", summary="200", node_id="restart-e1"
+    )
     session.graph.add(
         kind="hypothesis",
         provenance="ai_hypothesis",
@@ -322,7 +324,7 @@ async def test_application_restart_preserves_state(db_session: AsyncSession) -> 
     assert restored.session.hypotheses[0].title == "IDOR"
     assert restored.session.findings[0].title == "maybe idor"
     assert restored.session.strategy == ResearchStrategy.AUTHORIZATION.value
-    assert "e1" in restored.session.graph.nodes
+    assert "restart-e1" in restored.session.graph.nodes
     assert restored.session.provider.provider_name == "mock"
     assert restored.session.thinking_enabled is True
 

@@ -94,10 +94,14 @@ def estimate_operation_cost(
         envelope = remaining_requests if remaining_requests is not None else 20
         envelope = max(1, int(envelope))
         return CostEstimate(
-            estimated_units=envelope,
-            unit="requests",
+            estimated_units=1,
+            unit="tool_calls",
             estimated_requests=envelope,
-            explanation="Scanner envelope uses the configured remaining request budget.",
+            explanation=(
+                f"Scanner envelope ~{envelope} requests (estimate for review). "
+                "Session budget consumes one tool call plus scan duration after execution, "
+                "not the full envelope up front."
+            ),
         )
     if tool == "browser_navigate" or kind == "browser":
         extra = 1
