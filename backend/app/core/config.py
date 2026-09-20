@@ -16,6 +16,7 @@ _VALID_AI_PROVIDERS = {
     "ollama",
     "openai_compatible",
     "local",
+    "mlx",
 }
 
 
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.1.0"
+    version: str = "1.2.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     max_repo_files: int = 10_000
     analysis_timeout_seconds: int = 300
 
-    # AI provider: mock | openai | anthropic | ollama | openai_compatible | local
+    # AI provider: mock | openai | anthropic | ollama | openai_compatible | local | mlx
     ai_provider: str = "mock"
     ai_model: str = "gpt-4o-mini"
     # API key comes from environment only — never commit a real key
@@ -60,6 +61,13 @@ class Settings(BaseSettings):
     ai_timeout_seconds: int = 60
     ai_max_retries: int = 2
     ai_max_hypotheses: int = 3
+    # Local MLX (Qwen etc.). Model name is configurable — not hard-coded in the engine.
+    mlx_base_url: str = "http://127.0.0.1:8080/v1"
+    mlx_model: str = "Qwen3.6-35B-A3B-8bit"
+    ai_thinking_enabled: bool = False
+    ai_native_json_mode: bool = False
+    ai_max_context_tokens: int = 8192
+    ai_security_enabled: bool = True
 
     # Language analyzers that should run during static analysis.
     # Empty = every registered adapter that implements STATIC_ANALYSIS (currently Python).
@@ -186,7 +194,7 @@ class Settings(BaseSettings):
 
     def is_local_ai(self) -> bool:
         """Return True when the AI provider runs locally (no cloud cost)."""
-        return self.ai_provider in {"mock", "ollama", "openai_compatible", "local"}
+        return self.ai_provider in {"mock", "ollama", "openai_compatible", "local", "mlx"}
 
 
 @lru_cache

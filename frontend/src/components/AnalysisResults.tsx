@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import type { Analysis, CodeEntity, ImportRecord, RepositoryFile } from "@/lib/types";
 import { api } from "@/lib/api";
 import FindingsPanel from "@/components/FindingsPanel";
+import SecurityFindingsPanel from "@/components/SecurityFindingsPanel";
 import { formatDate, languageColor, statusColor } from "@/lib/utils";
 import LoadingSpinner from "@/components/ui/LoadingSpinner";
 
-type Tab = "overview" | "files" | "entities" | "imports" | "findings";
+type Tab = "overview" | "files" | "entities" | "imports" | "findings" | "security";
 
 interface Props {
   analysis: Analysis;
@@ -21,6 +22,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "entities", label: "Entities" },
   { key: "imports", label: "Imports" },
   { key: "findings", label: "Findings" },
+  { key: "security", label: "Security" },
 ];
 
 export default function AnalysisResults({ analysis, tab, onTabChange }: Props) {
@@ -102,6 +104,7 @@ export default function AnalysisResults({ analysis, tab, onTabChange }: Props) {
                 {tab === "entities" && <EntitiesTab entities={entities} />}
                 {tab === "imports" && <ImportsTab imports={imports} />}
                 {tab === "findings" && <FindingsPanel analysisId={analysis.id} />}
+                {tab === "security" && <SecurityFindingsPanel projectId={analysis.project_id} />}
               </>
             )}
           </div>
@@ -129,6 +132,7 @@ function OverviewTab({ analysis }: { analysis: Analysis }) {
           { label: "Source files", value: s.source_files },
           { label: "Test files", value: s.test_files },
           { label: "Code entities", value: s.total_entities },
+          { label: "Potential security", value: s.security_findings ?? 0 },
         ].map(({ label, value }) => (
           <div key={label} className="bg-slate-50 rounded-lg p-4 text-center">
             <p className="text-2xl font-bold text-slate-900">{value}</p>

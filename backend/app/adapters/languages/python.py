@@ -45,7 +45,10 @@ class PythonAdapter(LanguageAdapter):
                 LanguageCapability.DETECTION,
                 LanguageCapability.SOURCE,
                 LanguageCapability.PARSE,
+                LanguageCapability.ENTITY_EXTRACTION,
+                LanguageCapability.IMPORT_EXTRACTION,
                 LanguageCapability.STATIC_ANALYSIS,
+                LanguageCapability.SECURITY_ANALYSIS,
             }
         )
 

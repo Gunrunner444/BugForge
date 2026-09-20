@@ -26,7 +26,7 @@ export default function ProjectDetailPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pageTab, setPageTab] = useState<PageTab>("analysis");
-  const [analysisTab, setAnalysisTab] = useState<"overview" | "files" | "entities" | "imports" | "findings">("overview");
+  const [analysisTab, setAnalysisTab] = useState<"overview" | "files" | "entities" | "imports" | "findings" | "security">("overview");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadProject = useCallback(async () => {

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,10 +23,12 @@ from app.domain.evidence import (
     Evidence,
     EvidenceBundle,
 )
+from app.domain.security import EvidenceTier
 
 
 class FindingStatus(StrEnum):
     POTENTIAL = "potential"
+    CORROBORATED = "corroborated"
     VERIFIED = "verified"
     REJECTED = "rejected"
 
@@ -73,6 +76,14 @@ class SecurityFinding:
     tools: tuple[str, ...] = ()
     ai_analysis: str | None = None
     human_review_state: HumanReviewState = HumanReviewState.UNREVIEWED
+    evidence_tier: EvidenceTier = EvidenceTier.STATIC_INDICATOR
+    rule_ids: tuple[str, ...] = ()
+    analyzer: str | None = None
+    observation_refs: tuple[str, ...] = ()
+    asset: str | None = None
+    report_title: str | None = None
+    report_description: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
@@ -102,6 +113,21 @@ class SecurityFinding:
         )
         _require_verifying_evidence(merged)
         return replace(self, status=FindingStatus.VERIFIED, evidence=merged)
+
+    def corroborate(self) -> SecurityFinding:
+        """Mark independent static observations as a corroborated hypothesis.
+
+        This is the strongest status Phase 2 may assign. It is not verification.
+        """
+        if self.status is FindingStatus.REJECTED:
+            raise ValueError("Rejected findings cannot be corroborated")
+        if self.status is FindingStatus.VERIFIED:
+            raise ValueError("Verified findings are already beyond corroboration")
+        return replace(
+            self,
+            status=FindingStatus.CORROBORATED,
+            evidence_tier=EvidenceTier.CORROBORATED,
+        )
 
     def reject(
         self, *, evidence: EvidenceBundle | Sequence[Evidence] | None = None
@@ -143,6 +169,7 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         """Wrap a model-generated hypothesis. Always potential, never verified."""
+        kwargs.setdefault("evidence_tier", EvidenceTier.AI_HYPOTHESIS)
         return cls.potential(
             title,
             hypothesis=hypothesis,
@@ -161,6 +188,7 @@ class SecurityFinding:
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
         _require_verifying_evidence(bundle)
+        kwargs.setdefault("evidence_tier", EvidenceTier.VERIFIED)
         return cls(title=title, status=FindingStatus.VERIFIED, evidence=bundle, **kwargs)
 
     @classmethod

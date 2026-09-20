@@ -1,13 +1,13 @@
-"""Detection-capable language adapters without fake analysis implementations.
+"""Built-in language adapters.
 
-These adapters exist so language detection and source-file classification go
-through the registry. Parse and static analysis raise
-:class:`UnsupportedCapabilityError` until a later phase implements them.
+Programming languages with a syntax profile implement parse, entity/import
+extraction, and security analysis. Auxiliary formats remain detection-only.
 """
 
 from __future__ import annotations
 
 from app.adapters.languages.base import LanguageAdapter
+from app.adapters.languages.profile import ProfileLanguageAdapter
 from app.domain.language import LanguageCapability
 
 
@@ -47,74 +47,71 @@ class DetectionLanguageAdapter(LanguageAdapter):
         return self._capabilities
 
 
-class JavaScriptAdapter(DetectionLanguageAdapter):
+class JavaScriptAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
         super().__init__(
             "javascript",
             "JavaScript",
             frozenset({".js", ".mjs", ".cjs", ".jsx"}),
-            is_source=True,
         )
 
 
-class TypeScriptAdapter(DetectionLanguageAdapter):
+class TypeScriptAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
         super().__init__(
             "typescript",
             "TypeScript",
             frozenset({".ts", ".tsx"}),
-            is_source=True,
         )
 
 
-class RubyAdapter(DetectionLanguageAdapter):
+class RubyAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("ruby", "Ruby", frozenset({".rb"}), is_source=True)
+        super().__init__("ruby", "Ruby", frozenset({".rb"}))
 
 
-class CAdapter(DetectionLanguageAdapter):
+class CAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("c", "C", frozenset({".c", ".h"}), is_source=True)
+        super().__init__("c", "C", frozenset({".c", ".h"}))
 
 
-class CppAdapter(DetectionLanguageAdapter):
+class CppAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
         super().__init__(
             "cpp",
             "C++",
             frozenset({".cpp", ".cc", ".cxx", ".hpp"}),
-            is_source=True,
         )
 
 
-class GoAdapter(DetectionLanguageAdapter):
+class GoAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("go", "Go", frozenset({".go"}), is_source=True)
+        super().__init__("go", "Go", frozenset({".go"}))
 
 
-class RustAdapter(DetectionLanguageAdapter):
+class RustAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("rust", "Rust", frozenset({".rs"}), is_source=True)
+        super().__init__("rust", "Rust", frozenset({".rs"}))
 
 
-class JavaAdapter(DetectionLanguageAdapter):
+class JavaAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("java", "Java", frozenset({".java"}), is_source=True)
+        super().__init__("java", "Java", frozenset({".java"}))
 
 
-class PHPAdapter(DetectionLanguageAdapter):
+class PHPAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("php", "PHP", frozenset({".php"}), is_source=True)
+        super().__init__("php", "PHP", frozenset({".php"}))
 
 
-class KotlinAdapter(DetectionLanguageAdapter):
+class KotlinAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("kotlin", "Kotlin", frozenset({".kt", ".kts"}), is_source=True)
+        super().__init__("kotlin", "Kotlin", frozenset({".kt", ".kts"}))
 
 
-class SwiftAdapter(DetectionLanguageAdapter):
+class SwiftAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("swift", "Swift", frozenset({".swift"}), is_source=True)
+        super().__init__("swift", "Swift", frozenset({".swift"}))
 
 
 # Auxiliary languages previously tracked by the extension map. Detection only.

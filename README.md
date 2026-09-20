@@ -22,6 +22,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | v1.0.0 | Full AI Debugging Platform | ✅ Complete |
 | v1.1.0 | Autonomous Discovery | ✅ Complete |
 | Phase 1 | Adapter foundation (languages, AI, security tooling) | ✅ Complete |
+| Phase 2 | Local AI + multi-language security analysis | ✅ Complete |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -31,28 +32,23 @@ See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architec
 
 BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
-instead of hard-coded conditionals. Python analysis and the existing AI
-providers run through that catalog today; other languages are detected but not
-yet analyzed.
+instead of hard-coded conditionals. Python quality analysis and twelve-language
+security analysis run through that catalog. Auxiliary formats stay detection-only.
 
-Phase 1 contracts that later security work will rely on:
+Phase 2 adds:
 
-- **Language-neutral parse results** (`LanguageParseResult`) so core analysis
-  does not depend on the Python parser's types.
-- **Adapter registration** that rejects id/alias conflicts and replaces
-  language adapters atomically (including stale file extensions).
-- **Generic AI** `complete()` / `capabilities()` alongside existing debugging
-  methods. Local providers report availability from a real endpoint probe.
-- **Evidence provenance** and a frozen `SecurityFinding` so an AI hypothesis
-  cannot become a verified finding by itself.
-- **Scope separation**: `is_in_scope()` does not mean active testing is
-  allowed. Browser/proxy/fuzzer hooks require authorization wrappers.
-- **Local reports** distinguish potential / verified / human-review state and
-  are not remote submissions.
+- **Shared syntax graphs** (Python AST + profile parsers) so security rules are
+  language-neutral.
+- **Framework registry** (Django, Flask, FastAPI, Express, Next.js, NestJS, Rails, …).
+- **Security rule engine** with taint-aware source→sink hypotheses.
+- **Local MLX provider** at `http://127.0.0.1:8080/v1`, configurable model
+  (default `Qwen3.6-35B-A3B-8bit`), thinking enabled/disabled.
+- **Context selection** so repositories are not dumped into the model.
+- **Potential / corroborated** findings only — never verified from static or AI.
 
 Details: [docs/architecture.md](docs/architecture.md). Live scanning, browser
-exploitation, fuzzing against external targets, MLX/Qwen, and HackerOne
-automation remain **Phase 2** and are not implemented.
+exploitation, fuzzing against external targets, and HackerOne submission remain
+**Phase 3** and are not implemented.
 
 ```
 Repository
@@ -186,12 +182,18 @@ Set in `.env` or environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AI_PROVIDER` | `mock` | `mock` / `openai` / `anthropic` / `ollama` / `openai_compatible` / `local` |
-| `AI_MODEL` | `gpt-4o-mini` | Model name |
-| `AI_API_KEY` | *(empty)* | API key — never commit this |
+| `AI_PROVIDER` | `mock` | `mock` / `openai` / `anthropic` / `ollama` / `openai_compatible` / `local` / `mlx` |
+| `AI_MODEL` | `gpt-4o-mini` | Model name (override; for MLX prefer `MLX_MODEL`) |
+| `AI_API_KEY` | *(empty)* | API key — never commit this. Not required for MLX |
+| `AI_BASE_URL` | *(empty)* | Override; MLX defaults to `http://127.0.0.1:8080/v1` |
+| `MLX_BASE_URL` | `http://127.0.0.1:8080/v1` | Local MLX OpenAI-compatible endpoint |
+| `MLX_MODEL` | `Qwen3.6-35B-A3B-8bit` | Configurable local model id |
+| `AI_THINKING_ENABLED` | `false` | Request model thinking traces (stripped from the answer) |
+| `AI_NATIVE_JSON_MODE` | `false` | Send OpenAI `response_format` (off by default for local models) |
+| `AI_MAX_CONTEXT_TOKENS` | `8192` | Practical context budget for local models |
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature |
 | `AI_TIMEOUT_SECONDS` | `60` | Request timeout |
-| `LANGUAGE_ANALYZERS` | *(empty)* | Comma-separated analyzer ids. Empty = all analyzers that implement static analysis (currently `python`) |
+| `LANGUAGE_ANALYZERS` | *(empty)* | Comma-separated quality-analyzer ids. Empty = `STATIC_ANALYSIS` adapters (Python) |
 
 The **mock provider** is always safe for development — no API key required.
 
@@ -229,7 +231,9 @@ Full docs: `http://localhost:8000/docs`
 | POST | `/api/v1/projects/{id}/debug` | Start AI debugging (202) |
 | GET | `/api/v1/debugging/{id}` | Debugging session + hypotheses |
 | POST | `/api/v1/projects/{id}/test-generation` | Generate tests (202) |
-| GET | `/api/v1/test-generation/{id}/tests` | Generated test candidates |
+| GET | `/api/v1/ai/status` | AI provider, model, local/cloud, thinking, analyzers |
+| GET | `/api/v1/security/status` | Language analyzers and security rules |
+| GET | `/api/v1/security/findings` | Potential/corroborated security findings |
 
 ---
 
@@ -253,15 +257,15 @@ Full docs: `http://localhost:8000/docs`
 
 ## Roadmap
 
-Completed through v1.1.0 (debugging platform + autonomous discovery) and
-Phase 1 (adapter foundation). Deliberately **not** in Phase 1:
+Completed through Phase 2 (multi-language security analysis + local MLX).
+Deliberately **not** in this phase (Phase 3):
 
-- Qwen/MLX local backend
-- Burp / ZAP / Nuclei adapters
-- Live browser testing or exploitation
+- Live external-target scanning
+- Burp active control, Nuclei/ZAP active scanning
+- Browser exploitation or live navigation
 - Live fuzzing against external targets
-- HackerOne scope sync and report submission
-- Security agents and tool calling
+- HackerOne API submission (draft fields exist; nothing is submitted)
+- Claiming that static or AI output is a verified vulnerability
 
 ---
 

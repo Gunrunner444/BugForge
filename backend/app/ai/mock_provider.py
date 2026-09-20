@@ -13,6 +13,8 @@ from app.ai.health import AIHealthStatus, default_capabilities
 from app.ai.provider import (
     AICapabilities,
     AIUsage,
+    CompletionRequest,
+    CompletionResponse,
     DebuggingRequest,
     HypothesisResult,
     LLMProvider,
@@ -46,10 +48,13 @@ class MockLLMProvider(LLMProvider):
         return AICapabilities(
             chat=True,
             structured_output=True,
+            structured_generation=True,
+            text_generation=True,
             tool_calls=False,
             thinking=False,
             thinking_can_disable=True,
             supports_local_models=True,
+            local_execution=True,
             notes=("Deterministic mock; no network calls.",),
         )
 
@@ -221,5 +226,37 @@ class MockLLMProvider(LLMProvider):
             provider=self.provider_name,
             model=self.model_name,
             usage=AIUsage(prompt_tokens=256, completion_tokens=512),
+            duration_seconds=time.monotonic() - start,
+        )
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        start = time.monotonic()
+        lowered = (request.system_prompt or "").lower()
+        if "security" in lowered and "hypothesis" in lowered:
+            content = json.dumps(
+                {
+                    "title": "Potential security issue",
+                    "vulnerability_class": "injection",
+                    "hypothesis": (
+                        "[AI INFERENCE] Static observations suggest user-controlled "
+                        "data may reach a dangerous sink."
+                    ),
+                    "confidence": "medium",
+                    "impact": "Impact depends on sanitization that is not proven here.",
+                    "related_observation_refs": [],
+                    "not_verified": True,
+                    "reasoning_summary": (
+                        "[AI INFERENCE] Combined static observations. Not a verified vulnerability."
+                    ),
+                }
+            )
+        else:
+            response = await self.generate_structured(request.system_prompt, request.user_message)
+            content = response.content
+        return CompletionResponse(
+            content=content,
+            provider=self.provider_name,
+            model=self.model_name,
+            usage=AIUsage(prompt_tokens=64, completion_tokens=128),
             duration_seconds=time.monotonic() - start,
         )

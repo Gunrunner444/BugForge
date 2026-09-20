@@ -1,6 +1,8 @@
 import type {
   Analysis,
   AIStatus,
+  SecurityFinding,
+  SecurityStatus,
   AutonomousRun,
   AutonomousRunsListResponse,
   BugReproductionSession,
@@ -360,6 +362,14 @@ export const api = {
       request<{ provider: string; model: string; response: string; duration_seconds: number; error: string | null }>(
         "/api/v1/ai/test",
         { method: "POST", body: JSON.stringify({ prompt }) },
+      ),
+  },
+
+  security: {
+    status: () => request<SecurityStatus>("/api/v1/security/status"),
+    findings: (projectId: string, offset = 0, limit = 100) =>
+      request<{ items: SecurityFinding[]; total: number; offset: number; limit: number }>(
+        `/api/v1/security/findings?project_id=${projectId}&offset=${offset}&limit=${limit}`,
       ),
   },
 };

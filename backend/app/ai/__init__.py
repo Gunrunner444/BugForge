@@ -1,6 +1,7 @@
 from app.ai.anthropic_provider import AnthropicProvider
 from app.ai.context_builder import ContextBuilder
 from app.ai.local_provider import LocalAIProvider
+from app.ai.mlx_provider import MlxProvider
 from app.ai.mock_provider import MockLLMProvider
 from app.ai.openai_provider import OpenAIProvider
 from app.ai.prompt_builder import PromptBuilder
@@ -49,6 +50,7 @@ __all__ = [
     "OpenAIProvider",
     "AnthropicProvider",
     "LocalAIProvider",
+    "MlxProvider",
     "ContextBuilder",
     "PromptBuilder",
     "get_provider",

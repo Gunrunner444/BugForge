@@ -28,6 +28,7 @@ class AnalysisSummarySchema(BaseModel):
     total_entities: int
     total_imports: int
     total_findings: int = 0
+    security_findings: int = 0
     languages: list[LanguageStatsSchema]
     frameworks: list[FrameworkDetectionSchema]
     analysis_duration_seconds: float | None = None

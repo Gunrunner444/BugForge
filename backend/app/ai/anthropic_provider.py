@@ -67,6 +67,8 @@ class AnthropicProvider(LLMProvider):
         return AICapabilities(
             chat=True,
             structured_output=True,
+            structured_generation=True,
+            text_generation=True,
             tool_calls=False,
             thinking=False,
             thinking_can_disable=True,

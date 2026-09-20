@@ -69,6 +69,27 @@ def _register_ai_providers(catalog: PluginCatalog) -> None:
     def local_factory(settings: Settings) -> LocalAIProvider:
         return LocalAIProvider.from_settings(settings)
 
+    def mlx_factory(settings: Settings) -> LocalAIProvider:
+        from app.ai.mlx_provider import DEFAULT_MLX_MODEL
+
+        model = settings.ai_model
+        if not model or model == "gpt-4o-mini":
+            model = settings.mlx_model or DEFAULT_MLX_MODEL
+        return LocalAIProvider(
+            api_key=settings.ai_api_key,
+            model=model,
+            base_url=settings.ai_base_url or settings.mlx_base_url,
+            max_tokens=settings.ai_max_output_tokens,
+            temperature=settings.ai_temperature,
+            timeout_seconds=max(settings.ai_timeout_seconds, 30),
+            max_retries=settings.ai_max_retries,
+            backend="mlx",
+            provider_name="mlx",
+            thinking_enabled=settings.ai_thinking_enabled,
+            native_json_mode=settings.ai_native_json_mode,
+            max_context_tokens=settings.ai_max_context_tokens,
+        )
+
     catalog.ai_providers.register(
         "mock", mock_factory, aliases=("testing",), description="Deterministic mock provider"
     )
@@ -80,7 +101,12 @@ def _register_ai_providers(catalog: PluginCatalog) -> None:
         "local",
         local_factory,
         aliases=("ollama", "openai_compatible"),
-        description="Local OpenAI-compatible models (Ollama, LM Studio). MLX reserved.",
+        description="Local OpenAI-compatible models (Ollama, LM Studio)",
+    )
+    catalog.ai_providers.register(
+        "mlx",
+        mlx_factory,
+        description="Local MLX OpenAI-compatible server (configurable model)",
     )
 
 

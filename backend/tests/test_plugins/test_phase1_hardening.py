@@ -477,14 +477,14 @@ async def test_local_provider_unconfigured_empty_netloc() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_provider_capabilities_reserve_mlx_features() -> None:
+async def test_local_provider_openai_compatible_capabilities() -> None:
     provider = _local_provider()
     caps = provider.capabilities()
     assert caps.supports_local_models is True
     assert caps.thinking is False
     assert caps.thinking_can_disable is True
     assert caps.tool_calls is False
-    assert any("MLX" in note for note in caps.notes)
+    assert caps.local_execution is True
 
 
 # ---------------------------------------------------------------------------

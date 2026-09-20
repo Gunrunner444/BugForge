@@ -15,6 +15,7 @@ from app.models.finding import DBFinding  # noqa: F401
 from app.models.github import GitHubDelivery, GitHubRepository  # noqa: F401
 from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
+from app.models.security_finding import DBSecurityFinding  # noqa: F401
 from app.models.test_generation import GeneratedTest, TestGenerationSession  # noqa: F401
 from app.models.test_run import TestResult, TestRun  # noqa: F401
 from app.models.verification import PatchVerification  # noqa: F401

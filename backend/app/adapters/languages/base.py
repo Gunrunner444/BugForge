@@ -61,6 +61,22 @@ class LanguageAdapter(ABC):
             detail=f"{self.display_name} parsing is not implemented in this phase.",
         )
 
+    def syntax_graph(self, file_path: Path, source: str) -> object:
+        """Return a language-neutral syntax graph used by security analysis.
+
+        Default implementation uses the shared parser registry. Detection-only
+        adapters raise :class:`UnsupportedCapabilityError`.
+        """
+        from app.parsing.engine import can_parse, parse_source
+
+        if not can_parse(self.language_id):
+            raise UnsupportedCapabilityError(
+                self.language_id,
+                LanguageCapability.PARSE,
+                detail=f"{self.display_name} has no syntax parser.",
+            )
+        return parse_source(self.language_id, file_path, source)
+
     def analyze_file(self, file_path: Path, source: str) -> list[Finding]:
         raise UnsupportedCapabilityError(
             self.language_id,

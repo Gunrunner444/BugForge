@@ -62,9 +62,22 @@ class AnalysisService:
                 all_file_paths,
             )
 
+            from app.security.engine import SecurityAnalysisEngine
+
+            security_result = await asyncio.to_thread(
+                SecurityAnalysisEngine().analyze_repository,
+                Path(repository_path),
+                all_file_paths,
+            )
+
             async with async_session_factory() as session:
                 await self._persist_results(
-                    session, analysis_id, analysis_result, duration, static_findings
+                    session,
+                    analysis_id,
+                    analysis_result,
+                    duration,
+                    static_findings,
+                    security_findings=security_result.findings,
                 )
                 await session.commit()
 
@@ -89,6 +102,7 @@ class AnalysisService:
         result: AnalysisResult,
         duration: float,
         static_findings: list[Any] | None = None,
+        security_findings: list[Any] | None = None,
     ) -> None:
         from app.repositories.analysis_repo import AnalysisRepository
         from app.repositories.finding_repo import FindingRepository
@@ -159,6 +173,7 @@ class AnalysisService:
             "total_entities": total_entities,
             "total_imports": total_imports,
             "total_findings": len(static_findings) if static_findings else 0,
+            "security_findings": len(security_findings) if security_findings else 0,
             "languages": [
                 {
                     "language": ls.language,
@@ -185,3 +200,14 @@ class AnalysisService:
         if static_findings:
             finding_repo = FindingRepository(session)
             await finding_repo.bulk_create(analysis_id, static_findings)
+
+        if security_findings:
+            from app.models.analysis import Analysis
+            from app.repositories.security_finding_repo import SecurityFindingRepository
+
+            analysis = await session.get(Analysis, analysis_id)
+            project_id = analysis.project_id if analysis is not None else None
+            sec_repo = SecurityFindingRepository(session)
+            await sec_repo.bulk_create(
+                security_findings, project_id=project_id, analysis_id=analysis_id
+            )

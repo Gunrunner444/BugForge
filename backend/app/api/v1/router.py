@@ -10,6 +10,7 @@ from app.api.v1.endpoints.github import router as github_router
 from app.api.v1.endpoints.projects import router as projects_router
 from app.api.v1.endpoints.repair import router as repair_router
 from app.api.v1.endpoints.reproduction import router as reproduction_router
+from app.api.v1.endpoints.security import router as security_router
 from app.api.v1.endpoints.test_generation import router as test_generation_router
 from app.api.v1.endpoints.test_runs import router as test_runs_router
 from app.api.v1.endpoints.verification import router as verification_router
@@ -29,3 +30,4 @@ api_router.include_router(discovery_router)
 api_router.include_router(discovered_repos_router)
 api_router.include_router(autonomous_router)
 api_router.include_router(ai_router)
+api_router.include_router(security_router)

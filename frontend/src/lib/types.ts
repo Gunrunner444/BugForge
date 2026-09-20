@@ -34,6 +34,7 @@ export interface AnalysisSummary {
   total_entities: number;
   total_imports: number;
   total_findings: number;
+  security_findings?: number;
   languages: LanguageStats[];
   frameworks: FrameworkDetection[];
   analysis_duration_seconds: number | null;
@@ -681,6 +682,47 @@ export interface AIStatus {
   model_available: boolean | null;
   error: string | null;
   capabilities: string[] | null;
+  thinking_enabled?: boolean;
+  language_analyzers?: string[];
+  security_analysis_status?: string;
+}
+
+export interface SecurityFinding {
+  id: string;
+  project_id: string | null;
+  analysis_id: string | null;
+  title: string;
+  status: string;
+  vulnerability_class: string | null;
+  evidence_tier: string;
+  confidence: string;
+  description: string;
+  hypothesis: string | null;
+  ai_analysis: string | null;
+  impact: string | null;
+  file_path: string | null;
+  line: number | null;
+  analyzer: string | null;
+  rule_ids: string;
+  observation_refs: string;
+  asset: string | null;
+  created_at: string;
+}
+
+export interface SecurityStatus {
+  status: string;
+  language_analyzers: Array<{
+    language_id: string;
+    display_name: string;
+    capabilities: string[];
+    extensions: string[];
+  }>;
+  rule_ids: string[];
+  ai_provider: string;
+  ai_model: string;
+  ai_local: boolean;
+  thinking_enabled: boolean;
+  notes: string;
 }
 
 export interface DiscoverySettings {

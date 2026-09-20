@@ -92,6 +92,11 @@ def test_is_local_ai_ollama() -> None:
     assert s.is_local_ai() is True
 
 
+def test_is_local_ai_mlx() -> None:
+    s = make_settings(ai_provider="mlx")
+    assert s.is_local_ai() is True
+
+
 def test_is_local_ai_openai() -> None:
     s = make_settings(ai_provider="openai", ai_api_key="sk-x")
     assert s.is_local_ai() is False

@@ -28,8 +28,9 @@ class LocalReportProvider(ReportProvider):
             "This is a **local rendering**. It has not been submitted to any remote",
             "program (HackerOne or otherwise).",
             "",
-            "Hypotheses are not verified findings. Only items marked verified",
-            "have independent observational or executable evidence.",
+            "Hypotheses are not verified findings. Potential and corroborated",
+            "static hypotheses still require independent observational or",
+            "executable evidence before they can be marked verified.",
             "",
         ]
         if not findings:
@@ -54,6 +55,7 @@ class LocalReportProvider(ReportProvider):
 
         extra = evidence or EvidenceBundle()
         potential = sum(1 for f in findings if f.status is FindingStatus.POTENTIAL)
+        corroborated = sum(1 for f in findings if f.status is FindingStatus.CORROBORATED)
         verified = sum(1 for f in findings if f.status is FindingStatus.VERIFIED)
         rejected = sum(1 for f in findings if f.status is FindingStatus.REJECTED)
         unreviewed = sum(1 for f in findings if f.human_review_state is HumanReviewState.UNREVIEWED)
@@ -62,6 +64,7 @@ class LocalReportProvider(ReportProvider):
             "submitted_remotely": "false",
             "finding_count": str(len(findings)),
             "potential_count": str(potential),
+            "corroborated_count": str(corroborated),
             "verified_count": str(verified),
             "rejected_count": str(rejected),
             "unreviewed_count": str(unreviewed),

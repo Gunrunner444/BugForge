@@ -5,6 +5,7 @@ from app.models.finding import DBFinding
 from app.models.project import Project
 from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
+from app.models.security_finding import DBSecurityFinding
 from app.models.test_generation import GeneratedTest, TestGenerationSession
 from app.models.test_run import TestResult, TestRun
 from app.models.verification import PatchVerification
@@ -19,6 +20,7 @@ __all__ = [
     "TestRun",
     "TestResult",
     "DBFinding",
+    "DBSecurityFinding",
     "DebuggingSession",
     "DebuggingHypothesis",
     "AIModelCall",
