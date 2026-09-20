@@ -10,6 +10,7 @@ from app.adapters.hackerone.client import HackerOneApiClient
 from app.adapters.hackerone.credentials import HackerOneCredentials
 from app.adapters.hackerone.errors import HackerOneError
 from app.adapters.hackerone.evaluator import HackerOneScopeEvaluator
+from app.adapters.hackerone.intents import ReportIntentWorkflow
 from app.adapters.hackerone.models import (
     HackerOneProgram,
     ProgramSyncStatus,
@@ -22,11 +23,8 @@ from app.adapters.hackerone.models import (
     node_id,
     parse_hackerone_id,
 )
-from app.adapters.hackerone.reports import (
-    HackerOneReportDraft,
-    HackerOneReportWorkflow,
-    ReportIntentWorkflow,
-)
+from app.adapters.hackerone.reports import HackerOneReportDraft, HackerOneReportWorkflow
+from app.adapters.hackerone.scope_hash import hash_program_scope
 from app.adapters.reports.base import ReportProvider
 from app.adapters.scope.base import ScopeProvider
 from app.domain.evidence import EvidenceBundle
@@ -40,8 +38,13 @@ from app.security_testing.target import NETWORK_ASSET_TYPES
 
 
 class HackerOneScopeProvider(ScopeProvider):
-    def __init__(self, program: HackerOneProgram | None = None) -> None:
-        self.program = program
+    """Scope provider that always requires an explicit HackerOneProgram.
+
+    There is no global "active program". Evaluating program A never uses
+    program B's structured scope.
+    """
+
+    def __init__(self) -> None:
         self.evaluator = HackerOneScopeEvaluator()
 
     @property
@@ -49,7 +52,12 @@ class HackerOneScopeProvider(ScopeProvider):
         return "hackerone"
 
     def get_scope(self) -> ScopeConstraint:
-        program = self._require_program()
+        raise HackerOneError(
+            "HackerOne scope requires an explicit program. Use get_scope_for(program).",
+            code="no_program",
+        )
+
+    def get_scope_for(self, program: HackerOneProgram) -> ScopeConstraint:
         hosts: list[str] = []
         # Scope exclusions are report-category/reward exclusions, not target denials.
         for record in program.structured_scopes:
@@ -63,13 +71,8 @@ class HackerOneScopeProvider(ScopeProvider):
             program_name=program.name or program.handle,
         )
 
-    def evaluate(self, target: str) -> Any:
-        return self.evaluator.evaluate(self._require_program(), target)
-
-    def _require_program(self) -> HackerOneProgram:
-        if self.program is None:
-            raise HackerOneError("No HackerOne program has been imported", code="no_program")
-        return self.program
+    def evaluate(self, program: HackerOneProgram, target: str, **kwargs: Any) -> Any:
+        return self.evaluator.evaluate(program, target, **kwargs)
 
 
 class HackerOneProvider(ReportProvider):
@@ -128,10 +131,26 @@ class HackerOneProvider(ReportProvider):
             open_scope_policy=existing.open_scope_policy if existing else "",
             open_scope_acknowledged=existing.open_scope_acknowledged if existing else False,
             active_testing_approved=existing.active_testing_approved if existing else False,
+            scope_content_hash=existing.scope_content_hash if existing else "",
+            weaknesses_synced_at=existing.weaknesses_synced_at if existing else None,
+            scope_pages_fetched=existing.scope_pages_fetched if existing else 0,
         )
         self.programs[program.handle] = program
-        self.scope_provider.program = program
         return program
+
+    def evaluate_scope(self, handle: str, target: str, **kwargs: Any) -> Any:
+        program = self.programs.get(handle)
+        if program is None:
+            raise HackerOneError(
+                "Sync the HackerOne program before evaluating scope", code="no_program"
+            )
+        return self.scope_provider.evaluate(program, target, **kwargs)
+
+    def scope_for(self, handle: str) -> ScopeConstraint:
+        program = self.programs.get(handle)
+        if program is None:
+            raise HackerOneError("Unknown HackerOne program", code="no_program")
+        return self.scope_provider.get_scope_for(program)
 
     def sync_scope(self, handle: str) -> HackerOneProgram:
         """Fetch → validate → stage → replace atomically. Keep last-good on error."""
@@ -141,24 +160,60 @@ class HackerOneProvider(ReportProvider):
             structured, scope_meta = self._structured_scopes(handle)
             exclusions = self._exclusions(handle)
             weaknesses = self._weaknesses(handle)
-            if not structured and not scope_meta.get("scope_sync_complete", False):
+            complete = bool(scope_meta.get("scope_sync_complete"))
+            if scope_meta.get("error"):
                 raise HackerOneError(
-                    "Structured scope sync produced an empty incomplete snapshot",
+                    str(scope_meta.get("error")),
                     code="scope_sync_incomplete",
                 )
-            program.structured_scopes = tuple(structured)
-            program.exclusions = tuple(exclusions)
-            program.weaknesses = tuple(weaknesses)
-            program.fetched_at = datetime.now(UTC)
-            program.sync_status = ProgramSyncStatus.OK
-            program.error = None
-            program.scope_version = previous.scope_version + 1
-            program.scope_count = len(structured)
-            program.scope_sync_complete = bool(scope_meta.get("scope_sync_complete", True))
-            program.last_scope_id = (
+            if not complete:
+                restored = previous
+                restored.sync_status = ProgramSyncStatus.INCOMPLETE
+                restored.scope_sync_complete = False
+                restored.error = "Structured scope sync is incomplete; last-good snapshot kept"
+                restored.continuation_state = str(scope_meta.get("continuation_state") or "")
+                restored.last_scope_id = (
+                    str(scope_meta.get("last_scope_id"))
+                    if scope_meta.get("last_scope_id")
+                    else restored.last_scope_id
+                )
+                restored.scope_pages_fetched = int(scope_meta.get("pages_fetched") or 0)
+                restored.fetched_at = datetime.now(UTC)
+                program = restored
+                self.syncs.append(
+                    {
+                        "handle": handle,
+                        "status": "incomplete",
+                        "error": restored.error,
+                        "scope_sync_complete": False,
+                        "last_scope_id": restored.last_scope_id,
+                        "fetched_at": restored.fetched_at.isoformat(),
+                    }
+                )
+                self.programs[program.handle] = program
+                return program
+            staged = _copy_program(previous)
+            staged.structured_scopes = tuple(structured)
+            staged.exclusions = tuple(exclusions)
+            staged.weaknesses = tuple(weaknesses)
+            staged.fetched_at = datetime.now(UTC)
+            staged.weaknesses_synced_at = staged.fetched_at
+            staged.sync_status = ProgramSyncStatus.OK
+            staged.error = None
+            staged.scope_count = len(structured)
+            staged.scope_sync_complete = True
+            staged.last_scope_id = (
                 str(scope_meta.get("last_scope_id")) if scope_meta.get("last_scope_id") else None
             )
-            program.continuation_state = None
+            staged.continuation_state = str(scope_meta.get("continuation_state") or "complete")
+            staged.scope_pages_fetched = int(scope_meta.get("pages_fetched") or 0)
+            content_hash = hash_program_scope(staged)
+            if content_hash == previous.scope_content_hash and previous.scope_content_hash:
+                staged.scope_version = previous.scope_version
+            else:
+                staged.scope_version = previous.scope_version + 1
+            staged.scope_content_hash = content_hash
+            program = staged
             self.syncs.append(
                 {
                     "handle": handle,
@@ -166,14 +221,17 @@ class HackerOneProvider(ReportProvider):
                     "scope_count": program.scope_count,
                     "last_scope_id": program.last_scope_id,
                     "scope_sync_complete": program.scope_sync_complete,
+                    "scope_version": program.scope_version,
+                    "scope_content_hash": program.scope_content_hash,
                     "weakness_count": len(weaknesses),
-                    "fetched_at": program.fetched_at.isoformat(),
+                    "fetched_at": program.fetched_at.isoformat() if program.fetched_at else None,
                 }
             )
         except HackerOneError as exc:
             restored = previous
             restored.sync_status = ProgramSyncStatus.ERROR
             restored.error = str(exc)
+            restored.scope_sync_complete = previous.scope_sync_complete
             restored.fetched_at = datetime.now(UTC)
             program = restored
             self.syncs.append(
@@ -181,19 +239,24 @@ class HackerOneProvider(ReportProvider):
                     "handle": handle,
                     "status": "error",
                     "error": str(exc),
+                    "scope_sync_complete": restored.scope_sync_complete,
                     "fetched_at": restored.fetched_at.isoformat() if restored.fetched_at else None,
                 }
             )
         self.programs[program.handle] = program
-        self.scope_provider.program = program
         return program
 
     def sync_weaknesses(self, handle: str) -> HackerOneProgram:
         program = self.programs.get(handle) or self.lookup_program(handle)
         try:
             program.weaknesses = tuple(self._weaknesses(handle))
+            program.weaknesses_synced_at = datetime.now(UTC)
             program.sync_status = ProgramSyncStatus.OK
             program.error = None
+            new_hash = hash_program_scope(program)
+            if new_hash != program.scope_content_hash:
+                program.scope_version += 1
+                program.scope_content_hash = new_hash
         except HackerOneError as exc:
             program.sync_status = ProgramSyncStatus.ERROR
             program.error = str(exc)
@@ -387,4 +450,7 @@ def _copy_program(program: HackerOneProgram) -> HackerOneProgram:
         scope_count=program.scope_count,
         last_scope_id=program.last_scope_id,
         continuation_state=program.continuation_state,
+        scope_content_hash=program.scope_content_hash,
+        weaknesses_synced_at=program.weaknesses_synced_at,
+        scope_pages_fetched=program.scope_pages_fetched,
     )

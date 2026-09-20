@@ -29,6 +29,14 @@ from app.models.hackerone import (  # noqa: F401
 )
 from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
+from app.models.security_agent import (  # noqa: F401
+    DBReproductionPlan,
+    DBResearchEvidenceLink,
+    DBResearchHypothesis,
+    DBResearchSession,
+    DBResearchTimelineEvent,
+    DBResearchToolCall,
+)
 from app.models.security_audit import DBSecurityAuditEvent  # noqa: F401
 from app.models.security_finding import DBSecurityFinding  # noqa: F401
 from app.models.test_generation import GeneratedTest, TestGenerationSession  # noqa: F401

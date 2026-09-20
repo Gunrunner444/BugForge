@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.adapters.hackerone.intents import (
+    AttachmentRecord,
+    AttachmentReviewState,
+    IntentLocalState,
+    ReportIntentRecord,
+)
 from app.adapters.hackerone.models import (
     HackerOneProgram,
     ProgramSyncStatus,
@@ -21,9 +28,9 @@ from app.adapters.hackerone.models import (
     asset_type_from_hackerone,
 )
 from app.adapters.hackerone.provider import HackerOneProvider
+from app.adapters.hackerone.remote_state import HackerOneRemoteState
 from app.adapters.hackerone.reports import (
     ApprovalRecord,
-    HackerOneRemoteState,
     HackerOneReportDraft,
     ReportHumanReviewState,
     ReportSubmissionState,
@@ -31,9 +38,11 @@ from app.adapters.hackerone.reports import (
 )
 from app.models.hackerone import (
     DBHackerOneApprovalEvent,
+    DBHackerOneAttachment,
     DBHackerOneAuditEvent,
     DBHackerOneProgram,
     DBHackerOneReportDraft,
+    DBHackerOneReportIntent,
     DBHackerOneScopeExclusion,
     DBHackerOneStructuredScope,
     DBHackerOneSubmission,
@@ -55,19 +64,29 @@ class HackerOneRepository:
             await self.save_draft(draft)
         for record in provider.reports.submissions.values():
             await self.save_submission(record)
+        for intent in provider.intents.intents.values():
+            await self.save_intent(intent)
+        for items in provider.intents.attachments.values():
+            for attachment in items:
+                await self.save_attachment(attachment)
         await self._session.flush()
 
     async def hydrate(self, provider: HackerOneProvider) -> None:
         programs = await self.list_programs()
         for program in programs:
             provider.programs[program.handle] = program
-            provider.scope_provider.program = program
         drafts = await self.list_drafts()
         for draft in drafts:
             provider.reports.drafts[draft.id] = draft
         submissions = await self.list_submissions()
         for item in submissions:
             provider.reports.submissions[(item.finding_id, item.program)] = item
+        for intent in await self.list_intents():
+            provider.intents.intents[intent.id] = intent
+        attachments: dict[str, list[AttachmentRecord]] = {}
+        for attachment in await self.list_attachments():
+            attachments.setdefault(attachment.intent_id, []).append(attachment)
+        provider.intents.attachments = attachments
 
     async def replace_program(self, program: HackerOneProgram) -> DBHackerOneProgram:
         """Transactional replacement of scope/exclusion/weakness children."""
@@ -94,6 +113,9 @@ class HackerOneRepository:
         row.scope_count = len(program.structured_scopes)
         row.last_scope_id = program.last_scope_id
         row.continuation_state = program.continuation_state
+        row.scope_content_hash = program.scope_content_hash
+        row.weaknesses_synced_at = program.weaknesses_synced_at
+        row.scope_pages_fetched = program.scope_pages_fetched
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         await self._session.execute(
@@ -165,11 +187,8 @@ class HackerOneRepository:
         if row is None:
             row = DBHackerOneReportDraft(id=draft.id)
             self._session.add(row)
-        row.project_id = UUID(draft.project_id) if draft.project_id else None
-        try:
-            row.finding_id = UUID(draft.finding_id) if draft.finding_id else None
-        except ValueError:
-            row.finding_id = None
+        row.project_id = _optional_uuid(draft.project_id)
+        row.finding_id = _optional_uuid(draft.finding_id)
         row.program_handle = draft.program_handle
         row.title = draft.title
         row.vulnerability_information = draft.vulnerability_information
@@ -190,6 +209,9 @@ class HackerOneRepository:
         row.hackerone_report_id = draft.hackerone_report_id
         row.error = draft.error
         row.last_payload = draft.last_payload
+        row.submission_result = draft.submission_result
+        row.remote_state_raw = draft.remote_state_raw
+        row.claim_token = draft.claim_token
         row.report_content_hash = draft.report_content_hash
         row.evidence_hash = draft.evidence_hash
         row.scope_snapshot_hash = draft.scope_snapshot_hash
@@ -234,6 +256,13 @@ class HackerOneRepository:
         row.submission_state = record.submission_state.value
         row.remote_state = record.remote_state.value
         row.error = record.error
+        row.result = record.result
+        row.remote_state_raw = record.remote_state_raw
+        if isinstance(record.result, dict) and record.result.get("http_status") is not None:
+            try:
+                row.http_status = int(record.result["http_status"])
+            except (TypeError, ValueError):
+                row.http_status = None
         if record.submission_state is ReportSubmissionState.SUBMITTED:
             row.completed_at = datetime.now(UTC)
         await self._session.flush()
@@ -326,6 +355,188 @@ class HackerOneRepository:
         row = result.scalar_one_or_none()
         return _submission_from_row(row) if row else None
 
+    async def claim_submission(
+        self,
+        *,
+        draft_id: str,
+        finding_id: str | None,
+        program_handle: str,
+    ) -> tuple[bool, str]:
+        """Atomically claim a submission. Database is the concurrency authority."""
+        now = datetime.now(UTC)
+        token = uuid4().hex
+        expires = now + timedelta(minutes=10)
+        if finding_id:
+            result = await self._session.execute(
+                select(DBHackerOneSubmission).where(
+                    DBHackerOneSubmission.finding_id == finding_id,
+                    DBHackerOneSubmission.program_handle == program_handle,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                state = existing.submission_state
+                expires_at = _aware(existing.claim_expires_at)
+                expired = expires_at is not None and expires_at <= now
+                if state == ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN.value:
+                    return False, "submission_outcome_unknown"
+                if state == ReportSubmissionState.SUBMITTED.value or existing.hackerone_report_id:
+                    return False, "duplicate"
+                if (
+                    state
+                    in {
+                        ReportSubmissionState.SUBMISSION_ATTEMPTED.value,
+                        ReportSubmissionState.SUBMISSION_IN_PROGRESS.value,
+                    }
+                    and not expired
+                ):
+                    return False, "submission_in_progress"
+                claimed = await self._session.execute(
+                    update(DBHackerOneSubmission)
+                    .where(
+                        DBHackerOneSubmission.id == existing.id,
+                        DBHackerOneSubmission.submission_state.in_(
+                            (
+                                ReportSubmissionState.SUBMISSION_FAILED.value,
+                                ReportSubmissionState.SUBMISSION_ATTEMPTED.value,
+                                ReportSubmissionState.SUBMISSION_IN_PROGRESS.value,
+                            )
+                        ),
+                    )
+                    .values(
+                        draft_id=draft_id,
+                        submission_state=ReportSubmissionState.SUBMISSION_ATTEMPTED.value,
+                        claim_token=token,
+                        claim_expires_at=expires,
+                        error=None,
+                    )
+                )
+                if int(getattr(claimed, "rowcount", 0)) != 1:
+                    return False, "submission_in_progress"
+            else:
+                try:
+                    async with self._session.begin_nested():
+                        self._session.add(
+                            DBHackerOneSubmission(
+                                finding_id=finding_id,
+                                program_handle=program_handle,
+                                draft_id=draft_id,
+                                submission_state=ReportSubmissionState.SUBMISSION_ATTEMPTED.value,
+                                remote_state=HackerOneRemoteState.NOT_FETCHED.value,
+                                claim_token=token,
+                                claim_expires_at=expires,
+                            )
+                        )
+                        await self._session.flush()
+                except IntegrityError:
+                    return False, "submission_in_progress"
+        result = await self._session.execute(
+            update(DBHackerOneReportDraft)
+            .where(
+                DBHackerOneReportDraft.id == draft_id,
+                DBHackerOneReportDraft.submission_state == "human_approved",
+            )
+            .values(
+                submission_state="submission_attempted",
+                claim_token=token,
+                claim_expires_at=expires,
+                updated_at=now,
+            )
+        )
+        if int(getattr(result, "rowcount", 0)) != 1:
+            row = await self._session.get(DBHackerOneReportDraft, draft_id)
+            state = row.submission_state if row else "not_found"
+            if state == "submission_attempted":
+                draft_expires = _aware(row.claim_expires_at) if row else None
+                expired_draft = draft_expires is not None and draft_expires <= now
+                if expired_draft:
+                    reclaim = await self._session.execute(
+                        update(DBHackerOneReportDraft)
+                        .where(
+                            DBHackerOneReportDraft.id == draft_id,
+                            DBHackerOneReportDraft.submission_state == "submission_attempted",
+                            DBHackerOneReportDraft.claim_expires_at <= now,
+                        )
+                        .values(
+                            claim_token=token,
+                            claim_expires_at=expires,
+                            updated_at=now,
+                        )
+                    )
+                    if int(getattr(reclaim, "rowcount", 0)) == 1:
+                        return True, token
+                return False, "submission_in_progress"
+            return False, state
+        return True, token
+
+    async def save_intent(self, intent: ReportIntentRecord) -> DBHackerOneReportIntent:
+        row = await self._session.get(DBHackerOneReportIntent, intent.id)
+        if row is None:
+            row = DBHackerOneReportIntent(id=intent.id)
+            self._session.add(row)
+        row.project_id = _optional_uuid(intent.project_id)
+        row.finding_id = _optional_uuid(intent.finding_id)
+        row.draft_id = intent.draft_id
+        row.program_handle = intent.program_handle
+        row.title = intent.title
+        row.vulnerability_information = intent.vulnerability_information
+        row.impact = intent.impact
+        row.severity = intent.severity
+        row.local_status = intent.local_status.value
+        row.human_review_state = intent.human_review_state.value
+        row.remote_intent_id = intent.remote_intent_id
+        row.remote_state = intent.remote_state.value
+        row.remote_state_raw = intent.remote_state_raw
+        row.error = intent.error
+        row.last_payload = intent.last_payload
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        return row
+
+    async def save_attachment(self, item: AttachmentRecord) -> DBHackerOneAttachment:
+        row = await self._session.get(DBHackerOneAttachment, item.id)
+        if row is None:
+            row = DBHackerOneAttachment(id=item.id, intent_id=item.intent_id)
+            self._session.add(row)
+        row.intent_id = item.intent_id
+        row.project_id = item.project_id
+        row.finding_id = item.finding_id
+        row.draft_id = item.draft_id
+        row.filename = item.filename
+        row.stored_path = item.stored_path
+        row.sha256 = item.sha256
+        row.size = item.size
+        row.detected_content_type = item.detected_content_type
+        row.review_state = item.review_state.value
+        row.reviewed = item.review_state in {
+            AttachmentReviewState.REVIEWED,
+            AttachmentReviewState.UPLOAD_AUTHORIZED,
+            AttachmentReviewState.UPLOADING,
+            AttachmentReviewState.UPLOADED,
+        }
+        row.authorized_for_upload = item.review_state in {
+            AttachmentReviewState.UPLOAD_AUTHORIZED,
+            AttachmentReviewState.UPLOADING,
+            AttachmentReviewState.UPLOADED,
+        }
+        row.uploaded = item.review_state is AttachmentReviewState.UPLOADED
+        row.remote_attachment_id = item.remote_attachment_id
+        row.upload_state = item.upload_state.value
+        row.error = item.error
+        row.reviewed_by = item.reviewed_by
+        row.authorized_by = item.authorized_by
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        return row
+
+    async def list_intents(self) -> list[ReportIntentRecord]:
+        result = await self._session.execute(select(DBHackerOneReportIntent))
+        return [_intent_from_row(row) for row in result.scalars().all()]
+
+    async def list_attachments(self) -> list[AttachmentRecord]:
+        result = await self._session.execute(select(DBHackerOneAttachment))
+        return [_attachment_from_row(row) for row in result.scalars().all()]
+
     async def _program_row(self, handle: str) -> DBHackerOneProgram | None:
         result = await self._session.execute(
             select(DBHackerOneProgram)
@@ -380,7 +591,7 @@ def _program_from_row(row: DBHackerOneProgram) -> HackerOneProgram:
         name=row.name,
         program_id=row.program_id,
         program_url=row.program_url,
-        fetched_at=row.fetched_at,
+        fetched_at=_aware(row.fetched_at),
         sync_status=ProgramSyncStatus(row.sync_status),
         error=row.error,
         scope_mode=ScopeMode(row.scope_mode),
@@ -398,6 +609,9 @@ def _program_from_row(row: DBHackerOneProgram) -> HackerOneProgram:
         scope_count=row.scope_count,
         last_scope_id=row.last_scope_id,
         continuation_state=row.continuation_state,
+        scope_content_hash=row.scope_content_hash or "",
+        weaknesses_synced_at=_aware(row.weaknesses_synced_at),
+        scope_pages_fetched=row.scope_pages_fetched or 0,
     )
 
 
@@ -406,8 +620,10 @@ def _draft_from_row(row: DBHackerOneReportDraft) -> HackerOneReportDraft:
     if row.approved_by and row.approval_timestamp and row.approved_report_content_hash:
         approval = ApprovalRecord(
             approved_by=row.approved_by,
-            approved_at=row.approval_timestamp,
-            expires_at=row.approval_expires_at or row.approval_timestamp,
+            approved_at=_aware(row.approval_timestamp) or row.approval_timestamp,
+            expires_at=_aware(row.approval_expires_at)
+            or _aware(row.approval_timestamp)
+            or row.approval_timestamp,
             report_content_hash=row.approved_report_content_hash,
             evidence_hash=row.approved_evidence_hash or "",
             scope_snapshot_hash=row.approved_scope_snapshot_hash or "",
@@ -441,12 +657,15 @@ def _draft_from_row(row: DBHackerOneReportDraft) -> HackerOneReportDraft:
         project_id=str(row.project_id) if row.project_id else None,
         created_at=row.created_at,
         human_review_state=ReportHumanReviewState(row.human_review_state),
-        submission_state=ReportSubmissionState(row.submission_state),
-        remote_state=HackerOneRemoteState(row.remote_state),
+        submission_state=_submission_enum(row.submission_state),
+        remote_state=_remote_enum(row.remote_state),
         hackerone_report_id=row.hackerone_report_id,
         finding_verification=row.finding_verification,
         error=row.error,
         last_payload=row.last_payload,
+        submission_result=row.submission_result,
+        remote_state_raw=row.remote_state_raw or "",
+        claim_token=row.claim_token,
         reproduction=row.reproduction,
         target=row.target,
         eligible_for_submission=row.eligible_for_submission,
@@ -464,13 +683,107 @@ def _submission_from_row(row: DBHackerOneSubmission) -> SubmissionRecord:
     return SubmissionRecord(
         finding_id=row.finding_id,
         program=row.program_handle,
-        submission_state=ReportSubmissionState(row.submission_state),
+        submission_state=_submission_enum(row.submission_state),
         hackerone_report_id=row.hackerone_report_id,
         created_at=row.created_at,
-        metadata={"draft_id": row.draft_id or ""},
-        remote_state=HackerOneRemoteState(row.remote_state),
+        metadata={"draft_id": row.draft_id or "", "claim_token": row.claim_token or ""},
+        remote_state=_remote_enum(row.remote_state),
+        remote_state_raw=row.remote_state_raw or "",
         error=row.error,
+        result=row.result,
     )
+
+
+def _intent_from_row(row: DBHackerOneReportIntent) -> ReportIntentRecord:
+    try:
+        local = IntentLocalState(row.local_status)
+    except ValueError:
+        local = IntentLocalState.LOCAL_DRAFT
+    try:
+        review = IntentLocalState(row.human_review_state)
+    except ValueError:
+        review = local
+    return ReportIntentRecord(
+        id=row.id,
+        project_id=str(row.project_id) if row.project_id else "",
+        finding_id=str(row.finding_id) if row.finding_id else None,
+        draft_id=row.draft_id or "",
+        program_handle=row.program_handle,
+        title=row.title,
+        vulnerability_information=row.vulnerability_information,
+        impact=row.impact,
+        severity=row.severity,
+        local_status=local,
+        human_review_state=review,
+        remote_intent_id=row.remote_intent_id,
+        remote_state=_remote_enum(row.remote_state),
+        remote_state_raw=row.remote_state_raw or "",
+        error=row.error,
+        last_payload=row.last_payload,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _attachment_from_row(row: DBHackerOneAttachment) -> AttachmentRecord:
+    try:
+        state = AttachmentReviewState(row.review_state)
+    except ValueError:
+        state = AttachmentReviewState.RECEIVED
+    try:
+        upload = AttachmentReviewState(row.upload_state)
+    except ValueError:
+        upload = state
+    return AttachmentRecord(
+        id=row.id,
+        intent_id=row.intent_id,
+        project_id=row.project_id,
+        finding_id=row.finding_id,
+        draft_id=row.draft_id,
+        filename=row.filename,
+        stored_path=row.stored_path,
+        sha256=row.sha256,
+        size=row.size,
+        detected_content_type=row.detected_content_type,
+        review_state=state,
+        remote_attachment_id=row.remote_attachment_id,
+        upload_state=upload,
+        error=row.error,
+        reviewed_by=row.reviewed_by,
+        authorized_by=row.authorized_by,
+        created_at=row.created_at,
+    )
+
+
+def _remote_enum(value: str) -> HackerOneRemoteState:
+    try:
+        return HackerOneRemoteState(value)
+    except ValueError:
+        return HackerOneRemoteState.UNKNOWN
+
+
+def _submission_enum(value: str) -> ReportSubmissionState:
+    try:
+        return ReportSubmissionState(value)
+    except ValueError:
+        return ReportSubmissionState.LOCAL_DRAFT
+
+
+def _optional_uuid(value: str | None) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def _asset(value: str) -> AssetType:

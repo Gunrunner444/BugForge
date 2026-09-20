@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -20,6 +20,37 @@ def sha256_hex(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    """Hash the raw attachment bytes. Never hash a hex encoding of those bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def program_scope_content_hash(
+    *,
+    handle: str,
+    scope_mode: str,
+    instructions: str,
+    active_testing_approved: bool,
+    requires_severity: bool,
+    scopes: Sequence[Mapping[str, Any]],
+    exclusions: Sequence[Mapping[str, Any]],
+    weaknesses: Sequence[Mapping[str, Any]],
+) -> str:
+    """Canonical hash of authorization-relevant program snapshot content."""
+    return sha256_hex(
+        {
+            "handle": handle,
+            "scope_mode": scope_mode,
+            "instructions": instructions,
+            "active_testing_approved": active_testing_approved,
+            "requires_severity": requires_severity,
+            "scopes": scopes,
+            "exclusions": exclusions,
+            "weaknesses": weaknesses,
+        }
+    )
+
+
 def report_content_hash(
     *,
     title: str,
@@ -30,6 +61,8 @@ def report_content_hash(
     structured_scope_id: int | None,
     target: str | None,
     program_handle: str,
+    finding_verification: str | None = None,
+    reproduction: str | None = None,
 ) -> str:
     return sha256_hex(
         {
@@ -41,6 +74,8 @@ def report_content_hash(
             "structured_scope_id": structured_scope_id,
             "target": target,
             "program_handle": program_handle,
+            "finding_verification": finding_verification or "",
+            "reproduction": reproduction or "",
         }
     )
 

@@ -38,9 +38,10 @@ handles, scope snapshots, and report ids — not credentials.
 ## Persistent state
 
 Programs, structured scopes, exclusions, weaknesses, sync records, drafts,
-approvals, submissions, and lifecycle audit events persist in PostgreSQL
-(Alembic revision `015`). Restarting BugForge does not forget a HackerOne
-report id or a `SUBMISSION_OUTCOME_UNKNOWN` lock.
+approvals, submissions, report intents, attachments, and lifecycle audit
+events persist in PostgreSQL (Alembic revision `016`). Restarting BugForge
+does not forget a HackerOne report id, a local report intent, or a
+`SUBMISSION_OUTCOME_UNKNOWN` lock. API credentials are never stored.
 
 ## Scope vs scope exclusions
 
@@ -97,10 +98,29 @@ not POST again until an operator reconciles remote state.
 
 ## Report intents
 
-`/api/v1/hackerone/report-intents` is a **local** workflow bound to the same
-persisted finding. Raw client payloads cannot bypass evidence. Attachments
-are secret-scanned, reviewed, and not uploaded without human authorization.
-Report Assistant output is never verification evidence.
+A **local** BugForge report intent is not a HackerOne report intent.
+Local records persist (`HackerOneReportIntent` + attachments) and stay bound
+to project, finding, and draft. Raw client payloads cannot bypass evidence.
+
+Local human-review states: `LOCAL_DRAFT` → `READY_FOR_REVIEW` →
+`HUMAN_APPROVED` → `REMOTE_INTENT_CREATED` → `REMOTE_READY_TO_SUBMIT` →
+`SUBMITTED` / `FAILED`. The AI cannot create `HUMAN_APPROVED`. Remote
+HackerOne state is stored separately and never replaces BugForge review.
+
+Attachments start as `RECEIVED`. Client `reviewed=true` is ignored.
+Humans then `REVIEWED` → `UPLOAD_AUTHORIZED` before upload via
+`POST /hackers/report_intents/{id}/attachments`. SHA-256 is of the raw
+bytes. MIME type is sniffed, never trusted from the client.
+
+Submission uses an atomic database claim. A second concurrent request
+receives `SUBMISSION_IN_PROGRESS`. Timeouts become
+`SUBMISSION_OUTCOME_UNKNOWN` and are not retried automatically.
+
+Scope sync is staged then replaced only when complete. Unchanged content
+does not increment `scope_version`. Multiple programs never share a global
+active scope; evaluation is always `evaluate(program, target)`.
+
+See [security-agent.md](security-agent.md) for Phase 6 research planning.
 
 ## Dry-run
 

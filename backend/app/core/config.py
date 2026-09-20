@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.5.0"
+    version: str = "1.6.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -88,6 +88,19 @@ class Settings(BaseSettings):
     # Never persist these values in the database.
     bugforge_operator_token: str = ""
     bugforge_operator_identity: str = ""
+
+    # HackerOne program-data freshness before live submission (hours).
+    hackerone_program_max_age_hours: int = 24
+    hackerone_weakness_max_age_hours: int = 168
+    hackerone_attachment_max_bytes: int = 10 * 1024 * 1024
+    bugforge_evidence_dir: str = ""
+
+    # Guided security research agent budgets. The AI cannot raise these.
+    security_agent_max_iterations: int = 20
+    security_agent_max_tool_calls: int = 40
+    security_agent_max_requests: int = 50
+    security_agent_max_browser_actions: int = 20
+    security_agent_max_fuzz_requests: int = 20
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

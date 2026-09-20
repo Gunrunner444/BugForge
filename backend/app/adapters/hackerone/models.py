@@ -14,6 +14,7 @@ class ProgramSyncStatus(StrEnum):
     NEVER = "never"
     OK = "ok"
     ERROR = "error"
+    INCOMPLETE = "incomplete"
 
 
 class ScopeMode(StrEnum):
@@ -144,6 +145,9 @@ class HackerOneProgram:
     scope_count: int = 0
     last_scope_id: str | None = None
     continuation_state: str | None = None
+    scope_content_hash: str = ""
+    weaknesses_synced_at: datetime | None = None
+    scope_pages_fetched: int = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -165,6 +169,11 @@ class HackerOneProgram:
             "last_scope_id": self.last_scope_id,
             "active_testing_approved": self.active_testing_approved,
             "open_scope_acknowledged": self.open_scope_acknowledged,
+            "scope_content_hash": self.scope_content_hash,
+            "weaknesses_synced_at": (
+                self.weaknesses_synced_at.isoformat() if self.weaknesses_synced_at else None
+            ),
+            "scope_pages_fetched": self.scope_pages_fetched,
         }
 
 

@@ -1,7 +1,9 @@
 from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFile
 from app.models.base import Base
 from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession
+from app.models.discovery import AutonomousAnalysisRun, DiscoveryRun, RepositoryCandidate
 from app.models.finding import DBFinding
+from app.models.github import GitHubDelivery, GitHubRepository
 from app.models.hackerone import (
     DBHackerOneApprovalEvent,
     DBHackerOneAttachment,
@@ -18,6 +20,14 @@ from app.models.hackerone import (
 from app.models.project import Project
 from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
+from app.models.security_agent import (
+    DBReproductionPlan,
+    DBResearchEvidenceLink,
+    DBResearchHypothesis,
+    DBResearchSession,
+    DBResearchTimelineEvent,
+    DBResearchToolCall,
+)
 from app.models.security_audit import DBSecurityAuditEvent
 from app.models.security_finding import DBSecurityFinding
 from app.models.test_generation import GeneratedTest, TestGenerationSession
@@ -57,4 +67,15 @@ __all__ = [
     "RepairSession",
     "PatchCandidate",
     "PatchVerification",
+    "GitHubRepository",
+    "GitHubDelivery",
+    "RepositoryCandidate",
+    "DiscoveryRun",
+    "AutonomousAnalysisRun",
+    "DBResearchSession",
+    "DBResearchHypothesis",
+    "DBResearchToolCall",
+    "DBResearchTimelineEvent",
+    "DBResearchEvidenceLink",
+    "DBReproductionPlan",
 ]

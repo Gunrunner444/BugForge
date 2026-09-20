@@ -47,6 +47,11 @@ class DBHackerOneProgram(Base):
     scope_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_scope_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     continuation_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope_content_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    weaknesses_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scope_pages_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -188,6 +193,12 @@ class DBHackerOneReportDraft(Base):
     hackerone_report_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    submission_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    remote_state_raw: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     report_content_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     scope_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
@@ -231,6 +242,12 @@ class DBHackerOneSubmission(Base):
     remote_state: Mapped[str] = mapped_column(String(64), nullable=False, default="not_fetched")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    remote_state_raw: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -282,13 +299,32 @@ class DBHackerOneReportIntent(Base):
     finding_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("security_findings.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    draft_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    draft_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     program_handle: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    vulnerability_information: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    impact: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    severity: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    local_status: Mapped[str] = mapped_column(String(64), nullable=False, default="local_draft")
     human_review_state: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="unreviewed"
+        String(64), nullable=False, default="local_draft"
     )
+    remote_intent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remote_state: Mapped[str] = mapped_column(String(64), nullable=False, default="not_fetched")
+    remote_state_raw: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    attachments: Mapped[list[DBHackerOneAttachment]] = relationship(
+        "DBHackerOneAttachment",
+        back_populates="intent",
+        cascade="all, delete-orphan",
     )
 
 
@@ -299,12 +335,30 @@ class DBHackerOneAttachment(Base):
     intent_id: Mapped[str] = mapped_column(
         ForeignKey("hackerone_report_intents.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    project_id: Mapped[str] = mapped_column(String(128), nullable=False, default="", index=True)
+    finding_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    draft_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    stored_path: Mapped[str] = mapped_column(Text, nullable=False, default="")
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    detected_content_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    review_state: Mapped[str] = mapped_column(String(64), nullable=False, default="received")
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     authorized_for_upload: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     uploaded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    remote_attachment_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    upload_state: Mapped[str] = mapped_column(String(64), nullable=False, default="received")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    authorized_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    intent: Mapped[DBHackerOneReportIntent] = relationship(
+        "DBHackerOneReportIntent", back_populates="attachments"
     )

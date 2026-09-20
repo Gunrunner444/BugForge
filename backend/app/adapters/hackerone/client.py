@@ -31,7 +31,7 @@ _IDENTITY_HINTS = (
     "id verification",
     "kyc",
 )
-_UNSAFE_POST_RETRY_MARKERS = ("/hackers/reports",)
+_UNSAFE_POST_RETRY_MARKERS = ("/hackers/reports", "/hackers/report_intents")
 
 
 class HackerOneApiClient:
@@ -53,6 +53,8 @@ class HackerOneApiClient:
         self._transport = transport
         self.calls: list[tuple[str, str]] = []
         self._origin = _origin_parts(self._base)
+        self.last_status: int | None = None
+        self.last_sanitized_body: dict[str, Any] | None = None
 
     def _client(self) -> httpx.Client:
         kwargs: dict[str, Any] = {
@@ -124,44 +126,9 @@ class HackerOneApiClient:
         continue_with_id_gt: bool = True,
         page_cap: int = 100,
     ) -> list[Any]:
-        """Paginate a JSON:API collection.
-
-        HackerOne documents that ordinary ``links.next`` pagination can stop at
-        10,000 structured scopes. When that happens, continue with
-        ``filter[id__gt]`` using the last seen numeric id.
-        """
-        items: list[Any] = []
-        seen: set[str] = set()
-        next_path: str | None = path
-        query = dict(params or {})
-        last_numeric = 0
-        pages = 0
-        last_page_count = 0
-        while next_path and pages < page_cap:
-            payload = self.get(next_path, params=query or None)
-            page_items = _collection(payload)
-            last_page_count = len(page_items)
-            for row in page_items:
-                ident = node_id(row) or str(id(row))
-                if ident in seen:
-                    continue
-                seen.add(ident)
-                items.append(row)
-                numeric = parse_hackerone_id(ident)
-                if numeric is not None:
-                    last_numeric = max(last_numeric, numeric)
-            pages += 1
-            links = payload.get("links") if isinstance(payload.get("links"), dict) else {}
-            nxt = links.get("next") if isinstance(links, dict) else None
-            if not nxt:
-                next_path = None
-                query = {}
-                break
-            next_path, extra = self._authorized_relative(str(nxt))
-            query = dict(extra)
-        truncated = pages >= page_cap or (last_page_count > 0 and pages >= page_cap)
-        if continue_with_id_gt and last_numeric and (truncated or pages >= page_cap):
-            self._continue_id_gt(path, params or {}, items, seen, last_numeric)
+        items, _meta = self.paginate_with_meta(
+            path, params=params, continue_with_id_gt=continue_with_id_gt, page_cap=page_cap
+        )
         return items
 
     def paginate_with_meta(
@@ -169,24 +136,112 @@ class HackerOneApiClient:
         path: str,
         *,
         params: Mapping[str, Any] | None = None,
+        continue_with_id_gt: bool = True,
         page_cap: int = 100,
     ) -> tuple[list[Any], dict[str, Any]]:
-        items = self.paginate(path, params=params, continue_with_id_gt=True, page_cap=page_cap)
-        last_id = ""
+        """Paginate a JSON:API collection and report whether the sync is complete.
+
+        HackerOne documents that ordinary ``links.next`` pagination can stop at
+        10,000 structured scopes. When that happens, continue with
+        ``filter[id__gt]`` using the last seen numeric id.
+        ``scope_sync_complete`` is true only when every page was fetched.
+        """
+        items: list[Any] = []
+        seen: set[str] = set()
+        next_path: str | None = path
+        query = dict(params or {})
         last_numeric = 0
-        for row in items:
-            ident = node_id(row)
-            numeric = parse_hackerone_id(ident)
-            if numeric is not None and numeric >= last_numeric:
-                last_numeric = numeric
-                last_id = ident
-        complete = True
+        last_id = ""
+        pages = 0
+        last_page_count = 0
+        error: str | None = None
+        continuation_state = "links.next"
+        had_next = False
+        try:
+            while next_path and pages < page_cap:
+                payload = self.get(next_path, params=query or None)
+                page_items = _collection(payload)
+                last_page_count = len(page_items)
+                for row in page_items:
+                    ident = node_id(row) or str(id(row))
+                    if ident in seen:
+                        continue
+                    seen.add(ident)
+                    items.append(row)
+                    numeric = parse_hackerone_id(ident)
+                    if numeric is not None and numeric >= last_numeric:
+                        last_numeric = numeric
+                        last_id = ident
+                pages += 1
+                links = payload.get("links") if isinstance(payload.get("links"), dict) else {}
+                nxt = links.get("next") if isinstance(links, dict) else None
+                if not nxt:
+                    next_path = None
+                    query = {}
+                    break
+                had_next = True
+                next_path, extra = self._authorized_relative(str(nxt))
+                query = dict(extra)
+            hit_cap = bool(next_path) and pages >= page_cap
+            truncated = hit_cap or (had_next and pages >= page_cap and last_page_count > 0)
+            continued = False
+            if continue_with_id_gt and last_numeric and (truncated or hit_cap):
+                continuation_state = "filter[id__gt]"
+                continued, last_numeric, last_id = self._continue_id_gt(
+                    path, params or {}, items, seen, last_numeric, last_id
+                )
+                if continued:
+                    truncated = False
+                    hit_cap = False
+            complete = error is None and not truncated and not hit_cap
+            if truncated or hit_cap:
+                continuation_state = f"incomplete:pages={pages}:last_id={last_id}"
+            elif continued:
+                continuation_state = "complete:id_gt"
+            else:
+                continuation_state = "complete"
+        except HackerOneError as exc:
+            error = str(exc)
+            complete = False
+            continuation_state = f"error:{exc.code or 'error'}:last_id={last_id}"
         return items, {
             "count": len(items),
+            "pages_fetched": pages,
             "last_scope_id": last_id or None,
             "last_numeric_id": last_numeric or None,
+            "continuation_state": continuation_state,
             "scope_sync_complete": complete,
+            "error": error,
         }
+
+    def create_report_intent(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.post("hackers/report_intents", json_body=dict(payload))
+
+    def get_report_intent(self, intent_id: str) -> dict[str, Any]:
+        return self.get(f"hackers/report_intents/{intent_id}")
+
+    def patch_report_intent(self, intent_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self.patch(f"hackers/report_intents/{intent_id}", json_body=dict(payload))
+
+    def delete_report_intent(self, intent_id: str) -> dict[str, Any]:
+        return self.delete(f"hackers/report_intents/{intent_id}")
+
+    def submit_report_intent(self, intent_id: str) -> dict[str, Any]:
+        return self.post(f"hackers/report_intents/{intent_id}/submit", json_body={})
+
+    def list_report_intent_attachments(self, intent_id: str) -> dict[str, Any]:
+        return self.get(f"hackers/report_intents/{intent_id}/attachments")
+
+    def create_report_intent_attachment(
+        self, intent_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self.post(f"hackers/report_intents/{intent_id}/attachments", json_body=dict(payload))
+
+    def delete_report_intent_attachment(self, intent_id: str, attachment_id: str) -> dict[str, Any]:
+        return self.delete(f"hackers/report_intents/{intent_id}/attachments/{attachment_id}")
+
+    def list_hacker_reports(self, *, params: Mapping[str, Any] | None = None) -> list[Any]:
+        return self.paginate("hackers/reports", params=params, continue_with_id_gt=False)
 
     def _continue_id_gt(
         self,
@@ -195,15 +250,18 @@ class HackerOneApiClient:
         items: list[Any],
         seen: set[str],
         last_numeric: int,
-    ) -> None:
+        last_id: str,
+    ) -> tuple[bool, int, str]:
         current = last_numeric
+        current_id = last_id
+        progressed_any = False
         while True:
             query = dict(params)
             query["filter[id__gt]"] = current
             payload = self.get(path, params=query)
             page_items = _collection(payload)
             if not page_items:
-                return
+                return progressed_any, current, current_id
             progressed = False
             for row in page_items:
                 ident = node_id(row) or str(id(row))
@@ -214,9 +272,11 @@ class HackerOneApiClient:
                 numeric = parse_hackerone_id(ident)
                 if numeric is not None and numeric > current:
                     current = numeric
+                    current_id = ident
                     progressed = True
+                    progressed_any = True
             if not progressed:
-                return
+                return progressed_any, current, current_id
 
     def _authorized_relative(self, path: str) -> tuple[str, dict[str, str]]:
         """Return a relative path + query that is locked to the configured origin.
@@ -280,6 +340,8 @@ class HackerOneApiClient:
             body = parsed if isinstance(parsed, dict) else {"data": parsed}
         except ValueError:
             body = {"raw": text[:500]}
+        self.last_status = status
+        self.last_sanitized_body = _sanitize_response_body(body)
         errors = body.get("errors")
         message = _error_message(errors) or text[:300] or f"HTTP {status}"
         lowered = message.lower()
@@ -323,6 +385,30 @@ class HackerOneApiClient:
         if status >= 400:
             raise HackerOneError(message, status_code=status, code="error")
         return body
+
+
+def _sanitize_response_body(body: dict[str, Any]) -> dict[str, Any]:
+    blocked = {
+        "authorization",
+        "token",
+        "password",
+        "cookie",
+        "api_token",
+        "secret",
+        "hackerone_api_token",
+    }
+    cleaned: dict[str, Any] = {}
+    for key, value in body.items():
+        lowered = str(key).lower()
+        if any(part in lowered for part in blocked):
+            continue
+        if isinstance(value, dict):
+            cleaned[key] = _sanitize_response_body(value)
+        elif isinstance(value, str):
+            cleaned[key] = redact_text(value)
+        else:
+            cleaned[key] = value
+    return cleaned
 
 
 def _retry_safe(method: str, path: str) -> bool:

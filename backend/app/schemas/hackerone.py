@@ -80,7 +80,23 @@ class IntentSubmitRequest(BaseModel):
 class AttachmentCreateRequest(BaseModel):
     filename: str
     content_base64: str = ""
-    reviewed: bool = False
+    project_id: UUID
+    # Ignored. Client-supplied reviewed=true is never a human review.
+    reviewed: bool | None = None
+
+
+class AttachmentReviewRequest(BaseModel):
+    project_id: UUID
+    reject: bool = False
+
+
+class AttachmentAuthorizeRequest(BaseModel):
+    project_id: UUID
+
+
+class IntentActionRequest(BaseModel):
+    project_id: UUID
+    program_handle: str | None = None
 
 
 class ReconcileRequest(BaseModel):

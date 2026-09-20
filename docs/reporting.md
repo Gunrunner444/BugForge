@@ -51,3 +51,17 @@ On `/security-testing`:
 - Payload hash, scope snapshot, evidence summary, weakness, severity, target, program
 
 After any edit, approval is invalidated.
+
+## Report intents and attachments
+
+A local BugForge intent is not a HackerOne report intent. Intents persist
+(`HackerOneReportIntent` + `HackerOneReportIntentAttachment`) bound to
+project, finding, and draft. Attachments start as `RECEIVED`; client
+`reviewed=true` is ignored. Humans then `REVIEWED` → `UPLOAD_AUTHORIZED`
+before the official HackerOne attachment API is used.
+
+## Concurrent submission
+
+The database claims a submission (`HUMAN_APPROVED` → `SUBMISSION_ATTEMPTED`)
+before the remote POST. A second concurrent request receives
+`SUBMISSION_IN_PROGRESS`. Timeouts become `SUBMISSION_OUTCOME_UNKNOWN`.

@@ -18,7 +18,9 @@ from app.repositories.hackerone_repo import HackerOneRepository
 from app.repositories.security_finding_repo import SecurityFindingRepository
 from app.schemas.hackerone import (
     ActiveTestingRequest,
+    AttachmentAuthorizeRequest,
     AttachmentCreateRequest,
+    AttachmentReviewRequest,
     CreateDraftRequest,
     DraftActionRequest,
     DraftEditRequest,
@@ -373,7 +375,26 @@ async def submit(
             program_handle=draft.program_handle,
             operator_identity=session.identity,
         )
-        result = provider.reports.submit(draft_id, program, finding=finding, session=session)
+        claimed, reason = await repo.claim_submission(
+            draft_id=draft_id,
+            finding_id=draft.finding_id,
+            program_handle=draft.program_handle,
+        )
+        await db.commit()
+        await repo.hydrate(provider)
+        if not claimed:
+            code = (
+                409 if reason in {"submission_in_progress", "submission_outcome_unknown"} else 400
+            )
+            detail = {
+                "submission_in_progress": "SUBMISSION_IN_PROGRESS",
+                "submission_outcome_unknown": "SUBMISSION_OUTCOME_UNKNOWN",
+                "duplicate": "Finding already submitted to this program",
+            }.get(reason, reason)
+            raise HTTPException(status_code=code, detail=detail)
+        result = provider.reports.submit(
+            draft_id, program, finding=finding, session=session, already_claimed=True
+        )
         await repo.save_draft(result)
         if result.finding_id:
             existing = provider.reports.submissions.get((result.finding_id, result.program_handle))
@@ -454,6 +475,7 @@ async def create_intent(
         )
         intent = provider.intents.create_from_draft(draft, project_id=str(payload.project_id))
         await repo.save_draft(draft)
+        await repo.save_intent(provider.intents.record(str(intent["id"])))
         await repo.audit(
             "draft_created",
             project_id=str(payload.project_id),
@@ -472,13 +494,81 @@ async def create_intent(
 @router.get("/report-intents/{intent_id}")
 async def get_intent(
     intent_id: str,
+    project_id: UUID,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     del session
     provider, _repo = await _bound(db)
     try:
-        return provider.intents.get(intent_id)
+        intent = provider.intents.get(intent_id)
+        if intent.get("project_id") != str(project_id):
+            raise HTTPException(
+                status_code=403, detail="Report intent does not belong to this project"
+            )
+        return intent
+    except HackerOneError as exc:
+        raise HTTPException(status_code=exc.status_code or 400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/review")
+async def review_intent(
+    intent_id: str,
+    payload: IntentSubmitRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    del session
+    provider, repo = await _bound(db)
+    try:
+        updated = provider.intents.mark_ready(intent_id, project_id=str(payload.project_id))
+        await repo.save_intent(provider.intents.record(intent_id))
+        await db.commit()
+        return updated
+    except HackerOneError as exc:
+        raise HTTPException(status_code=exc.status_code or 400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/approve")
+async def approve_intent(
+    intent_id: str,
+    payload: IntentSubmitRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    provider, repo = await _bound(db)
+    try:
+        updated = provider.intents.human_approve(
+            intent_id, session=session, project_id=str(payload.project_id)
+        )
+        await repo.save_intent(provider.intents.record(intent_id))
+        await db.commit()
+        return updated
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except HackerOneError as exc:
+        raise HTTPException(status_code=exc.status_code or 400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/remote")
+async def create_remote_intent(
+    intent_id: str,
+    payload: IntentSubmitRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    provider, repo = await _bound(db)
+    try:
+        intent = provider.intents.record(intent_id)
+        program = _program_for(provider, payload.program_handle, intent.program_handle)
+        updated = provider.intents.create_remote(
+            intent_id, program, session=session, project_id=str(payload.project_id)
+        )
+        await repo.save_intent(provider.intents.record(intent_id))
+        await db.commit()
+        return updated
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except HackerOneError as exc:
         raise HTTPException(status_code=exc.status_code or 400, detail=str(exc)) from exc
 
@@ -491,13 +581,16 @@ async def patch_intent(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     del session
-    provider, _repo = await _bound(db)
+    provider, repo = await _bound(db)
     try:
-        return provider.intents.patch(
+        updated = provider.intents.patch(
             intent_id,
             {"title": payload.title, "impact": payload.impact, "severity": payload.severity},
             project_id=str(payload.project_id),
         )
+        await repo.save_intent(provider.intents.record(intent_id))
+        await db.commit()
+        return updated
     except HackerOneError as exc:
         raise HTTPException(status_code=exc.status_code or 400, detail=str(exc)) from exc
 
@@ -511,11 +604,13 @@ async def submit_intent(
 ) -> dict[str, object]:
     provider, repo = await _bound(db)
     try:
-        intent = provider.intents.get(intent_id)
-        draft = provider.reports.drafts.get(str(intent.get("draft_id") or ""))
-        program = _program_for(
-            provider, payload.program_handle, draft.program_handle if draft else None
-        )
+        intent = provider.intents.record(intent_id)
+        if intent.project_id != str(payload.project_id):
+            raise HTTPException(
+                status_code=403, detail="Report intent does not belong to this project"
+            )
+        draft = provider.reports.drafts.get(intent.draft_id)
+        program = _program_for(provider, payload.program_handle, intent.program_handle)
         finding = await _finding_for_draft(db, draft)
         result = provider.intents.submit(
             intent_id,
@@ -525,6 +620,7 @@ async def submit_intent(
             project_id=str(payload.project_id),
         )
         await repo.save_draft(result)
+        await repo.save_intent(provider.intents.record(intent_id))
         await db.commit()
         return result.snapshot()
     except HackerOneError as exc:
@@ -536,12 +632,13 @@ async def submit_intent(
 @router.get("/report-intents/{intent_id}/attachments")
 async def list_attachments(
     intent_id: str,
+    project_id: UUID,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     del session
     provider, _repo = await _bound(db)
-    return {"items": provider.intents.list_attachments(intent_id)}
+    return {"items": provider.intents.list_attachments(intent_id, project_id=str(project_id))}
 
 
 @router.post("/report-intents/{intent_id}/attachments")
@@ -553,16 +650,97 @@ async def add_attachment(
 ) -> dict[str, object]:
     import base64
 
-    provider, _repo = await _bound(db)
+    provider, repo = await _bound(db)
     try:
         content = base64.b64decode(payload.content_base64.encode("ascii"), validate=False)
-        return provider.intents.add_attachment(
+        record = provider.intents.add_attachment(
             intent_id,
             filename=payload.filename,
             content=content,
-            reviewed=payload.reviewed,
             session=session,
+            project_id=str(payload.project_id),
         )
+        await repo.save_attachment(
+            provider.intents.attachment(intent_id, record["id"], str(payload.project_id))
+        )
+        await db.commit()
+        return record
+    except HackerOneError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/attachments/{attachment_id}/review")
+async def review_attachment(
+    intent_id: str,
+    attachment_id: str,
+    payload: AttachmentReviewRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    provider, repo = await _bound(db)
+    try:
+        record = provider.intents.review_attachment(
+            intent_id,
+            attachment_id,
+            session=session,
+            project_id=str(payload.project_id),
+            reject=payload.reject,
+        )
+        await repo.save_attachment(
+            provider.intents.attachment(intent_id, attachment_id, str(payload.project_id))
+        )
+        await db.commit()
+        return record
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except HackerOneError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/attachments/{attachment_id}/authorize")
+async def authorize_attachment(
+    intent_id: str,
+    attachment_id: str,
+    payload: AttachmentAuthorizeRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    provider, repo = await _bound(db)
+    try:
+        record = provider.intents.authorize_upload(
+            intent_id, attachment_id, session=session, project_id=str(payload.project_id)
+        )
+        await repo.save_attachment(
+            provider.intents.attachment(intent_id, attachment_id, str(payload.project_id))
+        )
+        await db.commit()
+        return record
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except HackerOneError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/report-intents/{intent_id}/attachments/{attachment_id}/upload")
+async def upload_attachment(
+    intent_id: str,
+    attachment_id: str,
+    payload: AttachmentAuthorizeRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    provider, repo = await _bound(db)
+    try:
+        record = provider.intents.upload_attachment(
+            intent_id, attachment_id, session=session, project_id=str(payload.project_id)
+        )
+        await repo.save_attachment(
+            provider.intents.attachment(intent_id, attachment_id, str(payload.project_id))
+        )
+        await db.commit()
+        return record
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except HackerOneError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -571,12 +749,14 @@ async def add_attachment(
 async def delete_attachment(
     intent_id: str,
     attachment_id: str,
+    project_id: UUID,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     del session
-    provider, _repo = await _bound(db)
-    provider.intents.delete_attachment(intent_id, attachment_id)
+    provider, repo = await _bound(db)
+    provider.intents.delete_attachment(intent_id, attachment_id, project_id=str(project_id))
+    await db.commit()
     return {"deleted": True}
 
 

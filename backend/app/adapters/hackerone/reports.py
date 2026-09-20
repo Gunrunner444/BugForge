@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -12,20 +13,23 @@ from app.adapters.hackerone.client import HackerOneApiClient
 from app.adapters.hackerone.errors import (
     HackerOneError,
     HackerOneIdentityVerificationError,
+    HackerOneReconciliationAmbiguousError,
+    HackerOneSubmissionInProgressError,
     HackerOneSubmissionUnknownError,
 )
 from app.adapters.hackerone.evaluator import HackerOneScopeDecision, HackerOneScopeEvaluator
+from app.adapters.hackerone.freshness import require_fresh_program
 from app.adapters.hackerone.hashes import (
     evidence_hash,
     payload_hash,
     report_content_hash,
-    sha256_hex,
 )
 from app.adapters.hackerone.models import (
     HackerOneProgram,
     ScopeSnapshot,
     parse_hackerone_id,
 )
+from app.adapters.hackerone.remote_state import HackerOneRemoteState, map_remote_state
 from app.adapters.hackerone.weakness import map_program_weakness
 from app.domain.findings import FindingStatus, SecurityFinding
 from app.security_testing.operator_auth import OperatorSession
@@ -63,19 +67,11 @@ class ReportSubmissionState(StrEnum):
     READY_FOR_REVIEW = "ready_for_review"
     HUMAN_APPROVED = "human_approved"
     SUBMISSION_ATTEMPTED = "submission_attempted"
+    SUBMISSION_IN_PROGRESS = "submission_in_progress"
     SUBMITTED = "submitted"
     SUBMISSION_FAILED = "submission_failed"
     SUBMISSION_OUTCOME_UNKNOWN = "submission_outcome_unknown"
     IDENTITY_VERIFICATION_REQUIRED = "identity_verification_required"
-
-
-class HackerOneRemoteState(StrEnum):
-    UNKNOWN = "unknown"
-    NEW = "new"
-    PENDING = "pending"
-    TRIAGED = "triaged"
-    RESOLVED = "resolved"
-    NOT_FETCHED = "not_fetched"
 
 
 @dataclass(frozen=True)
@@ -107,7 +103,12 @@ class ApprovalRecord:
 
     def expired(self, now: datetime | None = None) -> bool:
         clock = now or datetime.now(UTC)
-        return clock >= self.expires_at
+        expires = self.expires_at
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=UTC)
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        return clock >= expires
 
 
 @dataclass
@@ -144,6 +145,9 @@ class HackerOneReportDraft:
     approval: ApprovalRecord | None = None
     scope_snapshot: ScopeSnapshot | None = None
     weakness_reason: str = ""
+    remote_state_raw: str = ""
+    submission_result: dict[str, Any] | None = None
+    claim_token: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -178,6 +182,8 @@ class HackerOneReportDraft:
             "approved_by": self.approval.approved_by if self.approval else None,
             "scope_snapshot": self.scope_snapshot.as_dict() if self.scope_snapshot else None,
             "error": self.error,
+            "remote_state_raw": self.remote_state_raw,
+            "submission_result": self.submission_result,
         }
 
 
@@ -191,6 +197,8 @@ class SubmissionRecord:
     metadata: dict[str, str] = field(default_factory=dict)
     remote_state: HackerOneRemoteState = HackerOneRemoteState.NOT_FETCHED
     error: str | None = None
+    result: dict[str, Any] | None = None
+    remote_state_raw: str = ""
 
 
 class ReportQualityValidator:
@@ -313,6 +321,7 @@ class HackerOneReportWorkflow:
         self.validator = ReportQualityValidator()
         self.drafts: dict[str, HackerOneReportDraft] = {}
         self.submissions: dict[tuple[str, str], SubmissionRecord] = {}
+        self._claim_lock = threading.Lock()
 
     def draft_from_finding(
         self,
@@ -366,7 +375,7 @@ class HackerOneReportWorkflow:
             scope_snapshot=snapshot,
             weakness_reason=mapped.reason,
         )
-        self._refresh_hashes(draft, program=program, scope=scope)
+        self._refresh_hashes(draft, program=program, scope=scope, finding=finding)
         self.drafts[draft.id] = draft
         return draft
 
@@ -405,7 +414,7 @@ class HackerOneReportWorkflow:
         }:
             raise HackerOneError("Draft is not awaiting human approval", code="invalid_state")
         scope = self._revalidate(draft, program, finding=finding, stage="human_approved")
-        self._refresh_hashes(draft, program=program, scope=scope)
+        self._refresh_hashes(draft, program=program, scope=scope, finding=finding)
         approval = ApprovalRecord(
             approved_by=session.identity,
             approved_at=datetime.now(UTC),
@@ -463,7 +472,7 @@ class HackerOneReportWorkflow:
             updated.target or "",
             vulnerability_class=finding.vulnerability_class if finding else None,
         )
-        self._refresh_hashes(updated, program=program, scope=scope)
+        self._refresh_hashes(updated, program=program, scope=scope, finding=finding)
         if draft.approval is not None and not self._approval_matches(updated, draft.approval):
             updated = replace(
                 updated,
@@ -534,6 +543,71 @@ class HackerOneReportWorkflow:
             "api_calls_during_dry_run": list(self.client.calls[len(before) :]),
         }
 
+    def get_draft(self, draft_id: str) -> HackerOneReportDraft:
+        return self._get(draft_id)
+
+    def claim_submission(self, draft_id: str, program: HackerOneProgram) -> HackerOneReportDraft:
+        """Atomically claim a local submission. Second caller gets in-progress."""
+        with self._claim_lock:
+            draft = self._get(draft_id)
+            if draft.submission_state is ReportSubmissionState.SUBMISSION_ATTEMPTED:
+                raise HackerOneSubmissionInProgressError()
+            if draft.submission_state is ReportSubmissionState.SUBMISSION_IN_PROGRESS:
+                raise HackerOneSubmissionInProgressError()
+            if draft.submission_state is ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN:
+                raise HackerOneSubmissionUnknownError(
+                    "A previous submission attempt has an unknown outcome. "
+                    "Reconcile the remote report before retrying."
+                )
+            if (
+                draft.hackerone_report_id
+                or draft.submission_state is ReportSubmissionState.SUBMITTED
+            ):
+                raise HackerOneError("Draft already has a HackerOne report id", code="duplicate")
+            if draft.submission_state is not ReportSubmissionState.HUMAN_APPROVED:
+                raise HackerOneError(
+                    "Real submission requires HUMAN_APPROVED. Use dry-run until a human approves.",
+                    code="not_approved",
+                )
+            if draft.finding_id:
+                existing = self.submissions.get((draft.finding_id, program.handle))
+                if existing is not None:
+                    if existing.submission_state in {
+                        ReportSubmissionState.SUBMISSION_ATTEMPTED,
+                        ReportSubmissionState.SUBMISSION_IN_PROGRESS,
+                    }:
+                        raise HackerOneSubmissionInProgressError()
+                    if (
+                        existing.submission_state
+                        is ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN
+                    ):
+                        raise HackerOneSubmissionUnknownError(
+                            "A previous submission attempt has an unknown outcome. Reconcile first."
+                        )
+                    if (
+                        existing.hackerone_report_id
+                        or existing.submission_state is ReportSubmissionState.SUBMITTED
+                    ):
+                        raise HackerOneError(
+                            "Finding already submitted as HackerOne report "
+                            f"{existing.hackerone_report_id}",
+                            code="duplicate",
+                        )
+                self.submissions[(draft.finding_id, program.handle)] = SubmissionRecord(
+                    finding_id=draft.finding_id,
+                    program=program.handle,
+                    submission_state=ReportSubmissionState.SUBMISSION_ATTEMPTED,
+                    metadata={"draft_id": draft_id, "claim_token": uuid4().hex},
+                )
+            claimed = replace(
+                draft,
+                submission_state=ReportSubmissionState.SUBMISSION_ATTEMPTED,
+                claim_token=uuid4().hex,
+                last_payload=self.redacted_payload(draft),
+            )
+            self.drafts[draft_id] = claimed
+            return claimed
+
     def submit(
         self,
         draft_id: str,
@@ -541,29 +615,18 @@ class HackerOneReportWorkflow:
         *,
         finding: SecurityFinding | None = None,
         session: OperatorSession,
+        already_claimed: bool = False,
     ) -> HackerOneReportDraft:
         session.assert_human()
+        require_fresh_program(program)
         draft = self._get(draft_id)
-        self._guard_duplicate(draft, program)
-        if draft.submission_state is ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN:
-            raise HackerOneSubmissionUnknownError(
-                "A previous submission attempt has an unknown outcome. "
-                "Reconcile the remote report before retrying."
-            )
-        if draft.hackerone_report_id:
-            raise HackerOneError("Draft already has a HackerOne report id", code="duplicate")
-        if draft.submission_state is not ReportSubmissionState.HUMAN_APPROVED:
-            raise HackerOneError(
-                "Real submission requires HUMAN_APPROVED. Use dry-run until a human approves.",
-                code="not_approved",
-            )
         if draft.approval is None:
             raise HackerOneError("Human approval record is missing", code="not_approved")
         if draft.approval.expired():
             self._invalidate_approval(draft, "Approval expired")
             raise HackerOneError("Human approval has expired", code="approval_expired")
         scope = self._revalidate(draft, program, finding=finding, stage="submit")
-        self._refresh_hashes(draft, program=program, scope=scope)
+        self._refresh_hashes(draft, program=program, scope=scope, finding=finding)
         if not self._approval_matches(draft, draft.approval):
             self._invalidate_approval(draft, "Approved hashes no longer match the current draft")
             raise HackerOneError(
@@ -577,12 +640,7 @@ class HackerOneReportWorkflow:
                 "Approved payload does not match the current report payload",
                 code="approval_stale",
             )
-        attempted = replace(
-            draft,
-            submission_state=ReportSubmissionState.SUBMISSION_ATTEMPTED,
-            last_payload=self.redacted_payload(draft),
-        )
-        self.drafts[draft_id] = attempted
+        attempted = draft if already_claimed else self.claim_submission(draft_id, program)
         try:
             body = self.client.post("hackers/reports", json_body=current_payload)
         except HackerOneIdentityVerificationError as exc:
@@ -590,8 +648,11 @@ class HackerOneReportWorkflow:
                 attempted,
                 submission_state=ReportSubmissionState.IDENTITY_VERIFICATION_REQUIRED,
                 error=str(exc),
+                submission_result=_submission_result(
+                    self.client, error_code=exc.code, report_id=None
+                ),
             )
-            self.drafts[draft_id] = failed
+            self._store_draft(failed, program)
             return failed
         except HackerOneError as exc:
             if exc.code in {"timeout", "network"}:
@@ -599,42 +660,38 @@ class HackerOneReportWorkflow:
                     attempted,
                     submission_state=ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN,
                     error=str(exc),
+                    submission_result=_submission_result(
+                        self.client, error_code=exc.code, report_id=None
+                    ),
                 )
-                self.drafts[draft_id] = unknown
-                if unknown.finding_id:
-                    self.submissions[(unknown.finding_id, program.handle)] = SubmissionRecord(
-                        finding_id=unknown.finding_id,
-                        program=program.handle,
-                        submission_state=ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN,
-                        metadata={"draft_id": draft_id},
-                        error=str(exc),
-                    )
+                self._store_draft(unknown, program)
                 return unknown
             failed = replace(
                 attempted,
                 submission_state=ReportSubmissionState.SUBMISSION_FAILED,
                 error=str(exc),
+                submission_result=_submission_result(
+                    self.client, error_code=exc.code, report_id=None
+                ),
             )
-            self.drafts[draft_id] = failed
+            self._store_draft(failed, program)
             return failed
         report_id = str((body.get("data") or {}).get("id") or "")
+        mapped, raw = map_remote_state(
+            ((body.get("data") or {}).get("attributes") or {}).get("state")
+        )
         submitted = replace(
             attempted,
             submission_state=ReportSubmissionState.SUBMITTED,
-            remote_state=HackerOneRemoteState.NEW,
+            remote_state=mapped
+            if mapped is not HackerOneRemoteState.NOT_FETCHED
+            else HackerOneRemoteState.NEW,
+            remote_state_raw=raw,
             hackerone_report_id=report_id,
             error=None,
+            submission_result=_submission_result(self.client, error_code=None, report_id=report_id),
         )
-        self.drafts[draft_id] = submitted
-        if submitted.finding_id and report_id:
-            self.submissions[(submitted.finding_id, program.handle)] = SubmissionRecord(
-                finding_id=submitted.finding_id,
-                hackerone_report_id=report_id,
-                program=program.handle,
-                submission_state=ReportSubmissionState.SUBMITTED,
-                metadata={"draft_id": draft_id},
-                remote_state=HackerOneRemoteState.NEW,
-            )
+        self._store_draft(submitted, program)
         return submitted
 
     def fetch_remote_report(self, report_id: str) -> dict[str, Any]:
@@ -645,27 +702,95 @@ class HackerOneReportWorkflow:
         draft_id: str,
         *,
         remote: dict[str, Any] | None = None,
+        human_confirmed_id: str | None = None,
+        program: HackerOneProgram | None = None,
     ) -> HackerOneReportDraft:
         draft = self._get(draft_id)
-        if not draft.hackerone_report_id and remote is None:
-            if draft.submission_state is ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN:
-                return draft
+        if human_confirmed_id:
+            body = remote or self.fetch_remote_report(human_confirmed_id)
+            return self._apply_remote(draft, body, require_id=human_confirmed_id)
+        if draft.hackerone_report_id:
+            body = remote or self.fetch_remote_report(draft.hackerone_report_id)
+            return self._apply_remote(draft, body, require_id=draft.hackerone_report_id)
+        if draft.submission_state is not ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN:
             raise HackerOneError("No HackerOne report id to reconcile", code="not_found")
-        body = remote or self.fetch_remote_report(draft.hackerone_report_id or "")
+        if remote is not None:
+            return self._apply_remote(draft, remote)
+        matches = self._search_remote_matches(draft, program)
+        if len(matches) == 1:
+            return self._apply_remote(draft, matches[0])
+        if len(matches) > 1:
+            raise HackerOneReconciliationAmbiguousError(
+                "Multiple remote HackerOne reports match; a human must confirm the report id"
+            )
+        return draft
+
+    def _search_remote_matches(
+        self, draft: HackerOneReportDraft, program: HackerOneProgram | None
+    ) -> list[dict[str, Any]]:
+        rows = self.client.list_hacker_reports()
+        window_start = draft.created_at.timestamp() - 3600
+        window_end = datetime.now(UTC).timestamp() + 3600
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_attrs = row.get("attributes")
+            attrs: dict[str, Any] = raw_attrs if isinstance(raw_attrs, dict) else {}
+            team = str(attrs.get("team_handle") or attrs.get("handle") or "")
+            title = str(attrs.get("title") or "")
+            submitted_at = str(attrs.get("submitted_at") or attrs.get("created_at") or "")
+            if program and team and team != program.handle and team != draft.program_handle:
+                continue
+            if title != draft.title:
+                continue
+            # Title is necessary but never sufficient. Require time window and/or payload hash.
+            time_ok = False
+            if submitted_at:
+                try:
+                    parsed = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                    time_ok = window_start <= parsed.timestamp() <= window_end
+                except ValueError:
+                    time_ok = False
+            payload_ok = False
+            remote_hash = str(attrs.get("vulnerability_information") or "")
+            if draft.payload_hash and draft.payload_hash in str(attrs):
+                payload_ok = True
+            if draft.vulnerability_information and remote_hash == draft.vulnerability_information:
+                payload_ok = True
+            if time_ok and payload_ok:
+                matches.append(row)
+        return matches
+
+    def _apply_remote(
+        self,
+        draft: HackerOneReportDraft,
+        body: dict[str, Any],
+        *,
+        require_id: str | None = None,
+    ) -> HackerOneReportDraft:
         data = body.get("data") if isinstance(body.get("data"), dict) else body
         remote_id = str((data or {}).get("id") or draft.hackerone_report_id or "")
+        if require_id and remote_id and remote_id != require_id:
+            raise HackerOneError("Remote report id does not match", code="mismatch")
         attrs = (data or {}).get("attributes") if isinstance(data, dict) else {}
-        state = _remote_state(attrs if isinstance(attrs, dict) else {})
+        mapped, raw = map_remote_state(
+            (attrs or {}).get("state") if isinstance(attrs, dict) else ""
+        )
         updated = replace(
             draft,
             hackerone_report_id=remote_id or draft.hackerone_report_id,
-            remote_state=state,
+            remote_state=mapped,
+            remote_state_raw=raw,
             submission_state=(
                 ReportSubmissionState.SUBMITTED if remote_id else draft.submission_state
             ),
             error=None,
+            submission_result=_submission_result(
+                self.client, error_code=None, report_id=remote_id or None
+            ),
         )
-        self.drafts[draft_id] = updated
+        self.drafts[draft.id] = updated
         if updated.finding_id:
             key = (updated.finding_id, updated.program_handle)
             existing = self.submissions.get(key)
@@ -675,29 +800,28 @@ class HackerOneReportWorkflow:
                 hackerone_report_id=updated.hackerone_report_id,
                 submission_state=updated.submission_state,
                 remote_state=updated.remote_state,
-                metadata={"draft_id": draft_id},
+                remote_state_raw=raw,
+                metadata={"draft_id": draft.id},
                 error=existing.error if existing else None,
+                result=updated.submission_result,
             )
         return updated
 
-    def _guard_duplicate(self, draft: HackerOneReportDraft, program: HackerOneProgram) -> None:
+    def _store_draft(self, draft: HackerOneReportDraft, program: HackerOneProgram) -> None:
+        self.drafts[draft.id] = draft
         if not draft.finding_id:
             return
-        existing = self.submissions.get((draft.finding_id, program.handle))
-        if existing is None:
-            return
-        if existing.submission_state is ReportSubmissionState.SUBMISSION_OUTCOME_UNKNOWN:
-            raise HackerOneSubmissionUnknownError(
-                "A previous submission attempt has an unknown outcome. Reconcile first."
-            )
-        if (
-            existing.hackerone_report_id
-            or existing.submission_state is ReportSubmissionState.SUBMITTED
-        ):
-            raise HackerOneError(
-                f"Finding already submitted as HackerOne report {existing.hackerone_report_id}",
-                code="duplicate",
-            )
+        self.submissions[(draft.finding_id, program.handle)] = SubmissionRecord(
+            finding_id=draft.finding_id,
+            program=program.handle,
+            hackerone_report_id=draft.hackerone_report_id,
+            submission_state=draft.submission_state,
+            remote_state=draft.remote_state,
+            remote_state_raw=draft.remote_state_raw,
+            metadata={"draft_id": draft.id, "claim_token": draft.claim_token or ""},
+            error=draft.error,
+            result=draft.submission_result,
+        )
 
     def _revalidate(
         self,
@@ -713,6 +837,12 @@ class HackerOneReportWorkflow:
                 raise HackerOneError(
                     "Finding does not belong to this report draft", code="finding_mismatch"
                 )
+            draft.finding_verification = finding.status.value
+            draft.evidence_references = tuple(
+                str(item.id) for item in finding.evidence.verifying_items()
+            )
+            if finding.reproduction:
+                draft.reproduction = finding.reproduction
         scope = self.evaluator.evaluate(
             program,
             draft.target or "",
@@ -741,6 +871,7 @@ class HackerOneReportWorkflow:
         *,
         program: HackerOneProgram,
         scope: HackerOneScopeDecision,
+        finding: SecurityFinding | None = None,
     ) -> None:
         snapshot = scope.snapshot(program)
         draft.scope_snapshot = snapshot
@@ -753,11 +884,28 @@ class HackerOneReportWorkflow:
             structured_scope_id=draft.structured_scope_id,
             target=draft.target,
             program_handle=draft.program_handle,
+            finding_verification=draft.finding_verification,
+            reproduction=draft.reproduction,
         )
-        extra = {
+        extra: dict[str, Any] = {
             "summaries": list(draft.evidence_references),
             "reproduction": draft.reproduction or "",
+            "finding_verification": draft.finding_verification or "",
+            "finding_id": draft.finding_id or "",
         }
+        if finding is not None:
+            extra["finding_status"] = finding.status.value
+            extra["finding_evidence"] = [
+                {
+                    "id": str(item.id),
+                    "kind": item.kind.value,
+                    "summary": item.summary,
+                    "provenance": getattr(item.provenance, "value", str(item.provenance)),
+                }
+                for item in finding.evidence.items
+            ]
+            extra["finding_reproduction"] = finding.reproduction or ""
+            extra["vulnerability_class"] = finding.vulnerability_class or ""
         draft.evidence_hash = evidence_hash(draft.evidence_references, extra)
         draft.scope_snapshot_hash = snapshot.snapshot_hash
         draft.payload_hash = payload_hash(self.build_payload(draft))
@@ -790,117 +938,6 @@ class HackerOneReportWorkflow:
         if draft is None:
             raise HackerOneError("Unknown report draft", code="not_found")
         return draft
-
-
-class ReportIntentWorkflow:
-    """Local report-intent records bound to a persisted finding. Not verification evidence."""
-
-    def __init__(self, reports: HackerOneReportWorkflow) -> None:
-        self.reports = reports
-        self.intents: dict[str, dict[str, Any]] = {}
-        self.attachments: dict[str, list[dict[str, Any]]] = {}
-
-    def create_from_draft(self, draft: HackerOneReportDraft, *, project_id: str) -> dict[str, Any]:
-        intent_id = uuid4().hex
-        record = {
-            "id": intent_id,
-            "draft_id": draft.id,
-            "project_id": project_id,
-            "finding_id": draft.finding_id,
-            "program_handle": draft.program_handle,
-            "human_review_state": draft.human_review_state.value,
-            "assistant_output_is_evidence": False,
-        }
-        self.intents[intent_id] = record
-        return record
-
-    def get(self, intent_id: str) -> dict[str, Any]:
-        intent = self.intents.get(intent_id)
-        if intent is None:
-            raise HackerOneError("Unknown report intent", code="not_found")
-        return intent
-
-    def patch(self, intent_id: str, payload: dict[str, Any], *, project_id: str) -> dict[str, Any]:
-        intent = self.get(intent_id)
-        if intent.get("project_id") != project_id:
-            raise HackerOneError("Report intent does not belong to this project", code="forbidden")
-        if "payload" in payload:
-            raise HackerOneError(
-                "Raw HackerOne intent payloads cannot bypass BugForge finding evidence",
-                code="raw_payload_forbidden",
-            )
-        allowed: dict[str, Any] = {
-            key: payload[key] for key in ("title", "impact", "severity") if key in payload
-        }
-        intent.update(allowed)
-        self.intents[intent_id] = intent
-        return intent
-
-    def submit(
-        self,
-        intent_id: str,
-        program: HackerOneProgram,
-        *,
-        session: OperatorSession,
-        finding: SecurityFinding | None,
-        project_id: str,
-    ) -> HackerOneReportDraft:
-        intent = self.get(intent_id)
-        if intent.get("project_id") != project_id:
-            raise HackerOneError("Report intent does not belong to this project", code="forbidden")
-        draft_id = str(intent.get("draft_id") or "")
-        return self.reports.submit(draft_id, program, finding=finding, session=session)
-
-    def list_attachments(self, intent_id: str) -> list[dict[str, Any]]:
-        self.get(intent_id)
-        return list(self.attachments.get(intent_id, []))
-
-    def add_attachment(
-        self,
-        intent_id: str,
-        *,
-        filename: str,
-        content: bytes,
-        reviewed: bool,
-        session: OperatorSession,
-    ) -> dict[str, Any]:
-        session.assert_human()
-        self.get(intent_id)
-        safe_name = _safe_filename(filename)
-        text = content.decode("utf-8", errors="replace")
-        leaked = detect_secrets(safe_name, text, configured=configured_secret_values())
-        if leaked:
-            raise HackerOneError(
-                f"Attachment rejected: possible secret leakage ({', '.join(leaked)})",
-                code="secret_detected",
-            )
-        record = {
-            "id": uuid4().hex,
-            "filename": safe_name,
-            "sha256": sha256_hex(content.hex()),
-            "size": len(content),
-            "reviewed": reviewed,
-            "authorized_for_upload": False,
-            "uploaded": False,
-        }
-        self.attachments.setdefault(intent_id, []).append(record)
-        return record
-
-    def authorize_upload(
-        self, intent_id: str, attachment_id: str, *, session: OperatorSession
-    ) -> dict[str, Any]:
-        session.assert_human()
-        for item in self.list_attachments(intent_id):
-            if item["id"] == attachment_id:
-                if not item.get("reviewed"):
-                    raise HackerOneError("Attachment has not been reviewed", code="not_reviewed")
-                item["authorized_for_upload"] = True
-                return item
-        raise HackerOneError("Unknown attachment", code="not_found")
-
-    def delete_attachment(self, intent_id: str, attachment_id: str) -> None:
-        items = self.attachments.get(intent_id, [])
-        self.attachments[intent_id] = [item for item in items if item["id"] != attachment_id]
 
 
 def compose_vulnerability_information(
@@ -978,20 +1015,16 @@ def _redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _safe_filename(name: str) -> str:
-    base = name.replace("\\", "/").split("/")[-1]
-    cleaned = "".join(ch for ch in base if ch.isalnum() or ch in {".", "-", "_"})
-    if not cleaned or cleaned in {".", ".."}:
-        raise HackerOneError("Unsafe attachment filename", code="unsafe_path")
-    return cleaned
-
-
-def _remote_state(attrs: dict[str, Any]) -> HackerOneRemoteState:
-    raw = str(attrs.get("state") or attrs.get("substate") or "").lower()
-    mapping = {
-        "new": HackerOneRemoteState.NEW,
-        "pending": HackerOneRemoteState.PENDING,
-        "triaged": HackerOneRemoteState.TRIAGED,
-        "resolved": HackerOneRemoteState.RESOLVED,
+def _submission_result(
+    client: HackerOneApiClient,
+    *,
+    error_code: str | None,
+    report_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "http_status": client.last_status,
+        "remote_report_id": report_id,
+        "error_code": error_code,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "response": client.last_sanitized_body,
     }
-    return mapping.get(raw, HackerOneRemoteState.UNKNOWN)

@@ -35,3 +35,15 @@ class HackerOneUrlRejectedError(HackerOneError):
 class HackerOneSubmissionUnknownError(HackerOneError):
     def __init__(self, message: str = "HackerOne submission outcome is unknown") -> None:
         super().__init__(message, code="submission_outcome_unknown")
+
+
+class HackerOneSubmissionInProgressError(HackerOneError):
+    def __init__(
+        self, message: str = "A HackerOne submission claim is already in progress"
+    ) -> None:
+        super().__init__(message, status_code=409, code="submission_in_progress")
+
+
+class HackerOneReconciliationAmbiguousError(HackerOneError):
+    def __init__(self, message: str = "Remote HackerOne report match is ambiguous") -> None:
+        super().__init__(message, status_code=409, code="reconciliation_ambiguous")

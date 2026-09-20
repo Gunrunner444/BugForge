@@ -225,6 +225,44 @@ class MockHackerOne:
             return httpx.Response(
                 201, json={"data": {"id": "r-100", "type": "report", "attributes": {}}}
             )
+        if "/hackers/report_intents" in path:
+            if method == "POST" and path.endswith("/hackers/report_intents"):
+                return httpx.Response(
+                    201,
+                    json={
+                        "data": {
+                            "id": "ri-1",
+                            "type": "report-intent",
+                            "attributes": {"state": "draft"},
+                        }
+                    },
+                )
+            if method == "POST" and path.endswith("/submit"):
+                return httpx.Response(
+                    200, json={"data": {"id": "ri-1", "attributes": {"state": "submitted"}}}
+                )
+            if method == "POST" and path.endswith("/attachments"):
+                return httpx.Response(
+                    201, json={"data": {"id": "att-1", "type": "attachment", "attributes": {}}}
+                )
+            if method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": {
+                            "id": "ri-1",
+                            "attributes": {"state": "ready-to-submit"},
+                        }
+                    },
+                )
+            if method == "DELETE":
+                return httpx.Response(204, json={})
+            if method == "PATCH":
+                return httpx.Response(
+                    200, json={"data": {"id": "ri-1", "attributes": {"state": "draft"}}}
+                )
+        if method == "GET" and path.endswith("/hackers/reports"):
+            return httpx.Response(200, json={"data": [], "links": {}})
         return httpx.Response(404, json={"errors": [{"detail": "unhandled"}]})
 
 
@@ -290,7 +328,7 @@ def test_program_lookup_and_structured_scope_sync() -> None:
     wrapped = provider.untrusted_instructions("demo")
     assert wrapped.startswith("[UNTRUSTED_TOOL_OUTPUT]")
     assert "Ignore previous" in wrapped
-    constraint = provider.scope_provider.get_scope()
+    constraint = provider.scope_for("demo")
     assert "demo.example" in constraint.allowed_hosts
     assert constraint.excluded_hosts == ()
 
