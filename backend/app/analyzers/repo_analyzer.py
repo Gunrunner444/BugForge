@@ -4,11 +4,11 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.adapters.languages.registry import LanguageRegistry
 from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
-from app.analyzers.language_detector import LanguageStats, detect_languages, language_for_path
-from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
-from app.analyzers.python.parser import ParseResult
 from app.core.config import settings
+from app.domain.language import LanguageCapability, LanguageStats
+from app.domain.source import LanguageParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class FileAnalysisResult:
     size_bytes: int
     line_count: int
     has_parse_errors: bool = False
-    parse_result: ParseResult | None = None
+    parse_result: LanguageParseResult | None = None
 
 
 @dataclass
@@ -157,7 +157,6 @@ class RepoAnalyzer:
     """Walks and analyses a local repository — synchronous, safe to run in a thread."""
 
     def __init__(self) -> None:
-        self._python_analyzer = PythonLanguageAnalyzer()
         self._framework_detector = FrameworkDetector()
 
     def analyze(self, repo_path: Path) -> AnalysisResult:
@@ -168,44 +167,52 @@ class RepoAnalyzer:
 
         logger.info("Analyzing repository at %s", repo_path)
 
+        from app.plugins import get_plugin_catalog
+
+        languages = get_plugin_catalog().languages
+
         # 1. Walk the filesystem
         raw_files = self._walk(repo_path)
 
         # 2. Classify each file
-        file_results = [self._classify_file(repo_path, p) for p in raw_files]
+        file_results = [self._classify_file(repo_path, p, languages) for p in raw_files]
 
         # 3. Language statistics (over all discovered files)
-        language_stats = detect_languages([f.absolute_path for f in file_results])
+        language_stats = languages.detect_languages([f.absolute_path for f in file_results])
 
-        # 4. Detect local Python packages for accurate import classification
-        local_packages = PythonLanguageAnalyzer.discover_local_packages(repo_path)
+        # 4. Per-language repository context (e.g. Python local packages)
+        parse_contexts: dict[str, object | None] = {}
+        for parser in languages.parsers():
+            parse_contexts[parser.language_id] = parser.prepare_repository(repo_path)
 
-        # 5. Parse Python source/test files
+        # 5. Parse files whose language adapter implements PARSE
         for fr in file_results:
-            if fr.language == "python":
-                if fr.size_bytes > settings.max_file_size_bytes:
-                    logger.debug(
-                        "Skipping oversized file (%d bytes): %s",
-                        fr.size_bytes,
-                        fr.relative_path,
-                    )
-                    fr.has_parse_errors = True
-                    continue
-                try:
-                    pr = self._python_analyzer.analyze_file(
-                        fr.absolute_path, local_packages=local_packages
-                    )
-                    fr.parse_result = pr
-                    fr.line_count = pr.line_count
-                    fr.has_parse_errors = bool(pr.errors)
-                    if pr.errors:
-                        logger.debug("Parse errors in %s: %s", fr.relative_path, pr.errors)
-                except (OSError, PermissionError) as exc:
-                    logger.warning("Cannot read %s: %s", fr.relative_path, exc)
-                    fr.has_parse_errors = True
-                except Exception as exc:
-                    logger.warning("Failed to parse %s: %s", fr.relative_path, exc)
-                    fr.has_parse_errors = True
+            adapter = languages.for_path(fr.absolute_path)
+            if adapter is None or not adapter.supports(LanguageCapability.PARSE):
+                continue
+            if fr.size_bytes > settings.max_file_size_bytes:
+                logger.debug(
+                    "Skipping oversized file (%d bytes): %s",
+                    fr.size_bytes,
+                    fr.relative_path,
+                )
+                fr.has_parse_errors = True
+                continue
+            try:
+                pr = adapter.parse_file(
+                    fr.absolute_path, context=parse_contexts.get(adapter.language_id)
+                )
+                fr.parse_result = pr
+                fr.line_count = pr.line_count
+                fr.has_parse_errors = bool(pr.errors)
+                if pr.errors:
+                    logger.debug("Parse errors in %s: %s", fr.relative_path, pr.errors)
+            except (OSError, PermissionError) as exc:
+                logger.warning("Cannot read %s: %s", fr.relative_path, exc)
+                fr.has_parse_errors = True
+            except Exception as exc:
+                logger.warning("Failed to parse %s: %s", fr.relative_path, exc)
+                fr.has_parse_errors = True
 
         # 6. Framework detection
         framework_detections = self._framework_detector.detect(
@@ -268,7 +275,9 @@ class RepoAnalyzer:
             files.append(item)
         return files
 
-    def _classify_file(self, repo_root: Path, file_path: Path) -> FileAnalysisResult:
+    def _classify_file(
+        self, repo_root: Path, file_path: Path, languages: LanguageRegistry
+    ) -> FileAnalysisResult:
         rel = file_path.relative_to(repo_root)
         rel_str = str(rel)
         size = 0
@@ -277,8 +286,9 @@ class RepoAnalyzer:
         except (OSError, PermissionError):
             pass
 
-        language = language_for_path(file_path)
-        file_type = self._determine_file_type(rel)
+        adapter = languages.for_path(file_path)
+        language = adapter.language_id if adapter is not None else None
+        file_type = self._determine_file_type(rel, languages)
 
         return FileAnalysisResult(
             relative_path=rel_str,
@@ -290,7 +300,7 @@ class RepoAnalyzer:
         )
 
     @staticmethod
-    def _determine_file_type(rel: Path) -> str:
+    def _determine_file_type(rel: Path, languages: LanguageRegistry) -> str:
         name = rel.name
         parts = rel.parts
 
@@ -307,16 +317,8 @@ class RepoAnalyzer:
             if part in _TEST_DIR_NAMES:
                 return "test"
 
-        # If it has a known programming language extension, call it source
-        from app.analyzers.language_detector import language_for_path
-
-        if language_for_path(rel) and language_for_path(rel) not in (
-            "yaml",
-            "json",
-            "toml",
-            "markdown",
-            "restructuredtext",
-        ):
+        adapter = languages.for_path(rel)
+        if adapter is not None and adapter.supports(LanguageCapability.SOURCE):
             return "source"
 
         return "other"

@@ -48,16 +48,16 @@ def test_create_openai_provider() -> None:
     assert provider.model_name == "gpt-4"
 
 
-def test_create_ollama_provider_uses_openai_compatible() -> None:
-    from app.ai.openai_provider import OpenAIProvider
+def test_create_ollama_provider_uses_local_adapter() -> None:
+    from app.ai.local_provider import LocalAIProvider
 
     provider = create_provider(make_settings(ai_provider="ollama", ai_model="llama3"))
-    assert isinstance(provider, OpenAIProvider)
+    assert isinstance(provider, LocalAIProvider)
     assert provider.model_name == "llama3"
 
 
 def test_create_openai_compatible_provider() -> None:
-    from app.ai.openai_provider import OpenAIProvider
+    from app.ai.local_provider import LocalAIProvider
 
     provider = create_provider(
         make_settings(
@@ -66,7 +66,7 @@ def test_create_openai_compatible_provider() -> None:
             ai_model="my-local-model",
         )
     )
-    assert isinstance(provider, OpenAIProvider)
+    assert isinstance(provider, LocalAIProvider)
 
 
 def test_unknown_provider_raises() -> None:
@@ -79,6 +79,11 @@ def test_unknown_provider_raises() -> None:
 
 def test_is_local_ai_mock() -> None:
     s = make_settings(ai_provider="mock")
+    assert s.is_local_ai() is True
+
+
+def test_is_local_ai_local() -> None:
+    s = make_settings(ai_provider="local")
     assert s.is_local_ai() is True
 
 
@@ -118,7 +123,7 @@ async def test_health_check_ollama_not_reachable() -> None:
     """When Ollama is not running, health check returns reachable=False."""
     import httpx
 
-    with patch("app.ai.factory.httpx.AsyncClient") as mock_client_cls:
+    with patch("app.ai.health.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -151,7 +156,7 @@ async def test_health_check_ollama_reachable_model_found() -> None:
     }
     mock_response.headers = {}
 
-    with patch("app.ai.factory.httpx.AsyncClient") as mock_client_cls:
+    with patch("app.ai.health.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -180,7 +185,7 @@ async def test_health_check_ollama_model_not_found() -> None:
     mock_response.json.return_value = {"data": [{"id": "other-model"}]}
     mock_response.headers = {}
 
-    with patch("app.ai.factory.httpx.AsyncClient") as mock_client_cls:
+    with patch("app.ai.health.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)

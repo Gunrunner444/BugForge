@@ -52,6 +52,17 @@ class ContextBuilder:
         static_findings = await self._load_static_findings(analysis_id, mentioned_paths)
         source_files = self._load_source_files(mentioned_paths, repo_root)
 
+        from app.adapters.evidence import default_debugging_collectors
+        from app.domain.evidence import EvidenceSource
+
+        evidence_bundle = default_debugging_collectors().collect_bundle(
+            EvidenceSource(
+                static_findings=static_findings,
+                test_failures=failing_tests,
+                source_files=source_files,
+            )
+        )
+
         return DebuggingRequest(
             project_name=project_name,
             repository_path=repository_path,
@@ -59,6 +70,7 @@ class ContextBuilder:
             static_findings=static_findings,
             source_files=source_files,
             max_hypotheses=settings.ai_max_hypotheses,
+            evidence_bundle=evidence_bundle,
         )
 
     async def _load_failing_tests(self, test_run_id: UUID | None) -> list[TestFailureEvidence]:
@@ -174,7 +186,12 @@ class ContextBuilder:
                 content = p.read_text(encoding="utf-8", errors="replace")[:_MAX_SOURCE_FILE_CHARS]
                 char_budget -= len(content)
                 rel = p.relative_to(repo_root)
-                sources.append(SourceFileEvidence(file_path=str(rel), content=content))
+                from app.plugins import get_plugin_catalog
+
+                language = get_plugin_catalog().languages.language_id_for_path(p) or "python"
+                sources.append(
+                    SourceFileEvidence(file_path=str(rel), content=content, language=language)
+                )
             except (OSError, PermissionError, ValueError):
                 continue
 
