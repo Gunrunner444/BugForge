@@ -5,7 +5,7 @@ from pathlib import Path
 from app.adapters.languages.registry import LanguageRegistry
 from app.domain.language import LanguageStats
 
-__all__ = ["LanguageStats", "detect_languages", "language_for_path", "EXTENSION_MAP"]
+__all__ = ["LanguageStats", "detect_languages", "language_for_path", "extension_map"]
 
 
 def _languages() -> LanguageRegistry:
@@ -30,9 +30,6 @@ def _legacy_extension_map() -> dict[str, str]:
     return mapping
 
 
-def __getattr__(name: str) -> object:
-    # Compatibility snapshot. Built lazily so importing this module does not
-    # construct the plugin catalog (which would circular-import PythonAdapter).
-    if name == "EXTENSION_MAP":
-        return _legacy_extension_map()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def extension_map() -> dict[str, str]:
+    """Compatibility snapshot of adapter extensions. The registry is authoritative."""
+    return _legacy_extension_map()

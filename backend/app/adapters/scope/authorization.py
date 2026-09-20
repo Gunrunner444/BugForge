@@ -24,9 +24,7 @@ def host_from_target(target: str) -> str:
     return raw.split("/", 1)[0].split(":", 1)[0].lower()
 
 
-def target_is_in_scope(
-    scope: ScopeConstraint, target: str, *, method: str | None = None
-) -> bool:
+def target_is_in_scope(scope: ScopeConstraint, target: str, *, method: str | None = None) -> bool:
     host = host_from_target(target)
     if not scope.allows_host(host):
         return False

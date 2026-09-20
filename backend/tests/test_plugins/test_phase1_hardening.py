@@ -82,8 +82,8 @@ def test_language_adapter_parse_contract_is_language_neutral() -> None:
 
 def test_language_adapter_module_does_not_import_python_parser() -> None:
     import app.adapters.languages.base as base_mod
-    import app.analyzers.repo_analyzer as repo_mod
     import app.analysis.engine as engine_mod
+    import app.analyzers.repo_analyzer as repo_mod
 
     for module in (base_mod, repo_mod, engine_mod):
         source = inspect.getsource(module)

@@ -49,18 +49,14 @@ class LocalReportProvider(ReportProvider):
                 lines.append(f"- Evidence items: {len(finding.evidence)}")
                 for item in finding.evidence.items:
                     provenance = item.provenance.value if item.provenance else "unknown"
-                    lines.append(
-                        f"  - [{item.kind.value} / {provenance}] {item.summary}"
-                    )
+                    lines.append(f"  - [{item.kind.value} / {provenance}] {item.summary}")
             lines.append("")
 
         extra = evidence or EvidenceBundle()
         potential = sum(1 for f in findings if f.status is FindingStatus.POTENTIAL)
         verified = sum(1 for f in findings if f.status is FindingStatus.VERIFIED)
         rejected = sum(1 for f in findings if f.status is FindingStatus.REJECTED)
-        unreviewed = sum(
-            1 for f in findings if f.human_review_state is HumanReviewState.UNREVIEWED
-        )
+        unreviewed = sum(1 for f in findings if f.human_review_state is HumanReviewState.UNREVIEWED)
         metadata = {
             "destination": "local",
             "submitted_remotely": "false",

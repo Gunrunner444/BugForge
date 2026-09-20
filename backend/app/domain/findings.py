@@ -85,7 +85,9 @@ class SecurityFinding:
     def is_verified(self) -> bool:
         return self.status is FindingStatus.VERIFIED
 
-    def verify(self, evidence: EvidenceBundle | Sequence[Evidence] | None = None) -> SecurityFinding:
+    def verify(
+        self, evidence: EvidenceBundle | Sequence[Evidence] | None = None
+    ) -> SecurityFinding:
         """Transition a potential finding to verified using independent evidence.
 
         Additional evidence is merged with any evidence already attached.
@@ -93,11 +95,17 @@ class SecurityFinding:
         """
         if self.status is FindingStatus.REJECTED:
             raise ValueError("Rejected findings cannot be verified")
-        merged = self.evidence.extend(_as_bundle(evidence).items) if evidence is not None else self.evidence
+        merged = (
+            self.evidence.extend(_as_bundle(evidence).items)
+            if evidence is not None
+            else self.evidence
+        )
         _require_verifying_evidence(merged)
         return replace(self, status=FindingStatus.VERIFIED, evidence=merged)
 
-    def reject(self, *, evidence: EvidenceBundle | Sequence[Evidence] | None = None) -> SecurityFinding:
+    def reject(
+        self, *, evidence: EvidenceBundle | Sequence[Evidence] | None = None
+    ) -> SecurityFinding:
         extra = _as_bundle(evidence)
         merged = self.evidence.extend(extra.items) if extra else self.evidence
         return replace(self, status=FindingStatus.REJECTED, evidence=merged)

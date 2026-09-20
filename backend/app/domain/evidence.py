@@ -113,9 +113,7 @@ class Evidence:
             object.__setattr__(self, "provenance", EvidenceProvenance.AI_HYPOTHESIS)
             return
         if self.provenance is EvidenceProvenance.AI_HYPOTHESIS:
-            raise ValueError(
-                "AI hypothesis provenance cannot be attached to non-AI evidence kinds"
-            )
+            raise ValueError("AI hypothesis provenance cannot be attached to non-AI evidence kinds")
         object.__setattr__(self, "provenance", derived)
 
     @property

@@ -34,9 +34,7 @@ class ScopeProvider(ABC):
 
     def is_active_testing_permitted(self, target: str, *, method: str | None = None) -> bool:
         scope = self.get_scope()
-        return scope.permits_active_testing() and target_is_in_scope(
-            scope, target, method=method
-        )
+        return scope.permits_active_testing() and target_is_in_scope(scope, target, method=method)
 
     def require_in_scope(self, target: str, *, method: str | None = None) -> None:
         require_in_scope(self.get_scope(), target, method=method)
