@@ -20,12 +20,35 @@ if TYPE_CHECKING:
     from app.plugins.catalog import PluginCatalog
 
 
+def _register_security_testing(catalog: PluginCatalog) -> None:
+    from app.adapters.browsers.playwright import PlaywrightBrowserAdapter
+    from app.adapters.fuzzing.controlled import ControlledFuzzingAdapter
+    from app.adapters.proxies.burp import BurpHistoryAdapter
+    from app.adapters.proxies.har import HarProxyAdapter
+    from app.adapters.security_tools.nuclei import NucleiAdapter
+    from app.adapters.security_tools.zap import ZapAdapter
+
+    catalog.browsers.register(
+        "playwright", PlaywrightBrowserAdapter, description="Playwright evidence collection"
+    )
+    catalog.proxies.register("har", HarProxyAdapter, description="HAR traffic ingestion")
+    catalog.proxies.register("burp", BurpHistoryAdapter, description="Burp HTTP history import")
+    catalog.security_tools.register("zap", ZapAdapter, description="OWASP ZAP automation/alerts")
+    catalog.security_tools.register("nuclei", NucleiAdapter, description="Nuclei template scans")
+    catalog.fuzzers.register(
+        "controlled",
+        ControlledFuzzingAdapter,
+        description="Gated fuzzing engine (requires a SecurityTestEngine)",
+    )
+
+
 def register_builtin_adapters(catalog: PluginCatalog) -> None:
     _register_languages(catalog)
     _register_ai_providers(catalog)
     _register_reporting(catalog)
     _register_scope(catalog)
     _register_evidence_collectors(catalog)
+    _register_security_testing(catalog)
 
 
 def _register_languages(catalog: PluginCatalog) -> None:

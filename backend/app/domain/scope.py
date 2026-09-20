@@ -42,14 +42,6 @@ class ScopeConstraint:
 
 
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
-    for pattern in patterns:
-        candidate = pattern.strip().lower()
-        if not candidate:
-            continue
-        if candidate.startswith("*."):
-            suffix = candidate[1:]  # ".example.com"
-            if host.endswith(suffix) or host == candidate[2:]:
-                return True
-        elif host == candidate:
-            return True
-    return False
+    from app.security_testing.target import hostname_matches
+
+    return hostname_matches(host, patterns)

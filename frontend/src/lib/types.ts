@@ -725,6 +725,43 @@ export interface SecurityStatus {
   notes: string;
 }
 
+export interface SecurityTestingSession {
+  project_id: string;
+  mode: string;
+  program: string | null;
+  lab_mode: boolean;
+  active_testing: boolean;
+  fuzzing_enabled: boolean;
+  dry_run: boolean;
+  request_limit: number;
+  requests_used: number;
+  rate_limit_rps: number;
+  approvals: Record<string, string>;
+  audit_entries: number;
+  finding_counts: Record<string, number>;
+  tools?: Record<string, unknown>;
+}
+
+export interface SecurityTestingSessionResponse {
+  session: SecurityTestingSession;
+  tools: string[];
+  notes: string;
+}
+
+export interface AuthorizationDecision {
+  allowed: boolean;
+  reason: string;
+  target: string;
+  method: string;
+  tool: string;
+  program: string | null;
+  dry_run: boolean;
+  approval_required: boolean;
+  approval_state: string;
+  matched_rule: string | null;
+  request_limit: number | null;
+}
+
 export interface DiscoverySettings {
   discovery_mode: string;
   discovery_interval_hours: number;

@@ -29,4 +29,5 @@ def test_security_status_lists_rules_and_languages() -> None:
     assert "javascript" in ids
     assert "ruby" in ids
     assert any(rid.startswith("sec.taint") for rid in data["rule_ids"])
-    assert "Phase 3" in data["notes"]
+    assert "HackerOne" in data["notes"]
+    assert "ScopeGuard" in data["notes"]

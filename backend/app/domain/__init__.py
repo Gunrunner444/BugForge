@@ -18,7 +18,7 @@ from app.domain.findings import (
     SecurityFinding,
     SourceLocation,
 )
-from app.domain.http import HttpExchange, HttpHeader
+from app.domain.http import HttpBodyMeta, HttpExchange, HttpHeader
 from app.domain.language import LanguageCapability, LanguageStats
 from app.domain.reports import ReportAsset, SecurityReport, VulnerabilityReportDraft
 from app.domain.scope import ScopeConstraint
@@ -39,6 +39,7 @@ __all__ = [
     "EvidenceSource",
     "FindingStatus",
     "HumanReviewState",
+    "HttpBodyMeta",
     "HttpExchange",
     "HttpHeader",
     "LanguageCapability",

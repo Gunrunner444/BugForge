@@ -5,6 +5,7 @@ from app.models.finding import DBFinding
 from app.models.project import Project
 from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
+from app.models.security_audit import DBSecurityAuditEvent
 from app.models.security_finding import DBSecurityFinding
 from app.models.test_generation import GeneratedTest, TestGenerationSession
 from app.models.test_run import TestResult, TestRun
@@ -20,6 +21,7 @@ __all__ = [
     "TestRun",
     "TestResult",
     "DBFinding",
+    "DBSecurityAuditEvent",
     "DBSecurityFinding",
     "DebuggingSession",
     "DebuggingHypothesis",

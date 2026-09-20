@@ -23,6 +23,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | v1.1.0 | Autonomous Discovery | ✅ Complete |
 | Phase 1 | Adapter foundation (languages, AI, security tooling) | ✅ Complete |
 | Phase 2 | Local AI + multi-language security analysis | ✅ Complete |
+| Phase 3 | Authorized security testing infrastructure | ✅ Complete (no HackerOne submission) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -46,9 +47,16 @@ Phase 2 adds:
 - **Context selection** so repositories are not dumped into the model.
 - **Potential / corroborated** findings only — never verified from static or AI.
 
-Details: [docs/architecture.md](docs/architecture.md). Live scanning, browser
-exploitation, fuzzing against external targets, and HackerOne submission remain
-**Phase 3** and are not implemented.
+Phase 3 adds **authorized, scope-aware security testing**. Every active
+operation must pass `ScopeGuard` → `SafetyController` → `RateLimiter`.
+HackerOne report submission is **not** implemented.
+
+Details: [docs/architecture.md](docs/architecture.md),
+[docs/security-testing.md](docs/security-testing.md),
+[docs/scope-model.md](docs/scope-model.md),
+[docs/tool-integrations.md](docs/tool-integrations.md). Live HackerOne
+submission remains unimplemented. Do not point this stack at real-world
+targets without an operator-approved program scope.
 
 ```
 Repository
@@ -257,15 +265,17 @@ Full docs: `http://localhost:8000/docs`
 
 ## Roadmap
 
-Completed through Phase 2 (multi-language security analysis + local MLX).
-Deliberately **not** in this phase (Phase 3):
+Completed through Phase 3 (authorized security-testing infrastructure).
+Deliberately **not** implemented:
 
-- Live external-target scanning
-- Burp active control, Nuclei/ZAP active scanning
-- Browser exploitation or live navigation
-- Live fuzzing against external targets
-- HackerOne API submission (draft fields exist; nothing is submitted)
-- Claiming that static or AI output is a verified vulnerability
+- HackerOne API report submission (approval gate exists; nothing is sent)
+- Unrestricted autonomous scanning or a "hack everything" action
+- Treating AI or scanner alerts as verified vulnerabilities
+- Driving the Burp GUI or treating ZAP's own scope as authoritative
+
+Use Local Lab mode against loopback fixtures. Do not use this against live
+external targets until a human has configured structured scope, enabled
+active testing, and accepted the conservative rate limits.
 
 ---
 

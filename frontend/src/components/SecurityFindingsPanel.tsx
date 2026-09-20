@@ -12,7 +12,9 @@ interface Props {
 const STATUS_STYLES: Record<string, string> = {
   potential: "bg-amber-100 text-amber-900 border-amber-300",
   corroborated: "bg-orange-100 text-orange-900 border-orange-300",
+  reproduced: "bg-yellow-100 text-yellow-900 border-yellow-300",
   verified: "bg-red-100 text-red-900 border-red-300",
+  human_accepted: "bg-emerald-100 text-emerald-900 border-emerald-300",
   rejected: "bg-slate-100 text-slate-600 border-slate-300",
 };
 

@@ -2,11 +2,10 @@
 
 BugForge is an evidence-first debugging platform that is growing into an
 AI-assisted software security research and vulnerability verification
-platform. Phase 2 adds multi-language security analysis and a local MLX AI
-backend. Debugging behavior is unchanged.
+platform. Phase 3 adds authorized, scope-aware security testing behind
+`ScopeGuard` and `SafetyController`. Debugging behavior is unchanged.
 
-Live scanning, browser exploitation, live fuzzing, and HackerOne submission
-are **intentionally not implemented** in this phase.
+HackerOne report submission is **intentionally not implemented**.
 
 ## Layering
 
@@ -322,26 +321,37 @@ The AI agent may attach a hypothesis. It cannot create a verified finding.
 | `AI_NATIVE_JSON_MODE` | `false` | Native `response_format` (off for local models) |
 | `AI_MAX_CONTEXT_TOKENS` | `8192` | Practical local context budget |
 
-Do not set browser/proxy/fuzzer providers until those adapters exist.
+Do not treat scanner or browser output as verified vulnerabilities.
 
-## What remains deferred to Phase 3
+## Authorized security testing (Phase 3)
 
-Phase 2 does **not** implement:
+See [security-testing.md](security-testing.md), [scope-model.md](scope-model.md),
+and [tool-integrations.md](tool-integrations.md).
 
-- Live external-target scanning
-- Burp / ZAP / Nuclei active scanning
-- Browser driving, exploitation, or live navigation
-- Live fuzzing against external targets
-- HackerOne API scope sync or report submission
-- Labeling static-only or AI-only findings as verified vulnerabilities
+Chain:
 
-Phase 3 can attach active testing tools to this security engine, reproduce
-hypotheses in authorized scope, and only then promote findings to verified.
+```
+Target → TargetNormalizer → ScopeGuard → SafetyController → RateLimiter
+       → SecurityToolRunner → Observation → Evidence → Correlation
+```
+
+Default deny: no scope, unknown target, or missing active-testing permission.
+Local Lab mode is isolated from live-target mode. Human approval is required
+before enabling active testing on a live project, starting a live scan,
+fuzzing, higher-risk scanners, sending a generated PoC, or (later) submitting
+a HackerOne report.
+
+## What remains deferred
+
+- HackerOne API scope sync and report submission
+- Full Playwright/ZAP/Nuclei execution when those binaries are absent
+  (adapters ingest results and still enforce BugForge scope)
+- Treating scanner alerts as verified program submissions
 
 ## Security tools
 
-`SecurityToolAdapter` is the future scanner boundary (`collect_passive_evidence`,
-`active_scan`). Burp, ZAP, and Nuclei are **not** implemented. Register a real
-adapter when the tool integration exists; do not ship empty classes that claim
-to scan.
+`SecurityToolAdapter` is implemented for ZAP and Nuclei. Burp and HAR adapters
+ingest recorded traffic as evidence. Replay and active scans must still pass
+ScopeGuard and SafetyController. Empty stub classes that claim to scan are
+not used.
 

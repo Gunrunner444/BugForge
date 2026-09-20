@@ -3,6 +3,8 @@ import type {
   AIStatus,
   SecurityFinding,
   SecurityStatus,
+  SecurityTestingSessionResponse,
+  AuthorizationDecision,
   AutonomousRun,
   AutonomousRunsListResponse,
   BugReproductionSession,
@@ -370,6 +372,28 @@ export const api = {
     findings: (projectId: string, offset = 0, limit = 100) =>
       request<{ items: SecurityFinding[]; total: number; offset: number; limit: number }>(
         `/api/v1/security/findings?project_id=${projectId}&offset=${offset}&limit=${limit}`,
+      ),
+  },
+
+  securityTesting: {
+    createSession: (body: Record<string, unknown>) =>
+      request<SecurityTestingSessionResponse>("/api/v1/security-testing/sessions", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    getSession: (projectId: string) =>
+      request<SecurityTestingSessionResponse>(`/api/v1/security-testing/sessions/${projectId}`),
+    authorize: (projectId: string, body: Record<string, unknown>) =>
+      request<AuthorizationDecision>(`/api/v1/security-testing/sessions/${projectId}/authorize`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    tools: () => request<{ browsers: string[]; proxies: string[]; security_tools: string[]; fuzzers: string[] }>(
+      "/api/v1/security-testing/tools",
+    ),
+    audit: (projectId: string) =>
+      request<{ entries: Array<Record<string, unknown>>; chain_valid: boolean }>(
+        `/api/v1/security-testing/sessions/${projectId}/audit`,
       ),
   },
 };

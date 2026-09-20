@@ -39,6 +39,14 @@ class SecurityReport:
         return sum(1 for finding in self.findings if finding.status is FindingStatus.CORROBORATED)
 
     @property
+    def reproduced_count(self) -> int:
+        return sum(1 for finding in self.findings if finding.status is FindingStatus.REPRODUCED)
+
+    @property
+    def human_accepted_count(self) -> int:
+        return sum(1 for finding in self.findings if finding.status is FindingStatus.HUMAN_ACCEPTED)
+
+    @property
     def rejected_count(self) -> int:
         return sum(1 for finding in self.findings if finding.status is FindingStatus.REJECTED)
 

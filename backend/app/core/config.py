@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.2.0"
+    version: str = "1.3.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"

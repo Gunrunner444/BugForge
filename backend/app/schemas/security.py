@@ -54,7 +54,8 @@ class SecurityStatusResponse(BaseModel):
     thinking_enabled: bool
     notes: str = (
         "Static and AI hypotheses remain potential or corroborated. "
-        "They are not verified vulnerabilities. Active testing is Phase 3."
+        "They are not verified vulnerabilities. Active testing uses ScopeGuard "
+        "and requires human approval. HackerOne submission is not implemented."
     )
 
 

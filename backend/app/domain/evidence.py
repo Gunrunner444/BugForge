@@ -48,8 +48,11 @@ class EvidenceProvenance(StrEnum):
     BROWSER_OBSERVATION = "browser_observation"
     HTTP_OBSERVATION = "http_observation"
     SCANNER_OBSERVATION = "scanner_observation"
+    SCANNER_RESULT = "scanner_result"
     API_TEST = "api_test"
     FUZZING_RESULT = "fuzzing_result"
+    SCREENSHOT = "screenshot"
+    LOG = "log"
 
 
 # Provenance that can back a verified finding. AI text is never included.
@@ -60,8 +63,11 @@ VERIFICATION_PROVENANCE: frozenset[EvidenceProvenance] = frozenset(
         EvidenceProvenance.BROWSER_OBSERVATION,
         EvidenceProvenance.HTTP_OBSERVATION,
         EvidenceProvenance.SCANNER_OBSERVATION,
+        EvidenceProvenance.SCANNER_RESULT,
         EvidenceProvenance.API_TEST,
         EvidenceProvenance.FUZZING_RESULT,
+        EvidenceProvenance.SCREENSHOT,
+        EvidenceProvenance.LOG,
     }
 )
 
@@ -78,10 +84,11 @@ _KIND_TO_PROVENANCE: dict[EvidenceKind, EvidenceProvenance] = {
     EvidenceKind.PROXY: EvidenceProvenance.HTTP_OBSERVATION,
     EvidenceKind.HTTP_REQUEST: EvidenceProvenance.HTTP_OBSERVATION,
     EvidenceKind.HTTP_RESPONSE: EvidenceProvenance.HTTP_OBSERVATION,
-    EvidenceKind.SCANNER: EvidenceProvenance.SCANNER_OBSERVATION,
+    EvidenceKind.SCANNER: EvidenceProvenance.SCANNER_RESULT,
     EvidenceKind.FUZZING: EvidenceProvenance.FUZZING_RESULT,
     EvidenceKind.API_TEST: EvidenceProvenance.API_TEST,
-    EvidenceKind.LOG: EvidenceProvenance.EXECUTION,
+    EvidenceKind.LOG: EvidenceProvenance.LOG,
+    EvidenceKind.SCREENSHOT: EvidenceProvenance.SCREENSHOT,
 }
 
 
