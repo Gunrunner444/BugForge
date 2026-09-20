@@ -324,7 +324,9 @@ class DBResearchIdentity(Base):
     browser_context_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     http_session_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     storage_namespace: Mapped[str] = mapped_column(String(64), nullable=False, default="")
-    authentication_state: Mapped[str] = mapped_column(String(32), nullable=False, default="unauthenticated")
+    authentication_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unauthenticated"
+    )
     credential_provenance: Mapped[str] = mapped_column(String(64), nullable=False, default="none")
     header_names: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     header_secret_refs: Mapped[dict[str, str] | None] = mapped_column(JSON, nullable=True)

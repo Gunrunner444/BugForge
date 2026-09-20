@@ -29,11 +29,15 @@ from app.security_agent.secrets import secrets_for
 from app.security_agent.states import RESUME_BLOCKED_STATES, ResearchMode, ResearchProjectState
 from app.security_agent.workbench import (
     dashboard as workbench_dashboard,
+)
+from app.security_agent.workbench import (
     evidence_explorer,
     evidence_graph_view,
     findings_workbench,
     identity_workbench,
     next_action_review,
+)
+from app.security_agent.workbench import (
     timeline as workbench_timeline,
 )
 from app.security_testing.approvals import ApprovalKind, is_ai_operator
@@ -708,7 +712,7 @@ async def compare_session_identities(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     await SecurityAgentRepository(db).save_session(agent.session)
     await db.commit()
-    return result.snapshot()
+    return dict(result.snapshot())
 
 
 @router.post("/sessions/{session_id}/next-action/review")

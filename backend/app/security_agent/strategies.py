@@ -133,7 +133,10 @@ _STRATEGY_SPECS: dict[ResearchStrategy, StrategySpec] = {
         goal="Correlate server-side source with authorized HTTP observations.",
         preferred_tools=("source_inspect", "http_request", "nuclei_scan"),
         allowed_evidence_types=("source", "request", "response", "scanner_result"),
-        minimum_evidence_expectations=("source or HTTP observation", "scanner alerts are not verification"),
+        minimum_evidence_expectations=(
+            "source or HTTP observation",
+            "scanner alerts are not verification",
+        ),
         preferred_oracle=OracleType.SOURCE_RUNTIME_CONSISTENCY.value,
         reproduction_requirement=True,
         stop_conditions=("hypothesis_supported", "scan_ingested"),

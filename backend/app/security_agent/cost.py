@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
-
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.security_agent.states import ToolRiskLevel
 
 
 class _ToolSpecLike(Protocol):
-    budget_kind: str
-    risk_level: ToolRiskLevel
+    @property
+    def budget_kind(self) -> str: ...
+
+    @property
+    def risk_level(self) -> ToolRiskLevel: ...
 
 
 @dataclass(frozen=True)

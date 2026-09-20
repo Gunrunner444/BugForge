@@ -9,11 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.mock_provider import MockLLMProvider
-from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceProvenance
+from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import FindingStatus, SecurityFinding
 from app.models.security_agent import DBResearchIdentity, DBResearchMemory
 from app.repositories.security_agent_repo import SecurityAgentRepository
-from app.security_agent.agent import AgentDecision, ResearchSession, SecurityResearchAgent
+from app.security_agent.agent import ResearchSession, SecurityResearchAgent
 from app.security_agent.authorization_diff import compare_authorization
 from app.security_agent.export import FindingNotFoundError, export_package
 from app.security_agent.handoff import prepare_hackerone_handoff
@@ -22,7 +22,7 @@ from app.security_agent.memory import ResearchMemory
 from app.security_agent.oracles import AuthorizationOracle
 from app.security_agent.orchestrator import AdvancedResearchOrchestrator
 from app.security_agent.replay import SessionReplay
-from app.security_agent.schemas import ResearchHypothesis, ToolCallRequest
+from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import EvidenceCompleteness, HypothesisStatus, ResearchMode
 from app.security_agent.strategies import ResearchStrategy, spec_for
 from app.security_testing.engine import SecurityTestEngine
@@ -92,7 +92,9 @@ def test_identify_missing_evidence_checks_existence_link_and_provenance() -> Non
         kind="observation", provenance="ai_hypothesis", summary="model said so", node_id="ai1"
     )
     session.graph.add(kind="observation", provenance="execution", summary="reflected", node_id="e1")
-    session.graph.add(kind="observation", provenance="execution", summary="not reflected", node_id="c1")
+    session.graph.add(
+        kind="observation", provenance="execution", summary="not reflected", node_id="c1"
+    )
     orch = AdvancedResearchOrchestrator(SecurityResearchAgent(session))
     missing = orch.identify_missing_evidence()
     blob = " ".join(missing)
@@ -145,8 +147,16 @@ def test_restore_headers_fail_closed_without_secrets() -> None:
 
 def test_authorization_oracle_is_required_for_meaningful_hypothesis() -> None:
     result = compare_authorization(
-        {"url": "http://127.0.0.1/item/1", "status": 200, "response": {"body": '{"id":"1","ts":"2020-01-01T00:00:00Z"}'}},
-        {"url": "http://127.0.0.1/item/1", "status": 200, "response": {"body": '{"id":"1","ts":"2021-02-02T00:00:00Z"}'}},
+        {
+            "url": "http://127.0.0.1/item/1",
+            "status": 200,
+            "response": {"body": '{"id":"1","ts":"2020-01-01T00:00:00Z"}'},
+        },
+        {
+            "url": "http://127.0.0.1/item/1",
+            "status": 200,
+            "response": {"body": '{"id":"1","ts":"2021-02-02T00:00:00Z"}'},
+        },
         expectation="",
         oracle=AuthorizationOracle.OWNER_ONLY,
     )
@@ -178,29 +188,29 @@ def test_authorization_normalizes_dynamic_fields() -> None:
 async def test_replay_restores_original_executors() -> None:
     session = _session()
     agent = SecurityResearchAgent(session)
-    original = agent.tools.executor_for("source_inspect")
 
     async def real(_arguments: dict[str, object]) -> dict[str, object]:
         return {"quality": "success", "executed": True, "live": True}
 
     agent.tools.replace_executor("source_inspect", real)
     original = agent.tools.executor_for("source_inspect")
+    during: list[object] = []
+    native_replace = agent.tools.replace_executor
+
+    def tracking_replace(name: str, executor: object) -> None:
+        native_replace(name, executor)  # type: ignore[arg-type]
+        if name == "source_inspect":
+            during.append(agent.tools.executor_for(name))
+
+    agent.tools.replace_executor = tracking_replace  # type: ignore[method-assign]
     replay = SessionReplay()
     replay.record("source_inspect", {"path": "app.py"}, {"quality": "success", "executed": True})
-    during: list[object] = []
-
-    real_play = replay.play
-
-    async def wrapped(agent_arg: SecurityResearchAgent) -> list[AgentDecision]:
-        result = await SessionReplay.play(replay, agent_arg)
-        return result
-
-    await wrapped(agent)
+    await replay.play(agent)
+    assert during
+    assert during[0] is not original
     assert agent.tools.executor_for("source_inspect") is original
     assert session.replay_mode is False
-    observations = [
-        node for node in session.graph.nodes.values() if node.kind == "observation"
-    ]
+    observations = [node for node in session.graph.nodes.values() if node.kind == "observation"]
     assert observations
     assert all(node.provenance == "replay" for node in observations)
 
@@ -247,9 +257,7 @@ def test_strategy_is_more_than_tool_names() -> None:
 
 def test_export_specific_finding_and_unknown_404() -> None:
     session = _session()
-    evidence = Evidence(
-        kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR"
-    )
+    evidence = Evidence(kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR")
     finding = SecurityFinding.verified(
         "Verified IDOR",
         evidence=EvidenceBundle.from_items([evidence]),
@@ -269,9 +277,7 @@ def test_export_specific_finding_and_unknown_404() -> None:
 
 def test_handoff_uses_evaluator_not_substring() -> None:
     session = _session()
-    evidence = Evidence(
-        kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR"
-    )
+    evidence = Evidence(kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR")
     finding = SecurityFinding.verified(
         "Verified IDOR",
         evidence=EvidenceBundle.from_items([evidence]),
@@ -300,10 +306,14 @@ async def test_identity_secrets_absent_from_database(db_session: AsyncSession) -
     await repo.save_session(session)
     await db_session.commit()
     row = (
-        await db_session.execute(
-            select(DBResearchIdentity).where(DBResearchIdentity.session_id == session.id)
+        (
+            await db_session.execute(
+                select(DBResearchIdentity).where(DBResearchIdentity.session_id == session.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     blob = json.dumps(
         [
             {

@@ -11,8 +11,10 @@ from typing import Any
 from app.adapters.hackerone.evaluator import HackerOneScopeEvaluator
 from app.adapters.hackerone.models import (
     HackerOneProgram,
-    ScopeMode as HackerOneScopeMode,
     StructuredScopeRecord,
+)
+from app.adapters.hackerone.models import (
+    ScopeMode as HackerOneScopeMode,
 )
 from app.domain.findings import SecurityFinding
 from app.security_agent.agent import ResearchSession

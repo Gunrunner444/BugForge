@@ -5,19 +5,21 @@ from __future__ import annotations
 import pytest
 
 from app.ai.mock_provider import MockLLMProvider
-from app.security_agent.agent import AgentDecision, ResearchSession, SecurityResearchAgent
+from app.security_agent.agent import ResearchSession, SecurityResearchAgent
 from app.security_agent.orchestrator import AdvancedResearchOrchestrator
 from app.security_agent.replay import SessionReplay
 from app.security_agent.schemas import ToolCallRequest
 from app.security_agent.states import ResearchMode
 from app.security_testing.engine import SecurityTestEngine, SecurityTestSession, TestingMode
-from app.security_testing.errors import RestrictedActivityError, SafetyLimitExceededError
+from app.security_testing.errors import RestrictedActivityError
 from app.security_testing.safety import SafetyLimits
 from app.security_testing.scope_model import Eligibility, ProgramScope, ScopeRule
 from app.security_testing.target import AssetType
 
 
-def _live_engine(*, includes: tuple[ScopeRule, ...] = (), active: bool = False) -> SecurityTestEngine:
+def _live_engine(
+    *, includes: tuple[ScopeRule, ...] = (), active: bool = False
+) -> SecurityTestEngine:
     return SecurityTestEngine(
         SecurityTestSession(
             project_id="live",

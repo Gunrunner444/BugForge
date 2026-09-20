@@ -165,7 +165,7 @@ def identity_workbench(orch: AdvancedResearchOrchestrator) -> dict[str, Any]:
         return {"a": None, "b": None, "isolated": False}
     snap = pair.snapshot()
     snap["never_displays_raw_credentials"] = True
-    return snap
+    return dict(snap)
 
 
 def strategy_view(orch: AdvancedResearchOrchestrator) -> dict[str, Any]:

@@ -160,7 +160,10 @@ class AdvancedResearchOrchestrator:
             hyp.status is HypothesisStatus.REQUIRES_REPRODUCTION
         ):
             return EvidenceCompleteness.REPRODUCTION_REQUIRED
-        if _has_live_reproduction(self.session, hyp) and hyp.status is not HypothesisStatus.VERIFIED:
+        if (
+            _has_live_reproduction(self.session, hyp)
+            and hyp.status is not HypothesisStatus.VERIFIED
+        ):
             return EvidenceCompleteness.REPRODUCED
         if hyp.supporting_evidence_ids and not any(
             item.endswith(":no_evidence") for item in missing
@@ -172,7 +175,11 @@ class AdvancedResearchOrchestrator:
 
     def research_completeness(self) -> EvidenceCompleteness:
         if any(item.is_verified for item in self.session.findings):
-            if all(_finding_has_live_verification(item, self.session) for item in self.session.findings if item.is_verified):
+            if all(
+                _finding_has_live_verification(item, self.session)
+                for item in self.session.findings
+                if item.is_verified
+            ):
                 return EvidenceCompleteness.VERIFIED
             return EvidenceCompleteness.INCONCLUSIVE
         if any(item.status is FindingStatus.REPRODUCED for item in self.session.findings):
@@ -213,7 +220,8 @@ class AdvancedResearchOrchestrator:
         estimate = estimate_operation_cost(
             tool, arguments or {}, spec, remaining_requests=remaining
         )
-        used = self.session.budget.snapshot()["used"]
+        used_raw = self.session.budget.snapshot()["used"]
+        used = used_raw if isinstance(used_raw, dict) else {}
         consumed = int(
             used.get("requests", 0)
             if estimate.unit == "requests"
@@ -273,7 +281,9 @@ class AdvancedResearchOrchestrator:
     def dashboard(self) -> dict[str, Any]:
         ranked = prioritize(self.session.hypotheses)
         current = ranked[0] if ranked else None
-        completeness = self.classify_hypothesis(current) if current else self.research_completeness()
+        completeness = (
+            self.classify_hypothesis(current) if current else self.research_completeness()
+        )
         engine = self.session.engine.session
         dry_run = bool(self.session.engine.safety.dry_run or engine.dry_run)
         active = bool(engine.active_testing_enabled and not dry_run)
@@ -360,7 +370,11 @@ def _linked_to_hypothesis(graph: Any, hypothesis_id: str, evidence_id: str) -> b
 def _needs_reproduction(hyp: Any, live_support: list[str]) -> bool:
     if hyp.status is HypothesisStatus.REQUIRES_REPRODUCTION:
         return True
-    if hyp.status in {HypothesisStatus.VERIFIED, HypothesisStatus.REJECTED, HypothesisStatus.DISPROVED}:
+    if hyp.status in {
+        HypothesisStatus.VERIFIED,
+        HypothesisStatus.REJECTED,
+        HypothesisStatus.DISPROVED,
+    }:
         return False
     if live_support or hyp.status is HypothesisStatus.SUPPORTED:
         return True
@@ -380,10 +394,12 @@ def _has_live_reproduction(session: ResearchSession, hyp: Any) -> bool:
             return True
     for finding in session.findings:
         if finding.status is FindingStatus.REPRODUCED and (
-            str(finding.hypothesis or "") == hyp.id
-            or finding.target == hyp.target
+            str(finding.hypothesis or "") == hyp.id or finding.target == hyp.target
         ):
-            if _finding_has_live_verification(finding, session) or finding.evidence.verifying_items():
+            if (
+                _finding_has_live_verification(finding, session)
+                or finding.evidence.verifying_items()
+            ):
                 return True
     return False
 

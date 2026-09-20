@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.mock_provider import MockLLMProvider
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
-from app.domain.findings import FindingStatus, SecurityFinding
+from app.domain.findings import SecurityFinding
 from app.repositories.security_agent_repo import SecurityAgentRepository
 from app.security_agent.agent import AgentDecision, ResearchSession, SecurityResearchAgent
 from app.security_agent.checkpoints import ResearchCheckpoint
@@ -21,13 +21,11 @@ from app.security_agent.schemas import ResearchHypothesis, ToolCallRequest
 from app.security_agent.states import (
     ResearchMode,
     ResearchProjectState,
-    ResearchState,
     ToolCapability,
 )
 from app.security_agent.strategies import ResearchStrategy
 from app.security_agent.tool_status import describe_tools
 from app.security_agent.tools import default_registry
-from app.security_testing.approvals import ApprovalKind
 from app.security_testing.engine import SecurityTestEngine, SecurityTestSession, TestingMode
 from app.security_testing.errors import RestrictedActivityError
 from app.security_testing.safety import SafetyLimits
@@ -163,9 +161,7 @@ async def test_local_lab_end_to_end(lab_server: LabServer, db_session: AsyncSess
         node.kind in {"observation", "reproduction", "request", "response"}
         for node in session.graph.nodes.values()
     )
-    reproduced = [
-        node for node in session.graph.nodes.values() if node.kind == "reproduction"
-    ]
+    reproduced = [node for node in session.graph.nodes.values() if node.kind == "reproduction"]
     if reproduced:
         evidence = Evidence(
             kind=EvidenceKind.REPRODUCTION,
@@ -180,9 +176,9 @@ async def test_local_lab_end_to_end(lab_server: LabServer, db_session: AsyncSess
         )
         session.findings.append(finding)
         assert orch.evidence_sufficient()
-        package = __import__("app.security_agent.export", fromlist=["export_package"]).export_package(
-            session, finding
-        )
+        package = __import__(
+            "app.security_agent.export", fromlist=["export_package"]
+        ).export_package(session, finding)
         assert package["hashes"]["sha256"]
         assert package["finding"]["id"] == str(finding.id)
     repo = SecurityAgentRepository(db_session)
@@ -233,13 +229,18 @@ async def test_live_mode_safety_blocks(client) -> None:
     )
     assert blocked.status_code in {403, 200}
     if blocked.status_code == 200:
-        assert blocked.json().get("authorization") in {None, "BLOCKED"} or blocked.json().get(
-            "quality"
-        ) in {"blocked", "unavailable"} or "disabled" in str(blocked.json()).lower()
+        assert (
+            blocked.json().get("authorization") in {None, "BLOCKED"}
+            or blocked.json().get("quality") in {"blocked", "unavailable"}
+            or "disabled" in str(blocked.json()).lower()
+        )
 
     escalate = await client.post(
         f"/api/v1/security-agent/sessions/{session_id}/approvals",
-        headers={**OPERATOR_HEADERS, "X-BugForge-Operator-Token": OPERATOR_HEADERS["X-BugForge-Operator-Token"]},
+        headers={
+            **OPERATOR_HEADERS,
+            "X-BugForge-Operator-Token": OPERATOR_HEADERS["X-BugForge-Operator-Token"],
+        },
         json={"kind": "enable_active_testing", "note": "ai"},
     )
     assert escalate.status_code in {200, 403}
@@ -289,6 +290,7 @@ def test_checkpoint_revalidates_current_authority() -> None:
 async def test_application_restart_preserves_state(db_session: AsyncSession) -> None:
     session = _lab_session()
     agent = SecurityResearchAgent(session)
+    assert agent.session is session
     session.hypotheses.append(
         ResearchHypothesis(
             title="IDOR",
@@ -308,7 +310,9 @@ async def test_application_restart_preserves_state(db_session: AsyncSession) -> 
         extra={"hypothesis_id": session.hypotheses[0].id},
     )
     session.graph.link(session.hypotheses[0].id, node.id, "supports")
-    evidence = Evidence(kind=EvidenceKind.HTTP_RESPONSE, source="http_request", summary="200 anyone")
+    evidence = Evidence(
+        kind=EvidenceKind.HTTP_RESPONSE, source="http_request", summary="200 anyone"
+    )
     session.findings.append(
         SecurityFinding.potential(
             "maybe idor",

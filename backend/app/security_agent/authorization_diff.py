@@ -246,7 +246,9 @@ def _strip_dynamic(value: Any) -> Any:
 
 def _structure(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _structure(item) for key, item in sorted(value.items(), key=lambda pair: pair[0])}
+        return {
+            key: _structure(item) for key, item in sorted(value.items(), key=lambda pair: pair[0])
+        }
     if isinstance(value, list):
         if not value:
             return []
@@ -279,7 +281,12 @@ def _sensitive_keys(body: Any) -> list[str]:
     if isinstance(body, dict):
         for key, value in body.items():
             lowered = str(key).lower()
-            if any(item in lowered for item in _SENSITIVE_FIELDS) and value not in (None, "", [], {}):
+            if any(item in lowered for item in _SENSITIVE_FIELDS) and value not in (
+                None,
+                "",
+                [],
+                {},
+            ):
                 found.append(str(key))
             found.extend(_sensitive_keys(value))
     elif isinstance(body, list):

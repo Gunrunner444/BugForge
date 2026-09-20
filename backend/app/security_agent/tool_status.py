@@ -6,8 +6,8 @@ from typing import Any
 
 from app.security_agent.states import (
     ToolApprovalStatus,
-    ToolAvailability,
     ToolAuthorization,
+    ToolAvailability,
     ToolCapability,
     ToolEnablement,
 )
@@ -50,9 +50,7 @@ def describe_tools(agent: Any) -> list[dict[str, Any]]:
                     if approved
                     else ToolApprovalStatus.NOT_APPROVED.value
                 ),
-                "authorization": auth.value
-                if isinstance(auth, ToolAuthorization)
-                else str(auth),
+                "authorization": auth.value if isinstance(auth, ToolAuthorization) else str(auth),
                 "installed_is_not_enabled": True,
                 "enabled_is_not_approved": True,
                 "approved_is_not_authorized": True,

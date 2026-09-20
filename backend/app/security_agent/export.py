@@ -104,6 +104,8 @@ def export_package(
         ),
     }
     package = _canonical(package)
+    if not isinstance(package, dict):
+        raise TypeError("export package must be a mapping")
     raw = json.dumps(package, sort_keys=True, separators=(",", ":"), default=str)
     package["hashes"] = {
         "sha256": sha256(raw.encode("utf-8")).hexdigest(),
@@ -126,7 +128,7 @@ def _finding_payload(finding: SecurityFinding) -> dict[str, Any]:
         }
         for item in sorted(finding.evidence.items, key=lambda item: str(item.id))
     ]
-    return _canonical(
+    payload = _canonical(
         {
             "id": str(finding.id),
             "title": finding.title,
@@ -141,6 +143,9 @@ def _finding_payload(finding: SecurityFinding) -> dict[str, Any]:
             "evidence": evidence_items,
         }
     )
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
 
 def _redact_exchanges(session: ResearchSession) -> list[dict[str, Any]]:
@@ -171,20 +176,28 @@ def _sorted_tools(session: ResearchSession) -> list[Any]:
 
 
 def _sorted_rules(rules: tuple[Any, ...]) -> tuple[Any, ...]:
-    return tuple(sorted(rules, key=lambda rule: (rule.identifier, str(rule.structured_scope_id or ""))))
+    return tuple(
+        sorted(rules, key=lambda rule: (rule.identifier, str(rule.structured_scope_id or "")))
+    )
 
 
 def _canonical(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(key): _canonical(value[key]) for key in sorted(value, key=lambda item: str(item))}
+        return {
+            str(key): _canonical(value[key]) for key in sorted(value, key=lambda item: str(item))
+        }
     if isinstance(value, set):
         return [_canonical(item) for item in sorted(value, key=lambda item: str(item))]
     if isinstance(value, tuple):
         return [_canonical(item) for item in value]
     if isinstance(value, list):
         if value and all(isinstance(item, dict) and "id" in item for item in value):
-            return [_canonical(item) for item in sorted(value, key=lambda item: str(item.get("id")))]
-        if value and all(isinstance(item, dict) and {"from", "to", "relation"} <= set(item) for item in value):
+            return [
+                _canonical(item) for item in sorted(value, key=lambda item: str(item.get("id")))
+            ]
+        if value and all(
+            isinstance(item, dict) and {"from", "to", "relation"} <= set(item) for item in value
+        ):
             return [
                 _canonical(item)
                 for item in sorted(

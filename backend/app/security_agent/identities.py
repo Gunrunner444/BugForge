@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from app.security_agent.authorization_diff import AuthorizationHypothesis, compare_authorization
+from app.security_agent.oracles import AuthorizationOracle
 from app.security_agent.secrets import SecretStore, is_secret_header, secrets_for
 from app.security_testing.errors import RestrictedActivityError
 
@@ -194,10 +196,8 @@ async def compare_identities(
     expectation: str,
     oracle: str = "",
     session_id: str = "",
-) -> Any:
+) -> AuthorizationHypothesis:
     """Send the same request as A and B. Never share credentials. Never mutate."""
-    from app.security_agent.authorization_diff import compare_authorization
-    from app.security_agent.oracles import AuthorizationOracle
 
     if method.upper() in {"DELETE", "PUT", "PATCH"} and not engine.session.scope.lab_mode:
         raise RestrictedActivityError("destructive_identity_compare")

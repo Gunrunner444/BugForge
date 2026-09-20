@@ -36,7 +36,9 @@ _TRANSITIONS: dict[ResearchProjectState, frozenset[ResearchProjectState]] = {
     ResearchProjectState.REVIEW: frozenset(
         {ResearchProjectState.HANDOFF, ResearchProjectState.COMPLETE, ResearchProjectState.FINDINGS}
     ),
-    ResearchProjectState.HANDOFF: frozenset({ResearchProjectState.COMPLETE, ResearchProjectState.REVIEW}),
+    ResearchProjectState.HANDOFF: frozenset(
+        {ResearchProjectState.COMPLETE, ResearchProjectState.REVIEW}
+    ),
     ResearchProjectState.COMPLETE: frozenset(),
 }
 

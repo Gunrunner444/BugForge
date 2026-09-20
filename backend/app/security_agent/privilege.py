@@ -99,9 +99,7 @@ def capture_privileges(
             "expires_at": record.expires_at.isoformat() if record.expires_at else None,
             "id": record.id,
             "scope_hash": scope_fingerprint(scope),
-            "approval_hash": _approval_hash(
-                kind.value, record.operator, scope_fingerprint(scope)
-            ),
+            "approval_hash": _approval_hash(kind.value, record.operator, scope_fingerprint(scope)),
         }
     return PrivilegeSnapshot(
         mode=mode.value,
@@ -250,13 +248,16 @@ def intersect_privileges(
     for kind, payload in persisted.approvals.items():
         if not isinstance(payload, dict):
             continue
-        if _approval_still_valid(
-            payload,
-            ttl_hours=ttl_hours,
-            current_scope_hash=current_hash,
-            current_program_handle=current_program_handle,
-            persisted_program_handle=persisted.program_handle,
-        ) and not downgrade_scope:
+        if (
+            _approval_still_valid(
+                payload,
+                ttl_hours=ttl_hours,
+                current_scope_hash=current_hash,
+                current_program_handle=current_program_handle,
+                persisted_program_handle=persisted.program_handle,
+            )
+            and not downgrade_scope
+        ):
             approvals[kind] = dict(payload)
         else:
             approvals[kind] = {
@@ -309,7 +310,9 @@ def expire_stale_privileges(snapshot: PrivilegeSnapshot) -> PrivilegeSnapshot:
     for kind, payload in snapshot.approvals.items():
         if not isinstance(payload, dict):
             continue
-        if _approval_still_valid(payload, ttl_hours=ttl_hours, current_scope_hash=snapshot.scope_hash):
+        if _approval_still_valid(
+            payload, ttl_hours=ttl_hours, current_scope_hash=snapshot.scope_hash
+        ):
             approvals[kind] = dict(payload)
         else:
             approvals[kind] = {"state": ApprovalState.MISSING.value, "reason": "expired"}

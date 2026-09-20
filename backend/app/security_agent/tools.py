@@ -260,14 +260,10 @@ class ToolRegistry:
                 **spec.for_llm(),
                 "disabled": spec.name in self._disabled or spec.disabled,
                 "availability": (
-                    "unavailable"
-                    if spec.capability is ToolCapability.UNAVAILABLE
-                    else "available"
+                    "unavailable" if spec.capability is ToolCapability.UNAVAILABLE else "available"
                 ),
                 "enablement": (
-                    "disabled"
-                    if spec.name in self._disabled or spec.disabled
-                    else "enabled"
+                    "disabled" if spec.name in self._disabled or spec.disabled else "enabled"
                 ),
             }
             for spec in self._specs.values()

@@ -29,7 +29,9 @@ def upgrade() -> None:
     with op.batch_alter_table("research_identities") as batch:
         batch.drop_column("cookies")
         batch.drop_column("storage")
-        batch.add_column(sa.Column("credential_ref", sa.String(length=64), nullable=False, server_default=""))
+        batch.add_column(
+            sa.Column("credential_ref", sa.String(length=64), nullable=False, server_default="")
+        )
         batch.add_column(
             sa.Column("browser_context_id", sa.String(length=64), nullable=False, server_default="")
         )
@@ -41,11 +43,16 @@ def upgrade() -> None:
         )
         batch.add_column(
             sa.Column(
-                "authentication_state", sa.String(length=32), nullable=False, server_default="unauthenticated"
+                "authentication_state",
+                sa.String(length=32),
+                nullable=False,
+                server_default="unauthenticated",
             )
         )
         batch.add_column(
-            sa.Column("credential_provenance", sa.String(length=64), nullable=False, server_default="none")
+            sa.Column(
+                "credential_provenance", sa.String(length=64), nullable=False, server_default="none"
+            )
         )
         batch.add_column(sa.Column("header_names", sa.JSON(), nullable=True))
         batch.add_column(sa.Column("header_secret_refs", sa.JSON(), nullable=True))
@@ -83,7 +90,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_security_research_projects_session_id", table_name="security_research_projects")
+    op.drop_index(
+        "ix_security_research_projects_session_id", table_name="security_research_projects"
+    )
     op.drop_table("security_research_projects")
     with op.batch_alter_table("research_identities") as batch:
         batch.drop_column("storage_secret_ref")
