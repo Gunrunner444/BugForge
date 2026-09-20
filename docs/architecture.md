@@ -7,8 +7,10 @@ platform. Phase 3 adds authorized, scope-aware security testing behind
 
 HackerOne report submission is implemented behind human review, dry-run,
 operator authentication, and persisted duplicate protection. The Phase 6
-`SecurityResearchAgent` is a planner only: it cannot decide scope, verify
-findings, approve reports, or submit to HackerOne.
+`SecurityResearchAgent` plans tool actions. Phase 7 executes authorized
+tools through existing adapters, persists the evidence graph, and restores
+sessions after restart. The agent cannot decide scope, verify findings,
+approve reports, or submit to HackerOne.
 
 ## Layering
 
@@ -47,10 +49,10 @@ Registries:
 |---|---|
 | `languages` | Detection, parsing, static analysis |
 | `ai_providers` | Mock, OpenAI, Anthropic, local |
-| `security_tools` | Future scanners (empty until implemented) |
-| `browsers` | Future browser evidence |
-| `proxies` | Future HTTP capture ingestion |
-| `fuzzers` | Future in-scope fuzzing |
+| `security_tools` | ZAP and Nuclei adapters (binaries optional; CI uses process fakes) |
+| `browsers` | Playwright adapter (unavailable without Playwright; not a stub navigation) |
+| `proxies` | Burp/HAR recorded-traffic ingestion |
+| `fuzzers` | Controlled in-scope fuzzing via `FuzzingEngine` |
 | `report_providers` | Local structured reports |
 | `scope_providers` | Authorized-testing scope |
 | `evidence_collectors` | Convert existing artifacts into `Evidence` |
@@ -295,14 +297,16 @@ records human review state. `HackerOneProvider.submit()` still refuses
 auto-submit; the gated workflow is LOCAL_DRAFT → READY_FOR_REVIEW →
 HUMAN_APPROVED → dry-run or real `POST /hackers/reports`.
 
-## Guided security research agent (Phase 6)
+## Guided security research agent (Phase 6–7)
 
 See [security-agent.md](security-agent.md), [agent-tools.md](agent-tools.md),
 and [agent-safety.md](agent-safety.md).
 
 The agent loop is Observe → Analyze → Hypothesize → Plan → Request tool →
-Authorization → Execute. Tool arguments are typed. ScopeGuard and
-SafetyController remain authoritative. Thinking traces are never evidence.
+Authorization → Execute → Evidence → Correlate → Reproduce. Tool arguments
+are typed from `ToolSpec`. ScopeGuard and SafetyController remain
+authoritative. Thinking traces are never evidence. Sessions restore from
+the database; live sessions require persisted HackerOne structured scope.
 
 ## Security analysis engine
 

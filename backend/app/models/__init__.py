@@ -22,7 +22,9 @@ from app.models.repair import PatchCandidate, RepairSession
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession
 from app.models.security_agent import (
     DBReproductionPlan,
+    DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
+    DBResearchEvidenceNode,
     DBResearchHypothesis,
     DBResearchSession,
     DBResearchTimelineEvent,
@@ -77,5 +79,7 @@ __all__ = [
     "DBResearchToolCall",
     "DBResearchTimelineEvent",
     "DBResearchEvidenceLink",
+    "DBResearchEvidenceNode",
+    "DBResearchEvidenceEdge",
     "DBReproductionPlan",
 ]

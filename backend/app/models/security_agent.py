@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -31,6 +31,12 @@ class DBResearchSession(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     human_overrides: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    termination_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    privilege_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    disabled_tools: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    repo_root: Mapped[str] = mapped_column(Text, nullable=False, default=".")
+    stopped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    exchanges: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -50,6 +56,12 @@ class DBResearchSession(Base):
     evidence_links: Mapped[list[DBResearchEvidenceLink]] = relationship(
         "DBResearchEvidenceLink", back_populates="session", cascade="all, delete-orphan"
     )
+    evidence_nodes: Mapped[list[DBResearchEvidenceNode]] = relationship(
+        "DBResearchEvidenceNode", back_populates="session", cascade="all, delete-orphan"
+    )
+    evidence_edges: Mapped[list[DBResearchEvidenceEdge]] = relationship(
+        "DBResearchEvidenceEdge", back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class DBResearchHypothesis(Base):
@@ -64,6 +76,10 @@ class DBResearchHypothesis(Base):
     target: Mapped[str] = mapped_column(Text, nullable=False, default="")
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     confidence: Mapped[str] = mapped_column(String(32), nullable=False, default="low")
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    impact: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    reproducibility: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    evidence_strength: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     supporting_evidence_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     contradicting_evidence_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     suggested_next_action: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -166,4 +182,45 @@ class DBReproductionPlan(Base):
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="planned")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class DBResearchEvidenceNode(Base):
+    __tablename__ = "research_evidence_node"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="evidence_nodes"
+    )
+
+
+class DBResearchEvidenceEdge(Base):
+    __tablename__ = "research_evidence_edge"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_node: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination_node: Mapped[str] = mapped_column(String(64), nullable=False)
+    relation: Mapped[str] = mapped_column(String(64), nullable=False, default="supports")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="evidence_edges"
     )

@@ -19,8 +19,9 @@ The two modes cannot be mixed in one session. A lab session cannot reach
 `example.com`. A live session cannot use lab isolation as a bypass.
 Lab permissions never apply to live HackerOne projects.
 
-The Phase 6 research agent uses the same tool APIs in both modes. There is
-no fully autonomous HackerOne mode.
+The Phase 6–7 research agent uses the same tool APIs in both modes. There is
+no fully autonomous HackerOne mode. Live agent sessions are blocked unless
+the program's structured scope has been synchronized.
 
 ## Authorization chain
 

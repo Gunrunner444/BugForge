@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from app.security_agent.schemas import TOOL_ARG_MODELS, ToolCallRequest
+from app.security_agent.states import ResearchMode, ToolCapability, ToolRiskLevel
 from app.security_testing.errors import RestrictedActivityError, SafetyLimitExceededError
 
 Executor = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -21,6 +22,128 @@ class ToolSpec:
     schema: type[BaseModel]
     budget_kind: str = "tool"
     disabled: bool = False
+    capability: ToolCapability = ToolCapability.UNAVAILABLE
+    risk_level: ToolRiskLevel = ToolRiskLevel.PASSIVE
+    requires_active_testing: bool = False
+    requires_human_approval: bool = False
+    approval_kind: str | None = None
+    network_access: bool = False
+    destructive_capability: bool = False
+    allowed_modes: tuple[ResearchMode, ...] = (ResearchMode.LAB, ResearchMode.LIVE_HACKERONE)
+
+    def argument_schema(self) -> dict[str, Any]:
+        return self.schema.model_json_schema()
+
+    def for_llm(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.argument_schema(),
+            "risk_level": self.risk_level.value,
+            "allowed_modes": [mode.value for mode in self.allowed_modes],
+            "network_access": self.network_access,
+            "requires_active_testing": self.requires_active_testing,
+            "requires_human_approval": self.requires_human_approval,
+            "approval_kind": self.approval_kind,
+            "capability": self.capability.value,
+            "destructive_capability": self.destructive_capability,
+        }
+
+
+_TOOL_META: dict[str, dict[str, Any]] = {
+    "http_request": {
+        "description": "Send one HTTP request through GatedHttpClient after ScopeGuard.",
+        "budget_kind": "request",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.LOW_RISK_ACTIVE,
+        "requires_active_testing": True,
+        "network_access": True,
+        "approval_kind": "send_poc_request",
+        "requires_human_approval": False,
+    },
+    "browser_navigate": {
+        "description": "Navigate with PlaywrightBrowserAdapter. Captures URL, title, network, console.",
+        "budget_kind": "browser",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.ACTIVE,
+        "requires_active_testing": True,
+        "network_access": True,
+        "approval_kind": None,
+    },
+    "source_inspect": {
+        "description": "Read a repo-relative source file excerpt. Untrusted data; secrets redacted.",
+        "budget_kind": "tool",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.PASSIVE,
+        "requires_active_testing": False,
+        "network_access": False,
+    },
+    "evidence_inspect": {
+        "description": "Load a persisted evidence-graph node for the current session.",
+        "budget_kind": "tool",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.PASSIVE,
+        "requires_active_testing": False,
+        "network_access": False,
+    },
+    "proxy_evidence": {
+        "description": "Load a captured HTTP exchange belonging to this research session.",
+        "budget_kind": "tool",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.PASSIVE,
+        "requires_active_testing": False,
+        "network_access": False,
+    },
+    "zap_scan": {
+        "description": "Run OWASP ZAP through ZapAdapter and ingest alerts. Authorization is not a result.",
+        "budget_kind": "tool",
+        "capability": ToolCapability.RESULTS_INGESTIBLE,
+        "risk_level": ToolRiskLevel.HIGH_RISK,
+        "requires_active_testing": True,
+        "requires_human_approval": True,
+        "approval_kind": "start_live_scan",
+        "network_access": True,
+    },
+    "nuclei_scan": {
+        "description": "Run Nuclei with the approved template policy and ingest JSONL results.",
+        "budget_kind": "tool",
+        "capability": ToolCapability.RESULTS_INGESTIBLE,
+        "risk_level": ToolRiskLevel.ACTIVE,
+        "requires_active_testing": True,
+        "requires_human_approval": True,
+        "approval_kind": "start_live_scan",
+        "network_access": True,
+    },
+    "fuzz": {
+        "description": "Mutate query/JSON/path/header inputs via FuzzingEngine. Interesting diffs only.",
+        "budget_kind": "fuzz",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.ACTIVE,
+        "requires_active_testing": True,
+        "requires_human_approval": True,
+        "approval_kind": "enable_fuzzing",
+        "network_access": True,
+    },
+    "reproduce": {
+        "description": "Execute a ReproductionPlan with a verification oracle. Status codes alone are inconclusive.",
+        "budget_kind": "request",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.ACTIVE,
+        "requires_active_testing": True,
+        "requires_human_approval": True,
+        "approval_kind": "send_poc_request",
+        "network_access": True,
+    },
+    "api_test": {
+        "description": "Import OpenAPI/Postman/Insomnia/HAR specs and run controlled candidate requests.",
+        "budget_kind": "request",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.LOW_RISK_ACTIVE,
+        "requires_active_testing": True,
+        "network_access": True,
+        "approval_kind": "send_poc_request",
+    },
+}
 
 
 class ToolRegistry:
@@ -33,6 +156,16 @@ class ToolRegistry:
         self._specs[spec.name] = spec
         self._executors[spec.name] = executor
 
+    def replace_spec(self, spec: ToolSpec) -> None:
+        if spec.name not in self._specs:
+            raise RestrictedActivityError(f"unknown_tool:{spec.name}")
+        self._specs[spec.name] = spec
+
+    def spec(self, name: str) -> ToolSpec:
+        if name not in self._specs:
+            raise RestrictedActivityError(f"unknown_tool:{name}")
+        return self._specs[name]
+
     def disable(self, name: str) -> None:
         self._disabled.add(name)
 
@@ -41,6 +174,9 @@ class ToolRegistry:
 
     def known(self) -> tuple[str, ...]:
         return tuple(self._specs)
+
+    def llm_tools(self) -> list[dict[str, Any]]:
+        return [spec.for_llm() for spec in self._specs.values() if spec.name not in self._disabled]
 
     def validate(self, request: ToolCallRequest) -> BaseModel:
         if request.tool not in self._specs:
@@ -53,6 +189,16 @@ class ToolRegistry:
         except ValidationError as exc:
             raise RestrictedActivityError(f"invalid_tool_arguments:{request.tool}") from exc
 
+    def validate_capability(self, name: str, *, mode: ResearchMode) -> ToolSpec:
+        spec = self.spec(name)
+        if spec.capability is ToolCapability.UNAVAILABLE:
+            raise RestrictedActivityError(f"tool_unavailable:{name}")
+        if mode not in spec.allowed_modes:
+            raise RestrictedActivityError(f"tool_mode_denied:{name}:{mode.value}")
+        if spec.capability is ToolCapability.PLANNING_ONLY:
+            return spec
+        return spec
+
     async def execute(self, request: ToolCallRequest) -> dict[str, Any]:
         parsed = self.validate(request)
         executor = self._executors[request.tool]
@@ -61,19 +207,37 @@ class ToolRegistry:
     def catalog(self) -> list[dict[str, object]]:
         return [
             {
-                "tool": spec.name,
-                "description": spec.description,
-                "disabled": spec.name in self._disabled,
+                **spec.for_llm(),
+                "disabled": spec.name in self._disabled or spec.disabled,
             }
             for spec in self._specs.values()
         ]
+
+    def restore_disabled(self, names: Sequence[str]) -> None:
+        self._disabled = {name for name in names if name in self._specs}
 
 
 def default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for name, model in TOOL_ARG_MODELS.items():
+        meta = _TOOL_META.get(name, {})
         registry.register(
-            ToolSpec(name=name, description=name, schema=model),
+            ToolSpec(
+                name=name,
+                description=str(meta.get("description") or name),
+                schema=model,
+                budget_kind=str(meta.get("budget_kind") or "tool"),
+                capability=meta.get("capability", ToolCapability.UNAVAILABLE),
+                risk_level=meta.get("risk_level", ToolRiskLevel.PASSIVE),
+                requires_active_testing=bool(meta.get("requires_active_testing")),
+                requires_human_approval=bool(meta.get("requires_human_approval")),
+                approval_kind=str(meta["approval_kind"]) if meta.get("approval_kind") else None,
+                network_access=bool(meta.get("network_access")),
+                destructive_capability=bool(meta.get("destructive_capability")),
+                allowed_modes=meta.get(
+                    "allowed_modes", (ResearchMode.LAB, ResearchMode.LIVE_HACKERONE)
+                ),
+            ),
             _unavailable(name),
         )
     return registry
@@ -84,3 +248,21 @@ def _unavailable(name: str) -> Executor:
         raise SafetyLimitExceededError(f"tool {name} has no executor bound")
 
     return _run
+
+
+def with_capability(spec: ToolSpec, capability: ToolCapability) -> ToolSpec:
+    return ToolSpec(
+        name=spec.name,
+        description=spec.description,
+        schema=spec.schema,
+        budget_kind=spec.budget_kind,
+        disabled=spec.disabled,
+        capability=capability,
+        risk_level=spec.risk_level,
+        requires_active_testing=spec.requires_active_testing,
+        requires_human_approval=spec.requires_human_approval,
+        approval_kind=spec.approval_kind,
+        network_access=spec.network_access,
+        destructive_capability=spec.destructive_capability,
+        allowed_modes=spec.allowed_modes,
+    )

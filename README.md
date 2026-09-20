@@ -26,7 +26,8 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 3 | Authorized security testing infrastructure | ✅ Implemented (execution + hardening in Phase 4) |
 | Phase 4 | HackerOne program integration | ✅ Implemented (gated submission; mock-tested) |
 | Phase 5 | HackerOne production readiness | ✅ Implemented (persistent state, numeric weaknesses, operator authorization) |
-| Phase 6 | Guided AI security research agent | ✅ Implemented (planner only; deterministic controls remain authoritative) |
+| Phase 6 | Guided AI security research agent | ✅ Implemented (planner; Phase 7 executes authorized tools) |
+| Phase 7 | Production security agent execution + evidence-driven verification | ✅ Implemented (lab-capable; live-capable with human approval; not unrestricted hacking) |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -57,8 +58,12 @@ adds HackerOne program lookup, structured scope sync, and a human-gated
 report workflow with dry-run (no report created) before optional real
 submission. Phase 5 persists that HackerOne state, binds approval to
 payload hashes, and uses program-specific numeric weakness IDs. Phase 6
-adds a guided `SecurityResearchAgent` that plans tool actions; deterministic
-BugForge controls remain authoritative.
+adds a guided `SecurityResearchAgent` that plans tool actions. Phase 7
+executes those tools through the existing adapters, persists the evidence
+graph, and restores sessions after restart. Deterministic BugForge
+controls remain authoritative. Tools that lack a binary (ZAP, Nuclei,
+Playwright) report `UNAVAILABLE` or ingest-only results — they are not
+stubs pretending to have scanned.
 
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),

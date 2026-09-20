@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.6.0"
+    version: str = "1.7.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     security_agent_max_requests: int = 50
     security_agent_max_browser_actions: int = 20
     security_agent_max_fuzz_requests: int = 20
+    security_agent_max_tokens: int = 200_000
+    security_agent_max_scan_seconds: float = 300.0
+    security_agent_max_identical_tool_calls: int = 2
+    security_agent_identical_call_window_seconds: float = 120.0
+    security_agent_source_excerpt_bytes: int = 32_768
+    security_agent_source_max_lines: int = 200
+    security_agent_approval_ttl_hours: int = 24
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

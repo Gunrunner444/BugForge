@@ -2,38 +2,59 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from app.ai.provider import CompletionRequest, LLMProvider
 from app.domain.findings import SecurityFinding
 from app.security_agent.budget import SessionBudget
+from app.security_agent.context import ContextManager
+from app.security_agent.correlation import correlate_all, finding_fingerprint
+from app.security_agent.correlation import prioritize as rank_hypotheses
 from app.security_agent.evidence_graph import EvidenceGraph
-from app.security_agent.injection import contains_injection_attempt, untrusted_observation
-from app.security_agent.reproduction import ReproductionPlan, execute_reproduction
+from app.security_agent.executors import ToolContext, bind_engine_tools
+from app.security_agent.injection import channel, contains_injection_attempt, untrusted_observation
+from app.security_agent.privilege import PrivilegeSnapshot, capture_privileges
+from app.security_agent.promotion import apply_reproduction, promote_hypothesis
 from app.security_agent.schemas import (
+    PlannerOutput,
     ResearchHypothesis,
     ResearchPlan,
+    ResearchPlanStep,
     ToolCallRequest,
 )
 from app.security_agent.states import (
+    RESUME_BLOCKED_STATES,
+    TERMINAL_RESEARCH_STATES,
+    EvidenceGraphKind,
     HypothesisStatus,
+    ReproductionOutcome,
     ResearchMode,
     ResearchState,
+    TerminationReason,
     ToolAuthorization,
+    ToolCapability,
+    ToolResultQuality,
+    ToolRiskLevel,
 )
 from app.security_agent.tools import ToolRegistry, default_registry
+from app.security_testing.approvals import ApprovalKind
 from app.security_testing.engine import SecurityTestEngine
 from app.security_testing.errors import (
+    ApprovalRequiredError,
     AuthorizationDeniedError,
     RestrictedActivityError,
     SafetyLimitExceededError,
 )
-from app.security_testing.sanitization import wrap_untrusted
+from app.security_testing.secrets import redact_text
 
 Planner = Callable[["ResearchSession"], Awaitable["AgentDecision"]]
 
@@ -47,6 +68,17 @@ _FORBIDDEN_AI_ACTIONS = frozenset(
         "enable_tool",
         "change_scope",
         "declare_in_scope",
+        "enable_active_testing",
+        "grant_approval",
+    }
+)
+
+_RETRYABLE_QUALITY = frozenset(
+    {
+        ToolResultQuality.FAILED.value,
+        ToolResultQuality.TIMEOUT.value,
+        ToolResultQuality.BLOCKED.value,
+        ToolResultQuality.UNAVAILABLE.value,
     }
 )
 
@@ -88,6 +120,13 @@ class TimelineEvent:
 
 
 @dataclass
+class FingerprintRecord:
+    fingerprint: str
+    at: datetime
+    quality: str
+
+
+@dataclass
 class ResearchSession:
     project_id: str
     target: str
@@ -105,6 +144,7 @@ class ResearchSession:
     timeline: list[TimelineEvent] = field(default_factory=list)
     tool_history: list[str] = field(default_factory=list)
     fingerprints: list[str] = field(default_factory=list)
+    fingerprint_records: list[FingerprintRecord] = field(default_factory=list)
     findings: list[SecurityFinding] = field(default_factory=list)
     disabled_tools: set[str] = field(default_factory=set)
     paused: bool = False
@@ -112,6 +152,16 @@ class ResearchSession:
     error: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    termination_reason: TerminationReason | None = None
+    repo_root: str = "."
+    exchanges: dict[str, dict[str, Any]] = field(default_factory=dict)
+    privilege: PrivilegeSnapshot | None = None
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    step_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    zap_runner: Any = None
+    nuclei_runner: Any = None
+    zap_binary: str | None = None
+    nuclei_binary: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -121,6 +171,9 @@ class ResearchSession:
             "target": self.target,
             "mode": self.mode.value,
             "state": self.state.value,
+            "termination_reason": self.termination_reason.value
+            if self.termination_reason
+            else None,
             "model": self.model_name or self.provider.model_name,
             "budget": self.budget.snapshot(),
             "hypotheses": [item.snapshot() for item in self.hypotheses],
@@ -129,7 +182,12 @@ class ResearchSession:
             "error": self.error,
             "paused": self.paused,
             "stopped": self.stopped,
+            "graph": self.graph.snapshot(),
+            "disabled_tools": sorted(self.disabled_tools),
         }
+
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set() or self.stopped or self.paused
 
 
 class SecurityResearchAgent:
@@ -143,17 +201,27 @@ class SecurityResearchAgent:
         planner: Planner | None = None,
     ) -> None:
         self.session = session
-        self.tools = tools or bind_engine_tools(session.engine, default_registry())
+        session.graph.session_id = session.id
+        session.graph.project_id = session.project_id
+        self.tools = tools or bind_engine_tools(_tool_context(session), default_registry())
         self.planner = planner or self._llm_planner
+        self.context = ContextManager()
+        self._refresh_privilege()
 
     def pause(self, reason: str = "operator") -> None:
         self.session.paused = True
-        self.session.state = ResearchState.PAUSED
+        self.session.cancel_event.set()
+        self.session.state = ResearchState.USER_PAUSED
+        self.session.termination_reason = TerminationReason.USER_PAUSED
+        self._timeline("pause", decision=f"PAUSE:{reason}")
         self._timeline("human_override", decision=f"PAUSE:{reason}")
 
     def stop(self, reason: str = "operator") -> None:
         self.session.stopped = True
-        self.session.state = ResearchState.COMPLETED
+        self.session.cancel_event.set()
+        self.session.state = ResearchState.USER_STOPPED
+        self.session.termination_reason = TerminationReason.USER_STOPPED
+        self._timeline("stop", decision=f"STOP:{reason}")
         self._timeline("human_override", decision=f"STOP:{reason}")
 
     def reject_action(self, reason: str) -> None:
@@ -171,31 +239,90 @@ class SecurityResearchAgent:
 
     def change_limits(self, *, operator: str, extra_tool_calls: int = 0) -> None:
         self.session.budget.grant_more(operator=operator, extra_tool_calls=extra_tool_calls)
+        self._timeline("approval", decision=f"CHANGE_LIMITS:{operator}")
         self._timeline("human_override", decision=f"CHANGE_LIMITS:{operator}")
+
+    def enable_active_testing(self, *, operator: str, note: str = "") -> None:
+        from app.security_testing.approvals import is_ai_operator
+
+        if is_ai_operator(operator):
+            raise RestrictedActivityError("The AI cannot enable active testing")
+        self.session.engine.enable_active_testing(operator=operator, note=note)
+        self._refresh_privilege()
+        self._timeline("approval", decision=f"ENABLE_ACTIVE_TESTING:{operator}")
+
+    def grant_tool_approval(self, kind: ApprovalKind, *, operator: str, note: str = "") -> None:
+        from app.security_testing.approvals import is_ai_operator
+
+        if is_ai_operator(operator):
+            raise RestrictedActivityError("The AI cannot grant tool approvals")
+        self.session.engine.grant(kind, operator=operator, note=note)
+        self._refresh_privilege()
+        self._timeline("approval", decision=f"{kind.value}:{operator}")
+
+    def resume(self, *, operator: str) -> ResearchSession:
+        from app.security_testing.approvals import is_ai_operator
+
+        if is_ai_operator(operator):
+            raise RestrictedActivityError("The AI cannot resume a research session")
+        if self.session.state in RESUME_BLOCKED_STATES or self.session.stopped:
+            raise RestrictedActivityError("session_resume_requires_operator_reopen")
+        self.session.paused = False
+        self.session.cancel_event.clear()
+        self.session.termination_reason = None
+        self.session.state = ResearchState.ANALYZING
+        self._timeline("session_state", decision=f"RESUME:{operator}")
+        return self.session
 
     async def run(self, *, max_steps: int | None = None) -> ResearchSession:
         limit = max_steps if max_steps is not None else self.session.budget.max_iterations
+        steps = 0
         for _ in range(limit):
             if self.session.stopped or self.session.paused:
                 break
-            if self.session.state in {
-                ResearchState.COMPLETED,
-                ResearchState.FAILED,
-                ResearchState.REJECTED,
-                ResearchState.VERIFIED,
-            }:
+            if self.session.state in TERMINAL_RESEARCH_STATES:
                 break
             await self.step()
-        if self.session.state not in {
-            ResearchState.COMPLETED,
-            ResearchState.FAILED,
-            ResearchState.PAUSED,
-            ResearchState.REJECTED,
-        }:
-            self.session.state = ResearchState.COMPLETED
+            steps += 1
+        self._finalize_run(steps=steps, limit=limit)
         return self.session
 
+    def _finalize_run(self, *, steps: int, limit: int) -> None:
+        if self.session.termination_reason is not None:
+            return
+        if self.session.stopped:
+            self.session.termination_reason = TerminationReason.USER_STOPPED
+            self.session.state = ResearchState.USER_STOPPED
+            return
+        if self.session.paused:
+            self.session.termination_reason = TerminationReason.USER_PAUSED
+            self.session.state = ResearchState.USER_PAUSED
+            return
+        if self.session.state is ResearchState.FAILED:
+            self.session.termination_reason = TerminationReason.FAILED
+            return
+        if self.session.budget.iterations >= self.session.budget.max_iterations or steps >= limit:
+            self.session.termination_reason = TerminationReason.MAX_ITERATIONS
+            self.session.state = ResearchState.MAX_ITERATIONS
+            return
+        verified = any(item.is_verified for item in self.session.findings)
+        reproduced = any(item.status.value == "reproduced" for item in self.session.findings)
+        if verified or reproduced:
+            self.session.termination_reason = TerminationReason.COMPLETED_SUCCESS
+            self.session.state = ResearchState.COMPLETED_SUCCESS
+            return
+        if self.session.findings or self.session.hypotheses:
+            self.session.termination_reason = TerminationReason.INCONCLUSIVE
+            self.session.state = ResearchState.INCONCLUSIVE
+            return
+        self.session.termination_reason = TerminationReason.COMPLETED_NO_FINDINGS
+        self.session.state = ResearchState.COMPLETED_NO_FINDINGS
+
     async def step(self) -> AgentDecision:
+        async with self.session.step_lock:
+            return await self._step_locked()
+
+    async def _step_locked(self) -> AgentDecision:
         if self.session.stopped:
             return AgentDecision(kind="stopped")
         if self.session.paused:
@@ -203,8 +330,10 @@ class SecurityResearchAgent:
         try:
             self.session.budget.consume("iteration")
         except SafetyLimitExceededError as exc:
-            self.session.state = ResearchState.FAILED
+            self.session.state = ResearchState.BUDGET_EXHAUSTED
+            self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
             self.session.error = str(exc)
+            self._timeline("session_state", decision="BUDGET_EXHAUSTED", result=str(exc))
             return AgentDecision(kind="budget_exhausted", note=str(exc))
         decision = await self.planner(self.session)
         if decision.thinking:
@@ -213,150 +342,345 @@ class SecurityResearchAgent:
             self._timeline("blocked", decision=decision.kind, authorization="blocked")
             raise RestrictedActivityError(decision.kind)
         if decision.kind == "hypothesis" and decision.hypothesis:
-            if decision.hypothesis.status is HypothesisStatus.VERIFIED:
-                raise RestrictedActivityError("verify_finding")
-            self.session.hypotheses.append(decision.hypothesis)
-            self.session.state = ResearchState.HYPOTHESIS_CREATED
-            self._timeline("hypothesis", decision=decision.hypothesis.title)
+            self._record_hypothesis(decision.hypothesis)
+            return decision
+        if decision.kind == "update_hypothesis" and decision.hypothesis:
+            self._record_hypothesis(decision.hypothesis, update=True)
             return decision
         if decision.kind == "plan" and decision.plan:
             self.session.plan = decision.plan
             self.session.state = ResearchState.PLAN_READY
             self._timeline("plan", decision=f"{len(decision.plan.steps)} steps")
+            self._timeline("model_decision", decision="plan")
             return decision
         if decision.kind == "tool" and decision.tool:
             await self._execute_tool(decision.tool, reason=decision.note)
             return decision
         if decision.kind == "reproduce":
             self.session.state = ResearchState.REPRODUCING
+            self._timeline("reproduction", decision=decision.note or "reproduce")
             return decision
         if decision.kind == "complete":
-            self.session.state = ResearchState.COMPLETED
+            self._finalize_run(
+                steps=self.session.budget.iterations, limit=self.session.budget.max_iterations
+            )
             return decision
         self.session.state = ResearchState.ANALYZING
+        self._timeline("model_decision", decision=decision.kind or "analyze")
         return decision
 
     async def request_tool(self, request: ToolCallRequest) -> dict[str, Any]:
-        return await self._execute_tool(request, reason=request.reason)
+        async with self.session.step_lock:
+            return await self._execute_tool(request, reason=request.reason)
 
     async def _execute_tool(self, request: ToolCallRequest, *, reason: str) -> dict[str, Any]:
         fingerprint = f"{request.tool}:{json.dumps(request.arguments, sort_keys=True, default=str)}"
-        if self.session.fingerprints.count(fingerprint) >= 2:
-            raise RestrictedActivityError("repeated_identical_tool_call")
-        self.session.fingerprints.append(fingerprint)
+        self._check_duplicate(fingerprint)
         if request.tool in self.session.disabled_tools:
             raise RestrictedActivityError(f"disabled_tool:{request.tool}")
         parsed = self.tools.validate(request)
-        target = str(
-            parsed.model_dump().get("url")
-            or parsed.model_dump().get("target")
-            or self.session.target
+        spec = self.tools.spec(request.tool)
+        dumped = parsed.model_dump()
+        target = str(dumped.get("url") or dumped.get("target") or self.session.target)
+        self._timeline("tool_request", decision=reason, tool=request.tool, target=target)
+        request_node = self.session.graph.add(
+            kind=EvidenceGraphKind.TOOL_REQUEST.value,
+            provenance="tool_request",
+            summary=f"{request.tool} {target}",
+            source=request.tool,
+            extra={"reason": reason},
         )
-        auth = self._authorize_target(target, tool=request.tool)
+        try:
+            self.tools.validate_capability(request.tool, mode=self.session.mode)
+        except RestrictedActivityError as exc:
+            if spec.capability is ToolCapability.UNAVAILABLE:
+                unavailable = ToolResultQuality.UNAVAILABLE.value
+                payload = {"quality": unavailable, "reason": str(exc), "executed": False}
+                self._remember_fingerprint(fingerprint, unavailable)
+                self._timeline(
+                    "authorization",
+                    tool=request.tool,
+                    target=target,
+                    authorization="blocked",
+                    result=unavailable,
+                    evidence_id=request_node.id,
+                )
+                return payload
+            raise
+        if spec.capability is ToolCapability.PLANNING_ONLY:
+            payload = {
+                "quality": ToolResultQuality.NO_RESULT.value,
+                "capability": ToolCapability.PLANNING_ONLY.value,
+                "executed": False,
+                "reason": "planning_only",
+            }
+            self._remember_fingerprint(fingerprint, ToolResultQuality.NO_RESULT.value)
+            return payload
+        auth = self._authorize_target(target, tool=request.tool, spec=spec, arguments=dumped)
         if auth is ToolAuthorization.BLOCKED:
             self._timeline(
-                "tool",
+                "authorization",
                 decision=reason,
                 tool=request.tool,
                 target=target,
                 authorization="blocked",
                 result="BLOCKED",
             )
-            return {"authorization": "BLOCKED", "reason": "ScopeGuard denied the target"}
-        kind = (
-            "browser"
-            if request.tool.startswith("browser")
-            else "fuzz"
-            if request.tool == "fuzz"
-            else "request"
-            if request.tool in {"http_request", "api_test", "reproduce"}
-            else "tool"
-        )
+            self._remember_fingerprint(fingerprint, ToolResultQuality.BLOCKED.value)
+            return {
+                "authorization": "BLOCKED",
+                "quality": ToolResultQuality.BLOCKED.value,
+                "reason": "ScopeGuard denied the target",
+                "executed": False,
+            }
+        if auth is ToolAuthorization.APPROVAL_REQUIRED:
+            self.session.state = ResearchState.WAITING_FOR_APPROVAL
+            self._timeline(
+                "authorization",
+                tool=request.tool,
+                target=target,
+                authorization="approval_required",
+                result="APPROVAL_REQUIRED",
+            )
+            self._remember_fingerprint(fingerprint, ToolResultQuality.APPROVAL_REQUIRED.value)
+            return {
+                "authorization": "APPROVAL_REQUIRED",
+                "quality": ToolResultQuality.APPROVAL_REQUIRED.value,
+                "reason": spec.approval_kind or "human approval required",
+                "executed": False,
+            }
         try:
             self.session.budget.consume("tool")
-            if kind != "tool":
-                self.session.budget.consume(kind)
+            if spec.budget_kind != "tool":
+                amount = 1
+                if spec.budget_kind == "fuzz":
+                    amount = int(dumped.get("count") or 1)
+                self.session.budget.consume(spec.budget_kind, amount=amount)
         except SafetyLimitExceededError as exc:
+            self.session.state = ResearchState.BUDGET_EXHAUSTED
+            self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
             self._timeline("tool", tool=request.tool, authorization="blocked", result=str(exc))
             raise
         self.session.state = ResearchState.EXECUTING
+        self._timeline(
+            "execution_start", tool=request.tool, target=target, authorization="authorized"
+        )
+        exec_node = self.session.graph.add(
+            kind=EvidenceGraphKind.TOOL_EXECUTION.value,
+            provenance="execution",
+            summary=f"execute {request.tool}",
+            source=request.tool,
+            parent_id=request_node.id,
+            relation="executes",
+        )
         try:
             result = await self.tools.execute(request)
         except AuthorizationDeniedError as exc:
             self._timeline(
-                "tool", tool=request.tool, target=target, authorization="blocked", result=str(exc)
+                "execution_result",
+                tool=request.tool,
+                target=target,
+                authorization="blocked",
+                result=str(exc),
             )
-            return {"authorization": "BLOCKED", "reason": str(exc)}
+            self._remember_fingerprint(fingerprint, ToolResultQuality.BLOCKED.value)
+            return {
+                "authorization": "BLOCKED",
+                "quality": ToolResultQuality.BLOCKED.value,
+                "reason": str(exc),
+                "executed": False,
+            }
+        except ApprovalRequiredError as exc:
+            self.session.state = ResearchState.WAITING_FOR_APPROVAL
+            self._remember_fingerprint(fingerprint, ToolResultQuality.APPROVAL_REQUIRED.value)
+            return {
+                "authorization": "APPROVAL_REQUIRED",
+                "quality": ToolResultQuality.APPROVAL_REQUIRED.value,
+                "reason": str(exc),
+                "executed": False,
+            }
+        if result.get("scan_seconds"):
+            try:
+                self.session.budget.consume_scan(float(result["scan_seconds"]))
+            except SafetyLimitExceededError:
+                self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
+                self.session.state = ResearchState.BUDGET_EXHAUSTED
+        quality = str(result.get("quality") or ToolResultQuality.SUCCESS.value)
         summary = json.dumps(result, default=str)[:500]
         if contains_injection_attempt(summary):
             summary = untrusted_observation(request.tool, summary)
-        node = self.session.graph.add(
-            kind="tool_result",
-            provenance="tool_execution",
-            summary=summary,
-            source=request.tool,
-        )
+        observation = None
+        if (
+            quality
+            not in {
+                ToolResultQuality.BLOCKED.value,
+                ToolResultQuality.UNAVAILABLE.value,
+                ToolResultQuality.APPROVAL_REQUIRED.value,
+            }
+            and result.get("executed", True) is not False
+        ):
+            observation = self.session.graph.add(
+                kind=EvidenceGraphKind.OBSERVATION.value,
+                provenance="execution",
+                summary=redact_text(summary),
+                source=request.tool,
+                parent_id=exec_node.id,
+                relation="observes",
+            )
+            for evidence_id in result.get("evidence_ids") or []:
+                if evidence_id in self.session.graph.nodes:
+                    self.session.graph.link(exec_node.id, str(evidence_id), "produced")
+            if result.get("evidence_id") and result["evidence_id"] in self.session.graph.nodes:
+                self.session.graph.link(exec_node.id, str(result["evidence_id"]), "produced")
         self.session.state = ResearchState.OBSERVING
+        evidence_id = (
+            observation.id if observation else str(result.get("evidence_id") or exec_node.id)
+        )
         self._timeline(
-            "tool",
+            "execution_result",
             decision=reason,
             tool=request.tool,
             target=target,
             authorization="authorized",
             result=summary[:200],
-            evidence_id=node.id,
+            evidence_id=evidence_id,
         )
-        return {"authorization": "AUTHORIZED", "result": result, "evidence_id": node.id}
+        self._timeline(
+            "evidence_created", tool=request.tool, evidence_id=evidence_id, result=quality
+        )
+        self._remember_fingerprint(fingerprint, quality)
+        self.session.tool_history.append(request.tool)
+        return {
+            "authorization": "AUTHORIZED",
+            "result": result,
+            "evidence_id": evidence_id,
+            "quality": quality,
+        }
 
-    def _authorize_target(self, target: str, *, tool: str) -> ToolAuthorization:
+    def _authorize_target(
+        self,
+        target: str,
+        *,
+        tool: str,
+        spec: Any | None = None,
+        arguments: dict[str, Any] | None = None,
+    ) -> ToolAuthorization:
+        arguments = arguments or {}
+        if spec is None:
+            try:
+                spec = self.tools.spec(tool)
+            except RestrictedActivityError:
+                spec = None
+        if spec is None:
+            return ToolAuthorization.BLOCKED
         if self.session.mode is ResearchMode.LIVE_HACKERONE:
             if not self.session.engine.session.scope.includes:
                 return ToolAuthorization.BLOCKED
-            if not self.session.engine.session.active_testing_enabled:
+            if (
+                spec.requires_active_testing
+                and not self.session.engine.session.active_testing_enabled
+            ):
                 return ToolAuthorization.BLOCKED
-        decision = self.session.engine.authorize(target, tool=tool, active=True)
+            if self.session.program_handle and (
+                self.session.engine.session.scope.program_name
+                not in {self.session.program_handle, None}
+                and self.session.engine.session.scope.program_name != self.session.program_handle
+            ):
+                return ToolAuthorization.BLOCKED
+        if spec.requires_human_approval and spec.approval_kind:
+            if self.session.mode is ResearchMode.LIVE_HACKERONE or spec.risk_level in {
+                ToolRiskLevel.ACTIVE,
+                ToolRiskLevel.HIGH_RISK,
+            }:
+                kind = ApprovalKind(spec.approval_kind)
+                if (
+                    self.session.mode is ResearchMode.LIVE_HACKERONE
+                    and not self.session.engine.approvals.is_granted(kind)
+                ):
+                    return ToolAuthorization.APPROVAL_REQUIRED
+                if (
+                    spec.risk_level is ToolRiskLevel.HIGH_RISK
+                    and not self.session.engine.approvals.is_granted(ApprovalKind.HIGH_RISK_SCANNER)
+                    and self.session.mode is ResearchMode.LIVE_HACKERONE
+                ):
+                    return ToolAuthorization.APPROVAL_REQUIRED
+                if (
+                    tool == "fuzz"
+                    and not self.session.engine.session.fuzzing_enabled
+                    and not self.session.engine.approvals.is_granted(ApprovalKind.ENABLE_FUZZING)
+                ):
+                    return ToolAuthorization.APPROVAL_REQUIRED
+        high_risk = spec.risk_level is ToolRiskLevel.HIGH_RISK
+        live_scan = tool in {"zap_scan", "nuclei_scan"}
+        poc = tool in {"reproduce"} or (
+            tool == "http_request"
+            and bool(arguments.get("active", True))
+            and spec.approval_kind == "send_poc_request"
+        )
+        decision = self.session.engine.authorize(
+            target,
+            tool=tool,
+            active=spec.requires_active_testing,
+            require_live_scan_approval=live_scan,
+            require_poc_approval=poc and self.session.mode is ResearchMode.LIVE_HACKERONE,
+            high_risk=high_risk and self.session.mode is ResearchMode.LIVE_HACKERONE,
+        )
         if not decision.allowed:
+            if decision.approval_required:
+                return ToolAuthorization.APPROVAL_REQUIRED
             return ToolAuthorization.BLOCKED
         return ToolAuthorization.AUTHORIZED
 
     def correlate(self) -> list[ResearchHypothesis]:
         """Strengthen hypotheses with independent sources. Never auto-verify."""
         self.session.state = ResearchState.CORRELATING
-        by_class: dict[str, list[ResearchHypothesis]] = {}
-        for item in self.session.hypotheses:
-            by_class.setdefault(item.vulnerability_class, []).append(item)
-        updated: list[ResearchHypothesis] = []
-        for group in by_class.values():
-            if len(group) > 1:
-                for item in group:
-                    if item.status is HypothesisStatus.OPEN:
-                        item.status = HypothesisStatus.SUPPORTED
-            updated.extend(group)
+        updated = correlate_all(self.session.hypotheses, self.session.graph)
+        for item in updated:
+            self._timeline("hypothesis_update", decision=f"{item.id}:{item.status.value}")
         return updated
 
     def investigate_conflicts(self, hypothesis: ResearchHypothesis) -> HypothesisStatus:
-        if hypothesis.contradicting_evidence_ids and hypothesis.supporting_evidence_ids:
-            hypothesis.status = HypothesisStatus.WEAKENED
-            return hypothesis.status
-        if hypothesis.contradicting_evidence_ids and not hypothesis.supporting_evidence_ids:
-            hypothesis.status = HypothesisStatus.DISPROVED
-            return hypothesis.status
-        if hypothesis.supporting_evidence_ids:
-            hypothesis.status = HypothesisStatus.SUPPORTED
-            return hypothesis.status
-        return HypothesisStatus.OPEN
+        from app.security_agent.correlation import correlate_hypothesis
+
+        status = correlate_hypothesis(hypothesis, self.session.graph)
+        self._timeline("hypothesis_update", decision=f"conflict:{hypothesis.id}:{status.value}")
+        return status
 
     def prioritize(self) -> list[ResearchHypothesis]:
-        rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-        return sorted(
-            self.session.hypotheses,
-            key=lambda item: (
-                rank.get(item.confidence, 0),
-                len(item.supporting_evidence_ids),
-                1 if item.status is HypothesisStatus.REQUIRES_REPRODUCTION else 0,
-            ),
-            reverse=True,
-        )
+        return rank_hypotheses(self.session.hypotheses)
+
+    def update_hypothesis(
+        self,
+        hypothesis_id: str,
+        *,
+        status: HypothesisStatus,
+        evidence_ids: tuple[str, ...] = (),
+        contradicting: tuple[str, ...] = (),
+    ) -> ResearchHypothesis:
+        if status is HypothesisStatus.VERIFIED:
+            raise RestrictedActivityError("verify_finding")
+        found = next((item for item in self.session.hypotheses if item.id == hypothesis_id), None)
+        if found is None:
+            raise RestrictedActivityError("unknown_hypothesis")
+        if status in {
+            HypothesisStatus.SUPPORTED,
+            HypothesisStatus.WEAKENED,
+            HypothesisStatus.DISPROVED,
+            HypothesisStatus.REQUIRES_REPRODUCTION,
+            HypothesisStatus.REJECTED,
+        } and not (evidence_ids or contradicting):
+            raise RestrictedActivityError("hypothesis_status_requires_evidence")
+        found.status = status
+        if evidence_ids:
+            found.supporting_evidence_ids = tuple(
+                dict.fromkeys(found.supporting_evidence_ids + evidence_ids)
+            )
+        if contradicting:
+            found.contradicting_evidence_ids = tuple(
+                dict.fromkeys(found.contradicting_evidence_ids + contradicting)
+            )
+        self._timeline("hypothesis_update", decision=f"{found.id}:{status.value}")
+        return found
 
     def draft_report(self, hypothesis: ResearchHypothesis) -> dict[str, Any]:
         """Summarize validated graph evidence. Cannot verify, approve, or submit."""
@@ -375,162 +699,245 @@ class SecurityResearchAgent:
             "thinking_excluded": True,
         }
 
-    def context_window(self) -> dict[str, Any]:
-        recent = self.session.timeline[-5:]
+    def draft_report_candidate(self, finding: SecurityFinding) -> dict[str, Any]:
+        if not finding.is_verified:
+            raise RestrictedActivityError("draft_report_requires_verified_finding")
+        evidence_ids = [str(item.id) for item in finding.evidence.items]
         return {
-            "target": self.session.target,
-            "mode": self.session.mode.value,
-            "state": self.session.state.value,
-            "program": self.session.program_handle,
-            "hypotheses": [item.snapshot() for item in self.session.hypotheses[-3:]],
-            "recent": [item.snapshot() for item in recent],
-            "budget": self.session.budget.remaining(),
+            "kind": "DRAFT_REPORT_CANDIDATE",
+            "verified_finding_id": str(finding.id),
+            "evidence_ids": evidence_ids,
+            "reproduction_ids": [
+                node.id
+                for node in self.session.graph.nodes.values()
+                if node.kind == EvidenceGraphKind.REPRODUCTION.value
+            ],
+            "target": finding.target or self.session.target,
+            "scope_snapshot": {
+                "program": self.session.program_handle,
+                "includes": [
+                    rule.identifier for rule in self.session.engine.session.scope.includes
+                ],
+                "hash": self.session.privilege.scope_hash if self.session.privilege else "",
+            },
+            "candidate_weakness": finding.vulnerability_class or "",
+            "candidate_severity": finding.impact or "unspecified",
+            "cannot_approve": True,
+            "cannot_submit": True,
+            "cannot_verify": True,
+            "cannot_change_scope": True,
         }
 
+    def promote(self, hypothesis: ResearchHypothesis) -> SecurityFinding | None:
+        finding = promote_hypothesis(self.session, hypothesis)
+        if finding:
+            self._timeline(
+                "verification", decision="promoted_potential", finding_id=str(finding.id)
+            )
+        return finding
+
+    def record_reproduction(
+        self,
+        hypothesis: ResearchHypothesis,
+        *,
+        outcome: ReproductionOutcome,
+        evidence: list[Any] | None = None,
+    ) -> SecurityFinding | None:
+        finding = apply_reproduction(self.session, hypothesis, outcome=outcome, evidence=evidence)
+        self._timeline(
+            "reproduction", decision=outcome.value, finding_id=str(finding.id) if finding else ""
+        )
+        return finding
+
+    def context_window(self) -> dict[str, Any]:
+        return self.context.build(self.session)
+
     async def _llm_planner(self, session: ResearchSession) -> AgentDecision:
-        context = wrap_untrusted("agent-context", json.dumps(self.context_window(), default=str))
+        context = self.context.for_model(session)
         request = CompletionRequest(
-            system_prompt=(
+            system_prompt=channel(
+                "TRUSTED_INSTRUCTIONS",
                 "You are a BugForge research planner. You never decide scope, "
-                "never mark findings verified, never approve reports, and never "
-                "submit to HackerOne. Return JSON with keys kind, tool, arguments, reason."
+                "never mark findings verified, never approve reports, never grant "
+                "approvals, and never submit to HackerOne. Return JSON with keys "
+                "kind, tool, arguments, reason. Thinking is not evidence.",
+                trusted=True,
             ),
             user_message=context,
             json_mode=True,
             thinking=session.thinking_enabled,
-            tools=[{"name": name} for name in self.tools.known()],
+            tools=self.tools.llm_tools(),
         )
         response = await session.provider.complete(request)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            total = int(getattr(usage, "prompt_tokens", 0) or 0) + int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+            if total:
+                try:
+                    session.budget.consume("token", amount=total)
+                except SafetyLimitExceededError as exc:
+                    session.state = ResearchState.BUDGET_EXHAUSTED
+                    session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
+                    return AgentDecision(kind="budget_exhausted", note=str(exc))
         if response.thinking:
             self._timeline("thinking", decision="model thinking ignored as evidence")
-        if response.tool_calls:
-            first = response.tool_calls[0]
-            tool = ToolCallRequest(
-                tool=str(first.get("tool") or first.get("name") or ""),
-                arguments=dict(first.get("arguments") or first.get("args") or {}),
-                reason=str(first.get("reason") or ""),
-            )
-            return AgentDecision(kind="tool", tool=tool, thinking=response.thinking)
         try:
-            payload = json.loads(response.content or "{}")
-        except json.JSONDecodeError:
+            if response.tool_calls:
+                first = response.tool_calls[0]
+                payload = PlannerOutput.model_validate(
+                    {
+                        "kind": "tool",
+                        "tool": str(first.get("tool") or first.get("name") or ""),
+                        "arguments": dict(first.get("arguments") or first.get("args") or {}),
+                        "reason": str(first.get("reason") or ""),
+                    }
+                )
+            else:
+                raw = json.loads(response.content or "{}")
+                if not isinstance(raw, dict):
+                    raise ValueError("model output is not an object")
+                payload = PlannerOutput.model_validate(raw)
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            self._timeline("model_decision", decision=f"rejected_malformed:{exc}")
             return AgentDecision(
                 kind="analyze", note="unparseable model output", thinking=response.thinking
             )
-        kind = str(payload.get("kind") or payload.get("type") or "analyze")
-        if kind in _FORBIDDEN_AI_ACTIONS:
-            raise RestrictedActivityError(kind)
-        if payload.get("tool"):
+        if payload.kind in _FORBIDDEN_AI_ACTIONS:
+            raise RestrictedActivityError(payload.kind)
+        self._timeline("model_decision", decision=payload.kind)
+        if payload.kind == "tool" and payload.tool:
             tool = ToolCallRequest(
-                tool=str(payload.get("tool")),
-                arguments=dict(payload.get("arguments") or {}),
-                reason=str(payload.get("reason") or ""),
+                tool=payload.tool,
+                arguments=dict(payload.arguments or {}),
+                reason=payload.reason or payload.note,
             )
-            return AgentDecision(kind="tool", tool=tool, thinking=response.thinking)
-        if kind == "hypothesis":
+            return AgentDecision(
+                kind="tool", tool=tool, thinking=response.thinking, note=tool.reason
+            )
+        if payload.kind == "hypothesis":
             hyp = ResearchHypothesis(
-                title=str(payload.get("title") or "Untitled hypothesis"),
-                vulnerability_class=str(payload.get("vulnerability_class") or "unknown"),
-                target=str(payload.get("target") or session.target),
-                reason=str(payload.get("reason") or ""),
-                confidence=str(payload.get("confidence") or "low"),
+                title=str(payload.title or "Untitled hypothesis"),
+                vulnerability_class=str(payload.vulnerability_class or "unknown"),
+                target=str(payload.target or session.target),
+                reason=str(payload.reason or payload.note or ""),
+                confidence=str(payload.confidence or "low"),
+                severity=str(payload.severity or "medium"),
+                impact=str(payload.impact or ""),
             )
             return AgentDecision(kind="hypothesis", hypothesis=hyp, thinking=response.thinking)
+        if payload.kind == "update_hypothesis" and payload.hypothesis_id:
+            status = HypothesisStatus(payload.status or HypothesisStatus.OPEN.value)
+            hyp = self.update_hypothesis(
+                payload.hypothesis_id,
+                status=status,
+                evidence_ids=tuple(payload.evidence_ids),
+            )
+            return AgentDecision(
+                kind="update_hypothesis", hypothesis=hyp, thinking=response.thinking
+            )
+        if payload.kind == "plan":
+            steps = tuple(
+                ResearchPlanStep(
+                    order=int(item.get("order") or index),
+                    action=str(item.get("action") or ""),
+                    tool=item.get("tool"),
+                    target=str(item.get("target") or ""),
+                    note=str(item.get("note") or ""),
+                )
+                for index, item in enumerate(payload.plan_steps or [])
+            )
+            return AgentDecision(
+                kind="plan", plan=ResearchPlan(steps=steps), thinking=response.thinking
+            )
         return AgentDecision(
-            kind=kind, note=str(payload.get("reason") or ""), thinking=response.thinking
+            kind=payload.kind, note=payload.reason or payload.note, thinking=response.thinking
+        )
+
+    def _record_hypothesis(self, hypothesis: ResearchHypothesis, *, update: bool = False) -> None:
+        if hypothesis.status is HypothesisStatus.VERIFIED:
+            raise RestrictedActivityError("verify_finding")
+        if not update:
+            fingerprint = finding_fingerprint(
+                vulnerability_class=hypothesis.vulnerability_class,
+                target=hypothesis.target,
+                endpoint=hypothesis.target,
+            )
+            for existing in self.session.hypotheses:
+                other = finding_fingerprint(
+                    vulnerability_class=existing.vulnerability_class,
+                    target=existing.target,
+                    endpoint=existing.target,
+                )
+                if other == fingerprint:
+                    existing.reason = hypothesis.reason or existing.reason
+                    existing.confidence = hypothesis.confidence
+                    self._timeline("hypothesis_update", decision=f"dedup:{existing.id}")
+                    self.session.state = ResearchState.HYPOTHESIS_CREATED
+                    return
+            node = self.session.graph.add(
+                kind=EvidenceGraphKind.HYPOTHESIS.value,
+                provenance="ai_hypothesis",
+                summary=hypothesis.title,
+                source="planner",
+            )
+            hypothesis.supporting_evidence_ids = hypothesis.supporting_evidence_ids
+            self.session.hypotheses.append(hypothesis)
+            self.session.graph.link(node.id, node.id, "self")
+        self.session.state = ResearchState.HYPOTHESIS_CREATED
+        self._timeline("hypothesis", decision=hypothesis.title)
+
+    def _check_duplicate(self, fingerprint: str) -> None:
+        window = timedelta(seconds=self.session.budget.identical_call_window_seconds)
+        now = datetime.now(UTC)
+        recent = [
+            item
+            for item in self.session.fingerprint_records
+            if item.fingerprint == fingerprint and now - item.at <= window
+        ]
+        successful = [item for item in recent if item.quality not in _RETRYABLE_QUALITY]
+        if len(successful) >= self.session.budget.max_identical_calls:
+            raise RestrictedActivityError("repeated_identical_tool_call")
+        # Legacy fingerprints list keeps the previous count semantics for identical successes.
+        self.session.fingerprints.append(fingerprint)
+
+    def _remember_fingerprint(self, fingerprint: str, quality: str) -> None:
+        self.session.fingerprint_records.append(
+            FingerprintRecord(fingerprint=fingerprint, at=datetime.now(UTC), quality=quality)
+        )
+
+    def _refresh_privilege(self) -> None:
+        self.session.privilege = capture_privileges(
+            self.session.engine,
+            mode=self.session.mode,
+            program_handle=self.session.program_handle,
+            disabled_tools=self.session.disabled_tools,
         )
 
     def _timeline(self, event_type: str, **fields: Any) -> None:
         self.session.timeline.append(TimelineEvent(event_type=event_type, **fields))
 
 
-def bind_engine_tools(engine: SecurityTestEngine, registry: ToolRegistry) -> ToolRegistry:
-    async def http_request(arguments: dict[str, Any]) -> dict[str, Any]:
-        exchange = await engine.http("agent_http").request(
-            str(arguments.get("method") or "GET"),
-            str(arguments["url"]),
-            headers=arguments.get("headers") or None,
-            content=arguments.get("content"),
-            active=bool(arguments.get("active", True)),
-        )
-        if hasattr(exchange, "response_status"):
-            body = wrap_untrusted(
-                "http-response", str(getattr(exchange, "response_body", "") or "")[:1000]
-            )
-            return {"status": exchange.response_status, "body": body, "url": arguments["url"]}
-        return {"state": getattr(exchange, "state", "unknown")}
+def _tool_context(session: ResearchSession) -> ToolContext:
+    return ToolContext(
+        engine=session.engine,
+        graph=session.graph,
+        project_id=session.project_id,
+        session_id=session.id,
+        mode=session.mode,
+        program_handle=session.program_handle,
+        repo_root=Path(session.repo_root or ".").resolve(),
+        exchanges=session.exchanges,
+        cancelled=session.cancelled,
+        zap_runner=session.zap_runner,
+        nuclei_runner=session.nuclei_runner,
+        zap_binary=session.zap_binary,
+        nuclei_binary=session.nuclei_binary,
+    )
 
-    async def browser_navigate(arguments: dict[str, Any]) -> dict[str, Any]:
-        decision = engine.authorize(str(arguments["url"]), tool="browser_navigate", active=True)
-        if not decision.allowed:
-            raise AuthorizationDeniedError(
-                decision.reason, target=str(arguments["url"]), tool="browser"
-            )
-        return {"navigated": arguments["url"], "authorization": "AUTHORIZED"}
 
-    async def source_inspect(arguments: dict[str, Any]) -> dict[str, Any]:
-        path = str(arguments.get("path") or "")
-        if path.startswith("/") and not path.startswith(engine.project_id):
-            # Keep inspection inside the bound project workspace conceptually.
-            pass
-        return {
-            "path": path,
-            "excerpt": untrusted_observation("source", arguments.get("query") or ""),
-        }
-
-    async def evidence_inspect(arguments: dict[str, Any]) -> dict[str, Any]:
-        return {"evidence_id": arguments.get("evidence_id"), "note": "inspection only"}
-
-    async def scan_stub(arguments: dict[str, Any]) -> dict[str, Any]:
-        target = str(arguments.get("target") or "")
-        decision = engine.authorize(target, tool="scanner", active=True)
-        if not decision.allowed:
-            raise AuthorizationDeniedError(decision.reason, target=target, tool="scanner")
-        return {
-            "target": target,
-            "ran": False,
-            "reason": "scanner bound through SafetyController envelope",
-        }
-
-    async def fuzz(arguments: dict[str, Any]) -> dict[str, Any]:
-        count = int(arguments.get("count") or 1)
-        if count > engine.safety.limits.max_payload_count:
-            raise SafetyLimitExceededError("fuzz count exceeds safety limits")
-        exchange = await engine.http("agent_fuzz").request(
-            "GET", str(arguments["url"]), active=True
-        )
-        return {"url": arguments["url"], "status": getattr(exchange, "response_status", None)}
-
-    async def reproduce(arguments: dict[str, Any]) -> dict[str, Any]:
-        plan = ReproductionPlan(
-            actions=(),
-            expected_result="controlled reproduction",
-        )
-        # Single GET reproduction through the gated client.
-        from app.security_agent.reproduction import ReproductionAction
-
-        plan.actions = (
-            ReproductionAction(
-                method=str(arguments.get("method") or "GET"), url=str(arguments["url"])
-            ),
-        )
-        done = await execute_reproduction(plan, engine)
-        return done.snapshot()
-
-    async def proxy_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
-        return {"exchange_id": arguments.get("exchange_id"), "note": "proxy evidence inspection"}
-
-    async def api_test(arguments: dict[str, Any]) -> dict[str, Any]:
-        return await http_request(arguments)
-
-    registry._executors["http_request"] = http_request
-    registry._executors["browser_navigate"] = browser_navigate
-    registry._executors["source_inspect"] = source_inspect
-    registry._executors["evidence_inspect"] = evidence_inspect
-    registry._executors["zap_scan"] = scan_stub
-    registry._executors["nuclei_scan"] = scan_stub
-    registry._executors["fuzz"] = fuzz
-    registry._executors["reproduce"] = reproduce
-    registry._executors["proxy_evidence"] = proxy_evidence
-    registry._executors["api_test"] = api_test
-    return registry
+def bind_engine_tools_for_session(
+    session: ResearchSession, registry: ToolRegistry | None = None
+) -> ToolRegistry:
+    return bind_engine_tools(_tool_context(session), registry or default_registry())

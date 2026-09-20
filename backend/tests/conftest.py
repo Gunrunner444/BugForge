@@ -31,7 +31,9 @@ from app.models.repair import PatchCandidate, RepairSession  # noqa: F401
 from app.models.reproduction import BugReproductionAttempt, BugReproductionSession  # noqa: F401
 from app.models.security_agent import (  # noqa: F401
     DBReproductionPlan,
+    DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
+    DBResearchEvidenceNode,
     DBResearchHypothesis,
     DBResearchSession,
     DBResearchTimelineEvent,

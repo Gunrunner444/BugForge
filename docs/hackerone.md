@@ -120,7 +120,9 @@ Scope sync is staged then replaced only when complete. Unchanged content
 does not increment `scope_version`. Multiple programs never share a global
 active scope; evaluation is always `evaluate(program, target)`.
 
-See [security-agent.md](security-agent.md) for Phase 6 research planning.
+See [security-agent.md](security-agent.md) for the guided research agent.
+Live agent sessions load this persisted structured scope by program handle
+and refuse creation when none exists.
 
 ## Dry-run
 
@@ -148,3 +150,18 @@ prove `POST /hackers/reports` does not occur.
 13. Reconcile remote state (`new` is not `triaged` or `resolved`).
 
 Never automatically submit during setup.
+
+## Manual live research-agent workflow (never in CI)
+
+1. Sync a program you are authorized to test.
+2. Confirm structured scopes persisted.
+3. `POST /api/v1/security-agent/sessions` with `mode=live_hackerone` and that
+   `program_handle`. Missing scope returns `LIVE_SCOPE_MISSING`.
+4. Out-of-scope target → blocked.
+5. Grant `enable_active_testing` as the operator (never the AI).
+6. Grant tool-specific approvals before ZAP/Nuclei/fuzz/PoC.
+7. Disable a tool → blocked. Exhaust budget → blocked.
+8. Change program scope and restore the session → privileges downgrade.
+9. Do not run real scans unattended. Conservative limits and human
+   monitoring are required.
+
