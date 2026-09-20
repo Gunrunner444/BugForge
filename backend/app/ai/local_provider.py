@@ -7,9 +7,12 @@ backend is intentionally not implemented in this phase.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from app.ai.health import AIHealthStatus, probe_openai_compatible
 from app.ai.openai_provider import OpenAIProvider
 from app.ai.provider import (
+    AICapabilities,
     DebuggingRequest,
     LLMProvider,
     ProviderResponse,
@@ -19,7 +22,6 @@ from app.ai.provider import (
 from app.plugins.errors import AdapterNotImplementedError
 
 _OLLAMA_DEFAULT_BASE = "http://localhost:11434/v1"
-_OPENAI_COMPAT_CHAT = "https://api.openai.com/v1/chat/completions"
 
 
 class LocalAIProvider(LLMProvider):
@@ -69,7 +71,7 @@ class LocalAIProvider(LLMProvider):
         self._provider_name = provider_name
         self._base_url = resolved_base
         self._api_key = api_key
-        self._configured = True
+        self._max_tokens = max_tokens
 
     @classmethod
     def from_settings(cls, settings: object) -> LocalAIProvider:
@@ -103,8 +105,41 @@ class LocalAIProvider(LLMProvider):
     def model_name(self) -> str:
         return self._inner.model_name
 
+    def capabilities(self) -> AICapabilities:
+        return AICapabilities(
+            chat=True,
+            structured_output=True,
+            tool_calls=False,
+            thinking=False,
+            thinking_can_disable=True,
+            max_output_tokens=self._max_tokens,
+            supports_local_models=True,
+            notes=(
+                "OpenAI-compatible local HTTP. "
+                "MLX/Qwen thinking and tool-calling backends are reserved.",
+            ),
+        )
+
+    def _endpoint_configured(self) -> bool:
+        return _http_url_configured(self._base_url)
+
     async def is_available(self) -> bool:
-        return True
+        """True only when the configured local endpoint is reachable."""
+        if not self._endpoint_configured():
+            return False
+        status = await self._probe()
+        return status.reachable
+
+    async def _probe(self) -> AIHealthStatus:
+        key = self._api_key or ("ollama" if self._provider_name == "ollama" else "")
+        return await probe_openai_compatible(
+            provider=self.provider_name,
+            model=self.model_name,
+            base_url=self._base_url,
+            api_key=key,
+            is_local=True,
+            configured=self._endpoint_configured(),
+        )
 
     async def analyze(self, request: DebuggingRequest) -> ProviderResponse:
         response = await self._inner.analyze(request)
@@ -127,13 +162,22 @@ class LocalAIProvider(LLMProvider):
         return await self.generate_structured(system_prompt, user_message)
 
     async def health(self) -> AIHealthStatus:
-        base = self._base_url or _OLLAMA_DEFAULT_BASE
-        key = self._api_key or ("ollama" if self._provider_name == "ollama" else "")
-        return await probe_openai_compatible(
-            provider=self.provider_name,
-            model=self.model_name,
-            base_url=base,
-            api_key=key,
-            is_local=True,
-            configured=True,
-        )
+        if not self._endpoint_configured():
+            return AIHealthStatus(
+                provider=self.provider_name,
+                model=self.model_name,
+                is_local=True,
+                reachable=False,
+                configured=False,
+                model_available=None,
+                error="invalid_or_missing_base_url",
+            )
+        return await self._probe()
+
+
+def _http_url_configured(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)

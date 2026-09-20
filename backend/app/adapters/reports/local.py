@@ -6,8 +6,9 @@ from collections.abc import Sequence
 
 from app.adapters.reports.base import ReportProvider
 from app.domain.evidence import EvidenceBundle
-from app.domain.findings import FindingStatus, SecurityFinding
+from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
 from app.domain.reports import SecurityReport
+from app.plugins.errors import AdapterNotImplementedError
 
 
 class LocalReportProvider(ReportProvider):
@@ -24,14 +25,18 @@ class LocalReportProvider(ReportProvider):
         lines = [
             "# BugForge Security Report",
             "",
+            "This is a **local rendering**. It has not been submitted to any remote",
+            "program (HackerOne or otherwise).",
+            "",
             "Hypotheses are not verified findings. Only items marked verified",
-            "have independent supporting evidence.",
+            "have independent observational or executable evidence.",
             "",
         ]
         if not findings:
             lines.append("No findings.")
         for finding in findings:
             lines.append(f"## [{finding.status.value}] {finding.title}")
+            lines.append(f"- Human review: {finding.human_review_state.value}")
             if finding.vulnerability_class:
                 lines.append(f"- Class: {finding.vulnerability_class}")
             if finding.target:
@@ -43,13 +48,27 @@ class LocalReportProvider(ReportProvider):
             if finding.evidence:
                 lines.append(f"- Evidence items: {len(finding.evidence)}")
                 for item in finding.evidence.items:
-                    lines.append(f"  - [{item.kind.value}] {item.summary}")
+                    provenance = item.provenance.value if item.provenance else "unknown"
+                    lines.append(
+                        f"  - [{item.kind.value} / {provenance}] {item.summary}"
+                    )
             lines.append("")
 
         extra = evidence or EvidenceBundle()
+        potential = sum(1 for f in findings if f.status is FindingStatus.POTENTIAL)
+        verified = sum(1 for f in findings if f.status is FindingStatus.VERIFIED)
+        rejected = sum(1 for f in findings if f.status is FindingStatus.REJECTED)
+        unreviewed = sum(
+            1 for f in findings if f.human_review_state is HumanReviewState.UNREVIEWED
+        )
         metadata = {
+            "destination": "local",
+            "submitted_remotely": "false",
             "finding_count": str(len(findings)),
-            "verified_count": str(sum(1 for f in findings if f.status is FindingStatus.VERIFIED)),
+            "potential_count": str(potential),
+            "verified_count": str(verified),
+            "rejected_count": str(rejected),
+            "unreviewed_count": str(unreviewed),
             "standalone_evidence_count": str(len(extra)),
         }
         return SecurityReport(
@@ -58,8 +77,13 @@ class LocalReportProvider(ReportProvider):
             generated_by=self.provider_id,
             body="\n".join(lines).strip() + "\n",
             metadata=metadata,
+            destination="local",
+            submitted_remotely=False,
         )
 
     def submit(self, report: SecurityReport) -> str:
-        """Local submission is a no-op upload: return the rendered body."""
-        return report.body
+        raise AdapterNotImplementedError(
+            "LocalReportProvider does not submit reports remotely. "
+            "Use render() for local output. HackerOne submission is reserved "
+            "for a later phase."
+        )

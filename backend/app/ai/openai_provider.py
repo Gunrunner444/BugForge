@@ -21,6 +21,7 @@ import httpx
 
 from app.ai.health import AIHealthStatus, probe_openai_compatible
 from app.ai.provider import (
+    AICapabilities,
     AIUsage,
     DebuggingRequest,
     HypothesisResult,
@@ -70,6 +71,16 @@ class OpenAIProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return bool(self._api_key)
+
+    def capabilities(self) -> AICapabilities:
+        return AICapabilities(
+            chat=True,
+            structured_output=True,
+            tool_calls=False,
+            thinking=False,
+            thinking_can_disable=True,
+            max_output_tokens=self._max_tokens,
+        )
 
     async def health(self) -> AIHealthStatus:
         return await probe_openai_compatible(

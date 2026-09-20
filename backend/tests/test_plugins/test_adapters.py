@@ -390,10 +390,16 @@ def test_local_report_provider_renders_potential_and_verified() -> None:
     ]
     report = LocalReportProvider().render(findings)
     assert report.generated_by == "local"
+    assert report.destination == "local"
+    assert report.submitted_remotely is False
     assert "[potential]" in report.body
     assert "[verified]" in report.body
     assert "Guess" in report.body
-    assert LocalReportProvider().submit(report) == report.body
+    assert "local rendering" in report.body.lower()
+    assert "Human review" in report.body
+    assert report.metadata["submitted_remotely"] == "false"
+    with pytest.raises(AdapterNotImplementedError, match="does not submit"):
+        LocalReportProvider().submit(report)
 
 
 def test_manual_scope_denies_by_default() -> None:
@@ -472,7 +478,7 @@ def test_security_tool_browser_proxy_fuzzer_can_register() -> None:
         def is_available(self) -> bool:
             return True
 
-        def fetch_exchanges(self, *, scope: ScopeConstraint | None = None):
+        def _fetch_captured_exchanges(self):
             return [
                 HttpExchange(method="GET", url="https://example.test/"),
             ]
@@ -492,8 +498,11 @@ def test_security_tool_browser_proxy_fuzzer_can_register() -> None:
     catalog.fuzzers.register("fake-fuzzer", FakeFuzzer)
 
     assert catalog.security_tools.create("fake-scanner").is_available() is True
-    assert catalog.proxies.create("fake-proxy").fetch_exchanges()[0].method == "GET"
+    in_scope = ScopeConstraint(allowed_hosts=("example.test",))
+    assert catalog.proxies.create("fake-proxy").fetch_exchanges(scope=in_scope)[0].method == "GET"
     with pytest.raises(UnsupportedCapabilityError):
         catalog.fuzzers.create("fake-fuzzer").fuzz(
-            target=FuzzingTarget.PARAMETER, scope=ScopeConstraint()
+            target=FuzzingTarget.PARAMETER,
+            scope=ScopeConstraint(allowed_hosts=("example.test",), allow_active_testing=True),
+            target_url="https://example.test/",
         )

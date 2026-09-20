@@ -36,6 +36,10 @@ class ScopeConstraint:
             return True
         return method.strip().upper() in {m.strip().upper() for m in self.allowed_methods}
 
+    def permits_active_testing(self) -> bool:
+        """Whether active testing is opted in. Independent of host allow-lists."""
+        return self.allow_active_testing
+
 
 def _host_matches(host: str, patterns: tuple[str, ...]) -> bool:
     for pattern in patterns:

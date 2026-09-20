@@ -21,10 +21,14 @@ class AdapterNotFoundError(AdapterError):
 class DuplicateAdapterError(AdapterError):
     """Raised when registering an adapter id that already exists."""
 
-    def __init__(self, kind: str, adapter_id: str) -> None:
+    def __init__(self, kind: str, adapter_id: str, *, detail: str | None = None) -> None:
         self.kind = kind
         self.adapter_id = adapter_id
-        super().__init__(f"{kind} {adapter_id!r} is already registered.")
+        self.detail = detail
+        message = f"{kind} {adapter_id!r} is already registered."
+        if detail:
+            message = f"{message} {detail}"
+        super().__init__(message)
 
 
 class AdapterConflictError(AdapterError):
@@ -45,3 +49,28 @@ class UnsupportedCapabilityError(AdapterError):
 
 class AdapterNotImplementedError(AdapterError, NotImplementedError):
     """Raised for a reserved backend that is intentionally not implemented yet."""
+
+
+class OutOfScopeError(AdapterError):
+    """Raised when an operation targets a host that is not in authorized scope."""
+
+    def __init__(self, target: str, *, detail: str | None = None) -> None:
+        self.target = target
+        message = f"Target {target!r} is not in scope."
+        if detail:
+            message = f"{message} {detail}"
+        super().__init__(message)
+
+
+class ActiveTestingNotPermittedError(AdapterError):
+    """Raised when a target is in scope but active testing is not authorized."""
+
+    def __init__(self, target: str, *, detail: str | None = None) -> None:
+        self.target = target
+        message = (
+            f"Active testing is not permitted for {target!r}. "
+            "Being in scope does not authorize active testing."
+        )
+        if detail:
+            message = f"{message} {detail}"
+        super().__init__(message)

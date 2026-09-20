@@ -38,22 +38,17 @@ class AdapterRegistry[T]:
         canonical = _normalize(adapter_id)
         if not canonical:
             raise ValueError(f"{self.kind} id must be a non-empty string")
-        if canonical in self._factories and not replace:
-            raise DuplicateAdapterError(self.kind, canonical)
-        self._remove_aliases_for(canonical)
+
+        alias_keys = tuple(key for alias in aliases if (key := _normalize(alias)))
+        self._validate_identity(canonical, alias_keys, replace=replace)
+
+        if replace:
+            self._remove_aliases_for(canonical)
+
         self._factories[canonical] = factory
         self._descriptions[canonical] = description
-        for alias in aliases:
-            alias_key = _normalize(alias)
-            if not alias_key:
-                continue
-            existing = self._aliases.get(alias_key)
-            if existing is not None and existing != canonical and alias_key in self._factories:
-                raise DuplicateAdapterError(self.kind, alias_key)
-            if alias_key in self._factories and alias_key != canonical:
-                raise DuplicateAdapterError(self.kind, alias_key)
+        for alias_key in alias_keys:
             self._aliases[alias_key] = canonical
-        # An id is always an alias of itself so lookup is uniform.
         self._aliases[canonical] = canonical
 
     def unregister(self, adapter_id: str) -> None:
@@ -83,16 +78,47 @@ class AdapterRegistry[T]:
         canonical = self.resolve_id(adapter_id)
         return self._factories[canonical](*args, **kwargs)
 
-    def _canonical_or_none(self, adapter_id: str) -> str | None:
+    def _validate_identity(
+        self, canonical: str, alias_keys: tuple[str, ...], *, replace: bool
+    ) -> None:
+        existing_owner = self._owner_of(canonical)
+        if existing_owner is not None and existing_owner != canonical:
+            raise DuplicateAdapterError(
+                self.kind,
+                canonical,
+                detail=f"{canonical!r} is already an alias of {existing_owner!r}",
+            )
+        if canonical in self._factories and not replace:
+            raise DuplicateAdapterError(self.kind, canonical)
+
+        for alias_key in alias_keys:
+            if alias_key == canonical:
+                continue
+            if alias_key in self._factories:
+                raise DuplicateAdapterError(
+                    self.kind,
+                    alias_key,
+                    detail=f"alias {alias_key!r} conflicts with canonical id {alias_key!r}",
+                )
+            owner = self._aliases.get(alias_key)
+            if owner is not None and owner != canonical:
+                raise DuplicateAdapterError(
+                    self.kind,
+                    alias_key,
+                    detail=f"alias {alias_key!r} is already registered for {owner!r}",
+                )
+
+    def _owner_of(self, adapter_id: str) -> str | None:
         key = _normalize(adapter_id)
-        if not key:
-            return None
         if key in self._factories:
             return key
         mapped = self._aliases.get(key)
         if mapped is not None and mapped in self._factories:
             return mapped
         return None
+
+    def _canonical_or_none(self, adapter_id: str) -> str | None:
+        return self._owner_of(adapter_id)
 
     def _remove_aliases_for(self, canonical: str) -> None:
         stale = [alias for alias, target in self._aliases.items() if target == canonical]

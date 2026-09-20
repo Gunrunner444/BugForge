@@ -5,7 +5,10 @@ from app.ai.mock_provider import MockLLMProvider
 from app.ai.openai_provider import OpenAIProvider
 from app.ai.prompt_builder import PromptBuilder
 from app.ai.provider import (
+    AICapabilities,
     AIUsage,
+    CompletionRequest,
+    CompletionResponse,
     DebuggingRequest,
     HypothesisResult,
     LLMProvider,
@@ -29,8 +32,11 @@ def get_provider() -> LLMProvider:
 
 
 __all__ = [
+    "AICapabilities",
     "AIProvider",
     "LLMProvider",
+    "CompletionRequest",
+    "CompletionResponse",
     "DebuggingRequest",
     "ProviderResponse",
     "HypothesisResult",

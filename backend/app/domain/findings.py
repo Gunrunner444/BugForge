@@ -5,17 +5,23 @@ representation of code-quality/static issues. This model is the foundation
 for later security-verification work and must not import vendor SDKs.
 
 Invariant: an AI hypothesis never becomes a verified finding by itself.
+Verification is a state transition that requires independent observational
+or executable evidence. Status cannot be mutated in place.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.domain.evidence import Evidence, EvidenceBundle
+from app.domain.evidence import (
+    VERIFICATION_PROVENANCE,
+    Evidence,
+    EvidenceBundle,
+)
 
 
 class FindingStatus(StrEnum):
@@ -40,13 +46,13 @@ class SourceLocation:
     function: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class SecurityFinding:
     """A security (or suspected security) finding with explicit verification state.
 
     Use the constructors :meth:`potential`, :meth:`verified`, and
-    :meth:`rejected` rather than setting ``status`` ad hoc. ``verified``
-    requires a non-empty evidence bundle.
+    :meth:`rejected`, or the :meth:`verify` transition. Direct status
+    assignment is impossible because the dataclass is frozen.
     """
 
     title: str
@@ -72,15 +78,33 @@ class SecurityFinding:
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("Finding title must be non-empty")
-        if self.status is FindingStatus.VERIFIED and not self.evidence:
-            raise ValueError(
-                "A verified finding requires evidence. "
-                "AI hypotheses must remain potential until independently confirmed."
-            )
+        if self.status is FindingStatus.VERIFIED:
+            _require_verifying_evidence(self.evidence)
 
     @property
     def is_verified(self) -> bool:
         return self.status is FindingStatus.VERIFIED
+
+    def verify(self, evidence: EvidenceBundle | Sequence[Evidence] | None = None) -> SecurityFinding:
+        """Transition a potential finding to verified using independent evidence.
+
+        Additional evidence is merged with any evidence already attached.
+        Rejected findings cannot be verified.
+        """
+        if self.status is FindingStatus.REJECTED:
+            raise ValueError("Rejected findings cannot be verified")
+        merged = self.evidence.extend(_as_bundle(evidence).items) if evidence is not None else self.evidence
+        _require_verifying_evidence(merged)
+        return replace(self, status=FindingStatus.VERIFIED, evidence=merged)
+
+    def reject(self, *, evidence: EvidenceBundle | Sequence[Evidence] | None = None) -> SecurityFinding:
+        extra = _as_bundle(evidence)
+        merged = self.evidence.extend(extra.items) if extra else self.evidence
+        return replace(self, status=FindingStatus.REJECTED, evidence=merged)
+
+    def with_review(self, state: HumanReviewState) -> SecurityFinding:
+        """Record human review without changing verification status."""
+        return replace(self, human_review_state=state)
 
     @classmethod
     def potential(
@@ -128,8 +152,7 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
-        if not bundle:
-            raise ValueError("Verified findings require at least one evidence item")
+        _require_verifying_evidence(bundle)
         return cls(title=title, status=FindingStatus.VERIFIED, evidence=bundle, **kwargs)
 
     @classmethod
@@ -154,3 +177,18 @@ def _as_bundle(evidence: EvidenceBundle | Sequence[Evidence] | None) -> Evidence
     if isinstance(evidence, EvidenceBundle):
         return evidence
     return EvidenceBundle.from_items(evidence)
+
+
+def _require_verifying_evidence(bundle: EvidenceBundle) -> None:
+    allowed = ", ".join(sorted(item.value for item in VERIFICATION_PROVENANCE))
+    if not bundle:
+        raise ValueError(
+            "A verified finding requires evidence. "
+            "AI hypotheses must remain potential until independently confirmed."
+        )
+    if not bundle.verifying_items():
+        raise ValueError(
+            "Verification requires independent observational or executable evidence "
+            f"(provenance: {allowed}). "
+            "AI-generated hypotheses, static hints, and source excerpts cannot verify a finding."
+        )

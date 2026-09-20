@@ -11,6 +11,7 @@ import time
 
 from app.ai.health import AIHealthStatus, default_capabilities
 from app.ai.provider import (
+    AICapabilities,
     AIUsage,
     DebuggingRequest,
     HypothesisResult,
@@ -40,6 +41,17 @@ class MockLLMProvider(LLMProvider):
 
     async def is_available(self) -> bool:
         return True
+
+    def capabilities(self) -> AICapabilities:
+        return AICapabilities(
+            chat=True,
+            structured_output=True,
+            tool_calls=False,
+            thinking=False,
+            thinking_can_disable=True,
+            supports_local_models=True,
+            notes=("Deterministic mock; no network calls.",),
+        )
 
     async def health(self) -> AIHealthStatus:
         return AIHealthStatus(

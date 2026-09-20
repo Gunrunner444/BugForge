@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.plugins.errors import (
+    ActiveTestingNotPermittedError,
     AdapterConflictError,
     AdapterError,
     AdapterNotFoundError,
     AdapterNotImplementedError,
     DuplicateAdapterError,
+    OutOfScopeError,
     UnsupportedCapabilityError,
 )
 from app.plugins.registry import AdapterRegistry
@@ -16,12 +18,14 @@ if TYPE_CHECKING:
     from app.plugins.catalog import PluginCatalog
 
 __all__ = [
+    "ActiveTestingNotPermittedError",
     "AdapterConflictError",
     "AdapterError",
     "AdapterNotFoundError",
     "AdapterNotImplementedError",
     "AdapterRegistry",
     "DuplicateAdapterError",
+    "OutOfScopeError",
     "PluginCatalog",
     "UnsupportedCapabilityError",
     "get_plugin_catalog",

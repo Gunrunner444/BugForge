@@ -30,6 +30,9 @@ def _legacy_extension_map() -> dict[str, str]:
     return mapping
 
 
-# Compatibility snapshot of adapter extensions. The registry is authoritative.
-EXTENSION_MAP: dict[str, str] = {}
-EXTENSION_MAP.update(_legacy_extension_map())
+def __getattr__(name: str) -> object:
+    # Compatibility snapshot. Built lazily so importing this module does not
+    # construct the plugin catalog (which would circular-import PythonAdapter).
+    if name == "EXTENSION_MAP":
+        return _legacy_extension_map()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -14,6 +14,7 @@ from app.domain.language import LanguageCapability
 from app.plugins.errors import AdapterNotFoundError, UnsupportedCapabilityError
 
 if TYPE_CHECKING:
+    from app.adapters.languages.base import LanguageAdapter
     from app.adapters.languages.registry import LanguageRegistry
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ class StaticAnalysisEngine:
     """Runs registered language analyzers against source files in a repository."""
 
     def __init__(self, rules: list[AnalyzerRule] | None = None) -> None:
-        # Optional override keeps the previous "custom Python rules" API working.
+        # Optional override is applied through LanguageAdapter.with_static_rules().
         self._rule_override: list[AnalyzerRule] | None = rules
 
     def analyze_repository(self, repo_path: Path, file_paths: list[Path]) -> list[Finding]:
@@ -43,7 +44,7 @@ class StaticAnalysisEngine:
             if adapter.language_id not in enabled_ids:
                 continue
 
-            file_findings = self._analyze_file(file_path, adapter.language_id)
+            file_findings = self._analyze_file(file_path, adapter)
             analyzed_files += 1
             for finding in file_findings:
                 try:
@@ -86,7 +87,7 @@ class StaticAnalysisEngine:
             enabled.add(adapter.language_id)
         return enabled
 
-    def _analyze_file(self, file_path: Path, language_id: str) -> list[Finding]:
+    def _analyze_file(self, file_path: Path, adapter: LanguageAdapter) -> list[Finding]:
         try:
             size = file_path.stat().st_size
         except OSError:
@@ -102,10 +103,12 @@ class StaticAnalysisEngine:
             logger.warning("Cannot read %s for static analysis: %s", file_path, exc)
             return []
 
-        from app.adapters.languages.python import PythonAdapter
-        from app.plugins import get_plugin_catalog
-
-        adapter = get_plugin_catalog().languages.get(language_id)
-        if self._rule_override is not None and isinstance(adapter, PythonAdapter):
-            adapter = PythonAdapter(rules=self._rule_override)
+        if self._rule_override is not None:
+            try:
+                adapter = adapter.with_static_rules(self._rule_override)
+            except UnsupportedCapabilityError:
+                # Rule overrides are adapter-specific. Languages that cannot
+                # apply them keep their built-in rules instead of special-casing
+                # Python in this engine.
+                pass
         return adapter.analyze_file(file_path, source)

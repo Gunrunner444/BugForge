@@ -3,54 +3,26 @@ from __future__ import annotations
 import ast
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+from app.domain.source import LanguageParseResult, ParsedEntity, ParsedImport, ParsedParameter
 
 logger = logging.getLogger(__name__)
 
 _STDLIB_MODULES: frozenset[str] = frozenset(sys.stdlib_module_names)
 
-
-@dataclass
-class ParameterInfo:
-    name: str
-    annotation: str | None
-    default: str | None
-    kind: str  # positional | keyword | var_positional | var_keyword
+# Backwards-compatible aliases for the language-neutral parse contract.
+ParameterInfo = ParsedParameter
+EntityInfo = ParsedEntity
+ImportInfo = ParsedImport
 
 
 @dataclass
-class EntityInfo:
-    entity_type: str  # function | async_function | class | method | async_method
-    name: str
-    qualified_name: str
-    start_line: int
-    end_line: int
-    docstring: str | None
-    decorators: list[str]
-    parameters: list[ParameterInfo]
-    return_annotation: str | None
-    parent: str | None  # parent class name for methods
+class ParseResult(LanguageParseResult):
+    """Python AST parse result. Satisfies :class:`LanguageParseResult`."""
 
-
-@dataclass
-class ImportInfo:
-    module: str
-    name: str | None  # None for bare `import module`
-    alias: str | None
-    line_number: int
-    is_from_import: bool
-    import_type: str = field(default="unknown")  # stdlib | third_party | relative | local
-
-
-@dataclass
-class ParseResult:
-    file_path: str
     language: str = "python"
-    imports: list[ImportInfo] = field(default_factory=list)
-    entities: list[EntityInfo] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    line_count: int = 0
 
 
 class PythonParser:

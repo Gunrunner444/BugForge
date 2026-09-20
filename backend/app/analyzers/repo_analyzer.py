@@ -6,9 +6,9 @@ from pathlib import Path
 
 from app.adapters.languages.registry import LanguageRegistry
 from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
-from app.analyzers.python.parser import ParseResult
 from app.core.config import settings
 from app.domain.language import LanguageCapability, LanguageStats
+from app.domain.source import LanguageParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class FileAnalysisResult:
     size_bytes: int
     line_count: int
     has_parse_errors: bool = False
-    parse_result: ParseResult | None = None
+    parse_result: LanguageParseResult | None = None
 
 
 @dataclass

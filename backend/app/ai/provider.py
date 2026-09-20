@@ -8,8 +8,9 @@ No AI vendor SDK is imported at the module level; implementations are lazy.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.ai.health import AIHealthStatus
@@ -126,6 +127,58 @@ class StructuredTextResponse:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class AICapabilities:
+    """Provider-specific features. Absence of a capability is not an error.
+
+    Future local models (e.g. Qwen via MLX) may advertise thinking, tool
+    calls, or different context windows. Callers must consult this object
+    instead of assuming every backend matches OpenAI.
+    """
+
+    chat: bool = True
+    structured_output: bool = False
+    tool_calls: bool = False
+    thinking: bool = False
+    thinking_can_disable: bool = True
+    max_context_tokens: int | None = None
+    max_output_tokens: int | None = None
+    supports_local_models: bool = False
+    notes: tuple[str, ...] = ()
+
+
+@dataclass
+class CompletionRequest:
+    """Provider-neutral completion request.
+
+    Debugging-specific methods remain on :class:`LLMProvider`. This type is
+    the foundation for later security analysis, evidence review, and reports.
+    Tool calling and thinking are reserved; providers may ignore those fields.
+    """
+
+    system_prompt: str = ""
+    user_message: str = ""
+    json_mode: bool = False
+    thinking: bool | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    tools: Sequence[Mapping[str, Any]] | None = None
+
+
+@dataclass
+class CompletionResponse:
+    """Provider-neutral completion result."""
+
+    content: str
+    provider: str
+    model: str
+    usage: AIUsage
+    duration_seconds: float
+    thinking: str | None = None
+    tool_calls: tuple[Mapping[str, Any], ...] = ()
+    error: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Provider interface
 # ---------------------------------------------------------------------------
@@ -187,6 +240,27 @@ class LLMProvider(ABC):
         Returns a StructuredTextResponse whose content is a JSON patch plan.
         """
         ...
+
+    def capabilities(self) -> AICapabilities:
+        """Advertise what this backend actually supports."""
+        return AICapabilities(chat=True, thinking_can_disable=True)
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        """Generic completion used by future non-debugging workflows.
+
+        Default implementation reuses :meth:`generate_structured` so existing
+        OpenAI, Anthropic, and mock providers keep working without a rewrite.
+        Tool calls are not executed in this phase.
+        """
+        response = await self.generate_structured(request.system_prompt, request.user_message)
+        return CompletionResponse(
+            content=response.content,
+            provider=response.provider,
+            model=response.model,
+            usage=response.usage,
+            duration_seconds=response.duration_seconds,
+            error=response.error,
+        )
 
     async def health(self) -> AIHealthStatus:
         """Return a health report. Implementations must never include API keys."""

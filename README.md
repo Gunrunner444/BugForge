@@ -33,7 +33,26 @@ BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
 instead of hard-coded conditionals. Python analysis and the existing AI
 providers run through that catalog today; other languages are detected but not
-yet analyzed. Details: [docs/architecture.md](docs/architecture.md).
+yet analyzed.
+
+Phase 1 contracts that later security work will rely on:
+
+- **Language-neutral parse results** (`LanguageParseResult`) so core analysis
+  does not depend on the Python parser's types.
+- **Adapter registration** that rejects id/alias conflicts and replaces
+  language adapters atomically (including stale file extensions).
+- **Generic AI** `complete()` / `capabilities()` alongside existing debugging
+  methods. Local providers report availability from a real endpoint probe.
+- **Evidence provenance** and a frozen `SecurityFinding` so an AI hypothesis
+  cannot become a verified finding by itself.
+- **Scope separation**: `is_in_scope()` does not mean active testing is
+  allowed. Browser/proxy/fuzzer hooks require authorization wrappers.
+- **Local reports** distinguish potential / verified / human-review state and
+  are not remote submissions.
+
+Details: [docs/architecture.md](docs/architecture.md). Live scanning, browser
+exploitation, fuzzing against external targets, MLX/Qwen, and HackerOne
+automation remain **Phase 2** and are not implemented.
 
 ```
 Repository
@@ -62,7 +81,8 @@ Repository
        └─ Source file context
 
   └─ AI Debugging (Phase 4)
-       ├─ LLMProvider abstraction (Mock / OpenAI / Anthropic)
+       ├─ LLMProvider abstraction (Mock / OpenAI / Anthropic / local)
+       ├─ Generic complete() / capabilities() (security agents not implemented)
        ├─ ContextBuilder (minimum-context selection)
        ├─ PromptBuilder (prompt-injection defense)
        ├─ DebuggingSession persistence
@@ -181,7 +201,7 @@ The **mock provider** is always safe for development — no API key required.
 
 ```bash
 cd backend
-pytest tests/ -v          # 130 tests, in-memory SQLite (no Postgres needed)
+pytest tests/ -v          # in-memory SQLite (no Postgres needed)
 pytest tests/ --cov=app   # With coverage
 ```
 
@@ -233,9 +253,15 @@ Full docs: `http://localhost:8000/docs`
 
 ## Roadmap
 
-- **Phase 6 — Bug Reproduction Engine**: Convert AI hypotheses into executable reproductions with multi-attempt verification
-- **Phase 7 — Automated Repair**: Generate and verify patches in isolation
-- **Phase 8 — GitHub Integration**: Analyze issues, open PRs with verified patches
+Completed through v1.1.0 (debugging platform + autonomous discovery) and
+Phase 1 (adapter foundation). Deliberately **not** in Phase 1:
+
+- Qwen/MLX local backend
+- Burp / ZAP / Nuclei adapters
+- Live browser testing or exploitation
+- Live fuzzing against external targets
+- HackerOne scope sync and report submission
+- Security agents and tool calling
 
 ---
 

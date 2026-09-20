@@ -25,7 +25,7 @@ class ReportProvider(ABC):
     ) -> SecurityReport: ...
 
     def submit(self, report: SecurityReport) -> str:
-        """Optional remote submission. Local providers must not upload."""
+        """Remote submission. Local providers must raise, never upload."""
         raise AdapterNotImplementedError(
             f"{self.provider_id} remote submission is reserved for a later phase."
         )

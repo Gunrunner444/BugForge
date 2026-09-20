@@ -11,8 +11,8 @@ from app.analysis.base import AnalyzerRule
 from app.analysis.finding import Finding
 from app.analysis.python_analyzer import ALL_PYTHON_RULES
 from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
-from app.analyzers.python.parser import ParseResult
 from app.domain.language import LanguageCapability
+from app.domain.source import LanguageParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class PythonAdapter(LanguageAdapter):
     def prepare_repository(self, repo_root: Path) -> frozenset[str]:
         return PythonLanguageAnalyzer.discover_local_packages(repo_root)
 
-    def parse_file(self, file_path: Path, *, context: object | None = None) -> ParseResult:
+    def parse_file(self, file_path: Path, *, context: object | None = None) -> LanguageParseResult:
         local_packages: frozenset[str] | None = None
         if isinstance(context, frozenset):
             local_packages = context
@@ -69,3 +69,14 @@ class PythonAdapter(LanguageAdapter):
 
     def static_rules(self) -> Sequence[AnalyzerRule]:
         return tuple(self._rules)
+
+    def with_static_rules(self, rules: Sequence[object]) -> PythonAdapter:
+        typed: list[AnalyzerRule] = []
+        for rule in rules:
+            if not isinstance(rule, AnalyzerRule):
+                raise TypeError(
+                    "Python static-analysis rule overrides must be AnalyzerRule "
+                    f"instances, got {type(rule)!r}"
+                )
+            typed.append(rule)
+        return PythonAdapter(rules=typed)

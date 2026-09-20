@@ -31,7 +31,7 @@ Adapters translate those systems into domain objects (`Evidence`,
 Lookups go through `PluginCatalog` instead of `if language == ...` /
 `if provider == ...` branches.
 
-## Plugin catalog
+## Plugin catalog and adapter registration
 
 ```python
 from app.plugins import get_plugin_catalog
@@ -55,7 +55,43 @@ Registries:
 | `scope_providers` | Authorized-testing scope |
 | `evidence_collectors` | Convert existing artifacts into `Evidence` |
 
-Unknown ids raise `AdapterNotFoundError` and list known ids.
+`AdapterRegistry` identifies adapters by a normalized (strip + lowercase)
+canonical id plus optional aliases. Registration **rejects**:
+
+- duplicate canonical ids
+- a canonical id that is already an alias of another adapter
+- an alias that matches another adapter's canonical id
+- an alias that is already claimed by another adapter
+
+Aliases are never overwritten silently. Use `replace=True` to swap an
+adapter you own. `unregister` drops the factory and all of its aliases.
+Unknown lookups raise `AdapterNotFoundError` and list known ids.
+
+`LanguageRegistry.register_adapter(..., replace=True)` validates the new
+adapter first, removes the previous adapter's extension mappings, then
+installs the new ones. If installation fails, the previous mappings are
+restored. An extension belonging to the old adapter never remains after a
+successful replacement.
+
+## Language-neutral parse contract
+
+`LanguageAdapter.parse_file()` returns `app.domain.source.LanguageParseResult`,
+a language-neutral contract with:
+
+- file path and language id
+- line count and parse errors
+- generic imports (`ParsedImport`) and entities (`ParsedEntity`)
+
+`RepoAnalyzer.FileAnalysisResult.parse_result` uses the same type. Core
+orchestration must not import `app.analyzers.python.parser.ParseResult`.
+
+Python keeps a richer `ParseResult` subclass for AST-specific work. That
+subclass satisfies the neutral contract, so `PythonAdapter.parse_file()`
+can return it.
+
+Static-analysis rule overrides go through `LanguageAdapter.with_static_rules()`.
+`StaticAnalysisEngine` does not import `PythonAdapter` or branch on language
+name. Languages that cannot apply a given override keep their built-in rules.
 
 ## Language adapters
 
@@ -110,10 +146,13 @@ class RubyAnalyzerAdapter(LanguageAdapter):
         })
 
     def parse_file(self, file_path: Path, *, context: object | None = None):
-        ...  # real Ruby parser
+        ...  # real Ruby parser returning LanguageParseResult
 
     def analyze_file(self, file_path: Path, source: str):
         ...  # real Ruby rules
+
+    def with_static_rules(self, rules):
+        ...  # optional rule-override support
 
 # Either replace the detection-only adapter in bootstrap, or:
 get_plugin_catalog().languages.register_adapter(RubyAnalyzerAdapter(), replace=True)
@@ -121,9 +160,23 @@ get_plugin_catalog().languages.register_adapter(RubyAnalyzerAdapter(), replace=T
 
 Unrelated modules (AI factory, Docker executor, GitHub delivery) do not change.
 
-## AI providers
+## AI abstraction
 
-`LLMProvider` (aliased as `AIProvider`) is the interface. Implementations:
+`LLMProvider` (aliased as `AIProvider`) is the interface. Debugging methods
+(`analyze`, `generate_tests`, `generate_structured`, `generate_patch`) remain
+for compatibility.
+
+Generic, provider-neutral entry points:
+
+- `complete(CompletionRequest) -> CompletionResponse` — chat / structured
+  generation / later evidence analysis and report drafting
+- `capabilities() -> AICapabilities` — per-backend features such as
+  structured output, tool calls, thinking, max context, and output token
+  limits
+
+Not every provider has the same capabilities. Callers must consult
+`capabilities()` instead of assuming an OpenAI-shaped backend. Tool calling
+and model thinking are **interface-ready but not implemented**.
 
 | Id | Class | Notes |
 |---|---|---|
@@ -136,47 +189,95 @@ Unrelated modules (AI factory, Docker executor, GitHub delivery) do not change.
 `create_provider(settings)` and `get_provider()` resolve through the catalog.
 Repository content is still wrapped in `[REPOSITORY_DATA]` by `PromptBuilder`.
 
+`LocalAIProvider.is_available()` probes the configured endpoint. It is not
+unconditionally true. `health()` remains the richer diagnostic and never
+includes API keys. `LocalAIProvider(backend="mlx")` is reserved for a later
+Qwen/MLX phase and raises `AdapterNotImplementedError` today.
+
 ### Adding an AI provider
 
-1. Subclass `LLMProvider`.
+1. Subclass `LLMProvider` (implement debugging methods; override `complete`
+   / `capabilities` when the backend differs).
 2. Register a factory in `register_builtin_adapters`.
 3. Add the id to `Settings` `_VALID_AI_PROVIDERS` if it should be selectable via `AI_PROVIDER`.
 
-`LocalAIProvider(backend="mlx")` is reserved for a later Qwen/MLX phase and
-raises `AdapterNotImplementedError` today.
+## Evidence provenance and verification invariant
+
+An AI hypothesis never becomes a verified finding by itself.
+
+`Evidence.provenance` (`EvidenceProvenance`) records where an item came from:
+
+| Provenance | Typical kind | Can verify? |
+|---|---|---|
+| `ai_hypothesis` | `ai_analysis` | **No** |
+| `static_analysis` | `static_analysis` | **No** |
+| `source_observation` | `source_code`, generated tests | **No** |
+| `execution` | test failures, logs | Yes |
+| `reproduction` | reproduction engine | Yes |
+| `browser_observation` | browser / screenshot | Yes |
+| `http_observation` | proxy / HTTP | Yes |
+| `scanner_observation` | scanner | Yes |
+| `api_test` | API test | Yes |
+| `fuzzing_result` | fuzzer | Yes |
+
+AI text is forced to `ai_hypothesis` even if a caller tries to label it as
+execution. Evidence records are frozen so provenance cannot be rewritten.
+
+`SecurityFinding` is frozen. Status is not a mutable field. Use constructors
+and transitions:
+
+- `potential` / `from_hypothesis` → `potential`
+- `verify(evidence)` / `verified(evidence)` → `verified` only when the bundle
+  contains at least one verifying provenance
+- `reject` → `rejected`
+- `with_review` → human review state without changing verification
+
+This sequence is rejected:
+
+```
+AI claim → Evidence.from_ai(...) → SecurityFinding.verified(...)
+```
+
+Static hints and source excerpts are also insufficient. Verification is a
+state transition backed by independent observational or executable evidence.
+
+## Scope separation
+
+`is_in_scope(target)` means the host is on the allow-list (optional method
+filter). It does **not** authorize active testing.
+
+| Check | Meaning |
+|---|---|
+| `is_in_scope` | Host (and optional method) is allowed |
+| `is_method_permitted` | HTTP method is allowed |
+| `is_active_testing_permitted` | In scope **and** `allow_active_testing` |
+| `rate_limit_per_minute` | Reserved for a later richer engine |
+
+`ManualScopeProvider` uses operator-supplied allow/deny lists. An empty
+allow-list denies every target. Remote HackerOne scope retrieval is not
+implemented.
+
+Browser `navigate`, fuzzer `fuzz`, and security-tool `active_scan` call
+`require_active_testing` before any implementation hook. Proxy
+`fetch_exchanges` is passive: it filters captured traffic to in-scope hosts
+and does not send requests. Implementations override `_navigate`,
+`_fuzz`, `_fetch_captured_exchanges`, or `_active_scan` so they cannot skip
+the public authorization wrapper by accident.
+
+## Reports
+
+`LocalReportProvider.render()` writes a local markdown document that
+distinguishes potential, verified, and rejected findings and records human
+review state. `submitted_remotely` is always false. `submit()` raises
+`AdapterNotImplementedError` — local rendering is not remote submission.
+HackerOne upload is reserved for a later phase.
 
 ## Security tools
 
-`SecurityToolAdapter` is the future scanner boundary (`collect_passive_evidence`).
-Burp, ZAP, and Nuclei are **not** implemented. Register a real adapter when the
-tool integration exists; do not ship empty classes that claim to scan.
-
-## Browser / proxy / fuzzing
-
-`BrowserAdapter`, `ProxyAdapter`, and `FuzzingAdapter` define evidence-oriented
-contracts (navigation/DOM/screenshots, captured HTTP exchanges, fuzz targets).
-They must honor `ScopeProvider`. Live testing against external targets is out
-of scope for Phase 1.
-
-## Evidence and findings
-
-BugForge remains evidence-first:
-
-- Static findings (`app.analysis.finding.Finding`) are tool output, not verified vulns.
-- `EvidenceCollector` converts static findings, failing tests, source, and
-  reproduction artifacts into `Evidence`.
-- `SecurityFinding.from_hypothesis()` always creates a **potential** finding.
-- `SecurityFinding.verified()` requires a non-empty evidence bundle.
-
-A model-generated hypothesis cannot become a verified finding by itself.
-
-## Reports and scope
-
-- `LocalReportProvider` renders a structured markdown report locally. It does
-  not upload anything.
-- `ManualScopeProvider` uses operator-supplied allow/deny lists. An empty
-  allow-list denies every target.
-- HackerOne report submission and remote scope retrieval are reserved.
+`SecurityToolAdapter` is the future scanner boundary (`collect_passive_evidence`,
+`active_scan`). Burp, ZAP, and Nuclei are **not** implemented. Register a real
+adapter when the tool integration exists; do not ship empty classes that claim
+to scan.
 
 ## Configuration
 
@@ -189,15 +290,18 @@ New optional setting:
 
 Do not set browser/proxy/fuzzer providers until those adapters exist.
 
-## What Phase 2 can build on
+## What remains deferred to Phase 2
 
-- Real analyzers for the detection-only languages
-- Local MLX/Qwen `LocalAIProvider` backend
-- Security-tool adapters that emit `Evidence`
-- Browser/proxy collectors feeding `SecurityFinding`
-- In-scope fuzzing gated by `ScopeProvider`
-- HackerOne `ReportProvider` / `ScopeProvider` implementations
-- A verification engine that promotes potential → verified only with evidence
+Phase 1 does **not** implement:
 
-Phase 2 should not need to rewrite language detection, AI selection, or the
-static-analysis engine's file loop.
+- Real analyzers for detection-only languages
+- Qwen/MLX local backend, thinking-mode execution, or tool calling
+- Burp / ZAP / Nuclei (or any live scanner)
+- Browser driving, exploitation, or live navigation
+- Live fuzzing against external targets
+- HackerOne API scope sync or report submission
+- Rate-limit enforcement and a full HackerOne-compatible scope engine
+- A security agent that promotes findings beyond the domain invariant
+
+Phase 2 should not need to rewrite language detection, AI selection, the
+static-analysis engine's file loop, or the verification/scope contracts.

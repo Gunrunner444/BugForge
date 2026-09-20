@@ -24,7 +24,12 @@ class AIHealthStatus:
     capabilities: list[str] | None = None
 
 
-_DEFAULT_CAPABILITIES = ["analysis", "test_generation", "patch_generation"]
+_DEFAULT_CAPABILITIES = [
+    "analysis",
+    "test_generation",
+    "patch_generation",
+    "completion",
+]
 
 
 def default_capabilities() -> list[str]:

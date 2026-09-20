@@ -11,8 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app.analysis.finding import Finding
-from app.analyzers.python.parser import ParseResult
 from app.domain.language import LanguageCapability
+from app.domain.source import LanguageParseResult
 from app.plugins.errors import UnsupportedCapabilityError
 
 
@@ -54,7 +54,7 @@ class LanguageAdapter(ABC):
         """Optional per-repository context (local packages, module roots, ...)."""
         return None
 
-    def parse_file(self, file_path: Path, *, context: object | None = None) -> ParseResult:
+    def parse_file(self, file_path: Path, *, context: object | None = None) -> LanguageParseResult:
         raise UnsupportedCapabilityError(
             self.language_id,
             LanguageCapability.PARSE,
@@ -70,3 +70,15 @@ class LanguageAdapter(ABC):
 
     def static_rules(self) -> Sequence[object]:
         return ()
+
+    def with_static_rules(self, rules: Sequence[object]) -> LanguageAdapter:
+        """Return an adapter that runs ``rules`` instead of the built-in set.
+
+        The engine uses this instead of language-specific branching. Adapters
+        that cannot apply rule overrides raise :class:`UnsupportedCapabilityError`.
+        """
+        raise UnsupportedCapabilityError(
+            self.language_id,
+            "static_rule_override",
+            detail=f"{self.display_name} does not support static-analysis rule overrides.",
+        )
