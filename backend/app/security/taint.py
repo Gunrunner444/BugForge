@@ -134,7 +134,19 @@ def propagate_taint(
                 and not binding.rhs_accesses
                 and not binding.rhs_callees
             )
+            # Parameters / empty declarations are not reassignments. An
+            # interprocedural callarg must remain the reaching state.
             if empty_rhs and previous is not None:
+                continue
+            # Replaying the same (or earlier) definition must not erase taint
+            # that _interprocedural() attached to this reaching definition.
+            # A later definition_index is a real reassignment and may clear it.
+            if (
+                reason is None
+                and previous is not None
+                and previous.reason
+                and binding.definition_index <= previous.def_index
+            ):
                 continue
             if binding.is_conditional and previous is not None:
                 new = _Reach(
@@ -157,9 +169,12 @@ def propagate_taint(
             for new_id, reason in _interprocedural(graph, live, source_pats):
                 current = reaching.get(new_id)
                 if current is None or current.reason != reason:
+                    # Attach to the current reaching definition. A fake later
+                    # def_index made the next binding pass look like an earlier
+                    # assignment and overwrite this reason with None.
                     reaching[new_id] = _Reach(
                         reason=reason,
-                        def_index=(current.def_index + 1 if current else 1),
+                        def_index=current.def_index if current is not None else 0,
                     )
                     changed = True
             interproc_depth += 1
