@@ -23,6 +23,7 @@ from app.security.taint import (
     argument_is_constant,
     call_matches_sink,
     call_taint_reason,
+    field_path_from_reason,
     language_vocab,
     looks_parameterized_sql,
     reaching_sanitizer_kind,
@@ -374,6 +375,9 @@ def _observation(
         "taint_scope": "cross_file" if "cross_file:" in taint else "local",
         "branch_merge": "true" if "merge:" in taint else "false",
     }
+    field_path = field_path_from_reason(taint)
+    if field_path:
+        metadata["field_path"] = field_path
     if extra:
         metadata.update(extra)
     if span is not None:

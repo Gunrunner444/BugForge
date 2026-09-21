@@ -36,6 +36,7 @@ from app.parsing.model import Binding, CallSite, SymbolKind, SyntaxGraph
 from app.security.definitions import SINK_SANITIZER_KINDS, SanitizerDefinition, SinkDefinition
 from app.security.language_vocab import vocab_for
 from app.security.taint import (
+    AliasMirrors,
     ExternalCallee,
     _callee_is_source,
     _empty_rhs,
@@ -47,7 +48,12 @@ from app.security.taint import (
     _scope_for_entity,
     _use_byte,
     call_matches_sink,
+    field_flow_allowed,
+    field_limit_facts,
+    field_root,
     fragment_matches_source,
+    is_field_path,
+    proven_alias_mirrors,
     sanitizer_intervened,
 )
 
@@ -1195,14 +1201,16 @@ def _summarize(
     limited = False
     capped = False
     hops = 0
+    blocked_fields, _, _ = field_limit_facts(graph)
+    alias_info = proven_alias_mirrors(graph)
 
     def at(name: str, byte: int) -> frozenset[str]:
         hit: frozenset[str] = frozenset()
+        best = -1
         for start, tokens in timeline.get(f"{scope_id}::{name}", []):
-            if start <= byte:
+            if start <= byte and start >= best:
+                best = start
                 hit = tokens
-            else:
-                break
         return hit
 
     def usable(summary: _Summary | None) -> _Summary | None:
@@ -1245,6 +1253,9 @@ def _summarize(
         if binding.scope_id != scope_id:
             continue
         byte = _use_byte(binding.span, binding.line)
+        field_key = (binding.symbol_id, binding.definition_index)
+        if field_key in blocked_fields:
+            continue
         tokens, added, hop, hit_limit, hit_cap = _binding_tokens(
             binding,
             graph,
@@ -1265,6 +1276,8 @@ def _summarize(
             tokens = tokens | latest.get(binding.symbol_id, frozenset())
         latest[binding.symbol_id] = tokens
         timeline.setdefault(binding.symbol_id, []).append((byte, tokens))
+        if field_key not in blocked_fields and is_field_path(binding.name):
+            _mirror_summary_field(binding, tokens, byte, scope_id, timeline, alias_info)
 
     returned: set[str] = set()
     for ret in graph.returns:
@@ -1279,6 +1292,7 @@ def _summarize(
         ident_tokens: set[str] = set()
         for ident in ret.idents:
             ident_tokens |= set(at(ident, byte))
+        ident_tokens |= _field_tokens(ret.accesses, at, byte)
         opaque = False
         from_calls: set[str] = set()
         for call in graph.calls:
@@ -1451,6 +1465,7 @@ def _binding_tokens(
             source_tokens.add(f"source:{hit}")
     for ident in binding.rhs_idents:
         ident_tokens |= set(at(ident, byte))
+    ident_tokens |= _field_tokens(binding.rhs_accesses, at, byte)
     opaque = False
     from_calls: set[str] = set()
     for call in graph.calls:
@@ -1549,9 +1564,11 @@ def _call_arg_tokens(
             return set()
         fragments = (*arg.accesses, *arg.callees, *arg.idents)
         idents = arg.idents
+        accesses = arg.accesses
     elif index == 0:
         fragments = (*call.argument_accesses, *call.argument_idents)
         idents = call.argument_idents
+        accesses = call.argument_accesses
     else:
         return set()
     tokens: set[str] = set()
@@ -1561,7 +1578,44 @@ def _call_arg_tokens(
             tokens.add(f"source:{hit}")
     for ident in idents:
         tokens |= set(at(ident, byte))
+    tokens |= _field_tokens(accesses, at, byte)
     return tokens
+
+
+def _field_tokens(
+    accesses: tuple[str, ...],
+    at: Callable[[str, int], frozenset[str]],
+    byte: int,
+) -> set[str]:
+    tokens: set[str] = set()
+    for access in accesses:
+        if is_field_path(access) and field_flow_allowed(access):
+            tokens |= set(at(access, byte))
+    return tokens
+
+
+def _mirror_summary_field(
+    binding: Binding,
+    tokens: frozenset[str],
+    byte: int,
+    scope_id: str,
+    timeline: dict[str, list[tuple[int, frozenset[str]]]],
+    alias_info: AliasMirrors,
+) -> None:
+    parsed = field_root(binding.name)
+    if parsed is None:
+        return
+    root, suffix = parsed
+    mirrors = alias_info.targets.get((binding.scope_id, root), ())
+    budget = settings.taint_max_alias_edges
+    for offset, (other, hold) in enumerate(mirrors):
+        if budget <= 0 or offset >= budget:
+            break
+        other_name = f"{other}{suffix}"
+        if other_name == binding.name or not field_flow_allowed(other_name):
+            continue
+        sid = f"{scope_id}::{other_name}"
+        timeline.setdefault(sid, []).append((max(byte, hold), tokens))
 
 
 def _all_arg_indexes(call: CallSite) -> list[int]:

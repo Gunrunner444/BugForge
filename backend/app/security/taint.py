@@ -9,6 +9,9 @@ Precision (documented, not advertised beyond this):
   If either path may taint ``q``, later uses in the parent stay tainted.
 * **not flow-insensitive**: taint is not a sticky property of ``scope_id::name``.
   Historical taint is distinct from the taint reaching a given program point.
+* **bounded field paths**: constant attributes and indexes (``obj.payload``,
+  ``obj["payload"]``, ``items[0]``) are their own symbols. Dynamic keys stay
+  unresolved. Depth, binding, and alias limits are explicit and zero-safe.
 
 Symbols are ``scope_id::name``. Sibling functions never share locals.
 Source/sink matching uses syntax-derived callees, member accesses, and
@@ -28,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from app.analyzers.framework_detector import FrameworkInfo
+from app.core.config import settings
 from app.parsing.model import Binding, CallArgument, CallSite, SymbolKind, SyntaxGraph
 from app.security.definitions import (
     SINK_SANITIZER_KINDS,
@@ -414,6 +418,11 @@ def analyze_taint(
     interproc_depth = 0
     definition_capped = False
     depth_saturated = False
+    blocked_fields, field_depth_limited, field_binding_limited = field_limit_facts(graph)
+    alias_info = proven_alias_mirrors(graph)
+    alias_limited = alias_info.truncated
+    mirror_ids: dict[tuple[str, str, int], int] = {}
+    next_mirror = 1_000_000
     while changed and rounds < MAX_TAINT_ROUNDS:
         changed = False
         rounds += 1
@@ -426,6 +435,12 @@ def analyze_taint(
             if applied > MAX_DEFINITIONS:
                 definition_capped = True
                 break
+            field_key = (binding.symbol_id, binding.definition_index)
+            existing = timeline.get(binding.symbol_id, {}).get(binding.definition_index)
+            if field_key in blocked_fields:
+                # Drop the definition. Do not write a clean fact that erases an
+                # earlier finding on the same path.
+                continue
             computed = _binding_taint(binding, source_pats, reaching, return_reasons)
             if not computed:
                 computed = _sanitized_call_result(graph.language, binding, source_pats, reaching)
@@ -435,7 +450,6 @@ def analyze_taint(
                 )
                 if ext_reason and (not computed or ":sanitized:" in ext_reason):
                     computed = ext_reason
-            existing = timeline.get(binding.symbol_id, {}).get(binding.definition_index)
             new = _reach_for_definition(
                 binding,
                 computed,
@@ -454,6 +468,21 @@ def analyze_taint(
                 reason=new.reason,
                 merged=new.merged,
             )
+            if field_key not in blocked_fields and is_field_path(binding.name):
+                mirrored, hit_alias_cap, next_mirror = _mirror_field_timeline(
+                    binding,
+                    new.reason,
+                    byte,
+                    timeline,
+                    reaching,
+                    alias_info,
+                    mirror_ids,
+                    next_mirror,
+                )
+                if hit_alias_cap:
+                    alias_limited = True
+                if mirrored:
+                    changed = True
         if interproc_depth < MAX_INTERPROC_DEPTH:
             state = _freeze_timeline(timeline, source_pats)
             live = {s: r.reason for s, r in reaching.items() if r.reason}
@@ -498,6 +527,12 @@ def analyze_taint(
         reasons.append("taint definition limit")
     if depth_saturated:
         reasons.append("interprocedural depth limit")
+    if field_depth_limited:
+        reasons.append("field depth limit")
+    if field_binding_limited:
+        reasons.append("field binding limit")
+    if alias_limited:
+        reasons.append("field alias limit")
     return _freeze_timeline(
         timeline,
         source_pats,
@@ -558,6 +593,238 @@ def _preserves_taint(callee: str) -> bool:
     return callee.rsplit(".", 1)[-1] in _PRESERVING_CALLEES
 
 
+def field_depth(name: str) -> int:
+    """Number of ``.`` and ``[`` steps in a field path. Plain names are depth 0."""
+    return sum(1 for ch in name if ch in ".[")
+
+
+def is_field_path(name: str) -> bool:
+    return field_depth(name) > 0
+
+
+def field_root(name: str) -> tuple[str, str] | None:
+    """Split ``obj.payload`` into ``("obj", ".payload")``."""
+    if not is_field_path(name):
+        return None
+    root: list[str] = []
+    for ch in name:
+        if ch in ".[":
+            break
+        root.append(ch)
+    root_name = "".join(root)
+    if not root_name:
+        return None
+    return root_name, name[len(root_name) :]
+
+
+def field_flow_allowed(name: str) -> bool:
+    depth = field_depth(name)
+    if depth == 0:
+        return True
+    limit = settings.taint_max_field_depth
+    return limit > 0 and depth <= limit
+
+
+def field_path_from_reason(taint: str) -> str:
+    """Outermost constant field path recorded in a use-site reason."""
+    marker = "field:"
+    start = 0
+    while True:
+        index = taint.find(marker, start)
+        if index < 0:
+            return ""
+        path, sep, _tail = taint[index + len(marker) :].partition(":")
+        if sep and path and field_depth(path) > 0 and " " not in path:
+            return path
+        start = index + len(marker)
+
+
+@dataclass(frozen=True)
+class AliasMirrors:
+    """Proven object aliases. ``targets[(scope, name)]`` is ``(other, byte)``."""
+
+    targets: dict[tuple[str, str], tuple[tuple[str, int], ...]]
+    truncated: bool = False
+
+
+def field_limit_facts(graph: SyntaxGraph) -> tuple[set[tuple[str, int]], bool, bool]:
+    """Field definitions that must not carry taint, plus which limit fired."""
+    blocked: set[tuple[str, int]] = set()
+    seen = 0
+    depth_limited = False
+    binding_capped = False
+    limit = settings.taint_max_field_bindings
+    for binding in _ordered_bindings(graph):
+        if not is_field_path(binding.name):
+            continue
+        key = (binding.symbol_id, binding.definition_index)
+        if not field_flow_allowed(binding.name):
+            blocked.add(key)
+            depth_limited = True
+            continue
+        seen += 1
+        if limit <= 0 or seen > limit:
+            blocked.add(key)
+            binding_capped = True
+    return blocked, depth_limited, binding_capped
+
+
+def proven_alias_mirrors(graph: SyntaxGraph) -> AliasMirrors:
+    """Unique, non-conditional, single-assignment aliases.
+
+    A later reassignment drops the name entirely. Multi-hop aliases are kept
+    only when each step toward the root was assigned no later than the step
+    that captured it. Zero ``taint_max_alias_edges`` yields no mirrors.
+    """
+    limit = settings.taint_max_alias_edges
+    if limit <= 0:
+        return AliasMirrors(targets={})
+    edges = _direct_alias_edges(graph)
+    grouped: dict[tuple[str, str], dict[str, int]] = {}
+    truncated = False
+    for scope, name in sorted(edges):
+        targets, hold, cut = _proven_alias_targets(scope, name, edges, limit)
+        truncated = truncated or cut
+        for target in sorted(targets):
+            grouped.setdefault((scope, name), {})[target] = hold
+            grouped.setdefault((scope, target), {})[name] = hold
+    capped: dict[tuple[str, str], tuple[tuple[str, int], ...]] = {}
+    for key, names in grouped.items():
+        items = tuple(sorted(names.items()))
+        if len(items) > limit:
+            truncated = True
+            items = items[:limit]
+        capped[key] = items
+    return AliasMirrors(targets=capped, truncated=truncated)
+
+
+def _direct_alias_edges(graph: SyntaxGraph) -> dict[tuple[str, str], tuple[str, int]]:
+    grouped: dict[tuple[str, str], list[Binding]] = {}
+    for binding in graph.bindings:
+        if is_field_path(binding.name):
+            continue
+        grouped.setdefault((binding.scope_id, binding.name), []).append(binding)
+    edges: dict[tuple[str, str], tuple[str, int]] = {}
+    for key, bindings in grouped.items():
+        if len(bindings) != 1:
+            continue
+        binding = bindings[0]
+        if binding.is_conditional or binding.kind is SymbolKind.PARAMETER:
+            continue
+        if binding.rhs_is_literal or binding.rhs_callees or binding.rhs_accesses:
+            continue
+        if len(binding.rhs_idents) != 1:
+            continue
+        target = binding.rhs_idents[0]
+        if not target or target == binding.name or is_field_path(target):
+            continue
+        if any(ch in binding.rhs.strip() for ch in ".([{:"):
+            continue
+        edges[key] = (target, _use_byte(binding.span, binding.line))
+    return edges
+
+
+def _proven_alias_targets(
+    scope: str,
+    name: str,
+    edges: dict[tuple[str, str], tuple[str, int]],
+    limit: int,
+) -> tuple[frozenset[str], int, bool]:
+    edge = edges.get((scope, name))
+    if edge is None:
+        return frozenset(), 0, False
+    target, hold = edge
+    found = [target]
+    seen = {name, target}
+    current = target
+    current_byte = hold
+    hops = 1
+    while hops < limit:
+        nxt = edges.get((scope, current))
+        if nxt is None:
+            return frozenset(found), hold, False
+        nxt_target, nxt_byte = nxt
+        if nxt_target in seen or nxt_byte > current_byte:
+            return frozenset(), 0, False
+        hops += 1
+        seen.add(nxt_target)
+        found.append(nxt_target)
+        current = nxt_target
+        current_byte = nxt_byte
+    further = edges.get((scope, current)) is not None
+    return frozenset(found), hold, further
+
+
+def _field_reaching(
+    accesses: Sequence[str],
+    scope_id: str,
+    reaching: dict[str, _Reach] | TaintState,
+    at_byte: int,
+) -> str | None:
+    """Taint of a constant field path. Whole-value idents are resolved by the caller first."""
+    for access in accesses:
+        if not is_field_path(access) or not field_flow_allowed(access):
+            continue
+        if isinstance(reaching, TaintState):
+            reason = reaching.reason_at_name(access, scope_id, at_byte)
+        else:
+            sid = _resolve_symbol(access, scope_id, reaching)
+            reason = reaching[sid].reason if sid is not None else None
+        if reason:
+            return f"field:{access}:{reason}"
+    return None
+
+
+def _mirror_field_timeline(
+    binding: Binding,
+    reason: str | None,
+    byte: int,
+    timeline: dict[str, dict[int, _Def]],
+    reaching: dict[str, _Reach],
+    alias_info: AliasMirrors,
+    mirror_ids: dict[tuple[str, str, int], int],
+    next_mirror: int,
+) -> tuple[bool, bool, int]:
+    """Copy one field definition onto proven aliases. Returns changed, capped, next id."""
+    parsed = field_root(binding.name)
+    if parsed is None:
+        return False, False, next_mirror
+    root, suffix = parsed
+    mirrors = alias_info.targets.get((binding.scope_id, root), ())
+    budget = settings.taint_max_alias_edges
+    changed = False
+    capped = False
+    for offset, (other, hold) in enumerate(mirrors):
+        if budget <= 0 or offset >= budget:
+            capped = True
+            break
+        other_name = f"{other}{suffix}"
+        if other_name == binding.name or not field_flow_allowed(other_name):
+            continue
+        sid = f"{binding.scope_id}::{other_name}"
+        key = (sid, binding.symbol_id, binding.definition_index)
+        index = mirror_ids.get(key)
+        if index is None:
+            index = next_mirror
+            next_mirror += 1
+            mirror_ids[key] = index
+        previous = timeline.get(sid, {}).get(index)
+        start = max(byte, hold)
+        if previous is not None and previous.reason == reason and previous.start_byte == start:
+            reaching[sid] = _Reach(reason=reason, def_index=index, merged=False)
+            continue
+        timeline.setdefault(sid, {})[index] = _Def(
+            start_byte=start,
+            line=binding.line,
+            definition_index=index,
+            reason=reason,
+            merged=False,
+        )
+        reaching[sid] = _Reach(reason=reason, def_index=index, merged=False)
+        changed = True
+    return changed, capped, next_mirror
+
+
 def _callee_is_source(callee: str, source_pats: Sequence[str]) -> bool:
     if fragment_matches_source(callee, source_pats):
         return True
@@ -591,6 +858,14 @@ def _binding_taint(
             sid = _resolve_symbol(ident, binding.scope_id, reaching)
             if sid is not None and reaching[sid].reason:
                 return f"from:{sid}:{reaching[sid].reason}"
+        field_reason = _field_reaching(
+            binding.rhs_accesses,
+            binding.scope_id,
+            reaching,
+            _use_byte(binding.span, binding.line),
+        )
+        if field_reason:
+            return field_reason
         return None
     for callee in transforming:
         simple = callee.rsplit(".", 1)[-1]
@@ -648,6 +923,13 @@ def _sanitized_call_result(
                 inner = f"from:{ident}:{reaching[sid].reason}"
                 break
     if inner is None:
+        inner = _field_reaching(
+            binding.rhs_accesses,
+            binding.scope_id,
+            reaching,
+            _use_byte(binding.span, binding.line),
+        )
+    if inner is None:
         return None
     return f"sanitized:{sanitizer.kind}:{inner}"
 
@@ -690,6 +972,12 @@ def _return_reasons(
                 if sid is not None:
                     reason = f"return:{sid}"
                     break
+        if reason is None and isinstance(reaching, TaintState):
+            field_reason = _field_reaching(
+                ret.accesses, ret.scope_id, reaching, _use_byte(ret.span, ret.line)
+            )
+            if field_reason:
+                reason = f"return:{field_reason}"
         if reason:
             out[func_name] = reason
     return out
@@ -843,6 +1131,10 @@ def _interprocedural_edges(
                 if reason:
                     ret_reason = f"return:{ident}:{reason}"
                     break
+            if ret_reason is None:
+                field_reason = _field_reaching(ret.accesses, ret.scope_id, use_state, ret_byte)
+                if field_reason:
+                    ret_reason = f"return:{field_reason}"
         if ret_reason is None:
             continue
         func_name = ret.scope_id.rsplit(":", 1)[-1]
@@ -915,7 +1207,7 @@ def call_taint_reason(
         reason = state.reason_at_name(ident, call.scope_id, at_byte)
         if reason:
             return f"from:{ident}:{reason}"
-    return None
+    return _field_reaching(call.argument_accesses, call.scope_id, state, at_byte)
 
 
 def _argument_taint(
@@ -945,12 +1237,12 @@ def _argument_taint(
             reason = reaching.reason_at_name(ident, scope_id, at_byte)
             if reason:
                 return f"from:{ident}:{reason}"
-        return None
+        return _field_reaching(arg.accesses, scope_id, reaching, at_byte)
     for ident in arg.idents:
         sid = _resolve_symbol(ident, scope_id, reaching)
         if sid is not None and reaching[sid].reason:
             return f"from:{sid}:{reaching[sid].reason}"
-    return None
+    return _field_reaching(arg.accesses, scope_id, reaching, at_byte)
 
 
 def call_matches_sink(call: CallSite, sink: SinkDefinition) -> bool:

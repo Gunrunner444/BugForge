@@ -423,6 +423,12 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         if isinstance(target, ast.Name):
             self._bind(target.id, line, rhs, SymbolKind.LOCAL, span, meta)
             return
+        if isinstance(target, ast.Subscript):
+            qualified = _constant_subscript(target)
+            if qualified is None:
+                return
+            self._bind(qualified, line, rhs, SymbolKind.FIELD, span, meta)
+            return
         if isinstance(target, ast.Attribute):
             qualified = _expr(target)
             self.calls.append(
@@ -524,6 +530,39 @@ def qn_if_method(class_name: str | None, name: str) -> str:
     return f"{class_name}.{name}" if class_name else name
 
 
+def _constant_subscript(node: ast.Subscript) -> str | None:
+    """Static field path for ``obj["key"]`` and ``items[0]``. Dynamic keys are empty."""
+    base = _subscript_base(node.value)
+    key = _constant_key(node.slice)
+    if not base or key is None:
+        return None
+    return f"{base}{key}"
+
+
+def _subscript_base(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _expr(node)
+    if isinstance(node, ast.Subscript):
+        return _constant_subscript(node) or ""
+    return ""
+
+
+def _constant_key(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if node.value and all(ch.isalnum() or ch == "_" for ch in node.value):
+            return f'["{node.value}"]'
+        return None
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    ):
+        return f"[{node.value}]"
+    return None
+
+
 def _expr_meta(node: ast.AST | None) -> _Meta:
     if node is None:
         return _Meta(is_literal=True)
@@ -540,6 +579,10 @@ def _expr_meta(node: ast.AST | None) -> _Meta:
             callees.append(_expr(child.func))
         elif isinstance(child, ast.Attribute):
             accesses.append(_expr(child))
+        elif isinstance(child, ast.Subscript):
+            path = _constant_subscript(child)
+            if path:
+                accesses.append(path)
         elif isinstance(child, ast.Name):
             idents.append(child.id)
         elif isinstance(child, (ast.BinOp, ast.JoinedStr)):

@@ -658,13 +658,18 @@ class _GraphBuilder:
             or _child_by_field(node, "value")
             or _assignment_rhs(node)
         )
-        names = self._assignment_names(left if left is not None else node)
-        if not names:
-            names = self._assignment_names(node)
+        left_type = str(getattr(left, "type", "")) if left is not None else ""
+        member_write = left is not None and left_type in self.grammar.member_types
+        static_field = self._static_field_path(left) if member_write and left is not None else ""
+        if member_write:
+            names = [static_field] if static_field else []
+        else:
+            names = self._assignment_names(left if left is not None else node)
+            if not names:
+                names = self._assignment_names(node)
         rhs_text = self._text(right) if right is not None else ""
         meta = self._expression_meta(right) if right is not None else _ExprMeta()
         # Member writes (el.innerHTML = q) are also sink-shaped CallSites.
-        left_type = str(getattr(left, "type", "")) if left is not None else ""
         if left is not None and left_type in self.grammar.member_types:
             left_qual = self._qualified(left)
             prop = left_qual.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
@@ -707,7 +712,11 @@ class _GraphBuilder:
                         span=span,
                     )
                 )
-            kind = SymbolKind.FIELD if bind_scope.kind is ScopeKind.CLASS else SymbolKind.LOCAL
+            kind = (
+                SymbolKind.FIELD
+                if static_field or bind_scope.kind is ScopeKind.CLASS
+                else SymbolKind.LOCAL
+            )
             symbol_id = Symbol.make_id(bind_scope.scope_id, name)
             def_index = self._next_def_index(symbol_id)
             is_conditional = (not is_declaration) and (
@@ -1204,6 +1213,46 @@ class _GraphBuilder:
             current = inner
         return ""
 
+    def _static_field_path(self, node: object | None) -> str:
+        """Constant attribute or index path. Computed keys return an empty string."""
+        if node is None:
+            return ""
+        ntype = str(getattr(node, "type", ""))
+        if ntype in self.grammar.identifier_types:
+            return self._normalize_ident(self._text(node))
+        named = [
+            child
+            for child in (getattr(node, "named_children", None) or ())
+            if getattr(child, "is_named", True)
+        ]
+        if ntype == "member_expression" and len(named) >= 2:
+            if str(getattr(named[1], "type", "")) != "property_identifier":
+                return ""
+            base = self._static_field_path(named[0])
+            prop = self._text(named[1])
+            if base and prop and prop.isidentifier():
+                return f"{base}.{prop}"
+            return ""
+        if ntype == "subscript_expression" and len(named) >= 2:
+            base = self._static_field_path(named[0])
+            if not base:
+                return ""
+            index = named[1]
+            itype = str(getattr(index, "type", ""))
+            if itype == "string":
+                fragment = ""
+                for child in getattr(index, "children", ()) or ():
+                    if str(getattr(child, "type", "")) == "string_fragment":
+                        fragment = self._text(child)
+                        break
+                if fragment and all(ch.isalnum() or ch == "_" for ch in fragment):
+                    return f'{base}["{fragment}"]'
+                return ""
+            if itype == "number" and self._text(index).isdigit():
+                return f"{base}[{self._text(index)}]"
+            return ""
+        return ""
+
     def _assignment_names(self, node: object) -> list[str]:
         ntype = str(getattr(node, "type", ""))
         if ntype in self.grammar.identifier_types:
@@ -1251,7 +1300,23 @@ class _GraphBuilder:
                 callees.append(self._qualified(child) or self._first_identifier(child))
                 is_literal = False
             elif ctype in self.grammar.member_types:
-                accesses.append(self._qualified(child))
+                static = self._static_field_path(child)
+                if static and ("." in static or "[" in static):
+                    accesses.append(static)
+                    # ``call.parameters["q"]`` is still a use of ``call.parameters``.
+                    base = static
+                    while base.endswith("]") and "[" in base:
+                        base = base[: base.rfind("[")]
+                        if not base:
+                            break
+                        accesses.append(base)
+                elif ctype == "subscript_expression":
+                    # A computed index is not ``obj.key`` and not an all-key alias.
+                    pass
+                else:
+                    qual = self._qualified(child)
+                    if qual:
+                        accesses.append(qual)
                 is_literal = False
             elif ctype in self.grammar.identifier_types:
                 ident = self._normalize_ident(self._text(child))

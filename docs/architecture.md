@@ -128,9 +128,12 @@ mode / comparison operands. Taint is flow-sensitive at the use site, not path-se
 and cross-file only for uniquely resolved Python, JavaScript, and TypeScript
 functions, re-exports, default exports, callable aliases, and methods.
 Partial callees and ambiguous imports are not edges. Symbol ids are
-`file::module::class::symbol`. See
-[phase12-semantic-analysis.md](phase12-semantic-analysis.md) and
-[phase13-repository-semantic-graph.md](phase13-repository-semantic-graph.md).
+`file::module::class::symbol`. Constant field paths (`obj.payload`,
+`obj["key"]`, `items[0]`) are separate symbols with a depth cap; dynamic keys
+stay unresolved. See
+[phase12-semantic-analysis.md](phase12-semantic-analysis.md),
+[phase13-repository-semantic-graph.md](phase13-repository-semantic-graph.md), and
+[phase14-field-sensitive-dataflow.md](phase14-field-sensitive-dataflow.md).
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.

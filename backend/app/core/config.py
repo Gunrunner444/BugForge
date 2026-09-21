@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     taint_max_cross_file_rounds: int = 4
     taint_max_cross_file_edges: int = 2_000
     taint_cross_file_budget_ms: int = 1_500
+    # Field paths such as obj.payload and obj["key"]. Zero disables field flow.
+    taint_max_field_depth: int = 4
+    taint_max_field_bindings: int = 2_000
+    taint_max_alias_edges: int = 32
 
     # AI provider: mock | openai | anthropic | ollama | openai_compatible | local | mlx
     ai_provider: str = "mock"
@@ -207,6 +211,9 @@ class Settings(BaseSettings):
         "taint_max_cross_file_rounds",
         "taint_max_cross_file_edges",
         "taint_cross_file_budget_ms",
+        "taint_max_field_depth",
+        "taint_max_field_bindings",
+        "taint_max_alias_edges",
     )
     @classmethod
     def validate_taint_limit(cls, value: int) -> int:
