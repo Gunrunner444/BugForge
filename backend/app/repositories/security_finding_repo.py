@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.findings import SecurityFinding
 from app.models.security_finding import DBSecurityFinding
+from app.schemas.security import SecurityFindingResponse
 
 
 class SecurityFindingRepository:
@@ -112,6 +113,7 @@ def _to_row(
         rule_ids=",".join(finding.rule_ids),
         observation_refs=",".join(finding.observation_refs),
         evidence_json=json.dumps(evidence),
+        intelligence_json=json.dumps(_intelligence(finding), sort_keys=True),
         asset=finding.asset,
         target=finding.target,
         endpoint=finding.endpoint,
@@ -122,6 +124,80 @@ def _to_row(
         report_description=finding.report_description,
         created_at=finding.created_at,
     )
+
+
+_INTELLIGENCE_FIELDS = (
+    "finding_key",
+    "flow_summary",
+    "flow_source",
+    "flow_sink",
+    "field_path",
+    "files_crossed",
+    "analysis_incomplete",
+    "parser_completeness",
+    "evidence_summary",
+    "related_group",
+)
+
+
+def _stored_intelligence(raw: str | None) -> dict[str, str]:
+    try:
+        loaded = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        key: str(loaded[key])
+        for key in _INTELLIGENCE_FIELDS
+        if key in loaded and isinstance(loaded[key], str)
+    }
+
+
+def to_security_response(row: DBSecurityFinding) -> SecurityFindingResponse:
+    """Map a stored row to the API shape, including additive flow fields."""
+    data = {
+        "id": row.id,
+        "project_id": row.project_id,
+        "analysis_id": row.analysis_id,
+        "title": row.title,
+        "status": row.status,
+        "vulnerability_class": row.vulnerability_class,
+        "evidence_tier": row.evidence_tier,
+        "confidence": row.confidence,
+        "description": row.description,
+        "hypothesis": row.hypothesis,
+        "ai_analysis": row.ai_analysis,
+        "impact": row.impact,
+        "file_path": row.file_path,
+        "line": row.line,
+        "analyzer": row.analyzer,
+        "rule_ids": row.rule_ids,
+        "observation_refs": row.observation_refs,
+        "asset": row.asset,
+        "created_at": row.created_at,
+        "parser_backend": row.parser_backend,
+        "node_id": row.node_id,
+        "taint_path": row.taint_path,
+        "language": row.language,
+    }
+    data.update(_stored_intelligence(row.intelligence_json))
+    return SecurityFindingResponse.model_validate(data)
+
+
+def _intelligence(finding: SecurityFinding) -> dict[str, str]:
+    return {
+        "finding_key": finding.finding_key,
+        "flow_summary": finding.flow_summary,
+        "flow_source": finding.flow_source,
+        "flow_sink": finding.flow_sink,
+        "field_path": finding.field_path,
+        "files_crossed": finding.files_crossed,
+        "analysis_incomplete": finding.analysis_incomplete,
+        "parser_completeness": finding.parser_completeness,
+        "evidence_summary": finding.evidence_summary,
+        "related_group": finding.related_group,
+    }
 
 
 def to_domain(row: DBSecurityFinding) -> SecurityFinding:
@@ -173,6 +249,7 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         "report_title": row.report_title,
         "report_description": row.report_description,
         "created_at": row.created_at,
+        **_stored_intelligence(row.intelligence_json),
     }
     if status is FindingStatus.VERIFIED:
         return SecurityFinding.verified(title, **kwargs)  # type: ignore[arg-type]

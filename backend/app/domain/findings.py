@@ -86,6 +86,16 @@ class SecurityFinding:
     rule_ids: tuple[str, ...] = ()
     analyzer: str | None = None
     observation_refs: tuple[str, ...] = ()
+    finding_key: str = ""
+    flow_summary: str = ""
+    flow_source: str = ""
+    flow_sink: str = ""
+    field_path: str = ""
+    files_crossed: str = ""
+    analysis_incomplete: str = ""
+    parser_completeness: str = ""
+    evidence_summary: str = ""
+    related_group: str = ""
     asset: str | None = None
     report_title: str | None = None
     report_description: str | None = None

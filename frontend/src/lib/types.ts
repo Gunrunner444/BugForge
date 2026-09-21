@@ -725,6 +725,16 @@ export interface SecurityFinding {
   node_id?: string | null;
   taint_path?: string | null;
   language?: string | null;
+  finding_key?: string;
+  flow_summary?: string;
+  flow_source?: string;
+  flow_sink?: string;
+  field_path?: string;
+  files_crossed?: string;
+  analysis_incomplete?: string;
+  parser_completeness?: string;
+  evidence_summary?: string;
+  related_group?: string;
 }
 
 export interface SecurityStatus {

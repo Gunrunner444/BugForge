@@ -12,7 +12,10 @@ from app.database import get_db
 from app.domain.language import LanguageCapability
 from app.parsing.engine import installed_parser_report
 from app.plugins import get_plugin_catalog
-from app.repositories.security_finding_repo import SecurityFindingRepository
+from app.repositories.security_finding_repo import (
+    SecurityFindingRepository,
+    to_security_response,
+)
 from app.schemas.security import (
     PaginatedSecurityFindingsResponse,
     RunSecurityAnalysisRequest,
@@ -63,7 +66,7 @@ async def list_security_findings(
     repo = SecurityFindingRepository(db)
     items, total = await repo.list_for_project(project_id, offset=offset, limit=limit)
     return PaginatedSecurityFindingsResponse(
-        items=items,  # type: ignore[arg-type]
+        items=[to_security_response(item) for item in items],
         total=total,
         offset=offset,
         limit=limit,
@@ -94,4 +97,9 @@ async def run_project_security_analysis(
     await repo.bulk_create(result.findings, project_id=project.id, analysis_id=None)
     await db.commit()
     items, total = await repo.list_for_project(project.id)
-    return PaginatedSecurityFindingsResponse(items=items, total=total, offset=0, limit=total)  # type: ignore[arg-type]
+    return PaginatedSecurityFindingsResponse(
+        items=[to_security_response(item) for item in items],
+        total=total,
+        offset=0,
+        limit=total,
+    )

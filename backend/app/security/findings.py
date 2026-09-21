@@ -6,6 +6,7 @@ from app.domain.evidence import Evidence, EvidenceBundle
 from app.domain.findings import FindingStatus, SecurityFinding, SourceLocation
 from app.domain.security import EvidenceTier
 from app.security.correlation import ObservationCluster
+from app.security.finding_intelligence import explain_cluster
 from app.security.rules.base import SecurityObservation
 
 
@@ -23,6 +24,7 @@ def finding_from_cluster(cluster: ObservationCluster) -> SecurityFinding:
     confidence = _cluster_confidence(observations)
     title = observations[0].title
     summary = "; ".join(obs.summary for obs in observations[:3])
+    explained = explain_cluster(observations)
     finding = SecurityFinding.potential(
         title,
         hypothesis=summary,
@@ -44,6 +46,16 @@ def finding_from_cluster(cluster: ObservationCluster) -> SecurityFinding:
         rule_ids=cluster.rule_ids,
         analyzer="security_rules",
         observation_refs=tuple(observation_ref(obs) for obs in observations),
+        finding_key=explained.finding_key,
+        flow_summary=explained.summary,
+        flow_source=explained.source,
+        flow_sink=explained.sink,
+        field_path=explained.field_path,
+        files_crossed=explained.files_crossed,
+        analysis_incomplete=explained.analysis_incomplete,
+        parser_completeness=explained.parser_completeness,
+        evidence_summary=explained.evidence_summary,
+        related_group=explained.related_group,
         report_title=title,
         report_description=summary,
         asset=cluster.file_path,

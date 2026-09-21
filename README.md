@@ -38,6 +38,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 15 | Framework-aware sources, sinks, and syntactic routes | ✅ Implemented |
 | Phase 16 | Evidence correlation without automatic verification | ✅ Implemented |
 | Phase 17 | In-memory incremental parse cache with clean-scan equivalence | ✅ Implemented |
+| Phase 18 | Stable finding identity, explanations, and duplicate suppression | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -66,7 +67,8 @@ Lua, and Elixir remain detection-only. See
 [docs/phase14-field-sensitive-dataflow.md](docs/phase14-field-sensitive-dataflow.md), and
 [docs/phase15-framework-aware-analysis.md](docs/phase15-framework-aware-analysis.md), and
 [docs/phase16-evidence-correlation.md](docs/phase16-evidence-correlation.md), and
-[docs/phase17-incremental-analysis.md](docs/phase17-incremental-analysis.md).
+[docs/phase17-incremental-analysis.md](docs/phase17-incremental-analysis.md), and
+[docs/phase18-finding-intelligence.md](docs/phase18-finding-intelligence.md).
 
 Phase 2 adds:
 

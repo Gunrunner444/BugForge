@@ -19,7 +19,8 @@ from app.core.paths import to_relative_path
 from app.domain.findings import SecurityFinding
 from app.domain.language import LanguageCapability
 from app.parsing.model import SyntaxGraph
-from app.security.correlation import ObservationCluster, correlate_observations
+from app.security.correlation import ObservationCluster
+from app.security.finding_intelligence import semantic_clusters
 from app.security.findings import findings_from_clusters
 from app.security.rules.base import SecurityObservation, SecurityRule
 from app.security.rules.catalog import builtin_security_rules
@@ -134,7 +135,7 @@ class SecurityAnalysisEngine:
                         )
                     )
 
-        clusters = correlate_observations(observations)
+        clusters = semantic_clusters(observations)
         findings = findings_from_clusters(clusters)
         from app.security.cross_file import build_project
 
@@ -183,7 +184,7 @@ class SecurityAnalysisEngine:
                                 rule_id=rule.rule_id,
                             )
                         )
-            clusters = correlate_observations(observations)
+            clusters = semantic_clusters(observations)
             findings = findings_from_clusters(clusters)
         return SecurityScanResult(
             observations=observations,

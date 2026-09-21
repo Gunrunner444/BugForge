@@ -47,6 +47,7 @@ class DBSecurityFinding(Base):
     rule_ids: Mapped[str] = mapped_column(Text, nullable=False, default="")
     observation_refs: Mapped[str] = mapped_column(Text, nullable=False, default="")
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    intelligence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     asset: Mapped[str | None] = mapped_column(Text, nullable=True)
     target: Mapped[str | None] = mapped_column(Text, nullable=True)
     endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)

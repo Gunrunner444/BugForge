@@ -32,6 +32,16 @@ class SecurityFindingResponse(BaseModel):
     node_id: str | None = None
     taint_path: str | None = None
     language: str | None = None
+    finding_key: str = ""
+    flow_summary: str = ""
+    flow_source: str = ""
+    flow_sink: str = ""
+    field_path: str = ""
+    files_crossed: str = ""
+    analysis_incomplete: str = ""
+    parser_completeness: str = ""
+    evidence_summary: str = ""
+    related_group: str = ""
 
 
 class PaginatedSecurityFindingsResponse(BaseModel):

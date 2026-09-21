@@ -55,11 +55,19 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
 def test_alembic_revision_chain_includes_020() -> None:
     cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(cfg)
-    heads = script.get_heads()
-    assert heads == ["020"]
     revision = script.get_revision("020")
     assert revision is not None
     assert revision.down_revision == "019"
+
+
+def test_alembic_revision_chain_includes_021() -> None:
+    cfg = Config("alembic.ini")
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert heads == ["021"]
+    revision = script.get_revision("021")
+    assert revision is not None
+    assert revision.down_revision == "020"
 
 
 def test_alembic_revision_chain_includes_019() -> None:
