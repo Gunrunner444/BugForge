@@ -70,11 +70,17 @@ class TestEmptyCatch:
         assert len(findings) == 1
         assert findings[0].severity == "medium"
 
-    def test_handled_clean(self, tmp_path: Path) -> None:
+    def test_intentional_empty_catch_clean(self, tmp_path: Path) -> None:
         findings = _findings(
-            EmptyCatchRule(), "try { f(); } catch (e) { console.error(e); }\n", tmp_path
+            EmptyCatchRule(),
+            "try { f(); } catch (e) { /* intentionally empty */ }\n",
+            tmp_path,
         )
         assert findings == []
+
+    def test_catalog_is_code_quality(self, tmp_path: Path) -> None:
+        findings = _findings(VarDeclarationRule(), "var x = 1;\n", tmp_path)
+        assert findings[0].catalog == "code_quality"
 
 
 class TestWithStatement:

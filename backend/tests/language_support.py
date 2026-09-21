@@ -27,20 +27,23 @@ ANALYSIS_LANGUAGE_IDS: tuple[str, ...] = (
     "php",
     "kotlin",
     "swift",
+    "csharp",
+    "shell",
+)
+
+SPECIALIZED_LANGUAGE_IDS: tuple[str, ...] = (
+    "html",
+    "css",
+    "scss",
+    "sql",
 )
 
 DETECTION_ONLY_LANGUAGE_IDS: tuple[str, ...] = (
-    "csharp",
-    "shell",
     "yaml",
     "json",
     "toml",
     "markdown",
     "restructuredtext",
-    "html",
-    "css",
-    "scss",
-    "sql",
     "r",
     "scala",
     "dart",
@@ -57,6 +60,13 @@ PARSE_CAPS = frozenset(
         LanguageCapability.SECURITY_ANALYSIS,
     }
 )
+
+FULL_PARSE_CAPS = PARSE_CAPS | {
+    LanguageCapability.AST,
+    LanguageCapability.SCOPE_ANALYSIS,
+    LanguageCapability.CALL_ANALYSIS,
+    LanguageCapability.DATA_FLOW,
+}
 
 DETECTION_ONLY_CAPS = frozenset({LanguageCapability.DETECTION, LanguageCapability.SOURCE})
 
@@ -75,7 +85,7 @@ SECURITY_CATEGORIES: tuple[str, ...] = (
 CATEGORY_TO_CLASS: dict[str, VulnerabilityClass] = {
     "sql": VulnerabilityClass.SQL_INJECTION,
     "command": VulnerabilityClass.COMMAND_INJECTION,
-    "path": VulnerabilityClass.PATH_TRAVERSAL,
+    "path": VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
     "ssrf": VulnerabilityClass.SSRF,
     "xss": VulnerabilityClass.XSS,
     "deser": VulnerabilityClass.UNSAFE_DESERIALIZATION,
@@ -124,6 +134,35 @@ def adapter(language_id: str) -> LanguageAdapter:
 
 
 def profile_supports(language_id: str, category: str) -> bool:
+    from app.security.language_vocab import vocab_for
+
+    vocab = vocab_for(language_id)
+    if vocab is not None:
+        if category == "crypto":
+            return bool(vocab.crypto_names)
+        mapping = {
+            "sql": VulnerabilityClass.SQL_INJECTION,
+            "command": VulnerabilityClass.COMMAND_INJECTION,
+            "path": VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
+            "ssrf": VulnerabilityClass.SSRF,
+            "xss": VulnerabilityClass.XSS,
+            "deser": VulnerabilityClass.UNSAFE_DESERIALIZATION,
+            "eval": VulnerabilityClass.DYNAMIC_EXECUTION,
+            "redirect": VulnerabilityClass.UNSAFE_REDIRECT,
+        }
+        vuln = mapping[category]
+        if any(s.vulnerability_class is vuln for s in vocab.sinks):
+            return True
+        if category == "deser" and any(
+            s.vulnerability_class is VulnerabilityClass.POTENTIAL_UNSAFE_DESERIALIZATION
+            for s in vocab.sinks
+        ):
+            return True
+        if category == "path" and any(
+            s.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL for s in vocab.sinks
+        ):
+            return True
+        return False
     profile = profile_for(language_id)
     if profile is None:
         return False

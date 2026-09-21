@@ -52,11 +52,19 @@ def test_alembic_env_discovers_hackerone_and_agent_models() -> None:
     assert "scope_content_hash" in program.c
 
 
-def test_alembic_revision_chain_includes_019() -> None:
+def test_alembic_revision_chain_includes_020() -> None:
     cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["019"]
+    assert heads == ["020"]
+    revision = script.get_revision("020")
+    assert revision is not None
+    assert revision.down_revision == "019"
+
+
+def test_alembic_revision_chain_includes_019() -> None:
+    cfg = Config("alembic.ini")
+    script = ScriptDirectory.from_config(cfg)
     revision = script.get_revision("019")
     assert revision is not None
     assert revision.down_revision == "018"

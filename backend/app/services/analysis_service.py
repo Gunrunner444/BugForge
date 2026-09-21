@@ -119,6 +119,9 @@ class AnalysisService:
                 size_bytes=fr.size_bytes,
                 line_count=fr.line_count,
                 has_errors=fr.has_parse_errors,
+                parser_backend=fr.parse_result.parser_backend if fr.parse_result else None,
+                parser_tier=fr.parse_result.parser_tier if fr.parse_result else None,
+                error_count=fr.parse_result.error_count if fr.parse_result else 0,
             )
             session.add(file_record)
             await session.flush()  # obtain file_record.id
@@ -192,6 +195,7 @@ class AnalysisService:
                 for fw in result.framework_detections
             ],
             "analysis_duration_seconds": round(duration, 3),
+            "language_capabilities": _language_capability_summary(),
         }
 
         repo = AnalysisRepository(session)
@@ -211,3 +215,20 @@ class AnalysisService:
             await sec_repo.bulk_create(
                 security_findings, project_id=project_id, analysis_id=analysis_id
             )
+
+
+def _language_capability_summary() -> list[dict[str, Any]]:
+    from app.plugins import get_plugin_catalog
+
+    catalog = get_plugin_catalog()
+    rows: list[dict[str, Any]] = []
+    for adapter in catalog.languages.all_adapters():
+        rows.append(
+            {
+                "language": adapter.language_id,
+                "parser_tier": str(adapter.parser_tier()),
+                "parser_backend": adapter.parser_backend(),
+                "capabilities": sorted(cap.value for cap in adapter.capabilities),
+            }
+        )
+    return rows

@@ -1,76 +1,63 @@
-"""JavaScript/TypeScript quality rules.
+"""JavaScript/TypeScript quality rules using syntax-graph events.
 
-These are language-specific checks that do not belong in the security sink
-system. They operate on comment-stripped source so string/comment lookalikes
-are not findings.
+These are CODE QUALITY findings, not security observations.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from app.analysis.base import AnalyzerRule
+from app.analysis.base import CodeQualityRule
+from app.analysis.catalog import FindingCatalog
 from app.analysis.finding import Finding
-from app.parsing.comments import strip_comments
-
-_EQ = re.compile(r"(?<![=!<>])==(?!=)")
-_NE = re.compile(r"(?<![=!<>])!=(?!=)")
-_VAR = re.compile(r"\bvar\s+(?P<name>[A-Za-z_$][\w$]*)")
-_WITH = re.compile(r"\bwith\s*\(")
-_EMPTY_CATCH = re.compile(r"\bcatch\s*(?:\([^)]*\))?\s*\{\s*\}")
-_NULLISH = re.compile(r"\b(?:null|undefined)\b", re.IGNORECASE)
+from app.parsing.engine import parse_source
+from app.parsing.model import SyntaxGraph
 
 
-def _clean(source: str) -> str:
-    stripped = strip_comments(source, line_comment="//", block_comment=("/*", "*/"))
-    return _blank_strings(stripped)
+def _language_for(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".ts", ".tsx"}:
+        return "typescript"
+    return "javascript"
 
 
-def _blank_strings(source: str) -> str:
-    out: list[str] = []
-    i = 0
-    n = len(source)
-    in_str: str | None = None
-    escape = False
-    while i < n:
-        ch = source[i]
-        if in_str:
-            if escape:
-                escape = False
-                out.append(" ")
-            elif ch == "\\":
-                escape = True
-                out.append(" ")
-            elif ch == in_str:
-                in_str = None
-                out.append(" ")
-            else:
-                out.append("\n" if ch == "\n" else " ")
-            i += 1
-            continue
-        if ch in {'"', "'", "`"}:
-            in_str = ch
-            out.append(" ")
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+def _graph(file_path: Path, source: str) -> SyntaxGraph:
+    return parse_source(_language_for(file_path), file_path, source)
 
 
-def _line_at(source: str, index: int) -> int:
-    return source.count("\n", 0, index) + 1
+def _finding(
+    rule: CodeQualityRule,
+    file_path: Path,
+    graph: SyntaxGraph,
+    line: int,
+    message: str,
+    explanation: str,
+    fix: str,
+    evidence: str,
+    *,
+    extra_line: int | None = None,
+) -> Finding:
+    event_span = None
+    return Finding(
+        category=rule.RULE_ID,
+        severity=rule.SEVERITY,
+        confidence=rule.CONFIDENCE,
+        file_path=str(file_path),
+        line=line,
+        end_line=extra_line or line,
+        message=message,
+        explanation=explanation,
+        analyzer=rule.RULE_ID,
+        evidence=evidence[:200],
+        suggested_fix=fix,
+        catalog=FindingCatalog.CODE_QUALITY,
+        language=graph.language,
+        parser_backend=graph.parser_backend,
+        start_column=event_span,
+    )
 
 
-def _snippet(source: str, line: int) -> str:
-    lines = source.splitlines() or [""]
-    if 1 <= line <= len(lines):
-        return lines[line - 1].strip()[:200]
-    return ""
-
-
-class LooseEqualityRule(AnalyzerRule):
+class LooseEqualityRule(CodeQualityRule):
     """Flag `==` / `!=` except the `== null` / `== undefined` idiom."""
 
     RULE_ID = "js_loose_equality"
@@ -78,40 +65,34 @@ class LooseEqualityRule(AnalyzerRule):
     CONFIDENCE = "high"
 
     def check_file(self, file_path: Path, source: str) -> list[Finding]:
-        cleaned = _clean(source)
+        return self.check_graph(_graph(file_path, source))
+
+    def check_graph(self, graph: SyntaxGraph) -> list[Finding]:
         findings: list[Finding] = []
-        for rx, message, fix in (
-            (_EQ, "Use `===` instead of `==`", "Replace `==` with `===`"),
-            (_NE, "Use `!==` instead of `!=`", "Replace `!=` with `!==`"),
-        ):
-            for match in rx.finditer(cleaned):
-                window = cleaned[max(0, match.start() - 24) : match.end() + 24]
-                if _NULLISH.search(window):
-                    continue
-                line = _line_at(cleaned, match.start())
-                findings.append(
-                    Finding(
-                        category=self.RULE_ID,
-                        severity=self.SEVERITY,
-                        confidence=self.CONFIDENCE,
-                        file_path=str(file_path),
-                        line=line,
-                        end_line=line,
-                        message=message,
-                        explanation=(
-                            "Loose equality coerces types and hides bugs. Strict equality "
-                            "(`===` / `!==`) compares without coercion. The `== null` idiom "
-                            "is allowed because it matches both `null` and `undefined`."
-                        ),
-                        analyzer=self.RULE_ID,
-                        evidence=_snippet(source, line),
-                        suggested_fix=fix,
-                    )
+        for event in graph.events:
+            if event.kind != "loose_eq":
+                continue
+            compact = "".join(event.text.split()).lower()
+            if "==null" in compact or "!=null" in compact or "==undefined" in compact or "!=undefined" in compact:
+                continue
+            findings.append(
+                _finding(
+                    self,
+                    Path(graph.file_path),
+                    graph,
+                    event.line,
+                    "Use `===` instead of `==`" if "==" in event.text else "Use `!==` instead of `!=`",
+                    "Loose equality coerces types and hides bugs. Strict equality "
+                    "(`===` / `!==`) compares without coercion. The `== null` idiom "
+                    "is allowed because it matches both `null` and `undefined`.",
+                    "Replace `==` with `===`",
+                    event.text,
                 )
+            )
         return findings
 
 
-class VarDeclarationRule(AnalyzerRule):
+class VarDeclarationRule(CodeQualityRule):
     """Flag `var` in favor of `let` / `const`."""
 
     RULE_ID = "js_var_declaration"
@@ -119,34 +100,31 @@ class VarDeclarationRule(AnalyzerRule):
     CONFIDENCE = "high"
 
     def check_file(self, file_path: Path, source: str) -> list[Finding]:
-        cleaned = _clean(source)
+        return self.check_graph(_graph(file_path, source))
+
+    def check_graph(self, graph: SyntaxGraph) -> list[Finding]:
         findings: list[Finding] = []
-        for match in _VAR.finditer(cleaned):
-            line = _line_at(cleaned, match.start())
-            name = match.group("name")
+        for event in graph.events:
+            if event.kind != "var_decl":
+                continue
             findings.append(
-                Finding(
-                    category=self.RULE_ID,
-                    severity=self.SEVERITY,
-                    confidence=self.CONFIDENCE,
-                    file_path=str(file_path),
-                    line=line,
-                    end_line=line,
-                    message=f"`var {name}` is function-scoped; prefer `let` or `const`",
-                    explanation=(
-                        "`var` is function-scoped and hoisted, which leads to accidental "
-                        "sharing across blocks. Use `const` by default and `let` when the "
-                        "binding must be reassigned."
-                    ),
-                    analyzer=self.RULE_ID,
-                    evidence=_snippet(source, line),
-                    suggested_fix=f"Replace `var {name}` with `const {name}` or `let {name}`",
+                _finding(
+                    self,
+                    Path(graph.file_path),
+                    graph,
+                    event.line,
+                    "`var` is function-scoped; prefer `let` or `const`",
+                    "`var` is function-scoped and hoisted, which leads to accidental "
+                    "sharing across blocks. Use `const` by default and `let` when the "
+                    "binding must be reassigned.",
+                    "Replace `var` with `const` or `let`",
+                    event.text,
                 )
             )
         return findings
 
 
-class EmptyCatchRule(AnalyzerRule):
+class EmptyCatchRule(CodeQualityRule):
     """Flag empty `catch` blocks that swallow errors."""
 
     RULE_ID = "js_empty_catch"
@@ -154,32 +132,31 @@ class EmptyCatchRule(AnalyzerRule):
     CONFIDENCE = "high"
 
     def check_file(self, file_path: Path, source: str) -> list[Finding]:
-        cleaned = _clean(source)
+        return self.check_graph(_graph(file_path, source))
+
+    def check_graph(self, graph: SyntaxGraph) -> list[Finding]:
         findings: list[Finding] = []
-        for match in _EMPTY_CATCH.finditer(cleaned):
-            line = _line_at(cleaned, match.start())
+        for event in graph.events:
+            if event.kind != "empty_catch":
+                continue
             findings.append(
-                Finding(
-                    category=self.RULE_ID,
-                    severity=self.SEVERITY,
-                    confidence=self.CONFIDENCE,
-                    file_path=str(file_path),
-                    line=line,
-                    end_line=line,
-                    message="Empty `catch` block swallows errors",
-                    explanation=(
-                        "An empty catch hides failures and makes production issues undiagnosable. "
-                        "Log, rethrow, or handle the error explicitly."
-                    ),
-                    analyzer=self.RULE_ID,
-                    evidence=_snippet(source, line),
-                    suggested_fix="Handle or rethrow the error inside the catch block",
+                _finding(
+                    self,
+                    Path(graph.file_path),
+                    graph,
+                    event.line,
+                    "Empty `catch` block swallows errors",
+                    "An empty catch hides failures and makes production issues undiagnosable. "
+                    "Log, rethrow, or handle the error explicitly. A catch whose only content "
+                    "is an 'intentionally empty' comment is allowed.",
+                    "Handle or rethrow the error inside the catch block",
+                    event.text,
                 )
             )
         return findings
 
 
-class WithStatementRule(AnalyzerRule):
+class WithStatementRule(CodeQualityRule):
     """Flag the `with` statement, which is forbidden in strict mode."""
 
     RULE_ID = "js_with_statement"
@@ -187,32 +164,30 @@ class WithStatementRule(AnalyzerRule):
     CONFIDENCE = "high"
 
     def check_file(self, file_path: Path, source: str) -> list[Finding]:
-        cleaned = _clean(source)
+        return self.check_graph(_graph(file_path, source))
+
+    def check_graph(self, graph: SyntaxGraph) -> list[Finding]:
         findings: list[Finding] = []
-        for match in _WITH.finditer(cleaned):
-            line = _line_at(cleaned, match.start())
+        for event in graph.events:
+            if event.kind != "with_stmt":
+                continue
             findings.append(
-                Finding(
-                    category=self.RULE_ID,
-                    severity=self.SEVERITY,
-                    confidence=self.CONFIDENCE,
-                    file_path=str(file_path),
-                    line=line,
-                    end_line=line,
-                    message="`with` statements are forbidden in strict mode",
-                    explanation=(
-                        "`with` mutates the identifier lookup scope and is banned under "
-                        "`'use strict'`. Reference properties on the object explicitly."
-                    ),
-                    analyzer=self.RULE_ID,
-                    evidence=_snippet(source, line),
-                    suggested_fix="Replace `with (obj) { x }` with `obj.x`",
+                _finding(
+                    self,
+                    Path(graph.file_path),
+                    graph,
+                    event.line,
+                    "`with` statements are forbidden in strict mode",
+                    "`with` mutates the identifier lookup scope and is banned under "
+                    "`'use strict'`. Reference properties on the object explicitly.",
+                    "Replace `with (obj) { x }` with `obj.x`",
+                    event.text,
                 )
             )
         return findings
 
 
-ALL_JAVASCRIPT_RULES: list[AnalyzerRule] = [
+ALL_JAVASCRIPT_RULES: list[CodeQualityRule] = [
     LooseEqualityRule(),
     VarDeclarationRule(),
     EmptyCatchRule(),

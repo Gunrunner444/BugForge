@@ -30,6 +30,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 7 | Production security agent execution + evidence-driven verification | ✅ Implemented (lab-capable; live-capable with human approval; not unrestricted hacking) |
 | Phase 8 | Advanced security research + verification intelligence | ✅ Implemented (orchestrator, identities, replay, memory; AI remains advisory) |
 | Phase 9 | Security research workbench + end-to-end validation | ✅ Implemented (hardening + researcher workflow; live remains human-controlled) |
+| Phase 10 | Native polyglot analysis parity (Tree-sitter + scope-aware taint) | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -39,15 +40,19 @@ See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architec
 
 BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
-instead of hard-coded conditionals. Python quality analysis, JavaScript/TypeScript
-quality rules, and twelve-language security analysis run through that catalog.
-Auxiliary formats stay detection-only. See
+instead of hard-coded conditionals. Python keeps its CPython AST quality
+analysis. Other programming languages parse through Tree-sitter into the same
+`SyntaxGraph`. JavaScript/TypeScript quality rules are syntax-aware and live
+in the **code quality** catalog, separate from **security** observations.
+C# and Shell are full analysis languages. HTML, CSS/SCSS, and SQL have
+specialized analysis. Remaining auxiliaries stay detection-only. See
+[docs/polyglot-analysis.md](docs/polyglot-analysis.md) and
 [docs/language-capability-matrix.md](docs/language-capability-matrix.md).
 
 Phase 2 adds:
 
-- **Shared syntax graphs** (Python AST + profile parsers) so security rules are
-  language-neutral.
+- **Shared syntax graphs** (CPython AST for Python, Tree-sitter for other
+  analysis languages, labeled profile fallback only if a grammar is missing).
 - **Framework registry** (Django, Flask, FastAPI, Express, Next.js, NestJS, Rails, …).
 - **Security rule engine** with taint-aware source→sink hypotheses.
 - **Local MLX provider** at `http://127.0.0.1:8080/v1`, configurable model

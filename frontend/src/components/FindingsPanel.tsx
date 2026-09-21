@@ -89,7 +89,7 @@ export default function FindingsPanel({ analysisId }: Props) {
     <div>
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-slate-500">
-          {total} finding{total !== 1 ? "s" : ""}
+          {total} code-quality finding{total !== 1 ? "s" : ""}
         </p>
         <select
           value={severityFilter}
@@ -179,7 +179,11 @@ function FindingRow({
           )}
           <div className="flex flex-wrap gap-3 text-xs text-slate-400">
             <span>Confidence: <span className="font-medium text-slate-600">{f.confidence}</span></span>
+            <span>Catalog: <span className="font-medium text-slate-600">{(f.catalog || "code_quality").replace(/_/g, " ")}</span></span>
             <span>Analyzer: <span className="font-mono text-slate-600">{f.analyzer}</span></span>
+            {f.parser_backend ? (
+              <span>Parser: <span className="font-mono text-slate-600">{f.parser_backend}</span></span>
+            ) : null}
             <span>Lines: <span className="font-mono text-slate-600">{f.line}–{f.end_line}</span></span>
           </div>
         </div>

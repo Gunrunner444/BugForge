@@ -61,7 +61,7 @@ export default function SecurityFindingsPanel({ projectId }: Props) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        {total} potential/corroborated finding{total === 1 ? "" : "s"}. None are verified in this phase.
+        {total} potential/corroborated security finding{total === 1 ? "" : "s"}. Static analysis never marks these verified.
       </p>
       {findings.map((finding) => (
         <button
@@ -80,11 +80,14 @@ export default function SecurityFindingsPanel({ projectId }: Props) {
           <p className="text-xs text-slate-500 mt-1">
             {finding.vulnerability_class} {finding.file_path}
             {finding.line != null ? `:${finding.line}` : ""}
+            {finding.language ? ` · ${finding.language}` : ""}
+            {finding.parser_backend ? ` · ${finding.parser_backend}` : ""}
           </p>
           {expanded === finding.id && (
             <div className="mt-2 text-xs text-slate-600 space-y-1">
               {finding.hypothesis && <p>{finding.hypothesis}</p>}
               {finding.ai_analysis && <p className="italic">{finding.ai_analysis}</p>}
+              {finding.taint_path && <p>Taint path: {finding.taint_path}</p>}
               {finding.rule_ids && <p>Rules: {finding.rule_ids}</p>}
             </div>
           )}

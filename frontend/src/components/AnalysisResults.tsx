@@ -21,7 +21,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "files", label: "Files" },
   { key: "entities", label: "Entities" },
   { key: "imports", label: "Imports" },
-  { key: "findings", label: "Findings" },
+  { key: "findings", label: "Code Quality" },
   { key: "security", label: "Security" },
 ];
 
@@ -158,6 +158,40 @@ function OverviewTab({ analysis }: { analysis: Analysis }) {
         </div>
       )}
 
+      {s.language_capabilities && s.language_capabilities.length > 0 && (
+        <div>
+          <h3 className="text-sm font-medium text-slate-700 mb-3">Parser backends</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-500 border-b border-slate-100">
+                  <th className="pb-2 pr-4 font-medium">Language</th>
+                  <th className="pb-2 pr-4 font-medium">Tier</th>
+                  <th className="pb-2 pr-4 font-medium">Backend</th>
+                  <th className="pb-2 font-medium">Capabilities</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {s.language_capabilities
+                  .filter((row) => row.parser_tier !== "detection_only")
+                  .map((row) => (
+                    <tr key={row.language}>
+                      <td className="py-2 pr-4 font-medium text-slate-800">{row.language}</td>
+                      <td className="py-2 pr-4">
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${tierColor(row.parser_tier)}`}>
+                          {tierLabel(row.parser_tier)}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 font-mono text-xs text-slate-600">{row.parser_backend}</td>
+                      <td className="py-2 text-xs text-slate-500">{row.capabilities.join(", ")}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Frameworks */}
       {s.frameworks.length > 0 && (
         <div>
@@ -203,6 +237,7 @@ function FilesTab({ files }: { files: RepositoryFile[] }) {
             <th className="pb-2 pr-4 font-medium">Path</th>
             <th className="pb-2 pr-4 font-medium">Type</th>
             <th className="pb-2 pr-4 font-medium">Language</th>
+            <th className="pb-2 pr-4 font-medium">Parser</th>
             <th className="pb-2 pr-4 font-medium text-right">Lines</th>
           </tr>
         </thead>
@@ -221,6 +256,16 @@ function FilesTab({ files }: { files: RepositoryFile[] }) {
                     {f.language}
                   </span>
                 )}
+              </td>
+              <td className="py-2 pr-4 text-xs text-slate-500">
+                {f.parser_tier ? (
+                  <span className={`px-2 py-0.5 rounded-full ${tierColor(f.parser_tier)}`}>
+                    {tierLabel(f.parser_tier)}
+                  </span>
+                ) : (
+                  "—"
+                )}
+                {f.has_errors ? <span className="ml-2 text-amber-700">errors</span> : null}
               </td>
               <td className="py-2 pr-4 text-right text-slate-500">{f.line_count || "—"}</td>
             </tr>
@@ -310,4 +355,18 @@ const importTypeColor = (t: string): string => {
   if (t === "third_party") return "bg-orange-50 text-orange-700";
   if (t === "relative") return "bg-sky-50 text-sky-700";
   return "bg-green-50 text-green-700";
+};
+
+const tierLabel = (tier: string): string => {
+  if (tier === "full_ast") return "FULL AST";
+  if (tier === "profile_fallback") return "PROFILE FALLBACK";
+  if (tier === "specialized") return "SPECIALIZED";
+  return "DETECTION ONLY";
+};
+
+const tierColor = (tier: string): string => {
+  if (tier === "full_ast") return "bg-emerald-50 text-emerald-800";
+  if (tier === "specialized") return "bg-sky-50 text-sky-800";
+  if (tier === "profile_fallback") return "bg-amber-50 text-amber-800";
+  return "bg-slate-100 text-slate-600";
 };

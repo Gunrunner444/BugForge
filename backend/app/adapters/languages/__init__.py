@@ -2,13 +2,18 @@ from app.adapters.languages.base import LanguageAdapter
 from app.adapters.languages.known import (
     CAdapter,
     CppAdapter,
+    CSharpAdapter,
+    CssAdapter,
     GoAdapter,
+    HtmlAdapter,
     JavaAdapter,
     JavaScriptAdapter,
     KotlinAdapter,
     PHPAdapter,
     RubyAdapter,
     RustAdapter,
+    ShellAdapter,
+    SqlAdapter,
     SwiftAdapter,
     TypeScriptAdapter,
 )
@@ -19,7 +24,10 @@ from app.adapters.languages.registry import LanguageRegistry
 __all__ = [
     "CAdapter",
     "CppAdapter",
+    "CSharpAdapter",
+    "CssAdapter",
     "GoAdapter",
+    "HtmlAdapter",
     "JavaAdapter",
     "JavaScriptAdapter",
     "KotlinAdapter",
@@ -30,6 +38,8 @@ __all__ = [
     "PythonAdapter",
     "RubyAdapter",
     "RustAdapter",
+    "ShellAdapter",
+    "SqlAdapter",
     "SwiftAdapter",
     "TypeScriptAdapter",
 ]

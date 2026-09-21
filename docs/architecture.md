@@ -107,16 +107,29 @@ name. Languages that cannot apply a given override keep their built-in rules.
 - `DETECTION` — map file extensions to a language id
 - `SOURCE` — count as source code in repository classification
 - `PARSE` — extract entities/imports
+- `AST` — real syntax tree (Tree-sitter or CPython), not a regex scan
 - `ENTITY_EXTRACTION` / `IMPORT_EXTRACTION` — advertised when parse is real
-- `STATIC_ANALYSIS` — quality rules (Python AST; JavaScript/TypeScript comment-aware checks)
-- `SECURITY_ANALYSIS` — taint-aware security observations
+- `SCOPE_ANALYSIS` / `CALL_ANALYSIS` / `DATA_FLOW` — scope-aware symbols and taint
+- `CODE_QUALITY` / `STATIC_ANALYSIS` — quality rules (never mixed into security)
+- `SECURITY_ANALYSIS` — taint-aware security observations (POTENTIAL / CORROBORATED only)
 
-**Python** (`PythonAdapter`) wraps the existing parser and AST quality rules
-and also participates in security analysis via the Python AST syntax graph.
+Parser tiers: `FULL_AST`, `PROFILE_FALLBACK`, `SPECIALIZED`, `DETECTION_ONLY`.
+The UI must not present profile fallback as equivalent to AST analysis.
 
-**JavaScript and TypeScript** use `ProfileLanguageAdapter` with the shared
-`SyntaxGraph` substrate plus JavaScript-specific quality rules (`==` vs `===`,
-`var`, empty `catch`, `with`). They do not reuse Python AST rules.
+**Python** (`PythonAdapter`) keeps the CPython AST as the primary parser because
+it is measurably better for existing Python quality rules. It still fills the
+same `SyntaxGraph` used by security analysis.
+
+**JavaScript, TypeScript, Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, Swift,
+C#, and Shell** parse with Tree-sitter into `SyntaxGraph`. JavaScript/TypeScript
+quality rules (`==`, `var`, empty `catch`, `with`) operate on syntax events, not
+regex over stripped source.
+
+**HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
+security patterns. They do not claim application-language taint parity.
+
+The regex `parse_with_profile` scanner remains as an explicitly labeled
+`PROFILE_FALLBACK` if Tree-sitter cannot load a grammar.
 
 **Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, and Swift** use
 `ProfileLanguageAdapter` without quality static analysis. Security analysis

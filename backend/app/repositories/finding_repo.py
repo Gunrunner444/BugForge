@@ -31,6 +31,14 @@ class FindingRepository:
                     analyzer=f.analyzer,
                     evidence=f.evidence,
                     suggested_fix=f.suggested_fix,
+                    catalog=getattr(f, "catalog", "code_quality"),
+                    language=getattr(f, "language", None),
+                    parser_backend=getattr(f, "parser_backend", None),
+                    node_id=getattr(f, "node_id", None) or None,
+                    start_byte=getattr(f, "start_byte", None),
+                    end_byte=getattr(f, "end_byte", None),
+                    start_column=getattr(f, "start_column", None) or f.column,
+                    end_column=getattr(f, "end_column", None),
                 )
             )
         await self.session.flush()

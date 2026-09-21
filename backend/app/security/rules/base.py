@@ -35,6 +35,17 @@ class SecurityObservation:
     language: str
     documentation: RuleDocumentation
     metadata: dict[str, str] = field(default_factory=dict)
+    end_line: int | None = None
+    start_column: int | None = None
+    end_column: int | None = None
+    start_byte: int | None = None
+    end_byte: int | None = None
+    node_id: str = ""
+    parser_backend: str = ""
+    framework_context: str = ""
+    taint_path: str = ""
+    possible_false_positives: str = ""
+    limitations: str = ""
 
     def to_evidence(self) -> Evidence:
         return Evidence(
@@ -50,8 +61,13 @@ class SecurityObservation:
                 "language": self.language,
                 "confidence": self.confidence,
                 "detects": self.documentation.detects,
-                "limitations": self.documentation.limitations,
-                "false_positives": self.documentation.false_positives,
+                "limitations": self.limitations or self.documentation.limitations,
+                "false_positives": self.possible_false_positives
+                or self.documentation.false_positives,
+                "parser_backend": self.parser_backend,
+                "node_id": self.node_id,
+                "framework": self.framework_context,
+                "taint_path": self.taint_path,
                 **self.metadata,
             },
         )

@@ -118,7 +118,7 @@ def test_cpp_path_traversal(tmp_path: Path) -> None:
     path = _copy(tmp_path, "cpp/vuln_path.cpp")
     result = SecurityAnalysisEngine().analyze_repository(tmp_path, [path])
     assert any(
-        obs.vulnerability_class is VulnerabilityClass.PATH_TRAVERSAL for obs in result.observations
+        obs.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL for obs in result.observations
     )
 
 

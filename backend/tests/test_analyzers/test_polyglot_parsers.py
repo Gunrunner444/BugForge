@@ -65,7 +65,7 @@ int main(int argc, char **argv)
     result = analyze_source(tmp_path, "main.c", src)
     classes = observation_classes(result)
     assert VulnerabilityClass.COMMAND_INJECTION in classes
-    assert VulnerabilityClass.PATH_TRAVERSAL in classes
+    assert VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
     assert VulnerabilityClass.SQL_INJECTION in classes
     comment_only = "/* system(argv[1]); */\nint x = 1;\n"
     quiet = analyze_source(tmp_path, "ok.c", comment_only)
@@ -152,7 +152,7 @@ impl App {
     result = analyze_source(tmp_path, "a.rs", src)
     classes = observation_classes(result)
     assert VulnerabilityClass.COMMAND_INJECTION in classes
-    assert VulnerabilityClass.PATH_TRAVERSAL in classes
+    assert VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
 
 
 def test_java_servlet_jdbc_and_process(tmp_path: Path) -> None:
@@ -265,7 +265,7 @@ actor Worker {}
     result = analyze_source(tmp_path, "A.swift", src)
     classes = observation_classes(result)
     assert (
-        VulnerabilityClass.SQL_INJECTION in classes or VulnerabilityClass.PATH_TRAVERSAL in classes
+        VulnerabilityClass.SQL_INJECTION in classes or VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
     )
 
 

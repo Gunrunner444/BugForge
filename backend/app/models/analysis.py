@@ -64,6 +64,9 @@ class RepositoryFile(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     has_errors: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parser_backend: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    parser_tier: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

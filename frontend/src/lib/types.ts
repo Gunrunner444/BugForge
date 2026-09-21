@@ -38,6 +38,12 @@ export interface AnalysisSummary {
   languages: LanguageStats[];
   frameworks: FrameworkDetection[];
   analysis_duration_seconds: number | null;
+  language_capabilities?: Array<{
+    language: string;
+    parser_tier: string;
+    parser_backend: string;
+    capabilities: string[];
+  }>;
 }
 
 export interface Analysis {
@@ -60,6 +66,9 @@ export interface RepositoryFile {
   size_bytes: number;
   line_count: number;
   has_errors: boolean;
+  parser_backend?: string | null;
+  parser_tier?: string | null;
+  error_count?: number;
 }
 
 export interface CodeEntity {
@@ -180,6 +189,9 @@ export interface Finding {
   evidence: string;
   suggested_fix: string;
   created_at: string;
+  catalog?: string;
+  language?: string | null;
+  parser_backend?: string | null;
 }
 
 export interface FindingsListResponse {
@@ -707,6 +719,10 @@ export interface SecurityFinding {
   observation_refs: string;
   asset: string | null;
   created_at: string;
+  parser_backend?: string | null;
+  node_id?: string | null;
+  taint_path?: string | null;
+  language?: string | null;
 }
 
 export interface SecurityStatus {
@@ -716,6 +732,8 @@ export interface SecurityStatus {
     display_name: string;
     capabilities: string[];
     extensions: string[];
+    parser_tier?: string;
+    parser_backend?: string;
   }>;
   rule_ids: string[];
   ai_provider: string;

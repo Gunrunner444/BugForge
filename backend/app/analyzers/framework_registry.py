@@ -135,6 +135,39 @@ DEFAULT_FRAMEWORKS: tuple[FrameworkSpec, ...] = (
         language="swift",
         manifests={"Package.swift": (r"vapor",)},
     ),
+    FrameworkSpec(
+        name="echo",
+        language="go",
+        manifests={"go.mod": (r"github.com/labstack/echo",)},
+    ),
+    FrameworkSpec(
+        name="fiber",
+        language="go",
+        manifests={"go.mod": (r"github.com/gofiber/fiber",)},
+    ),
+    FrameworkSpec(
+        name="axum",
+        language="rust",
+        manifests={"Cargo.toml": (r"\baxum\b",)},
+    ),
+    FrameworkSpec(
+        name="rocket",
+        language="rust",
+        manifests={"Cargo.toml": (r"\brocket\b",)},
+    ),
+    FrameworkSpec(
+        name="symfony",
+        language="php",
+        manifests={"composer.json": (r'"symfony/framework-bundle"', r'"symfony/http-foundation"')},
+        indicator_files=("symfony.lock",),
+    ),
+    FrameworkSpec(
+        name="servlet",
+        language="java",
+        config_patterns=(r"javax\.servlet", r"jakarta\.servlet", r"HttpServlet"),
+        config_files=("pom.xml", "build.gradle", "build.gradle.kts"),
+        indicator_files=("web.xml",),
+    ),
 )
 
 

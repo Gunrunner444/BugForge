@@ -62,7 +62,7 @@ CASES: list[MatrixCase] = [
         "path",
         "const q = req.query.f;\nfs.readFile(q);\n",
         "fs.readFile('/etc/hosts');\n",
-        VulnerabilityClass.PATH_TRAVERSAL,
+        VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
     ),
     MatrixCase(
         "javascript",
@@ -86,7 +86,7 @@ CASES: list[MatrixCase] = [
         "deser",
         "const q = req.body;\nJSON.parse(q);\n",
         "JSON.parse('{\"a\":1}');\n",
-        VulnerabilityClass.UNSAFE_DESERIALIZATION,
+        VulnerabilityClass.POTENTIAL_UNSAFE_DESERIALIZATION,
     ),
     MatrixCase(
         "javascript",
@@ -166,7 +166,7 @@ CASES: list[MatrixCase] = [
         "path",
         'char *c = argv[1];\nfopen(c, "r");\n',
         'fopen("/tmp/x", "r");\n',
-        VulnerabilityClass.PATH_TRAVERSAL,
+        VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
     ),
     MatrixCase(
         "c",
@@ -214,7 +214,7 @@ CASES: list[MatrixCase] = [
         "path",
         "let q = req.query;\nfs::read(q);\n",
         'fs::read("/etc/hosts");\n',
-        VulnerabilityClass.PATH_TRAVERSAL,
+        VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
     ),
     MatrixCase(
         "java",

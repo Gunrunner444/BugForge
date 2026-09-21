@@ -32,6 +32,8 @@ async def security_status() -> SecurityStatusResponse:
             display_name=adapter.display_name,
             capabilities=sorted(cap.value for cap in adapter.capabilities),
             extensions=sorted(adapter.file_extensions),
+            parser_tier=str(adapter.parser_tier()),
+            parser_backend=adapter.parser_backend(),
         )
         for adapter in catalog.languages.all_adapters()
         if adapter.supports(LanguageCapability.SECURITY_ANALYSIS)

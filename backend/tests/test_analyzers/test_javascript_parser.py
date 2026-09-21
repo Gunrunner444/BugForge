@@ -228,12 +228,12 @@ app.get('/all', (req, res) => {
 """
         result = analyze_source(tmp_path, "all.js", src)
         classes = observation_classes(result)
-        assert VulnerabilityClass.PATH_TRAVERSAL in classes
+        assert VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
         assert VulnerabilityClass.SSRF in classes
         assert VulnerabilityClass.XSS in classes
         assert VulnerabilityClass.DYNAMIC_EXECUTION in classes
         assert VulnerabilityClass.UNSAFE_REDIRECT in classes
-        assert VulnerabilityClass.UNSAFE_DESERIALIZATION in classes
+        assert VulnerabilityClass.POTENTIAL_UNSAFE_DESERIALIZATION in classes
 
     def test_weak_crypto(self, tmp_path: Path) -> None:
         src = "const hash = crypto.createHash('md5').update(password).digest('hex');\n"

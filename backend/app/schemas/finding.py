@@ -24,6 +24,10 @@ class FindingResponse(BaseModel):
     evidence: str
     suggested_fix: str
     created_at: datetime
+    catalog: str = "code_quality"
+    language: str | None = None
+    parser_backend: str | None = None
+    node_id: str | None = None
 
 
 class PaginatedFindingsResponse(BaseModel):

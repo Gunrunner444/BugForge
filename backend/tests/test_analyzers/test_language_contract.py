@@ -19,6 +19,7 @@ from tests.language_support import (
     DETECTION_ONLY_LANGUAGE_IDS,
     EXTENSIONS,
     PARSE_CAPS,
+    SPECIALIZED_LANGUAGE_IDS,
     adapter,
     graph_for,
     profile_supports,
@@ -69,6 +70,18 @@ def test_empty_and_malformed_source(language_id: str) -> None:
     assert empty.language == language_id
     broken = graph_for(language_id, f"bad{EXTENSIONS[language_id][0]}", "((({{{")
     assert broken.language == language_id
+    assert broken.diagnostics.has_errors or broken.errors
+
+
+@pytest.mark.parametrize("language_id", SPECIALIZED_LANGUAGE_IDS)
+def test_specialized_languages_parse(language_id: str) -> None:
+    lang = adapter(language_id)
+    assert lang.supports(LanguageCapability.PARSE)
+    assert lang.supports(LanguageCapability.SECURITY_ANALYSIS)
+    assert str(lang.parser_tier()) in {"specialized", "full_ast", "profile_fallback"}
+    graph = graph_for(language_id, f"x{EXTENSIONS[language_id][0]}", "x { y }")
+    assert graph.language == language_id
+    assert graph.parser_backend in {"tree_sitter", "profile"}
 
 
 @pytest.mark.parametrize("language_id", ANALYSIS_LANGUAGE_IDS)

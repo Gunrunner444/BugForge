@@ -28,6 +28,10 @@ class SecurityFindingResponse(BaseModel):
     observation_refs: str
     asset: str | None
     created_at: datetime
+    parser_backend: str | None = None
+    node_id: str | None = None
+    taint_path: str | None = None
+    language: str | None = None
 
 
 class PaginatedSecurityFindingsResponse(BaseModel):
@@ -42,6 +46,8 @@ class SecurityAnalyzerInfo(BaseModel):
     display_name: str
     capabilities: list[str]
     extensions: list[str]
+    parser_tier: str = "detection_only"
+    parser_backend: str = "none"
 
 
 class SecurityStatusResponse(BaseModel):

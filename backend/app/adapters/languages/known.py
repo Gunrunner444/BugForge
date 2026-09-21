@@ -1,7 +1,9 @@
 """Built-in language adapters.
 
-Programming languages with a syntax profile implement parse, entity/import
-extraction, and security analysis. Auxiliary formats remain detection-only.
+Programming languages with a Tree-sitter (or CPython AST) backend implement
+parse, entity/import extraction, scope-aware data flow, and security analysis.
+Markup/query formats get specialized analysis. Remaining auxiliaries stay
+detection-only.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 from app.adapters.languages.base import LanguageAdapter
 from app.adapters.languages.profile import ProfileLanguageAdapter
 from app.analysis.javascript_analyzer import ALL_JAVASCRIPT_RULES
-from app.domain.language import LanguageCapability
+from app.domain.language import LanguageCapability, ParserTier
 
 
 class DetectionLanguageAdapter(LanguageAdapter):
@@ -46,6 +48,9 @@ class DetectionLanguageAdapter(LanguageAdapter):
     @property
     def capabilities(self) -> frozenset[LanguageCapability]:
         return self._capabilities
+
+    def parser_tier(self) -> ParserTier:
+        return ParserTier.DETECTION_ONLY
 
 
 class JavaScriptAdapter(ProfileLanguageAdapter):
@@ -117,10 +122,45 @@ class SwiftAdapter(ProfileLanguageAdapter):
         super().__init__("swift", "Swift", frozenset({".swift"}))
 
 
-# Auxiliary languages previously tracked by the extension map. Detection only.
+class CSharpAdapter(ProfileLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("csharp", "C#", frozenset({".cs"}))
+
+
+class ShellAdapter(ProfileLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("shell", "Shell", frozenset({".sh", ".bash", ".zsh"}))
+
+
+class SpecializedLanguageAdapter(ProfileLanguageAdapter):
+    """Syntax-aware specialized analysis (not a full application-language taint suite)."""
+
+    def __init__(self, language_id: str, display_name: str, extensions: frozenset[str]) -> None:
+        super().__init__(language_id, display_name, extensions, specialized=True)
+
+
+class HtmlAdapter(SpecializedLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("html", "HTML", frozenset({".html", ".htm"}))
+
+
+class CssAdapter(SpecializedLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("css", "CSS", frozenset({".css"}))
+
+
+class ScssAdapter(SpecializedLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("scss", "SCSS", frozenset({".scss", ".sass"}))
+
+
+class SqlAdapter(SpecializedLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__("sql", "SQL", frozenset({".sql"}))
+
+
+# Config/docs remain detection-only.
 AUXILIARY_LANGUAGES: tuple[DetectionLanguageAdapter, ...] = (
-    DetectionLanguageAdapter("csharp", "C#", frozenset({".cs"}), is_source=True),
-    DetectionLanguageAdapter("shell", "Shell", frozenset({".sh", ".bash", ".zsh"}), is_source=True),
     DetectionLanguageAdapter("yaml", "YAML", frozenset({".yaml", ".yml"}), is_source=False),
     DetectionLanguageAdapter("json", "JSON", frozenset({".json"}), is_source=False),
     DetectionLanguageAdapter("toml", "TOML", frozenset({".toml"}), is_source=False),
@@ -131,10 +171,6 @@ AUXILIARY_LANGUAGES: tuple[DetectionLanguageAdapter, ...] = (
         frozenset({".rst"}),
         is_source=False,
     ),
-    DetectionLanguageAdapter("html", "HTML", frozenset({".html", ".htm"}), is_source=True),
-    DetectionLanguageAdapter("css", "CSS", frozenset({".css"}), is_source=True),
-    DetectionLanguageAdapter("scss", "SCSS", frozenset({".scss", ".sass"}), is_source=True),
-    DetectionLanguageAdapter("sql", "SQL", frozenset({".sql"}), is_source=True),
     DetectionLanguageAdapter("r", "R", frozenset({".r"}), is_source=True),
     DetectionLanguageAdapter("scala", "Scala", frozenset({".scala"}), is_source=True),
     DetectionLanguageAdapter("dart", "Dart", frozenset({".dart"}), is_source=True),
@@ -154,4 +190,10 @@ PROGRAMMING_LANGUAGE_ADAPTERS: tuple[type[LanguageAdapter], ...] = (
     PHPAdapter,
     KotlinAdapter,
     SwiftAdapter,
+    CSharpAdapter,
+    ShellAdapter,
+    HtmlAdapter,
+    CssAdapter,
+    ScssAdapter,
+    SqlAdapter,
 )

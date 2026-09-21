@@ -1,63 +1,105 @@
-"""Python AST → SyntaxGraph. More precise than the profile parser."""
+"""Python AST → SyntaxGraph. Primary Python backend (CPython)."""
 
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
+from app.domain.language import ParserTier
 from app.domain.source import ParsedEntity, ParsedImport, ParsedParameter
-from app.parsing.model import Binding, CallSite, SyntaxGraph
+from app.parsing.model import (
+    Binding,
+    CallKind,
+    CallSite,
+    ParserDiagnostics,
+    ReturnSite,
+    Scope,
+    ScopeKind,
+    SemanticKind,
+    SemanticNode,
+    Symbol,
+    SymbolKind,
+    SyntaxEvent,
+    SyntaxGraph,
+)
+from app.parsing.span import SourceSpan, span_from_lineno
+
+_STDLIB = frozenset(sys.stdlib_module_names)
 
 
 def parse_python_graph(file_path: Path, source: str) -> SyntaxGraph:
     lines = tuple(source.splitlines() or [""])
     errors: list[str] = []
-    imports: list[ParsedImport] = []
-    entities: list[ParsedEntity] = []
-    calls: list[CallSite] = []
-    bindings: list[Binding] = []
     try:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError as exc:
         errors.append(f"SyntaxError at line {exc.lineno}: {exc.msg}")
+        span = span_from_lineno(source, exc.lineno or 1, exc.lineno or 1, start_column=(exc.offset or 1))
         return SyntaxGraph(
             language="python",
             file_path=str(file_path),
             source=source,
             lines=lines,
             errors=tuple(errors),
+            parser_backend="cpython_ast",
+            parser_tier=ParserTier.FULL_AST,
+            diagnostics=ParserDiagnostics(
+                has_errors=True,
+                error_count=1,
+                error_spans=(span,),
+                recoverable=False,
+                message=errors[0],
+            ),
         )
 
-    visitor = _PythonGraphVisitor(imports, entities, calls, bindings)
-    visitor.visit(tree)
+    builder = _PythonGraphVisitor(source)
+    builder.visit(tree)
     return SyntaxGraph(
         language="python",
         file_path=str(file_path),
         source=source,
         lines=lines,
-        imports=tuple(imports),
-        entities=tuple(entities),
-        calls=tuple(calls),
-        bindings=tuple(bindings),
-        errors=tuple(errors),
+        imports=tuple(builder.imports),
+        entities=tuple(builder.entities),
+        calls=tuple(builder.calls),
+        bindings=tuple(builder.bindings),
+        errors=(),
+        parser_backend="cpython_ast",
+        parser_tier=ParserTier.FULL_AST,
+        diagnostics=ParserDiagnostics(),
+        scopes=tuple(builder.scopes),
+        symbols=tuple(builder.symbols),
+        nodes=tuple(builder.nodes),
+        returns=tuple(builder.returns),
+        events=tuple(builder.events),
+        file_context=_file_context(str(file_path)),
     )
 
 
 class _PythonGraphVisitor(ast.NodeVisitor):
-    def __init__(
-        self,
-        imports: list[ParsedImport],
-        entities: list[ParsedEntity],
-        calls: list[CallSite],
-        bindings: list[Binding],
-    ) -> None:
-        self.imports = imports
-        self.entities = entities
-        self.calls = calls
-        self.bindings = bindings
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.imports: list[ParsedImport] = []
+        self.entities: list[ParsedEntity] = []
+        self.calls: list[CallSite] = []
+        self.bindings: list[Binding] = []
+        self.returns: list[ReturnSite] = []
+        self.events: list[SyntaxEvent] = []
+        self.scopes: list[Scope] = [
+            Scope(scope_id="module", kind=ScopeKind.MODULE, name="module")
+        ]
+        self.symbols: list[Symbol] = []
+        self.nodes: list[SemanticNode] = []
+        self._scope_stack = list(self.scopes)
         self._class: str | None = None
 
+    @property
+    def scope_id(self) -> str:
+        return self._scope_stack[-1].scope_id
+
     def visit_Import(self, node: ast.Import) -> None:
+        span = _span(self.source, node)
         for alias in node.names:
             self.imports.append(
                 ParsedImport(
@@ -65,12 +107,21 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     alias=alias.asname,
                     line_number=node.lineno,
                     is_from_import=False,
-                    import_type="unknown",
+                    import_type=_classify_module(alias.name, relative=False),
+                    column=node.col_offset + 1,
+                    start_byte=span.start_byte,
+                    end_byte=span.end_byte,
+                    syntax_kind="import",
                 )
             )
+        self._node(SemanticKind.IMPORT, alias.name if node.names else "import", span, "Import")
+        self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
+        relative = (node.level or 0) > 0
+        import_type = "relative" if relative else _classify_module(module, relative=False)
+        span = _span(self.source, node)
         for alias in node.names:
             self.imports.append(
                 ParsedImport(
@@ -79,11 +130,26 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     alias=alias.asname,
                     line_number=node.lineno,
                     is_from_import=True,
-                    import_type="relative" if (node.level or 0) > 0 else "unknown",
+                    import_type=import_type,
+                    column=node.col_offset + 1,
+                    start_byte=span.start_byte,
+                    end_byte=span.end_byte,
+                    syntax_kind="from_import",
                 )
             )
+        self._node(SemanticKind.IMPORT, module, span, "ImportFrom")
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        span = _span(self.source, node)
+        scope_id = f"{self.scope_id}/class:{node.name}"
+        scope = Scope(
+            scope_id=scope_id,
+            kind=ScopeKind.CLASS,
+            name=node.name,
+            parent_id=self.scope_id,
+            span=span,
+        )
         self.entities.append(
             ParsedEntity(
                 entity_type="class",
@@ -91,13 +157,23 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                 qualified_name=node.name,
                 start_line=node.lineno,
                 end_line=node.end_lineno or node.lineno,
+                start_column=node.col_offset + 1,
+                end_column=(node.end_col_offset or 0) + 1,
+                start_byte=span.start_byte,
+                end_byte=span.end_byte,
                 docstring=ast.get_docstring(node),
                 parent=self._class,
+                decorators=[_expr(d) for d in node.decorator_list],
+                node_id=f"python:class:{span.start_byte}:{node.name}",
             )
         )
+        self._node(SemanticKind.CLASS, node.name, span, "ClassDef")
         prev = self._class
         self._class = node.name
+        self._scope_stack.append(scope)
+        self.scopes.append(scope)
         self.generic_visit(node)
+        self._scope_stack.pop()
         self._class = prev
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -108,6 +184,10 @@ class _PythonGraphVisitor(ast.NodeVisitor):
             else ("method" if self._class else ("async_function" if is_async else "function"))
         )
         qn = f"{self._class}.{node.name}" if self._class else node.name
+        span = _span(self.source, node)
+        kind = ScopeKind.METHOD if self._class else ScopeKind.FUNCTION
+        scope_id = f"{self.scope_id}/{kind.value}:{node.name}"
+        scope = Scope(scope_id=scope_id, kind=kind, name=node.name, parent_id=self.scope_id, span=span)
         params = [
             ParsedParameter(name=arg.arg)
             for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
@@ -119,58 +199,260 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                 qualified_name=qn,
                 start_line=node.lineno,
                 end_line=node.end_lineno or node.lineno,
+                start_column=node.col_offset + 1,
+                end_column=(node.end_col_offset or 0) + 1,
+                start_byte=span.start_byte,
+                end_byte=span.end_byte,
                 docstring=ast.get_docstring(node),
                 parameters=params,
                 parent=self._class,
+                decorators=[_expr(d) for d in node.decorator_list],
+                node_id=f"python:function:{span.start_byte}:{qn}",
             )
         )
+        self._node(SemanticKind.METHOD if self._class else SemanticKind.FUNCTION, node.name, span, type(node).__name__)
+        self._scope_stack.append(scope)
+        self.scopes.append(scope)
+        for param in params:
+            self._bind(param.name, node.lineno, "", SymbolKind.PARAMETER, span, rhs_is_literal=True)
         self.generic_visit(node)
+        self._scope_stack.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        meta = _expr_meta(node.value)
         rhs = _expr(node.value)
+        span = _span(self.source, node)
         for target in node.targets:
-            name = _name_of(target)
-            if name:
-                self.bindings.append(Binding(name=name, line=node.lineno, rhs=rhs))
+            self._bind_target(target, node.lineno, rhs, meta, span)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is not None:
-            name = _name_of(node.target)
-            if name:
-                self.bindings.append(Binding(name=name, line=node.lineno, rhs=_expr(node.value)))
+            meta = _expr_meta(node.value)
+            self._bind_target(node.target, node.lineno, _expr(node.value), meta, _span(self.source, node))
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         qualified = _expr(node.func)
         name = qualified.rsplit(".", 1)[-1]
         args = ", ".join(_expr(a) for a in node.args)
-        dynamic = any(
-            isinstance(a, (ast.BinOp, ast.JoinedStr, ast.FormattedValue)) for a in node.args
-        ) or any(isinstance(a, ast.BinOp) for a in ast.walk(node))
-        if not dynamic:
-            dynamic = "+" in args or "{" in args
+        meta = _call_arg_meta(node)
+        span = _span(self.source, node)
+        kind = CallKind.CONSTRUCTOR if isinstance(node.func, ast.Name) and node.func.id[:1].isupper() else CallKind.DIRECT
+        if isinstance(node.func, ast.Attribute):
+            kind = CallKind.METHOD
         self.calls.append(
             CallSite(
                 name=name,
                 qualified=qualified,
                 line=node.lineno,
                 argument_text=args,
-                dynamic=dynamic,
+                dynamic=meta.dynamic,
+                kind=kind,
+                span=span,
+                node_id=f"python:call:{span.start_byte}:{qualified}",
+                scope_id=self.scope_id,
+                argument_is_literal=meta.is_literal,
+                argument_idents=meta.idents,
+                argument_accesses=meta.accesses + meta.callees,
+            )
+        )
+        self._node(SemanticKind.CALL, qualified, span, "Call")
+        self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return) -> None:
+        meta = _expr_meta(node.value) if node.value is not None else _Meta()
+        span = _span(self.source, node)
+        self.returns.append(
+            ReturnSite(
+                scope_id=self.scope_id,
+                line=node.lineno,
+                text=_expr(node.value) if node.value is not None else "",
+                idents=meta.idents,
+                accesses=meta.accesses + meta.callees,
+                span=span,
+            )
+        )
+        self._node(SemanticKind.RETURN, "return", span, "Return")
+        self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        for op in node.ops:
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                right = node.comparators[0] if node.comparators else None
+                extra = ""
+                if isinstance(right, ast.Constant) and right.value is None:
+                    extra = "none"
+                self.events.append(
+                    SyntaxEvent(
+                        kind="loose_eq",
+                        line=node.lineno,
+                        text=_expr(node),
+                        span=_span(self.source, node),
+                        extra=extra,
+                    )
+                )
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        empty = not node.body or all(isinstance(s, ast.Pass) for s in node.body)
+        self.events.append(
+            SyntaxEvent(
+                kind="empty_catch" if empty else "catch",
+                line=node.lineno,
+                text="except",
+                span=_span(self.source, node),
             )
         )
         self.generic_visit(node)
 
+    def _bind_target(
+        self,
+        target: ast.AST,
+        line: int,
+        rhs: str,
+        meta: _Meta,
+        span: SourceSpan,
+    ) -> None:
+        if isinstance(target, ast.Name):
+            self._bind(target.id, line, rhs, SymbolKind.LOCAL, span, meta)
+            return
+        if isinstance(target, ast.Attribute):
+            qualified = _expr(target)
+            self.calls.append(
+                CallSite(
+                    name=target.attr,
+                    qualified=qualified,
+                    line=line,
+                    argument_text=rhs,
+                    dynamic=meta.dynamic,
+                    kind=CallKind.MEMBER_WRITE,
+                    span=span,
+                    node_id=f"python:write:{span.start_byte}:{qualified}",
+                    scope_id=self.scope_id,
+                    argument_is_literal=meta.is_literal,
+                    argument_idents=meta.idents,
+                    argument_accesses=meta.accesses + meta.callees,
+                )
+            )
+            self._bind(qualified, line, rhs, SymbolKind.FIELD, span, meta)
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._bind_target(elt, line, rhs, meta, span)
 
-def _name_of(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        base = _name_of(node.value)
-        return f"{base}.{node.attr}" if base else node.attr
-    return None
+    def _bind(
+        self,
+        name: str,
+        line: int,
+        rhs: str,
+        kind: SymbolKind,
+        span: SourceSpan,
+        meta: _Meta | None = None,
+        *,
+        rhs_is_literal: bool = False,
+    ) -> None:
+        meta = meta or _Meta(is_literal=rhs_is_literal)
+        binding = Binding(
+            name=name,
+            line=line,
+            rhs=rhs,
+            scope_id=self.scope_id,
+            kind=kind,
+            span=span,
+            node_id=f"python:bind:{span.start_byte}:{name}",
+            rhs_is_literal=meta.is_literal,
+            rhs_callees=meta.callees,
+            rhs_accesses=meta.accesses,
+            rhs_idents=meta.idents,
+        )
+        self.bindings.append(binding)
+        self.symbols.append(
+            Symbol(
+                symbol_id=binding.symbol_id,
+                name=name,
+                scope_id=self.scope_id,
+                kind=kind,
+                span=span,
+                node_id=binding.node_id,
+            )
+        )
+
+    def _node(self, kind: SemanticKind, name: str, span: SourceSpan, language_type: str) -> None:
+        self.nodes.append(
+            SemanticNode(
+                node_id=f"python:{kind.value}:{span.start_byte}:{name}",
+                kind=kind,
+                name=name,
+                span=span,
+                parent_id=self.scope_id,
+                language_type=language_type,
+            )
+        )
+
+
+class _Meta:
+    def __init__(
+        self,
+        callees: tuple[str, ...] = (),
+        accesses: tuple[str, ...] = (),
+        idents: tuple[str, ...] = (),
+        dynamic: bool = False,
+        is_literal: bool = False,
+    ) -> None:
+        self.callees = callees
+        self.accesses = accesses
+        self.idents = idents
+        self.dynamic = dynamic
+        self.is_literal = is_literal
+
+
+def _expr_meta(node: ast.AST | None) -> _Meta:
+    if node is None:
+        return _Meta(is_literal=True)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes, int, float, type(None), bool)):
+        return _Meta(is_literal=True)
+    callees: list[str] = []
+    accesses: list[str] = []
+    idents: list[str] = []
+    dynamic = isinstance(node, (ast.BinOp, ast.JoinedStr, ast.FormattedValue))
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            callees.append(_expr(child.func))
+        elif isinstance(child, ast.Attribute):
+            accesses.append(_expr(child))
+        elif isinstance(child, ast.Name):
+            idents.append(child.id)
+        elif isinstance(child, (ast.BinOp, ast.JoinedStr)):
+            dynamic = True
+    return _Meta(
+        callees=tuple(callees),
+        accesses=tuple(accesses),
+        idents=tuple(dict.fromkeys(idents)),
+        dynamic=dynamic,
+        is_literal=False,
+    )
+
+
+def _call_arg_meta(node: ast.Call) -> _Meta:
+    if not node.args:
+        return _Meta(is_literal=True)
+    merged = _Meta(is_literal=True)
+    callees: list[str] = []
+    accesses: list[str] = []
+    idents: list[str] = []
+    dynamic = False
+    literal = True
+    for arg in node.args:
+        meta = _expr_meta(arg)
+        callees.extend(meta.callees)
+        accesses.extend(meta.accesses)
+        idents.extend(meta.idents)
+        dynamic = dynamic or meta.dynamic
+        literal = literal and meta.is_literal
+    return _Meta(tuple(callees), tuple(accesses), tuple(dict.fromkeys(idents)), dynamic, literal)
 
 
 def _expr(node: ast.AST) -> str:
@@ -178,3 +460,33 @@ def _expr(node: ast.AST) -> str:
         return ast.unparse(node)
     except Exception:
         return type(node).__name__
+
+
+def _span(source: str, node: ast.AST) -> SourceSpan:
+    lineno = getattr(node, "lineno", 1) or 1
+    end = getattr(node, "end_lineno", None) or lineno
+    return span_from_lineno(
+        source,
+        lineno,
+        end,
+        start_column=(getattr(node, "col_offset", 0) or 0) + 1,
+        end_column=(getattr(node, "end_col_offset", 0) or 0) + 1,
+    )
+
+
+def _classify_module(module: str, *, relative: bool) -> str:
+    if relative:
+        return "relative"
+    root = (module or "").split(".", 1)[0]
+    if root in _STDLIB:
+        return "stdlib"
+    if root:
+        return "third_party"
+    return "module"
+
+
+def _file_context(path: str) -> str:
+    lowered = path.replace("\\", "/").lower()
+    if "/test" in lowered or lowered.startswith("test"):
+        return "test"
+    return "unknown"

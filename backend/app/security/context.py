@@ -133,6 +133,44 @@ class SecurityContextBuilder:
                     start_line=max(1, cluster.line - 25),
                 )
             )
+            enclosing = _enclosing_entity(graph, cluster.line)
+            if enclosing is not None:
+                scored.append(
+                    ContextChunk(
+                        path=_rel(primary, repo_root),
+                        kind="function",
+                        score=95.0,
+                        content=_entity_window(graph, enclosing),
+                        language=graph.language,
+                        start_line=enclosing.start_line,
+                    )
+                )
+            calls = ", ".join(sorted({c.qualified for c in graph.calls if abs(c.line - cluster.line) <= 8})[:20])
+            if calls:
+                scored.append(
+                    ContextChunk(
+                        path=_rel(primary, repo_root),
+                        kind="calls",
+                        score=80.0,
+                        content=calls,
+                        language=graph.language,
+                    )
+                )
+            sources = ", ".join(
+                f"{b.name}={b.rhs[:80]}"
+                for b in graph.bindings
+                if not b.rhs_is_literal and abs(b.line - cluster.line) <= 30
+            )[:1500]
+            if sources:
+                scored.append(
+                    ContextChunk(
+                        path=_rel(primary, repo_root),
+                        kind="data_flow",
+                        score=78.0,
+                        content=sources,
+                        language=graph.language,
+                    )
+                )
             imports = ", ".join(imp.module for imp in graph.imports[:20])
             if imports:
                 scored.append(
@@ -155,6 +193,19 @@ class SecurityContextBuilder:
                         language=graph.language,
                     )
                 )
+            scored.append(
+                ContextChunk(
+                    path=_rel(primary, repo_root),
+                    kind="parser",
+                    score=50.0,
+                    content=(
+                        f"language={graph.language} backend={graph.parser_backend} "
+                        f"tier={graph.parser_tier} framework={graph.framework or 'none'} "
+                        f"context={graph.file_context}"
+                    ),
+                    language=graph.language,
+                )
+            )
 
         for obs in cluster.observations:
             scored.append(
@@ -214,3 +265,17 @@ def _rel(path: str, repo_root: Path) -> str:
         return str(Path(path).resolve().relative_to(repo_root.resolve()))
     except ValueError:
         return path
+
+
+def _enclosing_entity(graph: SyntaxGraph, line: int):
+    enclosing = None
+    for ent in graph.entities:
+        if ent.start_line <= line <= (ent.end_line or ent.start_line):
+            enclosing = ent
+    return enclosing
+
+
+def _entity_window(graph: SyntaxGraph, entity: object) -> str:
+    start = max(1, int(getattr(entity, "start_line", 1)))
+    end = min(len(graph.lines), int(getattr(entity, "end_line", start)) )
+    return "\n".join(graph.lines[start - 1 : end])[:4_000]

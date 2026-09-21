@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app.analysis.finding import Finding
-from app.domain.language import LanguageCapability
+from app.domain.language import LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
 from app.plugins.errors import UnsupportedCapabilityError
 
@@ -98,3 +98,18 @@ class LanguageAdapter(ABC):
             "static_rule_override",
             detail=f"{self.display_name} does not support static-analysis rule overrides.",
         )
+
+    def parser_tier(self) -> ParserTier:
+        return ParserTier.DETECTION_ONLY
+
+    def parser_backend(self) -> str:
+        return "none"
+
+    def analysis_diagnostics(self) -> dict[str, object]:
+        return {
+            "language_id": self.language_id,
+            "display_name": self.display_name,
+            "parser_tier": str(self.parser_tier()),
+            "parser_backend": self.parser_backend(),
+            "capabilities": sorted(cap.value for cap in self.capabilities),
+        }

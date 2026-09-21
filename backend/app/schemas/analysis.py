@@ -32,6 +32,7 @@ class AnalysisSummarySchema(BaseModel):
     languages: list[LanguageStatsSchema]
     frameworks: list[FrameworkDetectionSchema]
     analysis_duration_seconds: float | None = None
+    language_capabilities: list[dict[str, Any]] = []
 
 
 class AnalysisResponse(BaseModel):
@@ -58,6 +59,9 @@ class FileResponse(BaseModel):
     size_bytes: int
     line_count: int
     has_errors: bool
+    parser_backend: str | None = None
+    parser_tier: str | None = None
+    error_count: int = 0
 
 
 class EntityResponse(BaseModel):

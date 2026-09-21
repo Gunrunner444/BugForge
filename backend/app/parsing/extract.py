@@ -18,7 +18,8 @@ from pathlib import Path
 
 from app.domain.source import ParsedEntity, ParsedImport
 from app.parsing.comments import strip_comments
-from app.parsing.model import Binding, CallSite, LanguageProfile, SyntaxGraph
+from app.domain.language import ParserTier
+from app.parsing.model import Binding, CallSite, LanguageProfile, ParserDiagnostics, SyntaxGraph
 
 _IDENT = re.compile(r"[A-Za-z_$\\][\w$\\]*")
 _DYNAMIC_MARKERS = ("+", "${", 'f"', "f'", "%s", "%d", "{}", ".format(", "`", "#{")
@@ -171,6 +172,7 @@ def parse_with_profile(profile: LanguageProfile, file_path: Path, source: str) -
     bindings = _bindings(profile, logical)
     calls = _calls(cleaned, bare_keywords=profile.bare_call_keywords)
     bindings.extend(_decorator_param_bindings(cleaned))
+    bindings = [_with_literal_flags(b) for b in bindings]
     return SyntaxGraph(
         language=profile.language_id,
         file_path=str(file_path),
@@ -180,6 +182,32 @@ def parse_with_profile(profile: LanguageProfile, file_path: Path, source: str) -
         entities=tuple(entities),
         calls=tuple(calls),
         bindings=tuple(bindings),
+        parser_backend="profile",
+        parser_tier=ParserTier.PROFILE_FALLBACK,
+        diagnostics=ParserDiagnostics(message="profile fallback parser"),
+    )
+
+
+def _looks_quoted(text: str) -> bool:
+    stripped = text.strip()
+    return len(stripped) >= 2 and stripped[0] in {'"', "'", "`"} and stripped[-1] == stripped[0]
+
+
+def _with_literal_flags(binding: Binding) -> Binding:
+    if not _looks_quoted(binding.rhs):
+        return binding
+    return Binding(
+        name=binding.name,
+        line=binding.line,
+        rhs=binding.rhs,
+        scope_id=binding.scope_id,
+        kind=binding.kind,
+        span=binding.span,
+        node_id=binding.node_id,
+        rhs_is_literal=True,
+        rhs_callees=(),
+        rhs_accesses=(),
+        rhs_idents=(),
     )
 
 

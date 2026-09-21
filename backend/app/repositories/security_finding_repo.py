@@ -94,8 +94,13 @@ def _to_row(
         impact=finding.impact,
         file_path=loc.file_path if loc else finding.asset,
         line=loc.line if loc else None,
-        language=None,
+        language=finding.evidence.items[0].metadata.get("language") if finding.evidence.items else None,
         analyzer=finding.analyzer,
+        parser_backend=(
+            finding.evidence.items[0].metadata.get("parser_backend") if finding.evidence.items else None
+        ),
+        node_id=finding.evidence.items[0].metadata.get("node_id") if finding.evidence.items else None,
+        taint_path=finding.evidence.items[0].metadata.get("taint_path") if finding.evidence.items else None,
         rule_ids=",".join(finding.rule_ids),
         observation_refs=",".join(finding.observation_refs),
         evidence_json=json.dumps(evidence),

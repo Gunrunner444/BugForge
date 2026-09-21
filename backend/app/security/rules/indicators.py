@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
 from app.parsing.model import SyntaxGraph
-from app.parsing.profiles import profile_for
+from app.security.language_vocab import vocab_for
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import compile_patterns, matches_any
 
@@ -63,17 +63,40 @@ class HardcodedSecretRule(SecurityRule):
     ) -> list[SecurityObservation]:
         del frameworks
         observations: list[SecurityObservation] = []
-        for i, line in enumerate(graph.lines, start=1):
+        for binding in graph.bindings:
+            if not binding.rhs_is_literal:
+                continue
+            line = (
+                graph.lines[binding.line - 1]
+                if 0 < binding.line <= len(graph.lines)
+                else binding.rhs
+            )
             if _PEM.search(line):
-                observations.append(self._obs(graph, i, "PEM private key in source", line))
+                observations.append(
+                    self._obs(graph, binding.line, "PEM private key in source", line)
+                )
                 continue
             aws = _AWS_KEY.search(line)
             if aws:
-                observations.append(self._obs(graph, i, "AWS-style access key id", line))
+                observations.append(self._obs(graph, binding.line, "AWS-style access key id", line))
                 continue
-            assigned = _SECRET_ASSIGN.search(line)
+            assigned = _SECRET_ASSIGN.search(f"{binding.name} = {binding.rhs}")
             if assigned and not _PLACEHOLDER.search(assigned.group(2)):
-                observations.append(self._obs(graph, i, f"Hard-coded {assigned.group(1)}", line))
+                observations.append(
+                    self._obs(graph, binding.line, f"Hard-coded {assigned.group(1)}", line)
+                )
+        # Literal PEM / AWS keys that are not assignments
+        for i, line in enumerate(graph.lines, start=1):
+            if line.strip().startswith(("#", "//", "/*", "*", "--")):
+                continue
+            if _PEM.search(line) or _AWS_KEY.search(line):
+                if not any(obs.line == i for obs in observations):
+                    kind = (
+                        "PEM private key in source"
+                        if _PEM.search(line)
+                        else "AWS-style access key id"
+                    )
+                    observations.append(self._obs(graph, i, kind, line))
         return observations
 
     def _obs(self, graph: SyntaxGraph, line: int, summary: str, raw: str) -> SecurityObservation:
@@ -104,27 +127,19 @@ class WeakCryptoRule(SecurityRule):
         frameworks: Sequence[FrameworkInfo] = (),
     ) -> list[SecurityObservation]:
         del frameworks
-        profile = profile_for(graph.language)
-        if profile is None:
+        vocab = vocab_for(graph.language)
+        names = tuple(
+            token.lower()
+            for token in (vocab.crypto_names if vocab is not None else ())
+            if token.lower() not in {"createhash", "hash", "digest"}
+        )
+        if not names:
             return []
-        patterns = compile_patterns(profile.crypto_patterns)
         observations: list[SecurityObservation] = []
-        for i, line in enumerate(graph.lines, start=1):
-            if matches_any(line, patterns) is None:
+        for call in graph.calls:
+            hay = f"{call.qualified}({call.argument_text})".lower()
+            if not any(token in hay for token in names):
                 continue
-            if not any(
-                hint in line.lower()
-                for hint in ("password", "passwd", "secret", "token", "auth", "hash")
-            ):
-                # Require a security-relevant hint to cut checksum noise.
-                if (
-                    "md5" not in line.lower()
-                    and "sha1" not in line.lower()
-                    and "des" not in line.lower()
-                ):
-                    continue
-                if "password" not in graph.source.lower() and "secret" not in line.lower():
-                    continue
             observations.append(
                 SecurityObservation(
                     rule_id=self.rule_id,
@@ -132,11 +147,13 @@ class WeakCryptoRule(SecurityRule):
                     title="Potential weak cryptography",
                     summary="Weak hash or cipher used in a security-sensitive context",
                     file_path=graph.file_path,
-                    line=i,
-                    evidence_text=line.strip()[:400],
+                    line=call.line,
+                    evidence_text=hay.strip()[:400],
                     confidence="low",
                     language=graph.language,
                     documentation=self.documentation,
+                    parser_backend=graph.parser_backend,
+                    node_id=call.node_id,
                 )
             )
         return observations
