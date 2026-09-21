@@ -223,6 +223,40 @@ def test_registry_unknown_lookup_lists_known() -> None:
     assert "missing" in str(exc.value)
 
 
+def test_registry_replace_failure_preserves_previous_state() -> None:
+    class BoomRegistry(AdapterRegistry[str]):
+        fail_next = False
+
+        def _commit_registration(
+            self,
+            canonical: str,
+            factory: object,
+            alias_keys: tuple[str, ...],
+            *,
+            description: str,
+            replace: bool,
+        ) -> None:
+            if self.fail_next:
+                raise RuntimeError("install failed")
+            super()._commit_registration(
+                canonical,
+                factory,  # type: ignore[arg-type]
+                alias_keys,
+                description=description,
+                replace=replace,
+            )
+
+    registry = BoomRegistry("widget")
+    registry.register("alpha", lambda: "A", aliases=("a",))
+    registry.fail_next = True
+    with pytest.raises(RuntimeError, match="install failed"):
+        registry.register("alpha", lambda: "B", aliases=("b",), replace=True)
+    assert registry.create("alpha") == "A"
+    assert registry.create("a") == "A"
+    with pytest.raises(AdapterNotFoundError):
+        registry.create("b")
+
+
 # ---------------------------------------------------------------------------
 # LanguageRegistry replace
 # ---------------------------------------------------------------------------
@@ -254,6 +288,22 @@ def test_language_extension_conflict_leaves_original() -> None:
     with pytest.raises(AdapterConflictError, match=".py"):
         registry.register_adapter(_toy_adapter("toy", frozenset({".py"})))
     assert registry.language_id_for_path(Path("mod.py")) == "python"
+
+
+def test_language_register_rollback_on_install_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = LanguageRegistry()
+    original = _toy_adapter("toy", frozenset({".toy"}))
+    registry.register_adapter(original)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("install failed")
+
+    monkeypatch.setattr(AdapterRegistry, "register", boom)
+    with pytest.raises(RuntimeError, match="install failed"):
+        registry.register_adapter(_toy_adapter("toy", frozenset({".toy", ".new"})), replace=True)
+    assert registry.get("toy") is original
+    assert registry.language_id_for_path(Path("a.toy")) == "toy"
+    assert registry.language_id_for_path(Path("a.new")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +397,34 @@ def test_verify_transition_requires_independent_evidence() -> None:
     assert finding.status is FindingStatus.POTENTIAL
 
 
+def test_reproduce_and_human_accept_transitions() -> None:
+    finding = SecurityFinding.potential("Possible IDOR").corroborate()
+    with pytest.raises(ValueError, match="requires"):
+        finding.reproduce()
+    reproduced = finding.reproduce([_repro_evidence()])
+    assert reproduced.status is FindingStatus.REPRODUCED
+    with pytest.raises(ValueError, match="reproduced or independently verified"):
+        finding.human_accept()
+    accepted = reproduced.human_accept()
+    assert accepted.status is FindingStatus.HUMAN_ACCEPTED
+    assert accepted.human_review_state is HumanReviewState.ACCEPTED
+    assert accepted.is_verified is True
+    rejected = finding.reject()
+    with pytest.raises(ValueError, match="Rejected"):
+        rejected.reproduce([_repro_evidence()])
+    with pytest.raises(ValueError, match="Rejected"):
+        rejected.human_accept()
+
+
+def test_screenshot_and_log_are_explicit_provenance() -> None:
+    shot = Evidence(kind=EvidenceKind.SCREENSHOT, source="browser", summary="page.png")
+    log = Evidence(kind=EvidenceKind.LOG, source="zap", summary="scan log")
+    assert shot.provenance is EvidenceProvenance.SCREENSHOT
+    assert log.provenance is EvidenceProvenance.LOG
+    assert shot.provenance in VERIFICATION_PROVENANCE
+    assert log.provenance in VERIFICATION_PROVENANCE
+
+
 def test_rejected_cannot_be_verified() -> None:
     finding = SecurityFinding.rejected("Nope")
     with pytest.raises(ValueError, match="Rejected"):
@@ -373,7 +451,7 @@ async def test_mock_complete_and_capabilities() -> None:
     caps = provider.capabilities()
     assert caps.chat is True
     assert caps.structured_output is True
-    assert caps.tool_calls is False
+    assert caps.tool_calls is True
     assert caps.thinking_can_disable is True
     response = await provider.complete(
         CompletionRequest(system_prompt="sys", user_message="hello", json_mode=True)
@@ -477,14 +555,14 @@ async def test_local_provider_unconfigured_empty_netloc() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_provider_capabilities_reserve_mlx_features() -> None:
+async def test_local_provider_openai_compatible_capabilities() -> None:
     provider = _local_provider()
     caps = provider.capabilities()
     assert caps.supports_local_models is True
     assert caps.thinking is False
     assert caps.thinking_can_disable is True
     assert caps.tool_calls is False
-    assert any("MLX" in note for note in caps.notes)
+    assert caps.local_execution is True
 
 
 # ---------------------------------------------------------------------------

@@ -67,8 +67,9 @@ export default function FindingsPanel({ analysisId }: Props) {
     return (
       <div className="text-center py-12 text-slate-400">
         <p className="text-sm">
-          {severityFilter ? `No ${severityFilter} findings.` : "No static-analysis findings — clean code! 🎉"}
+          {severityFilter ? `No ${severityFilter} findings.` : "No code-quality findings."}
         </p>
+        <p className="text-xs mt-2">Code-quality results are not security findings and are never verified vulnerabilities.</p>
         {severityFilter && (
           <button onClick={() => setSeverityFilter("")} className="text-xs text-indigo-500 mt-2 hover:underline">
             Clear filter
@@ -89,7 +90,7 @@ export default function FindingsPanel({ analysisId }: Props) {
     <div>
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-slate-500">
-          {total} finding{total !== 1 ? "s" : ""}
+          {total} code-quality finding{total !== 1 ? "s" : ""}
         </p>
         <select
           value={severityFilter}
@@ -151,6 +152,7 @@ function FindingRow({
             {f.file_path}:{f.line}
           </p>
         </div>
+        <span className="text-xs px-2 py-0.5 rounded border bg-white/70 text-slate-700 shrink-0">CODE QUALITY</span>
         <span className="text-xs opacity-60 shrink-0 capitalize">{f.category.replace(/_/g, " ")}</span>
         <svg
           className={`w-4 h-4 opacity-50 shrink-0 mt-0.5 transition-transform ${isExpanded ? "rotate-180" : ""}`}
@@ -179,7 +181,11 @@ function FindingRow({
           )}
           <div className="flex flex-wrap gap-3 text-xs text-slate-400">
             <span>Confidence: <span className="font-medium text-slate-600">{f.confidence}</span></span>
+            <span className="text-xs px-2 py-0.5 rounded border bg-slate-50 text-slate-700">CODE QUALITY</span>
             <span>Analyzer: <span className="font-mono text-slate-600">{f.analyzer}</span></span>
+            {f.parser_backend ? (
+              <span>Parser: <span className="font-mono text-slate-600">{f.parser_backend}</span></span>
+            ) : null}
             <span>Lines: <span className="font-mono text-slate-600">{f.line}–{f.end_line}</span></span>
           </div>
         </div>

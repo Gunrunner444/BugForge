@@ -13,6 +13,8 @@ from app.ai.health import AIHealthStatus, default_capabilities
 from app.ai.provider import (
     AICapabilities,
     AIUsage,
+    CompletionRequest,
+    CompletionResponse,
     DebuggingRequest,
     HypothesisResult,
     LLMProvider,
@@ -28,8 +30,9 @@ class MockLLMProvider(LLMProvider):
     Results are deterministic given the same input, making tests reproducible.
     """
 
-    def __init__(self, delay_seconds: float = 0.0) -> None:
+    def __init__(self, delay_seconds: float = 0.0, *, model_name: str = "mock-v1") -> None:
         self._delay = delay_seconds
+        self._model_name = model_name
 
     @property
     def provider_name(self) -> str:
@@ -37,7 +40,7 @@ class MockLLMProvider(LLMProvider):
 
     @property
     def model_name(self) -> str:
-        return "mock-v1"
+        return self._model_name
 
     async def is_available(self) -> bool:
         return True
@@ -46,10 +49,13 @@ class MockLLMProvider(LLMProvider):
         return AICapabilities(
             chat=True,
             structured_output=True,
-            tool_calls=False,
+            structured_generation=True,
+            text_generation=True,
+            tool_calls=True,
             thinking=False,
             thinking_can_disable=True,
             supports_local_models=True,
+            local_execution=True,
             notes=("Deterministic mock; no network calls.",),
         )
 
@@ -221,5 +227,60 @@ class MockLLMProvider(LLMProvider):
             provider=self.provider_name,
             model=self.model_name,
             usage=AIUsage(prompt_tokens=256, completion_tokens=512),
+            duration_seconds=time.monotonic() - start,
+        )
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        start = time.monotonic()
+        if request.tools:
+            content = json.dumps(
+                {
+                    "kind": "tool",
+                    "tool": "http_request",
+                    "arguments": {"method": "GET", "url": "http://127.0.0.1/health"},
+                    "reason": "Observe the local lab health endpoint",
+                }
+            )
+            return CompletionResponse(
+                content=content,
+                provider=self.provider_name,
+                model=self.model_name,
+                usage=AIUsage(prompt_tokens=64, completion_tokens=128),
+                duration_seconds=time.monotonic() - start,
+                tool_calls=(
+                    {
+                        "tool": "http_request",
+                        "arguments": {"method": "GET", "url": "http://127.0.0.1/health"},
+                        "reason": "Observe the local lab health endpoint",
+                    },
+                ),
+            )
+        lowered = (request.system_prompt or "").lower()
+        if "security" in lowered and "hypothesis" in lowered:
+            content = json.dumps(
+                {
+                    "title": "Potential security issue",
+                    "vulnerability_class": "injection",
+                    "hypothesis": (
+                        "[AI INFERENCE] Static observations suggest user-controlled "
+                        "data may reach a dangerous sink."
+                    ),
+                    "confidence": "medium",
+                    "impact": "Impact depends on sanitization that is not proven here.",
+                    "related_observation_refs": [],
+                    "not_verified": True,
+                    "reasoning_summary": (
+                        "[AI INFERENCE] Combined static observations. Not a verified vulnerability."
+                    ),
+                }
+            )
+        else:
+            response = await self.generate_structured(request.system_prompt, request.user_message)
+            content = response.content
+        return CompletionResponse(
+            content=content,
+            provider=self.provider_name,
+            model=self.model_name,
+            usage=AIUsage(prompt_tokens=64, completion_tokens=128),
             duration_seconds=time.monotonic() - start,
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,12 +23,20 @@ from app.domain.evidence import (
     Evidence,
     EvidenceBundle,
 )
+from app.domain.security import EvidenceTier
 
 
 class FindingStatus(StrEnum):
     POTENTIAL = "potential"
+    CORROBORATED = "corroborated"
+    REPRODUCED = "reproduced"
     VERIFIED = "verified"
+    HUMAN_ACCEPTED = "human_accepted"
     REJECTED = "rejected"
+
+
+_TERMINAL_BLOCK = frozenset({FindingStatus.REJECTED})
+_VERIFIED_STATUSES = frozenset({FindingStatus.VERIFIED, FindingStatus.HUMAN_ACCEPTED})
 
 
 class HumanReviewState(StrEnum):
@@ -73,17 +82,35 @@ class SecurityFinding:
     tools: tuple[str, ...] = ()
     ai_analysis: str | None = None
     human_review_state: HumanReviewState = HumanReviewState.UNREVIEWED
+    evidence_tier: EvidenceTier = EvidenceTier.STATIC_INDICATOR
+    rule_ids: tuple[str, ...] = ()
+    analyzer: str | None = None
+    observation_refs: tuple[str, ...] = ()
+    finding_key: str = ""
+    flow_summary: str = ""
+    flow_source: str = ""
+    flow_sink: str = ""
+    field_path: str = ""
+    files_crossed: str = ""
+    analysis_incomplete: str = ""
+    parser_completeness: str = ""
+    evidence_summary: str = ""
+    related_group: str = ""
+    asset: str | None = None
+    report_title: str | None = None
+    report_description: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("Finding title must be non-empty")
-        if self.status is FindingStatus.VERIFIED:
+        if self.status in _VERIFIED_STATUSES or self.status is FindingStatus.REPRODUCED:
             _require_verifying_evidence(self.evidence)
 
     @property
     def is_verified(self) -> bool:
-        return self.status is FindingStatus.VERIFIED
+        return self.status in _VERIFIED_STATUSES
 
     def verify(
         self, evidence: EvidenceBundle | Sequence[Evidence] | None = None
@@ -93,15 +120,79 @@ class SecurityFinding:
         Additional evidence is merged with any evidence already attached.
         Rejected findings cannot be verified.
         """
-        if self.status is FindingStatus.REJECTED:
+        if self.status in _TERMINAL_BLOCK:
             raise ValueError("Rejected findings cannot be verified")
+        if self.status is FindingStatus.HUMAN_ACCEPTED:
+            raise ValueError("Human-accepted findings are already verified")
         merged = (
             self.evidence.extend(_as_bundle(evidence).items)
             if evidence is not None
             else self.evidence
         )
         _require_verifying_evidence(merged)
-        return replace(self, status=FindingStatus.VERIFIED, evidence=merged)
+        return replace(
+            self,
+            status=FindingStatus.VERIFIED,
+            evidence=merged,
+            evidence_tier=EvidenceTier.VERIFIED,
+        )
+
+    def corroborate(self) -> SecurityFinding:
+        """Mark independent static observations as a corroborated hypothesis.
+
+        This is not verification. AI-only findings cannot skip this via mutation.
+        """
+        if self.status in _TERMINAL_BLOCK:
+            raise ValueError("Rejected findings cannot be corroborated")
+        if self.status in _VERIFIED_STATUSES or self.status is FindingStatus.REPRODUCED:
+            raise ValueError("Finding is already beyond corroboration")
+        return replace(
+            self,
+            status=FindingStatus.CORROBORATED,
+            evidence_tier=EvidenceTier.CORROBORATED,
+        )
+
+    def reproduce(
+        self, evidence: EvidenceBundle | Sequence[Evidence] | None = None
+    ) -> SecurityFinding:
+        """Record independent reproduction. Stronger than corroboration, not verified."""
+        if self.status in _TERMINAL_BLOCK:
+            raise ValueError("Rejected findings cannot be reproduced")
+        if self.status in _VERIFIED_STATUSES:
+            raise ValueError("Verified findings are already beyond reproduction")
+        merged = (
+            self.evidence.extend(_as_bundle(evidence).items)
+            if evidence is not None
+            else self.evidence
+        )
+        _require_verifying_evidence(merged)
+        return replace(
+            self,
+            status=FindingStatus.REPRODUCED,
+            evidence=merged,
+            evidence_tier=EvidenceTier.REPRODUCED,
+        )
+
+    def human_accept(self) -> SecurityFinding:
+        """Operator accepts a reproduced or verified finding. AI cannot take this path."""
+        if self.status in _TERMINAL_BLOCK:
+            raise ValueError("Rejected findings cannot be accepted")
+        if self.status not in {
+            FindingStatus.REPRODUCED,
+            FindingStatus.VERIFIED,
+            FindingStatus.HUMAN_ACCEPTED,
+        }:
+            raise ValueError(
+                "Human acceptance requires a reproduced or independently verified finding. "
+                "AI hypotheses and static corroboration are not sufficient."
+            )
+        _require_verifying_evidence(self.evidence)
+        return replace(
+            self,
+            status=FindingStatus.HUMAN_ACCEPTED,
+            human_review_state=HumanReviewState.ACCEPTED,
+            evidence_tier=EvidenceTier.VERIFIED,
+        )
 
     def reject(
         self, *, evidence: EvidenceBundle | Sequence[Evidence] | None = None
@@ -143,6 +234,7 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         """Wrap a model-generated hypothesis. Always potential, never verified."""
+        kwargs.setdefault("evidence_tier", EvidenceTier.AI_HYPOTHESIS)
         return cls.potential(
             title,
             hypothesis=hypothesis,
@@ -161,6 +253,7 @@ class SecurityFinding:
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
         _require_verifying_evidence(bundle)
+        kwargs.setdefault("evidence_tier", EvidenceTier.VERIFIED)
         return cls(title=title, status=FindingStatus.VERIFIED, evidence=bundle, **kwargs)
 
     @classmethod

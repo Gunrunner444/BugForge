@@ -131,9 +131,9 @@ class StructuredTextResponse:
 class AICapabilities:
     """Provider-specific features. Absence of a capability is not an error.
 
-    Future local models (e.g. Qwen via MLX) may advertise thinking, tool
-    calls, or different context windows. Callers must consult this object
-    instead of assuming every backend matches OpenAI.
+    Callers must consult this object instead of assuming every backend
+    matches OpenAI. Local models may advertise thinking, long context, or
+    local execution without native JSON response_format support.
     """
 
     chat: bool = True
@@ -145,6 +145,33 @@ class AICapabilities:
     max_output_tokens: int | None = None
     supports_local_models: bool = False
     notes: tuple[str, ...] = ()
+    text_generation: bool = True
+    structured_generation: bool = False
+    reasoning: bool = False
+    vision: bool = False
+    long_context: bool = False
+    local_execution: bool = False
+    native_json_response_format: bool = False
+
+    def advertised(self) -> tuple[str, ...]:
+        labels: list[str] = []
+        if self.text_generation or self.chat:
+            labels.append("text_generation")
+        if self.structured_generation or self.structured_output:
+            labels.append("structured_generation")
+        if self.reasoning or self.thinking:
+            labels.append("reasoning")
+        if self.tool_calls:
+            labels.append("tool_calling")
+        if self.vision:
+            labels.append("vision")
+        if self.long_context:
+            labels.append("long_context")
+        if self.local_execution or self.supports_local_models:
+            labels.append("local_execution")
+        if self.thinking:
+            labels.append("thinking")
+        return tuple(labels)
 
 
 @dataclass

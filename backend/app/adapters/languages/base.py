@@ -11,8 +11,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app.analysis.finding import Finding
-from app.domain.language import LanguageCapability
+from app.domain.language import LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
+from app.parsing.model import SyntaxGraph
 from app.plugins.errors import UnsupportedCapabilityError
 
 
@@ -61,6 +62,22 @@ class LanguageAdapter(ABC):
             detail=f"{self.display_name} parsing is not implemented in this phase.",
         )
 
+    def syntax_graph(self, file_path: Path, source: str) -> SyntaxGraph:
+        """Return a language-neutral syntax graph used by security analysis.
+
+        Default implementation uses the shared parser registry. Detection-only
+        adapters raise :class:`UnsupportedCapabilityError`.
+        """
+        from app.parsing.engine import can_parse, parse_source
+
+        if not can_parse(self.language_id):
+            raise UnsupportedCapabilityError(
+                self.language_id,
+                LanguageCapability.PARSE,
+                detail=f"{self.display_name} has no syntax parser.",
+            )
+        return parse_source(self.language_id, file_path, source)
+
     def analyze_file(self, file_path: Path, source: str) -> list[Finding]:
         raise UnsupportedCapabilityError(
             self.language_id,
@@ -82,3 +99,18 @@ class LanguageAdapter(ABC):
             "static_rule_override",
             detail=f"{self.display_name} does not support static-analysis rule overrides.",
         )
+
+    def parser_tier(self) -> ParserTier:
+        return ParserTier.DETECTION_ONLY
+
+    def parser_backend(self) -> str:
+        return "none"
+
+    def analysis_diagnostics(self) -> dict[str, object]:
+        return {
+            "language_id": self.language_id,
+            "display_name": self.display_name,
+            "parser_tier": str(self.parser_tier()),
+            "parser_backend": self.parser_backend(),
+            "capabilities": sorted(cap.value for cap in self.capabilities),
+        }

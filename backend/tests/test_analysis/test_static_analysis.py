@@ -131,12 +131,12 @@ class TestStaticAnalysisEngine:
         assert "mutable_default_argument" in categories
         assert "comparison_to_none" in categories
 
-    def test_engine_skips_non_python(self, tmp_path: Path) -> None:
+    def test_engine_skips_detection_only_formats(self, tmp_path: Path) -> None:
         from app.analysis.engine import StaticAnalysisEngine
 
-        js_file = tmp_path / "app.js"
-        js_file.write_text("const x = null;")
-        findings = StaticAnalysisEngine().analyze_repository(tmp_path, [js_file])
+        md_file = tmp_path / "README.md"
+        md_file.write_text("# var x = 1\n")
+        findings = StaticAnalysisEngine().analyze_repository(tmp_path, [md_file])
         assert findings == []
 
     def test_engine_handles_syntax_error_gracefully(self, tmp_path: Path) -> None:

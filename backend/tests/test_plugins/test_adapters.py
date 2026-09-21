@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.adapters.languages import JavaScriptAdapter, PythonAdapter, TypeScriptAdapter
+from app.adapters.languages import PythonAdapter
 from app.adapters.languages.base import LanguageAdapter
 from app.adapters.reports import LocalReportProvider
 from app.adapters.scope import ManualScopeProvider
@@ -147,17 +147,17 @@ def test_static_engine_custom_python_rules(tmp_path: Path) -> None:
 
 
 def test_unsupported_language_fails_cleanly_on_analyze() -> None:
-    adapter = JavaScriptAdapter()
+    adapter = get_plugin_catalog().languages.get("markdown")
     assert adapter.supports(LanguageCapability.DETECTION)
     assert not adapter.supports(LanguageCapability.STATIC_ANALYSIS)
-    with pytest.raises(UnsupportedCapabilityError, match="javascript"):
-        adapter.analyze_file(Path("app.js"), "const x = 1;")
+    with pytest.raises(UnsupportedCapabilityError, match="markdown"):
+        adapter.analyze_file(Path("README.md"), "# hi")
 
 
 def test_unsupported_language_fails_cleanly_on_parse() -> None:
-    adapter = TypeScriptAdapter()
-    with pytest.raises(UnsupportedCapabilityError, match="typescript"):
-        adapter.parse_file(Path("app.ts"))
+    adapter = get_plugin_catalog().languages.get("yaml")
+    with pytest.raises(UnsupportedCapabilityError, match="yaml"):
+        adapter.parse_file(Path("config.yaml"))
 
 
 def test_unknown_language_path_is_none() -> None:
@@ -202,8 +202,8 @@ def test_language_analyzers_detection_only_language_errors() -> None:
 
     original = config_mod.settings.language_analyzers
     try:
-        object.__setattr__(config_mod.settings, "language_analyzers", "javascript")
-        with pytest.raises(UnsupportedCapabilityError, match="javascript"):
+        object.__setattr__(config_mod.settings, "language_analyzers", "markdown")
+        with pytest.raises(UnsupportedCapabilityError, match="markdown"):
             StaticAnalysisEngine().analyze_repository(Path("."), [])
     finally:
         object.__setattr__(config_mod.settings, "language_analyzers", original)
@@ -301,11 +301,18 @@ def test_invalid_ai_provider_config_errors() -> None:
         make_settings(ai_provider="not-a-provider")
 
 
-def test_mlx_backend_is_reserved() -> None:
+def test_mlx_backend_constructs() -> None:
     from app.ai.local_provider import LocalAIProvider
 
-    with pytest.raises(AdapterNotImplementedError, match="MLX"):
-        LocalAIProvider(api_key="", model="qwen", backend="mlx")
+    provider = LocalAIProvider(
+        api_key="",
+        model="Qwen3.6-35B-A3B-8bit",
+        base_url="http://127.0.0.1:8080/v1",
+        backend="mlx",
+    )
+    assert provider.provider_name == "mlx"
+    assert provider.capabilities().thinking is True
+    assert provider.capabilities().local_execution is True
 
 
 def test_get_provider_uses_registry() -> None:

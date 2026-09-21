@@ -34,9 +34,18 @@ export interface AnalysisSummary {
   total_entities: number;
   total_imports: number;
   total_findings: number;
+  security_findings?: number;
   languages: LanguageStats[];
   frameworks: FrameworkDetection[];
   analysis_duration_seconds: number | null;
+  language_capabilities?: Array<{
+    language: string;
+    parser_tier: string;
+    parser_backend: string;
+    capabilities: string[];
+    native_available?: boolean;
+    parser_status?: string;
+  }>;
 }
 
 export interface Analysis {
@@ -59,6 +68,9 @@ export interface RepositoryFile {
   size_bytes: number;
   line_count: number;
   has_errors: boolean;
+  parser_backend?: string | null;
+  parser_tier?: string | null;
+  error_count?: number;
 }
 
 export interface CodeEntity {
@@ -179,6 +191,9 @@ export interface Finding {
   evidence: string;
   suggested_fix: string;
   created_at: string;
+  catalog?: string;
+  language?: string | null;
+  parser_backend?: string | null;
 }
 
 export interface FindingsListResponse {
@@ -681,6 +696,102 @@ export interface AIStatus {
   model_available: boolean | null;
   error: string | null;
   capabilities: string[] | null;
+  thinking_enabled?: boolean;
+  language_analyzers?: string[];
+  security_analysis_status?: string;
+}
+
+export interface SecurityFinding {
+  id: string;
+  project_id: string | null;
+  analysis_id: string | null;
+  title: string;
+  status: string;
+  vulnerability_class: string | null;
+  evidence_tier: string;
+  confidence: string;
+  description: string;
+  hypothesis: string | null;
+  ai_analysis: string | null;
+  impact: string | null;
+  file_path: string | null;
+  line: number | null;
+  analyzer: string | null;
+  rule_ids: string;
+  observation_refs: string;
+  asset: string | null;
+  created_at: string;
+  parser_backend?: string | null;
+  node_id?: string | null;
+  taint_path?: string | null;
+  language?: string | null;
+  finding_key?: string;
+  flow_summary?: string;
+  flow_source?: string;
+  flow_sink?: string;
+  field_path?: string;
+  files_crossed?: string;
+  analysis_incomplete?: string;
+  parser_completeness?: string;
+  evidence_summary?: string;
+  related_group?: string;
+}
+
+export interface SecurityStatus {
+  status: string;
+  language_analyzers: Array<{
+    language_id: string;
+    display_name: string;
+    capabilities: string[];
+    extensions: string[];
+    parser_tier?: string;
+    parser_backend?: string;
+    native_available?: boolean;
+    parser_status?: string;
+  }>;
+  rule_ids: string[];
+  ai_provider: string;
+  ai_model: string;
+  ai_local: boolean;
+  thinking_enabled: boolean;
+  notes: string;
+}
+
+export interface SecurityTestingSession {
+  project_id: string;
+  mode: string;
+  program: string | null;
+  lab_mode: boolean;
+  active_testing: boolean;
+  fuzzing_enabled: boolean;
+  dry_run: boolean;
+  request_limit: number;
+  requests_used: number;
+  rate_limit_rps: number;
+  approvals: Record<string, string>;
+  audit_entries: number;
+  finding_counts: Record<string, number>;
+  tools?: Record<string, unknown>;
+}
+
+export interface SecurityTestingSessionResponse {
+  session: SecurityTestingSession;
+  tools: string[];
+  notes: string;
+}
+
+export interface AuthorizationDecision {
+  allowed: boolean;
+  reason: string;
+  target: string;
+  method: string;
+  tool: string;
+  program: string | null;
+  dry_run: boolean;
+  approval_required: boolean;
+  approval_state: string;
+  matched_rule: string | null;
+  request_limit: number | null;
 }
 
 export interface DiscoverySettings {

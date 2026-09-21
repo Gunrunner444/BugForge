@@ -42,9 +42,34 @@ class AdapterRegistry[T]:
         alias_keys = tuple(key for alias in aliases if (key := _normalize(alias)))
         self._validate_identity(canonical, alias_keys, replace=replace)
 
+        snapshot_factories = dict(self._factories)
+        snapshot_aliases = dict(self._aliases)
+        snapshot_descriptions = dict(self._descriptions)
+        try:
+            self._commit_registration(
+                canonical,
+                factory,
+                alias_keys,
+                description=description,
+                replace=replace,
+            )
+        except Exception:
+            self._factories = snapshot_factories
+            self._aliases = snapshot_aliases
+            self._descriptions = snapshot_descriptions
+            raise
+
+    def _commit_registration(
+        self,
+        canonical: str,
+        factory: Callable[..., T],
+        alias_keys: tuple[str, ...],
+        *,
+        description: str,
+        replace: bool,
+    ) -> None:
         if replace:
             self._remove_aliases_for(canonical)
-
         self._factories[canonical] = factory
         self._descriptions[canonical] = description
         for alias_key in alias_keys:

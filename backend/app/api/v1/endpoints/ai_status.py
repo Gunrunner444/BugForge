@@ -26,6 +26,20 @@ async def get_ai_status() -> AIStatusResponse:
     API keys are never included in the response.
     """
     health = await check_ai_health(settings)
+    catalog = None
+    try:
+        from app.domain.language import LanguageCapability
+        from app.plugins import get_plugin_catalog
+
+        catalog = get_plugin_catalog()
+        analyzers = [
+            adapter.language_id
+            for adapter in catalog.languages.all_adapters()
+            if adapter.supports(LanguageCapability.SECURITY_ANALYSIS)
+            or adapter.supports(LanguageCapability.STATIC_ANALYSIS)
+        ]
+    except Exception:
+        analyzers = []
     return AIStatusResponse(
         provider=health.provider,
         model=health.model,
@@ -35,6 +49,9 @@ async def get_ai_status() -> AIStatusResponse:
         model_available=health.model_available,
         error=health.error,
         capabilities=health.capabilities,
+        thinking_enabled=settings.ai_thinking_enabled,
+        language_analyzers=analyzers,
+        security_analysis_status="available",
     )
 
 

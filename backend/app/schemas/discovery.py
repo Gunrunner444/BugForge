@@ -151,6 +151,9 @@ class AIStatusResponse(BaseModel):
     model_available: bool | None
     error: str | None
     capabilities: list[str] | None
+    thinking_enabled: bool = False
+    language_analyzers: list[str] = []
+    security_analysis_status: str = "available"
 
 
 class AITestRequest(BaseModel):

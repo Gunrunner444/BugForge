@@ -10,6 +10,7 @@ from uuid import UUID
 from app.analysis.engine import StaticAnalysisEngine
 from app.analyzers.repo_analyzer import AnalysisResult, RepoAnalyzer
 from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFile
+from app.parsing.engine import installed_parser_report
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,22 @@ class AnalysisService:
                 all_file_paths,
             )
 
+            from app.security.engine import SecurityAnalysisEngine
+
+            security_result = await asyncio.to_thread(
+                SecurityAnalysisEngine().analyze_repository,
+                Path(repository_path),
+                all_file_paths,
+            )
+
             async with async_session_factory() as session:
                 await self._persist_results(
-                    session, analysis_id, analysis_result, duration, static_findings
+                    session,
+                    analysis_id,
+                    analysis_result,
+                    duration,
+                    static_findings,
+                    security_findings=security_result.findings,
                 )
                 await session.commit()
 
@@ -89,6 +103,7 @@ class AnalysisService:
         result: AnalysisResult,
         duration: float,
         static_findings: list[Any] | None = None,
+        security_findings: list[Any] | None = None,
     ) -> None:
         from app.repositories.analysis_repo import AnalysisRepository
         from app.repositories.finding_repo import FindingRepository
@@ -105,6 +120,9 @@ class AnalysisService:
                 size_bytes=fr.size_bytes,
                 line_count=fr.line_count,
                 has_errors=fr.has_parse_errors,
+                parser_backend=fr.parse_result.parser_backend if fr.parse_result else None,
+                parser_tier=fr.parse_result.parser_tier if fr.parse_result else None,
+                error_count=fr.parse_result.error_count if fr.parse_result else 0,
             )
             session.add(file_record)
             await session.flush()  # obtain file_record.id
@@ -159,6 +177,7 @@ class AnalysisService:
             "total_entities": total_entities,
             "total_imports": total_imports,
             "total_findings": len(static_findings) if static_findings else 0,
+            "security_findings": len(security_findings) if security_findings else 0,
             "languages": [
                 {
                     "language": ls.language,
@@ -177,6 +196,7 @@ class AnalysisService:
                 for fw in result.framework_detections
             ],
             "analysis_duration_seconds": round(duration, 3),
+            "language_capabilities": _language_capability_summary(),
         }
 
         repo = AnalysisRepository(session)
@@ -185,3 +205,35 @@ class AnalysisService:
         if static_findings:
             finding_repo = FindingRepository(session)
             await finding_repo.bulk_create(analysis_id, static_findings)
+
+        if security_findings:
+            from app.models.analysis import Analysis
+            from app.repositories.security_finding_repo import SecurityFindingRepository
+
+            analysis = await session.get(Analysis, analysis_id)
+            project_id = analysis.project_id if analysis is not None else None
+            sec_repo = SecurityFindingRepository(session)
+            await sec_repo.bulk_create(
+                security_findings, project_id=project_id, analysis_id=analysis_id
+            )
+
+
+def _language_capability_summary() -> list[dict[str, Any]]:
+    from app.plugins import get_plugin_catalog
+
+    catalog = get_plugin_catalog()
+    rows: list[dict[str, Any]] = []
+    for adapter in catalog.languages.all_adapters():
+        rows.append(
+            {
+                "language": adapter.language_id,
+                "parser_tier": str(adapter.parser_tier()),
+                "parser_backend": adapter.parser_backend(),
+                "capabilities": sorted(cap.value for cap in adapter.capabilities),
+                "native_available": bool(
+                    installed_parser_report(adapter.language_id)["native_available"]
+                ),
+                "parser_status": str(installed_parser_report(adapter.language_id)["status"]),
+            }
+        )
+    return rows

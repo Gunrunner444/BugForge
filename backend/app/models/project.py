@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.models.github import GitHubRepository
     from app.models.repair import RepairSession
     from app.models.reproduction import BugReproductionSession
+    from app.models.security_finding import DBSecurityFinding
     from app.models.test_generation import TestGenerationSession
     from app.models.test_run import TestRun
 
@@ -85,4 +86,11 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+
+    security_findings: Mapped[list[DBSecurityFinding]] = relationship(
+        "DBSecurityFinding",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="DBSecurityFinding.created_at.desc()",
     )

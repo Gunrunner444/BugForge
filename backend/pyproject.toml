@@ -19,6 +19,8 @@ dependencies = [
     "httpx>=0.27.0",
     # pytest-json-report is used to capture structured test results from analyzed repos
     "pytest-json-report>=1.5.0",
+    "tree-sitter>=0.24.0,<0.27",
+    "tree-sitter-language-pack>=0.7.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -48,10 +50,18 @@ omit = ["tests/*", "alembic/*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = [
+    "tests/fixtures/phase12_repo/bad/broken.py",
+    "tests/fixtures/phase13_repo/partial/bad/broken.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fixtures/**" = ["F821", "F401", "I001", "N"]
+"alembic/**" = ["I001", "E402", "UP007", "UP035", "N815"]
 
 [tool.mypy]
 python_version = "3.12"

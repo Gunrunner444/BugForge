@@ -18,10 +18,11 @@ from app.domain.findings import (
     SecurityFinding,
     SourceLocation,
 )
-from app.domain.http import HttpExchange, HttpHeader
+from app.domain.http import HttpBodyMeta, HttpExchange, HttpHeader
 from app.domain.language import LanguageCapability, LanguageStats
-from app.domain.reports import SecurityReport
+from app.domain.reports import ReportAsset, SecurityReport, VulnerabilityReportDraft
 from app.domain.scope import ScopeConstraint
+from app.domain.security import EvidenceTier, VulnerabilityClass
 from app.domain.source import (
     LanguageParseResult,
     ParsedEntity,
@@ -38,6 +39,7 @@ __all__ = [
     "EvidenceSource",
     "FindingStatus",
     "HumanReviewState",
+    "HttpBodyMeta",
     "HttpExchange",
     "HttpHeader",
     "LanguageCapability",
@@ -46,8 +48,12 @@ __all__ = [
     "ParsedEntity",
     "ParsedImport",
     "ParsedParameter",
+    "ReportAsset",
     "ScopeConstraint",
     "SecurityFinding",
     "SecurityReport",
     "SourceLocation",
+    "EvidenceTier",
+    "VulnerabilityClass",
+    "VulnerabilityReportDraft",
 ]

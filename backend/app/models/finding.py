@@ -34,6 +34,16 @@ class DBFinding(Base):
     analyzer: Mapped[str] = mapped_column(String(100), nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False, default="")
     suggested_fix: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    catalog: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="code_quality", index=True
+    )
+    language: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    parser_backend: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    node_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    start_byte: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_byte: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_column: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_column: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

@@ -99,6 +99,13 @@ class LanguageRegistry(AdapterRegistry[LanguageAdapter]):
             adapter for adapter in self.all_adapters() if adapter.supports(LanguageCapability.PARSE)
         ]
 
+    def security_analyzers(self) -> list[LanguageAdapter]:
+        return [
+            adapter
+            for adapter in self.all_adapters()
+            if adapter.supports(LanguageCapability.SECURITY_ANALYSIS)
+        ]
+
     def for_path(self, path: Path) -> LanguageAdapter | None:
         language_id = self.language_id_for_path(path)
         if language_id is None:

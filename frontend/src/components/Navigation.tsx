@@ -2,6 +2,7 @@ import Link from "next/link";
 
 const NAV_LINKS = [
   { href: "/projects", label: "Projects" },
+    { href: "/research", label: "Research" },
   { href: "/discovery", label: "Discovery" },
   { href: "/repositories", label: "Repositories" },
   { href: "/autonomous", label: "Analysis Runs" },

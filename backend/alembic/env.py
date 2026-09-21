@@ -8,10 +8,25 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
-# Import all models so Alembic can detect them
+# Import every mapped class before target_metadata is evaluated so
+# ``alembic revision --autogenerate`` can detect HackerOne and agent changes.
 from app.models.base import Base  # noqa: F401
-import app.models.project  # noqa: F401
+import app.models  # noqa: F401
 import app.models.analysis  # noqa: F401
+import app.models.debugging  # noqa: F401
+import app.models.discovery  # noqa: F401
+import app.models.finding  # noqa: F401
+import app.models.github  # noqa: F401
+import app.models.hackerone  # noqa: F401
+import app.models.project  # noqa: F401
+import app.models.repair  # noqa: F401
+import app.models.reproduction  # noqa: F401
+import app.models.security_agent  # noqa: F401
+import app.models.security_audit  # noqa: F401
+import app.models.security_finding  # noqa: F401
+import app.models.test_generation  # noqa: F401
+import app.models.test_run  # noqa: F401
+import app.models.verification  # noqa: F401
 
 config = context.config
 fileConfig(config.config_file_name)
@@ -20,7 +35,10 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url", ""))
+    env_url = os.environ.get("DATABASE_URL")
+    if env_url:
+        return env_url
+    return config.get_main_option("sqlalchemy.url", "")
 
 
 def run_migrations_offline() -> None:

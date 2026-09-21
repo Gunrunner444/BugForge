@@ -1,6 +1,10 @@
 import type {
   Analysis,
   AIStatus,
+  SecurityFinding,
+  SecurityStatus,
+  SecurityTestingSessionResponse,
+  AuthorizationDecision,
   AutonomousRun,
   AutonomousRunsListResponse,
   BugReproductionSession,
@@ -60,9 +64,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
-      headers: { "Content-Type": "application/json", ...init?.headers },
-      signal: controller.signal,
       ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(typeof window !== "undefined" && sessionStorage.getItem("bugforge_operator_token")
+          ? { "X-BugForge-Operator-Token": sessionStorage.getItem("bugforge_operator_token") as string }
+          : {}),
+        ...init?.headers,
+      },
+      signal: controller.signal,
     });
   } catch (err) {
     clearTimeout(timeoutId);
@@ -83,7 +93,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = await res.text().catch(() => undefined);
     }
-    throw new ApiError(res.status, `HTTP ${res.status}`, detail);
+    const label =
+      res.status === 401
+        ? "Unauthorized"
+        : res.status === 403
+          ? "Forbidden"
+          : `HTTP ${res.status}`;
+    throw new ApiError(res.status, label, detail);
   }
 
   if (res.status === 204) return undefined as unknown as T;
@@ -361,5 +377,127 @@ export const api = {
         "/api/v1/ai/test",
         { method: "POST", body: JSON.stringify({ prompt }) },
       ),
+  },
+
+  security: {
+    status: () => request<SecurityStatus>("/api/v1/security/status"),
+    findings: (projectId: string, offset = 0, limit = 100) =>
+      request<{ items: SecurityFinding[]; total: number; offset: number; limit: number }>(
+        `/api/v1/security/findings?project_id=${projectId}&offset=${offset}&limit=${limit}`,
+      ),
+  },
+
+  securityTesting: {
+    createSession: (body: Record<string, unknown>) =>
+      request<SecurityTestingSessionResponse>("/api/v1/security-testing/sessions", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    getSession: (projectId: string) =>
+      request<SecurityTestingSessionResponse>(`/api/v1/security-testing/sessions/${projectId}`),
+    authorize: (projectId: string, body: Record<string, unknown>) =>
+      request<AuthorizationDecision>(`/api/v1/security-testing/sessions/${projectId}/authorize`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    tools: () => request<{ browsers: string[]; proxies: string[]; security_tools: string[]; fuzzers: string[] }>(
+      "/api/v1/security-testing/tools",
+    ),
+    audit: (projectId: string) =>
+      request<{ entries: Array<Record<string, unknown>>; chain_valid: boolean }>(
+        `/api/v1/security-testing/sessions/${projectId}/audit`,
+      ),
+  },
+
+  research: {
+    createSession: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/security-agent/sessions", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    getSession: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}`),
+    dashboard: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/dashboard`),
+    timeline: (id: string, params?: Record<string, string>) => {
+      const query = new URLSearchParams(params);
+      const suffix = query.toString() ? `?${query}` : "";
+      return request<Record<string, unknown>>(
+        `/api/v1/security-agent/sessions/${id}/timeline${suffix}`,
+      );
+    },
+    step: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/step`, {
+        method: "POST",
+      }),
+    override: (id: string, body: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/override`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    reviewNext: (id: string, body: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/next-action/review`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    findings: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/findings`),
+    evidence: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/evidence`),
+    graph: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/graph`),
+    identities: (id: string) =>
+      request<Record<string, unknown>>(`/api/v1/security-agent/sessions/${id}/identities`),
+    exportPackage: (id: string, findingId?: string) => {
+      const suffix = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : "";
+      return request<Record<string, unknown>>(
+        `/api/v1/security-agent/sessions/${id}/export${suffix}`,
+      );
+    },
+    createProject: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/security-agent/research-projects", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  },
+
+  hackerone: {
+    status: () => request<Record<string, unknown>>("/api/v1/hackerone/status"),
+    sync: (handle: string) =>
+      request<Record<string, unknown>>("/api/v1/hackerone/programs/sync", {
+        method: "POST",
+        body: JSON.stringify({ handle }),
+      }),
+    program: (handle: string) => request<Record<string, unknown>>(`/api/v1/hackerone/programs/${handle}`),
+    createDraft: (body: Record<string, unknown>) =>
+      request<Record<string, unknown>>("/api/v1/hackerone/reports/drafts", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    review: (draftId: string, programHandle: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/review`, {
+        method: "POST",
+        body: JSON.stringify({ program_handle: programHandle }),
+      }),
+    dryRun: (draftId: string, programHandle: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/dry-run`, {
+        method: "POST",
+        body: JSON.stringify({ program_handle: programHandle }),
+      }),
+    approve: (draftId: string, programHandle: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ program_handle: programHandle }),
+      }),
+    submit: (draftId: string, programHandle: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/submit`, {
+        method: "POST",
+        body: JSON.stringify({ program_handle: programHandle }),
+      }),
+    reconcile: (draftId: string) =>
+      request<Record<string, unknown>>(`/api/v1/hackerone/reports/${draftId}/reconcile`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
   },
 };

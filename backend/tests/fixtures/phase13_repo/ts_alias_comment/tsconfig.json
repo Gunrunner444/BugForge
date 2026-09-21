@@ -1,0 +1,3 @@
+{ // comments are not executed
+  "compilerOptions": {"baseUrl": ".", "paths": {"@lib/*": ["src/lib/*"]}}
+}

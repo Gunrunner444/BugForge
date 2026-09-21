@@ -97,6 +97,12 @@ export default function AIPage() {
                 </p>
               </div>
               <div>
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Thinking</p>
+                <p className="mt-1 font-semibold text-gray-900">
+                  {status.thinking_enabled ? "Enabled" : "Disabled"}
+                </p>
+              </div>
+              <div>
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Status</p>
                 <div className="mt-1 flex flex-col gap-1">
                   <StatusIndicator ok={status.configured} label="Configured" />
@@ -124,9 +130,38 @@ export default function AIPage() {
                 </div>
               </div>
             )}
+
+            {status.language_analyzers && status.language_analyzers.length > 0 && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Language analyzers</p>
+                <div className="flex flex-wrap gap-2">
+                  {status.language_analyzers.map((lang) => (
+                    <span key={lang} className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-medium">
+                      {lang}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {status.security_analysis_status && (
+              <p className="mt-3 text-xs text-gray-500">
+                Security analysis: {status.security_analysis_status} (potential findings only)
+              </p>
+            )}
           </div>
 
           {/* Ollama setup guide */}
+          {status.provider === "mlx" && !status.reachable && (
+            <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 mb-6 text-sm text-yellow-800">
+              <p className="font-semibold mb-2">Local MLX server not reachable</p>
+              <p className="text-xs">
+                Start an OpenAI-compatible MLX server on{" "}
+                <code className="bg-yellow-100 px-1 rounded">http://127.0.0.1:8080/v1</code>{" "}
+                and set <code className="bg-yellow-100 px-1 rounded">AI_PROVIDER=mlx</code>. The model name is configurable
+                via <code className="bg-yellow-100 px-1 rounded">MLX_MODEL</code>.
+              </p>
+            </div>
+          )}
           {status.provider === "ollama" && !status.reachable && (
             <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 mb-6 text-sm text-yellow-800">
               <p className="font-semibold mb-2">Ollama not reachable</p>
@@ -179,10 +214,11 @@ export default function AIPage() {
           <div className="mt-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Environment Variables</p>
             <pre className="text-xs text-gray-600 overflow-x-auto whitespace-pre-wrap">
-{`AI_PROVIDER=ollama            # mock | openai | anthropic | ollama | openai_compatible
-AI_MODEL=qwen2.5-coder:7b     # any model you have available
-AI_BASE_URL=http://localhost:11434/v1
-AI_API_KEY=                   # empty for Ollama; required for OpenAI / Anthropic`}
+{`AI_PROVIDER=mlx              # mock | openai | anthropic | ollama | openai_compatible | local | mlx
+AI_MODEL=Qwen3.6-35B-A3B-8bit # configurable; mlx default lives in MLX_MODEL
+MLX_BASE_URL=http://127.0.0.1:8080/v1
+AI_THINKING_ENABLED=false
+AI_API_KEY=                   # empty for local MLX / Ollama`}
             </pre>
           </div>
         </>

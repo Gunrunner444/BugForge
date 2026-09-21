@@ -10,8 +10,9 @@ from app.adapters.languages.base import LanguageAdapter
 from app.analysis.base import AnalyzerRule
 from app.analysis.finding import Finding
 from app.analysis.python_analyzer import ALL_PYTHON_RULES
+from app.analysis.quality import analyzer_error_finding
 from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
-from app.domain.language import LanguageCapability
+from app.domain.language import FULL_ANALYSIS_CAPS, LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
 
 logger = logging.getLogger(__name__)
@@ -41,13 +42,15 @@ class PythonAdapter(LanguageAdapter):
     @property
     def capabilities(self) -> frozenset[LanguageCapability]:
         return frozenset(
-            {
-                LanguageCapability.DETECTION,
-                LanguageCapability.SOURCE,
-                LanguageCapability.PARSE,
-                LanguageCapability.STATIC_ANALYSIS,
-            }
+            FULL_ANALYSIS_CAPS
+            | {LanguageCapability.CODE_QUALITY, LanguageCapability.STATIC_ANALYSIS}
         )
+
+    def parser_tier(self) -> ParserTier:
+        return ParserTier.FULL_AST
+
+    def parser_backend(self) -> str:
+        return "cpython_ast"
 
     def prepare_repository(self, repo_root: Path) -> frozenset[str]:
         return PythonLanguageAnalyzer.discover_local_packages(repo_root)
@@ -64,7 +67,11 @@ class PythonAdapter(LanguageAdapter):
             try:
                 findings.extend(rule.check_file(file_path, source))
             except Exception as exc:
-                logger.warning("Rule %s failed on %s: %s", rule.RULE_ID, file_path, exc)
+                findings.append(
+                    analyzer_error_finding(
+                        file_path, self.language_id, self.parser_backend(), rule.RULE_ID, exc
+                    )
+                )
         return findings
 
     def static_rules(self) -> Sequence[AnalyzerRule]:

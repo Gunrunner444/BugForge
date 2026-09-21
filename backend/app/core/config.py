@@ -16,6 +16,7 @@ _VALID_AI_PROVIDERS = {
     "ollama",
     "openai_compatible",
     "local",
+    "mlx",
 }
 
 
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "BugForge"
-    version: str = "1.1.0"
+    version: str = "1.8.0"
     environment: str = "development"
     debug: bool = False
     log_level: str = "INFO"
@@ -46,8 +47,18 @@ class Settings(BaseSettings):
     max_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
     max_repo_files: int = 10_000
     analysis_timeout_seconds: int = 300
+    # Cross-file taint. Hitting a limit stops propagation and records a diagnostic.
+    taint_max_files: int = 400
+    taint_max_import_depth: int = 3
+    taint_max_cross_file_rounds: int = 4
+    taint_max_cross_file_edges: int = 2_000
+    taint_cross_file_budget_ms: int = 1_500
+    # Field paths such as obj.payload and obj["key"]. Zero disables field flow.
+    taint_max_field_depth: int = 4
+    taint_max_field_bindings: int = 2_000
+    taint_max_alias_edges: int = 32
 
-    # AI provider: mock | openai | anthropic | ollama | openai_compatible | local
+    # AI provider: mock | openai | anthropic | ollama | openai_compatible | local | mlx
     ai_provider: str = "mock"
     ai_model: str = "gpt-4o-mini"
     # API key comes from environment only — never commit a real key
@@ -60,9 +71,17 @@ class Settings(BaseSettings):
     ai_timeout_seconds: int = 60
     ai_max_retries: int = 2
     ai_max_hypotheses: int = 3
+    # Local MLX (Qwen etc.). Model name is configurable — not hard-coded in the engine.
+    mlx_base_url: str = "http://127.0.0.1:8080/v1"
+    mlx_model: str = "Qwen3.6-35B-A3B-8bit"
+    ai_thinking_enabled: bool = False
+    ai_native_json_mode: bool = False
+    ai_max_context_tokens: int = 8192
+    ai_security_enabled: bool = True
 
     # Language analyzers that should run during static analysis.
-    # Empty = every registered adapter that implements STATIC_ANALYSIS (currently Python).
+    # Empty = every registered adapter that implements STATIC_ANALYSIS
+    # (Python plus JavaScript/TypeScript quality rules).
     # Comma-separated language ids, e.g. "python".
     language_analyzers: str = ""
 
@@ -70,6 +89,37 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_app_id: str = ""
     github_app_private_key: str = ""
+
+    # HackerOne Hacker API — never expose these to the frontend
+    hackerone_api_username: str = ""
+    hackerone_api_token: str = ""
+    hackerone_api_base_url: str = "https://api.hackerone.com/v1"
+
+    # Local operator authorization for HackerOne approval / live-testing gates.
+    # Never persist these values in the database.
+    bugforge_operator_token: str = ""
+    bugforge_operator_identity: str = ""
+
+    # HackerOne program-data freshness before live submission (hours).
+    hackerone_program_max_age_hours: int = 24
+    hackerone_weakness_max_age_hours: int = 168
+    hackerone_attachment_max_bytes: int = 10 * 1024 * 1024
+    bugforge_evidence_dir: str = ""
+
+    # Guided security research agent budgets. The AI cannot raise these.
+    security_agent_max_iterations: int = 20
+    security_agent_max_tool_calls: int = 40
+    security_agent_max_requests: int = 50
+    security_agent_max_browser_actions: int = 20
+    security_agent_max_fuzz_requests: int = 20
+    security_agent_max_tokens: int = 200_000
+    security_agent_max_scan_seconds: float = 300.0
+    security_agent_max_identical_tool_calls: int = 2
+    security_agent_identical_call_window_seconds: float = 120.0
+    security_agent_source_excerpt_bytes: int = 32_768
+    security_agent_source_max_lines: int = 200
+    security_agent_approval_ttl_hours: int = 24
+    security_agent_lab_roots: list[str] = []
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)
@@ -155,6 +205,22 @@ class Settings(BaseSettings):
             raise ValueError(f"discovery_mode must be one of {valid}")
         return v
 
+    @field_validator(
+        "taint_max_files",
+        "taint_max_import_depth",
+        "taint_max_cross_file_rounds",
+        "taint_max_cross_file_edges",
+        "taint_cross_file_budget_ms",
+        "taint_max_field_depth",
+        "taint_max_field_bindings",
+        "taint_max_alias_edges",
+    )
+    @classmethod
+    def validate_taint_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("cross-file taint limits must be >= 0; 0 disables that propagation")
+        return value
+
     @field_validator("ai_provider")
     @classmethod
     def validate_ai_provider(cls, v: str) -> str:
@@ -186,7 +252,7 @@ class Settings(BaseSettings):
 
     def is_local_ai(self) -> bool:
         """Return True when the AI provider runs locally (no cloud cost)."""
-        return self.ai_provider in {"mock", "ollama", "openai_compatible", "local"}
+        return self.ai_provider in {"mock", "ollama", "openai_compatible", "local", "mlx"}
 
 
 @lru_cache

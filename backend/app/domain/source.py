@@ -30,6 +30,11 @@ class ParsedEntity:
     parameters: list[ParsedParameter] = field(default_factory=list)
     return_annotation: str | None = None
     parent: str | None = None
+    start_column: int = 1
+    end_column: int = 1
+    start_byte: int = 0
+    end_byte: int = 0
+    node_id: str = ""
 
 
 @dataclass
@@ -39,7 +44,12 @@ class ParsedImport:
     alias: str | None = None
     line_number: int = 0
     is_from_import: bool = False
-    import_type: str = "unknown"  # stdlib | third_party | relative | local | unknown
+    import_type: str = "unknown"  # stdlib | third_party | relative | local | module | include | require | use | using
+    column: int = 1
+    start_byte: int = 0
+    end_byte: int = 0
+    syntax_kind: str = "import"
+    relative_level: int = 0
 
 
 @dataclass
@@ -52,3 +62,7 @@ class LanguageParseResult:
     errors: list[str] = field(default_factory=list)
     imports: list[ParsedImport] = field(default_factory=list)
     entities: list[ParsedEntity] = field(default_factory=list)
+    has_errors: bool = False
+    error_count: int = 0
+    parser_backend: str = ""
+    parser_tier: str = ""
