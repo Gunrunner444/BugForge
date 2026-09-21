@@ -11,7 +11,7 @@ source code
     → native syntax tree (CPython AST or Tree-sitter)
         → normalized SyntaxGraph (entities, imports, calls, bindings, scopes, spans)
             → lexical scopes + definition versions
-                → flow-sensitive taint (not path-sensitive)
+                → flow-sensitive taint at the use site (not path-sensitive, bounded interprocedural)
                     → argument-aware sources / sanitizers / sinks
                         → static security hypothesis + evidence
 ```
@@ -51,13 +51,18 @@ equivalent to native analysis.
 
 ## Taint precision
 
-Taint is **flow-sensitive** and **not path-sensitive**.
+Taint is **flow-sensitive at the use site** and **not path-sensitive**.
+Bounded same-file inter-procedural analysis applies only when the callee is
+uniquely resolved.
 
+* A sink uses the definition reaching that call's source position. Later
+  reassignments of the same name do not taint an earlier sink, and an earlier
+  tainted definition still taints a sink that occurs before a later safe write.
 * Sequential reassignment replaces the reaching definition: `q = input; q = "safe"; sink(q)` is not tainted.
 * Branch/loop assignments merge conservatively: if either path may taint `q`, later uses stay tainted.
 * Sibling function scopes never share locals. Nested `let`/`const` (JS/TS) and block-scoped declarations are distinct symbols.
 * Same-file inter-procedural propagation maps actual arguments onto the matching formal parameter, and only when the callee is uniquely resolved.
-* Sanitizers apply only when a callee of the relevant argument has a sanitizer kind that matches the sink (HTML encoding does not sanitize SQL).
+* Sanitizers apply only when a callee of the relevant argument at that call has a sanitizer kind that matches the sink (HTML encoding does not sanitize SQL).
 * Static analysis never claims a demonstrated directory escape. Path findings are `user_controlled_path`, `unsafe_path_construction`, or `possible_path_traversal`.
 
 ## Security vs code quality

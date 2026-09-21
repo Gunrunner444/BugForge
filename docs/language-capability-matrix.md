@@ -19,8 +19,9 @@ equivalent to Tree-sitter or CPython AST analysis. Status fields distinguish
 `native_parser_available`, `native_parser_unavailable`, `profile_fallback_used`,
 and `parser_failure`.
 
-Taint is flow-sensitive and not path-sensitive. Same-file inter-procedural
-analysis maps arguments by index when the callee is unique.
+Taint is flow-sensitive at the use site (not a file-final symbol map) and not
+path-sensitive. Same-file inter-procedural analysis maps arguments by index
+when the callee is unique.
 
 ## Analysis languages
 

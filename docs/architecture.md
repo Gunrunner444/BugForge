@@ -124,7 +124,7 @@ same `SyntaxGraph` used by security analysis.
 C#, and Shell** parse with Tree-sitter into `SyntaxGraph`. Every full-analysis
 language has a syntax-aware code-quality catalog. JavaScript/TypeScript rules
 (`==`, `var`, empty `catch`, `with`) operate on syntax events and honor strict
-mode / comparison operands. Taint is flow-sensitive and not path-sensitive.
+mode / comparison operands. Taint is flow-sensitive at the use site and not path-sensitive.
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.

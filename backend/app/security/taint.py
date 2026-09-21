@@ -2,11 +2,13 @@
 
 Precision (documented, not advertised beyond this):
 
-* **flow-sensitive**: a later reaching definition replaces an earlier one in
-  the same scope. ``q = tainted; q = "safe"; sink(q)`` is not tainted.
+* **flow-sensitive at the use site**: a sink uses the definition reaching that
+  call's source position, not the file-final state of the symbol.
+  ``q = "safe"; sink(q); q = input`` is not tainted at the sink.
 * **not path-sensitive**: assignments inside branches/loops merge conservatively.
-  If either path may taint a symbol, later uses in the parent stay tainted.
+  If either path may taint ``q``, later uses in the parent stay tainted.
 * **not flow-insensitive**: taint is not a sticky property of ``scope_id::name``.
+  Historical taint is distinct from the taint reaching a given program point.
 
 Symbols are ``scope_id::name``. Sibling functions never share locals.
 Source/sink matching uses syntax-derived callees, member accesses, and
@@ -23,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.analyzers.framework_detector import FrameworkInfo
-from app.parsing.model import Binding, CallArgument, CallSite, SyntaxGraph
+from app.parsing.model import Binding, CallArgument, CallSite, SymbolKind, SyntaxGraph
 from app.security.definitions import (
     SINK_SANITIZER_KINDS,
     LanguageSecurityVocab,
@@ -107,13 +109,135 @@ class _Reach:
     merged: bool = False
 
 
-def propagate_taint(
+@dataclass(frozen=True)
+class _Def:
+    """One reaching definition of a symbol, ordered by source position."""
+
+    start_byte: int
+    line: int
+    definition_index: int
+    reason: str | None
+    merged: bool = False
+
+
+@dataclass
+class TaintState:
+    """Flow-sensitive taint: ordered definitions per symbol, queried at a use."""
+
+    defs: dict[str, tuple[_Def, ...]]
+    source_pats: tuple[str, ...] = ()
+
+    def final_map(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for sid, defs in self.defs.items():
+            if defs and defs[-1].reason:
+                out[sid] = defs[-1].reason
+        return out
+
+    def reason_at_name(self, name: str, scope_id: str, at_byte: int) -> str | None:
+        """Taint of ``name`` reaching ``at_byte`` in ``scope_id``. Never sibling scopes."""
+        current: str | None = scope_id
+        while current:
+            candidate = f"{current}::{name}"
+            if candidate in self.defs:
+                return _reason_at(self.defs[candidate], at_byte)
+            if "/" not in current:
+                break
+            current = current.rsplit("/", 1)[0]
+        module = f"module::{name}"
+        if module in self.defs:
+            return _reason_at(self.defs[module], at_byte)
+        return None
+
+    @staticmethod
+    def from_final_map(
+        tainted: dict[str, str], source_pats: Sequence[str] = ()
+    ) -> TaintState:
+        """Treat a file-final map as definitions at byte 0 (legacy / tests)."""
+        defs: dict[str, tuple[_Def, ...]] = {
+            sid: (_Def(start_byte=0, line=1, definition_index=0, reason=reason),)
+            for sid, reason in tainted.items()
+        }
+        return TaintState(defs=defs, source_pats=tuple(source_pats))
+
+
+def _use_byte(span: object | None, line: int) -> int:
+    start = getattr(span, "start_byte", None)
+    if isinstance(start, int):
+        return start
+    return max(0, line) * 10_000
+
+
+def _reason_at(defs: tuple[_Def, ...], at_byte: int) -> str | None:
+    hitting: _Def | None = None
+    for item in defs:
+        if item.start_byte <= at_byte:
+            hitting = item
+        else:
+            break
+    return hitting.reason if hitting is not None else None
+
+
+def _freeze_timeline(
+    timeline: dict[str, dict[int, _Def]], source_pats: Sequence[str]
+) -> TaintState:
+    frozen: dict[str, tuple[_Def, ...]] = {}
+    for sid, by_index in timeline.items():
+        frozen[sid] = tuple(
+            sorted(by_index.values(), key=lambda item: (item.start_byte, item.definition_index))
+        )
+    return TaintState(defs=frozen, source_pats=tuple(source_pats))
+
+
+def _empty_rhs(binding: Binding) -> bool:
+    return (
+        not binding.rhs
+        and not binding.rhs_idents
+        and not binding.rhs_accesses
+        and not binding.rhs_callees
+    )
+
+
+def _killing_assignment(binding: Binding) -> bool:
+    """Literal RHS that is not a parameter/placeholder — clears this definition only."""
+    return (
+        binding.rhs_is_literal
+        and not binding.rhs_callees
+        and not binding.rhs_accesses
+        and not _empty_rhs(binding)
+    )
+
+
+def _reach_for_definition(
+    binding: Binding,
+    computed: str | None,
+    previous_this_walk: _Reach | None,
+    existing: _Def | None,
+) -> _Reach:
+    """Taint of this definition. Never copy a later definition backward."""
+    existing_reason = existing.reason if existing is not None else None
+    if _empty_rhs(binding):
+        reason = existing_reason or computed
+    elif _killing_assignment(binding):
+        reason = None
+    elif computed:
+        reason = computed
+    else:
+        reason = existing_reason
+    merged = False
+    if binding.is_conditional and previous_this_walk is not None:
+        reason = _merge_reason(previous_this_walk.reason, reason)
+        merged = True
+    return _Reach(reason=reason, def_index=binding.definition_index, merged=merged)
+
+
+def analyze_taint(
     graph: SyntaxGraph,
     sources: Sequence[SourceDefinition],
-) -> dict[str, str]:
-    """Map symbol_id → why the currently reaching definition is user-controlled."""
+) -> TaintState:
+    """Compute ordered reaching definitions. Use ``taint_at_use`` at sinks."""
     source_pats = tuple(p for src in sources for p in src.patterns)
-    reaching: dict[str, _Reach] = {}
+    timeline: dict[str, dict[int, _Def]] = {}
     rounds = 0
     changed = True
     interproc_depth = 0
@@ -121,64 +245,89 @@ def propagate_taint(
         changed = False
         rounds += 1
         applied = 0
-        return_reasons = _return_reasons(graph, reaching, source_pats)
+        prior = _freeze_timeline(timeline, source_pats)
+        return_reasons = _return_reasons(graph, prior, source_pats)
+        reaching: dict[str, _Reach] = {}
         for binding in _ordered_bindings(graph):
             applied += 1
             if applied > MAX_DEFINITIONS:
                 break
-            reason = _binding_taint(binding, source_pats, reaching, return_reasons)
-            previous = reaching.get(binding.symbol_id)
-            empty_rhs = (
-                not binding.rhs
-                and not binding.rhs_idents
-                and not binding.rhs_accesses
-                and not binding.rhs_callees
+            computed = _binding_taint(binding, source_pats, reaching, return_reasons)
+            existing = timeline.get(binding.symbol_id, {}).get(binding.definition_index)
+            new = _reach_for_definition(
+                binding,
+                computed,
+                reaching.get(binding.symbol_id),
+                existing,
             )
-            # Parameters / empty declarations are not reassignments. An
-            # interprocedural callarg must remain the reaching state.
-            if empty_rhs and previous is not None:
-                continue
-            # Replaying the same (or earlier) definition must not erase taint
-            # that _interprocedural() attached to this reaching definition.
-            # A later definition_index is a real reassignment and may clear it.
-            if (
-                reason is None
-                and previous is not None
-                and previous.reason
-                and binding.definition_index <= previous.def_index
-            ):
-                continue
-            if binding.is_conditional and previous is not None:
-                new = _Reach(
-                    reason=_merge_reason(previous.reason, reason),
-                    def_index=binding.definition_index,
-                    merged=True,
-                )
-            else:
-                new = _Reach(reason=reason, def_index=binding.definition_index)
-            if (
-                previous is None
-                or previous.reason != new.reason
-                or previous.def_index != new.def_index
-            ):
-                reaching[binding.symbol_id] = new
-                if (previous.reason if previous else None) != new.reason:
-                    changed = True
+            old_reason = existing.reason if existing is not None else None
+            if old_reason != new.reason:
+                changed = True
+            reaching[binding.symbol_id] = new
+            byte = _use_byte(binding.span, binding.line)
+            timeline.setdefault(binding.symbol_id, {})[binding.definition_index] = _Def(
+                start_byte=byte,
+                line=binding.line,
+                definition_index=binding.definition_index,
+                reason=new.reason,
+                merged=new.merged,
+            )
         if interproc_depth < MAX_INTERPROC_DEPTH:
+            state = _freeze_timeline(timeline, source_pats)
             live = {s: r.reason for s, r in reaching.items() if r.reason}
-            for new_id, reason in _interprocedural(graph, live, source_pats):
-                current = reaching.get(new_id)
-                if current is None or current.reason != reason:
-                    # Attach to the current reaching definition. A fake later
-                    # def_index made the next binding pass look like an earlier
-                    # assignment and overwrite this reason with None.
-                    reaching[new_id] = _Reach(
-                        reason=reason,
-                        def_index=current.def_index if current is not None else 0,
-                    )
-                    changed = True
+            for new_id, reason, idx in _interprocedural_edges(
+                graph, live, source_pats, state=state
+            ):
+                existing = timeline.get(new_id, {}).get(idx)
+                if existing is not None and existing.reason == reason:
+                    continue
+                target = _binding_at(graph, new_id, idx)
+                byte = (
+                    existing.start_byte
+                    if existing is not None
+                    else _use_byte(target.span, target.line)
+                    if target is not None
+                    else 0
+                )
+                line = (
+                    existing.line
+                    if existing is not None
+                    else target.line
+                    if target is not None
+                    else 1
+                )
+                timeline.setdefault(new_id, {})[idx] = _Def(
+                    start_byte=byte,
+                    line=line,
+                    definition_index=idx,
+                    reason=reason,
+                    merged=existing.merged if existing is not None else False,
+                )
+                changed = True
             interproc_depth += 1
-    return {sid: r.reason for sid, r in reaching.items() if r.reason}
+    return _freeze_timeline(timeline, source_pats)
+
+
+def propagate_taint(
+    graph: SyntaxGraph,
+    sources: Sequence[SourceDefinition],
+) -> dict[str, str]:
+    """File-final map (last definition per symbol). Sinks must use ``taint_at_use``."""
+    return analyze_taint(graph, sources).final_map()
+
+
+def taint_at_use(
+    graph: SyntaxGraph,
+    call: CallSite,
+    sources: Sequence[SourceDefinition],
+    *,
+    argument_indexes: Sequence[int] | None = None,
+) -> str | None:
+    """Taint reaching ``call`` at its source position."""
+    state = analyze_taint(graph, sources)
+    return call_taint_reason(
+        call, state.source_pats, state, argument_indexes=argument_indexes
+    )
 
 
 def _ordered_bindings(graph: SyntaxGraph) -> list[Binding]:
@@ -221,7 +370,7 @@ def _binding_taint(
 
 def _return_reasons(
     graph: SyntaxGraph,
-    reaching: dict[str, _Reach],
+    reaching: dict[str, _Reach] | TaintState,
     source_pats: Sequence[str],
 ) -> dict[str, str]:
     """Map uniquely resolved function names to a return taint reason."""
@@ -245,7 +394,14 @@ def _return_reasons(
                 reason = f"return:source:{hit}"
                 break
         if reason is None:
+            ret_byte = _use_byte(ret.span, ret.line)
             for ident in ret.idents:
+                if isinstance(reaching, TaintState):
+                    ident_reason = reaching.reason_at_name(ident, ret.scope_id, ret_byte)
+                    if ident_reason:
+                        reason = f"return:{ident}:{ident_reason}"
+                        break
+                    continue
                 sid = _resolve_symbol(ident, ret.scope_id, reaching)
                 if sid is not None:
                     reason = f"return:{sid}"
@@ -281,13 +437,59 @@ def _resolve_symbol(
     return None
 
 
+def _binding_at(graph: SyntaxGraph, symbol_id: str, def_index: int) -> Binding | None:
+    for binding in graph.bindings:
+        if binding.symbol_id == symbol_id and binding.definition_index == def_index:
+            return binding
+    return None
+
+
+def _parameter_def_index(graph: SyntaxGraph, symbol_id: str) -> int:
+    matches = [b for b in graph.bindings if b.symbol_id == symbol_id]
+    params = [
+        b
+        for b in matches
+        if b.kind is SymbolKind.PARAMETER
+        or b.declarator == "param"
+        or (_empty_rhs(b) and b.is_declaration)
+    ]
+    if params:
+        return min(b.definition_index for b in params)
+    if matches:
+        return min(b.definition_index for b in matches)
+    return 0
+
+
 def _interprocedural(
     graph: SyntaxGraph,
     tainted: dict[str, str],
     source_pats: Sequence[str] = (),
+    *,
+    state: TaintState | None = None,
 ) -> list[tuple[str, str]]:
-    """Parameter and return propagation only when the callee is unique."""
-    new: list[tuple[str, str]] = []
+    """Parameter and return edges (symbol, reason). Tests inspect this shape."""
+    return [
+        (sid, reason)
+        for sid, reason, _idx in _interprocedural_edges(
+            graph, tainted, source_pats, state=state
+        )
+    ]
+
+
+def _interprocedural_edges(
+    graph: SyntaxGraph,
+    tainted: dict[str, str],
+    source_pats: Sequence[str] = (),
+    *,
+    state: TaintState | None = None,
+) -> list[tuple[str, str, int]]:
+    """Parameter and return propagation only when the callee is unique.
+
+    Call-argument taint is attached to the *parameter* definition, not a later
+    reassignment of the same name. Return taint is attached to the assignment
+    whose RHS is that call, not a later definition of the same symbol.
+    """
+    new: list[tuple[str, str, int]] = []
     functions = [
         ent
         for ent in graph.entities
@@ -315,7 +517,7 @@ def _interprocedural(
             return qualified_hits[0]
         return None
 
-    reaching_wrap = {sid: _Reach(reason=reason) for sid, reason in tainted.items()}
+    use_state = state or TaintState.from_final_map(tainted, source_pats)
     for call in graph.calls:
         callee = resolve_callee(call)
         if callee is None:
@@ -336,13 +538,15 @@ def _interprocedural(
                     dynamic=call.dynamic,
                 )
             ]
+        at_byte = _use_byte(call.span, call.line)
         for arg in args:
-            reason = _argument_taint(arg, call.scope_id, reaching_wrap, source_pats)
+            reason = _argument_taint(arg, call.scope_id, use_state, source_pats, at_byte)
             if not reason:
                 continue
             if arg.index < len(params):
                 pname = params[arg.index].name
-                new.append((f"{callee_scope}::{pname}", f"callarg:{arg.index}:{reason}"))
+                sid = f"{callee_scope}::{pname}"
+                new.append((sid, f"callarg:{arg.index}:{reason}", _parameter_def_index(graph, sid)))
     for ret in graph.returns:
         ret_reason = None
         for fragment in (*ret.accesses, *ret.idents):
@@ -351,10 +555,11 @@ def _interprocedural(
                 ret_reason = f"return:source:{hit}"
                 break
         if ret_reason is None:
+            ret_byte = _use_byte(ret.span, ret.line)
             for ident in ret.idents:
-                sid = _resolve_symbol(ident, ret.scope_id, reaching_wrap)
-                if sid is not None:
-                    ret_reason = f"return:{sid}"
+                reason = use_state.reason_at_name(ident, ret.scope_id, ret_byte)
+                if reason:
+                    ret_reason = f"return:{ident}:{reason}"
                     break
         if ret_reason is None:
             continue
@@ -365,7 +570,7 @@ def _interprocedural(
             if binding.scope_id == ret.scope_id:
                 continue
             if any(c == func_name or c.endswith(f".{func_name}") for c in binding.rhs_callees):
-                new.append((binding.symbol_id, ret_reason))
+                new.append((binding.symbol_id, ret_reason, binding.definition_index))
     return new
 
 
@@ -391,24 +596,29 @@ def _scope_for_entity(graph: SyntaxGraph, entity: object) -> str | None:
 def call_taint_reason(
     call: CallSite,
     source_pats: Sequence[str],
-    tainted: dict[str, str],
+    tainted: TaintState | dict[str, str],
     *,
     argument_indexes: Sequence[int] | None = None,
 ) -> str | None:
-    reaching = {sid: _Reach(reason=reason) for sid, reason in tainted.items()}
+    state = (
+        tainted
+        if isinstance(tainted, TaintState)
+        else TaintState.from_final_map(tainted, source_pats)
+    )
+    at_byte = _use_byte(call.span, call.line)
     indexes = list(argument_indexes or [])
     if call.arguments and indexes:
         for index in indexes:
             arg = call.argument_at(index)
             if arg is None:
                 continue
-            reason = _argument_taint(arg, call.scope_id, reaching, source_pats)
+            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte)
             if reason:
                 return reason
         return None
     if call.arguments:
         for arg in call.arguments:
-            reason = _argument_taint(arg, call.scope_id, reaching, source_pats)
+            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte)
             if reason:
                 return reason
         return None
@@ -419,17 +629,18 @@ def call_taint_reason(
         if hit:
             return f"source:{hit}"
     for ident in call.argument_idents:
-        sid = _resolve_symbol(ident, call.scope_id, reaching)
-        if sid is not None and reaching[sid].reason:
-            return f"from:{sid}:{reaching[sid].reason}"
+        reason = state.reason_at_name(ident, call.scope_id, at_byte)
+        if reason:
+            return f"from:{ident}:{reason}"
     return None
 
 
 def _argument_taint(
     arg: CallArgument,
     scope_id: str,
-    reaching: dict[str, _Reach],
+    reaching: dict[str, _Reach] | TaintState,
     source_pats: Sequence[str],
+    at_byte: int = 0,
 ) -> str | None:
     if arg.is_literal and not arg.dynamic and not arg.idents and not arg.accesses:
         return None
@@ -437,6 +648,12 @@ def _argument_taint(
         hit = fragment_matches_source(fragment, source_pats)
         if hit:
             return f"source:{hit}"
+    if isinstance(reaching, TaintState):
+        for ident in arg.idents:
+            reason = reaching.reason_at_name(ident, scope_id, at_byte)
+            if reason:
+                return f"from:{ident}:{reason}"
+        return None
     for ident in arg.idents:
         sid = _resolve_symbol(ident, scope_id, reaching)
         if sid is not None and reaching[sid].reason:

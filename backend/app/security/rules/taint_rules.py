@@ -14,13 +14,13 @@ from app.security.definitions import (
 )
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import (
+    analyze_taint,
     applicable_sanitizer_kinds,
     argument_is_constant,
     call_matches_sink,
     call_taint_reason,
     language_vocab,
     looks_parameterized_sql,
-    propagate_taint,
     sanitizer_intervened,
     vocab_sources,
 )
@@ -69,7 +69,7 @@ class TaintFlowRule(SecurityRule):
             return []
         sources = vocab_sources(vocab, frameworks)
         source_pats = tuple(p for src in sources for p in src.patterns)
-        tainted = propagate_taint(graph, sources)
+        taint_state = analyze_taint(graph, sources)
         framework_name = (
             ",".join(
                 fw.name
@@ -95,7 +95,7 @@ class TaintFlowRule(SecurityRule):
             ):
                 continue
             taint = call_taint_reason(
-                call, source_pats, tainted, argument_indexes=indexes or None
+                call, source_pats, taint_state, argument_indexes=indexes or None
             )
             if not taint and not call.dynamic:
                 continue
@@ -195,6 +195,7 @@ def _observation(
         "taint_source": taint.split(":", 1)[-1] if taint else "",
         "taint_precision": "flow-sensitive",
         "path_sensitive": "false",
+        "taint_use_site": "true",
     }
     if span is not None:
         metadata.update(
@@ -243,7 +244,7 @@ def _observation(
 SQL_DOC = RuleDocumentation(
     detects="User-controlled data or dynamically constructed strings reaching a query API.",
     evidence="Call site, taint reason, surrounding source line, parser backend.",
-    limitations="Intra-procedural plus unique same-file calls. Flow-sensitive, not path-sensitive. Does not prove the query is exploitable.",
+    limitations="Intra-procedural plus unique same-file calls. Flow-sensitive at the use site, not path-sensitive. Bounded interprocedural. Does not prove the query is exploitable.",
     false_positives="ORMs, query builders, and sanitized helpers can still match.",
 )
 CMD_DOC = RuleDocumentation(
@@ -279,7 +280,7 @@ DESER_DOC = RuleDocumentation(
 EVAL_DOC = RuleDocumentation(
     detects="Dynamic evaluation/execution of code.",
     evidence="Call site; constant literals are ignored.",
-    limitations="Cannot see runtime-built strings assembled in other files.",
+    limitations="Flow-sensitive at the use site, not path-sensitive. Bounded same-file interprocedural. Cannot see runtime-built strings assembled in other files.",
     false_positives="Test helpers and debug REPL hooks.",
 )
 REDIRECT_DOC = RuleDocumentation(
