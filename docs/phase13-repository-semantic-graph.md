@@ -107,8 +107,10 @@ when all of these hold:
 * every call of that name is in the same scope as the assignment
 * the identifier is one function or class
 
-A later assignment drops the alias. `getattr`, `eval`, dictionary lookups, and
-computed attributes are not followed.
+A later assignment drops the alias. An assignment inside a branch is not an
+alias. `getattr`, `eval`, dictionary lookups, and computed attributes are not
+followed. A default export whose name is reassigned after the export is
+unresolved.
 
 ## Methods
 
@@ -163,7 +165,9 @@ the file list and never creates a semantic edge.
 | `taint_cross_file_budget_ms` | Stop before propagation |
 
 A positive file cap keeps the first N paths in sorted order and records
-`cross_file_incomplete`. A positive edge cap keeps at most N budgeted edges
+`cross_file_incomplete`. A re-export or alias hop that remains after
+`taint_max_import_depth` iterations records `cross_file_depth_limited` and
+does not invent the missing hop. A positive edge cap keeps at most N budgeted edges
 (`call` first, then alias, default, import, re-export, class import) and drops
 callees whose call edge was not kept. Same-file `MAX_INTERPROC_DEPTH` still
 marks the file incomplete when a further hop was added on the last allowed

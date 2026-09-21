@@ -348,3 +348,72 @@ def test_file_limit_keeps_local_finding(tmp_path: Path, monkeypatch: pytest.Monk
     result = _scan(root)
     assert _lines(result, "app.py") == [4]
     assert any(item.kind == "cross_file_incomplete" for item in result.diagnostics)
+
+
+def test_conditional_alias_stays_unresolved() -> None:
+    graphs = _parse_tree(
+        {
+            "helpers.py": "def run_code(value):\n    eval(value)\n",
+            "app.py": (
+                "from helpers import run_code\n"
+                "if cond:\n"
+                "    alias = run_code\n"
+                "alias(request.args.get('q'))\n"
+            ),
+        }
+    )
+    project = build_project(graphs)
+    assert "alias" not in project.externals.get("app.py", {})
+    assert "run_code" in project.externals["app.py"]
+
+
+def test_reassigned_default_export_stays_unresolved() -> None:
+    graphs = _parse_tree(
+        {
+            "helpers.js": (
+                "function runCode(value) { eval(value); }\n"
+                "export default runCode;\n"
+                "runCode = other;\n"
+            ),
+            "app.js": 'import runCode from "./helpers.js";\nrunCode(req.query.q);\n',
+        }
+    )
+    project = build_project(graphs)
+    assert project.externals == {}
+    assert any(item.kind == "unresolved_export" for item in project.diagnostics)
+
+
+def test_import_depth_records_an_unfollowed_hop() -> None:
+    graphs = _parse_tree(
+        {
+            "d0.py": "def run_code(value):\n    eval(value)\n",
+            "d1.py": "from d0 import run_code\n",
+            "d2.py": "from d1 import run_code\n",
+            "d3.py": "from d2 import run_code\n",
+            "app.py": "from d3 import run_code\nrun_code(request.args.get('q'))\n",
+        }
+    )
+    short = build_project(graphs, limits=CrossFileLimits(max_import_depth=1))
+    assert "app.py" not in short.externals
+    assert short.incomplete
+    assert any(item.kind == "cross_file_depth_limited" for item in short.diagnostics)
+
+    reached = build_project(graphs, limits=CrossFileLimits(max_import_depth=2))
+    assert "run_code" in reached.externals.get("app.py", {})
+
+
+def test_partial_importer_is_explicit() -> None:
+    graphs = _parse_tree(
+        {
+            "helpers.py": "def run_code(value):\n    eval(value)\n",
+            "app.py": "from helpers import run_code\nrun_code(request.args.get('q'))\n",
+        }
+    )
+    graphs["app.py"].diagnostics = replace(
+        graphs["app.py"].diagnostics, has_errors=True, error_count=1
+    )
+    project = build_project(graphs)
+    ext = project.externals["app.py"]["run_code"]
+    assert ext.partial
+    assert project.incomplete
+    assert any("partial importer" in item.message for item in project.diagnostics)

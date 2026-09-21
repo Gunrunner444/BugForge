@@ -290,8 +290,14 @@ def _cross_file_observations(
                             f" param:{index} sink:{sink_name}"
                         ),
                         **(
-                            {"analysis_incomplete": taint_state.limit_reason or "bounded"}
-                            if taint_state.incomplete
+                            {
+                                "analysis_incomplete": (
+                                    taint_state.limit_reason or "bounded"
+                                    if taint_state.incomplete
+                                    else "partial_importer"
+                                )
+                            }
+                            if taint_state.incomplete or ext.partial
                             else {}
                         ),
                         **({"branch_merge": "true"} if "merge:" in taint else {}),

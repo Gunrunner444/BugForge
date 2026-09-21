@@ -308,7 +308,10 @@ def build_project(
                 file_path="",
             )
         )
-    if any(item.kind == "cross_file_partial" for item in project.diagnostics):
+    if any(
+        item.kind in {"cross_file_partial", "cross_file_depth_limited", "cross_file_incomplete"}
+        for item in project.diagnostics
+    ):
         project.incomplete = True
     project.diagnostics = _stable_diagnostics(project.diagnostics)
     return project
@@ -732,6 +735,15 @@ def _import_targets(
         alias_progress = _bind_callable_aliases(graphs, targets, classes, bind, bind_class)
         if not progressed[0] and not alias_progress:
             break
+    else:
+        if pending:
+            diagnostics.append(
+                FlowDiagnostic(
+                    kind="cross_file_depth_limited",
+                    message="cross-file taint stopped at max import depth",
+                    file_path=pending[0][0],
+                )
+            )
     return targets, classes, link_kinds, diagnostics
 
 
@@ -779,6 +791,15 @@ def _bind_default_import(
 ) -> None:
     local = imp.alias or imp.name or ""
     exported = target.default_export
+    if exported and not _default_export_stable(target, exported):
+        diagnostics.append(
+            FlowDiagnostic(
+                kind="unresolved_export",
+                message="default export is reassigned or conditional",
+                file_path=path,
+            )
+        )
+        return
     if not local or not exported:
         diagnostics.append(
             FlowDiagnostic(
@@ -795,6 +816,16 @@ def _bind_default_import(
         bind_class(path, local, (resolved, exported), path)
         return
     pending.append((path, local, resolved, exported, "default"))
+
+
+def _default_export_stable(graph: SyntaxGraph, name: str) -> bool:
+    """A default export stays bound only when that name is not reassigned."""
+    for binding in graph.bindings:
+        if binding.name != name or binding.kind is SymbolKind.PARAMETER:
+            continue
+        if binding.is_conditional or not binding.is_declaration:
+            return False
+    return True
 
 
 def _follow_pending(
@@ -850,6 +881,8 @@ def _bind_callable_aliases(
             if len(binds) != 1 or (path, name) in targets or (path, name) in classes:
                 continue
             binding = binds[0]
+            if binding.is_conditional:
+                continue
             if binding.rhs_is_literal or binding.rhs_callees or binding.rhs_accesses:
                 continue
             if len(binding.rhs_idents) != 1:
@@ -1660,6 +1693,14 @@ def _externals_from(
                         dropped = True
         if table:
             externals[path] = dict(sorted(table.items()))
+            if caller_partial:
+                diagnostics.append(
+                    FlowDiagnostic(
+                        kind="cross_file_partial",
+                        message="partial importer graph is not a complete cross-file summary",
+                        file_path=path,
+                    )
+                )
     for file_path in sorted(partial_files):
         diagnostics.append(
             FlowDiagnostic(
