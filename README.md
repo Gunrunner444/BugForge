@@ -43,8 +43,9 @@ BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
 instead of hard-coded conditionals. Python keeps its CPython AST quality
 analysis. Other programming languages parse through Tree-sitter into the same
-`SyntaxGraph`. Taint is flow-sensitive at the use site (not path-sensitive,
-bounded interprocedural) and argument-aware.
+`SyntaxGraph`. Taint is flow-sensitive at the use site (not path-sensitive),
+with bounded same-file and cross-file propagation when a callee resolves
+uniquely. Unknown calls and profile fallback are not treated as dataflow.
 Every full-analysis language has a syntax-aware **code quality** catalog,
 separate from **security** observations. Parser fallback is labeled
 `PROFILE_FALLBACK` and never advertised as AST. C# and Shell are full analysis

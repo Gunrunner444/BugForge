@@ -49,6 +49,7 @@ class ParsedImport:
     start_byte: int = 0
     end_byte: int = 0
     syntax_kind: str = "import"
+    relative_level: int = 0
 
 
 @dataclass

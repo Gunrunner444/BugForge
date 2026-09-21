@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     max_file_size_bytes: int = 5 * 1024 * 1024  # 5 MB
     max_repo_files: int = 10_000
     analysis_timeout_seconds: int = 300
+    # Cross-file taint. Hitting a limit stops propagation and records a diagnostic.
+    taint_max_files: int = 400
+    taint_max_import_depth: int = 3
+    taint_max_cross_file_rounds: int = 4
+    taint_max_cross_file_edges: int = 2_000
+    taint_cross_file_budget_ms: int = 1_500
 
     # AI provider: mock | openai | anthropic | ollama | openai_compatible | local | mlx
     ai_provider: str = "mock"

@@ -62,7 +62,9 @@ uniquely resolved.
 * Branch/loop assignments merge conservatively: if either path may taint `q`, later uses stay tainted.
 * Sibling function scopes never share locals. Nested `let`/`const` (JS/TS) and block-scoped declarations are distinct symbols.
 * Same-file inter-procedural propagation maps actual arguments onto the matching formal parameter, and only when the callee is uniquely resolved.
-* Sanitizers apply only when a callee of the relevant argument at that call has a sanitizer kind that matches the sink (HTML encoding does not sanitize SQL).
+* Cross-file propagation is bounded and only for Python, JavaScript, and TypeScript full-AST graphs. A local import must resolve to exactly one repository file, and the callee must be a unique module-level function. Ambiguous names, unresolved third-party modules, profile fallback, and instance methods produce no edge.
+* An unknown call does not pass taint through to its result. `b = forward(q)` is tainted only when `forward` is uniquely resolved and its return flows from that argument or from a source.
+* Sanitizers apply when a callee of the relevant argument at that call has a matching sanitizer kind, or when the reaching definition is the result of a known effective sanitizer. HTML encoding does not sanitize SQL or `eval`. A later assignment replaces that definition.
 * Static analysis never claims a demonstrated directory escape. Path findings are `user_controlled_path`, `unsafe_path_construction`, or `possible_path_traversal`.
 
 ## Security vs code quality
@@ -124,13 +126,17 @@ quality catalog). Detection-only languages cannot be enabled this way.
 
 ## Limits
 
-Parse size, walk nodes, nesting, taint rounds, and same-file inter-procedural
-depth are hard-capped. Truncated or erroneous parses remain visible in
-diagnostics; they are not reported as clean analysis.
+Parse size, walk nodes, nesting, taint rounds, same-file inter-procedural
+depth, and cross-file files/import depth/edges/time are hard-capped
+(`taint_max_files`, `taint_max_import_depth`, `taint_max_cross_file_rounds`,
+`taint_max_cross_file_edges`, `taint_cross_file_budget_ms`). Hitting a cap
+records a diagnostic (`cross_file_incomplete` or `cross_file_depth_limited`).
+Truncated or erroneous parses remain visible in diagnostics; they are not
+reported as clean analysis.
 
 ## Known limitations
 
-* Taint is not path-sensitive and not inter-file.
+* Taint is not path-sensitive. Cross-file taint is limited to uniquely resolved Python and JavaScript/TypeScript module-level functions in the same repository.
 * Ambiguous same-named callees are not linked.
 * PHP `echo`/`print` XSS requires HTML output context.
 * Generic APIs (`Write`, `send`, `JSON.parse` as code-exec) are not treated as

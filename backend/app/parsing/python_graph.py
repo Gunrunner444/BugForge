@@ -141,6 +141,7 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     start_byte=span.start_byte,
                     end_byte=span.end_byte,
                     syntax_kind="from_import",
+                    relative_level=node.level or 0,
                 )
             )
         self._node(SemanticKind.IMPORT, module, span, "ImportFrom")

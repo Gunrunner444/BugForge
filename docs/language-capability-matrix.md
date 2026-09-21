@@ -21,7 +21,11 @@ and `parser_failure`.
 
 Taint is flow-sensitive at the use site (not a file-final symbol map) and not
 path-sensitive. Same-file inter-procedural analysis maps arguments by index
-when the callee is unique.
+when the callee is unique. Cross-file analysis adds bounded import edges for
+Python and JavaScript/TypeScript full-AST graphs only: one unique local module,
+module-level functions, no third-party guessing, no profile-fallback dataflow.
+Other full-analysis languages stay intra-file. R, Scala, Dart, Lua, and Elixir
+stay detection-only.
 
 ## Analysis languages
 

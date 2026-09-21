@@ -6,9 +6,11 @@ potential findings. Never labels a result as verified.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 from app.adapters.languages.base import LanguageAdapter
 from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
@@ -114,6 +116,52 @@ class SecurityAnalysisEngine:
 
         clusters = correlate_observations(observations)
         findings = findings_from_clusters(clusters)
+        from app.security.cross_file import build_project
+
+        project = build_project(graphs)
+        for item in project.diagnostics:
+            diagnostics.append(
+                AnalysisDiagnostic(
+                    kind=item.kind,
+                    message=item.message,
+                    file_path=item.file_path,
+                )
+            )
+        if project.incomplete or project.externals:
+            # Re-run taint rules with project context. Other rules already ran
+            # per file and do not depend on cross-file summaries.
+            observations = [
+                obs for obs in observations if not str(obs.rule_id).startswith("sec.taint.")
+            ]
+            for graph_path in sorted(graphs):
+                graph = graphs[graph_path]
+                for rule in self._rules:
+                    if not str(rule.rule_id).startswith("sec.taint."):
+                        continue
+                    try:
+                        check = cast(Any, rule.check)
+                        observations.extend(
+                            check(graph, frameworks=frameworks, project=project)
+                            if _accepts_project(rule)
+                            else rule.check(graph, frameworks=frameworks)
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Security rule %s failed on %s: %s", rule.rule_id, file_path, exc
+                        )
+                        diagnostics.append(
+                            AnalysisDiagnostic(
+                                kind="analyzer_error",
+                                message=f"{rule.rule_id}: {exc}",
+                                file_path=graph.file_path,
+                                language=graph.language,
+                                parser_backend=graph.parser_backend,
+                                parser_tier=str(graph.parser_tier),
+                                rule_id=rule.rule_id,
+                            )
+                        )
+            clusters = correlate_observations(observations)
+            findings = findings_from_clusters(clusters)
         return SecurityScanResult(
             observations=observations,
             clusters=clusters,
@@ -173,3 +221,10 @@ class SecurityAnalysisEngine:
                 language=adapter.language_id,
             )
         return graph, None
+
+
+def _accepts_project(rule: object) -> bool:
+    try:
+        return "project" in inspect.signature(getattr(rule, "check")).parameters
+    except (TypeError, ValueError):
+        return False

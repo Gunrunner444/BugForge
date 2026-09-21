@@ -8,12 +8,15 @@ from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
 from app.parsing.model import CallSite, SyntaxGraph
 from app.security.definitions import (
+    LanguageSecurityVocab,
     PathIssueKind,
     SinkCertainty,
     SinkDefinition,
 )
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import (
+    ExternalCallee,
+    TaintState,
     analyze_taint,
     applicable_sanitizer_kinds,
     argument_is_constant,
@@ -21,6 +24,7 @@ from app.security.taint import (
     call_taint_reason,
     language_vocab,
     looks_parameterized_sql,
+    reaching_sanitizer_kind,
     sanitizer_intervened,
     vocab_sources,
 )
@@ -48,6 +52,7 @@ class TaintFlowRule(SecurityRule):
         graph: SyntaxGraph,
         *,
         frameworks: Sequence[FrameworkInfo] = (),
+        project: object | None = None,
     ) -> list[SecurityObservation]:
         vocab = language_vocab(graph)
         if vocab is None:
@@ -69,7 +74,8 @@ class TaintFlowRule(SecurityRule):
             return []
         sources = vocab_sources(vocab, frameworks)
         source_pats = tuple(p for src in sources for p in src.patterns)
-        taint_state = analyze_taint(graph, sources)
+        externals = _externals(project, graph.file_path)
+        taint_state = analyze_taint(graph, sources, externals=externals or None)
         framework_name = (
             ",".join(
                 fw.name
@@ -112,6 +118,8 @@ class TaintFlowRule(SecurityRule):
             )
             if sanitizer is not None and sanitizer.effective:
                 continue
+            if _sanitizer_blocks_reason(taint or "", kinds):
+                continue
             confidence = "high" if taint else "medium"
             if sanitizer is not None:
                 confidence = "low"
@@ -138,7 +146,116 @@ class TaintFlowRule(SecurityRule):
                     argument_index=indexes[0] if indexes else matched.argument_index,
                 )
             )
+        if externals:
+            observations.extend(
+                _cross_file_observations(
+                    self,
+                    graph,
+                    externals,
+                    sinks,
+                    taint_state,
+                    source_pats,
+                    vocab,
+                    framework_name,
+                    seen,
+                )
+            )
         return observations
+
+
+def _externals(project: object | None, file_path: str) -> dict[str, ExternalCallee]:
+    if project is None:
+        return {}
+    getter = getattr(project, "externals_for", None)
+    if not callable(getter):
+        return {}
+    table = getter(file_path)
+    return dict(table or {})
+
+
+def _sanitizer_blocks_reason(taint: str, kinds: tuple[str, ...] | list[str]) -> bool:
+    if not taint or not kinds:
+        return False
+    kind = reaching_sanitizer_kind(taint)
+    return kind is not None and kind in set(kinds)
+
+
+def _cross_file_observations(
+    rule: TaintFlowRule,
+    graph: SyntaxGraph,
+    externals: dict[str, ExternalCallee],
+    sinks: list[SinkDefinition],
+    taint_state: TaintState,
+    source_pats: tuple[str, ...],
+    vocab: object,
+    framework_name: str,
+    seen: set[tuple[str, int, str, str]],
+) -> list[SecurityObservation]:
+    if not isinstance(vocab, LanguageSecurityVocab):
+        return []
+    observations: list[SecurityObservation] = []
+    for call in graph.calls:
+        ext = externals.get(call.qualified) or externals.get(call.name)
+        if ext is None or ext.callee_file == graph.file_path:
+            continue
+        for index, vuln_value, sink_name, sink_line in ext.param_sinks:
+            if vuln_value != rule.vulnerability_class.value:
+                continue
+            matched = next(
+                (sink for sink in sinks if sink.vulnerability_class.value == vuln_value),
+                None,
+            )
+            if matched is None:
+                continue
+            if argument_is_constant(call, argument_indexes=(index,)):
+                continue
+            taint = call_taint_reason(
+                call, source_pats, taint_state, argument_indexes=(index,)
+            )
+            if not taint:
+                continue
+            kinds = applicable_sanitizer_kinds(matched)
+            sanitizer = sanitizer_intervened(
+                call,
+                vocab.sanitizers,
+                allowed_kinds=kinds,
+                argument_indexes=(index,),
+            )
+            if sanitizer is not None and sanitizer.effective:
+                continue
+            if _sanitizer_blocks_reason(taint, kinds):
+                continue
+            if any(item[:3] == (graph.file_path, call.line, call.qualified) for item in seen):
+                continue
+            key = (graph.file_path, call.line, call.qualified, f"cross:{index}:{vuln_value}")
+            if key in seen:
+                continue
+            seen.add(key)
+            observations.append(
+                _observation(
+                    rule,
+                    graph,
+                    call,
+                    matched,
+                    "high",
+                    taint=taint,
+                    framework=framework_name or graph.framework,
+                    path_kind=_path_kind(call, taint)
+                    if matched.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL
+                    else None,
+                    sanitizer="",
+                    argument_index=index,
+                    extra={
+                        "taint_scope": "cross_file",
+                        "callee_file": ext.callee_file,
+                        "callee_function": ext.callee_function,
+                        "callee_sink": sink_name,
+                        "callee_line": str(sink_line),
+                        "cross_file_partial": "true" if ext.partial else "false",
+                    },
+                )
+            )
+    return observations
 
 
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:
@@ -164,6 +281,7 @@ def _observation(
     path_kind: PathIssueKind | None,
     sanitizer: str,
     argument_index: int = 0,
+    extra: dict[str, str] | None = None,
 ) -> SecurityObservation:
     line = call.line
     snippet = graph.lines[line - 1].strip() if 0 < line <= len(graph.lines) else call.argument_text
@@ -196,7 +314,10 @@ def _observation(
         "taint_precision": "flow-sensitive",
         "path_sensitive": "false",
         "taint_use_site": "true",
+        "taint_scope": "cross_file" if "cross_file:" in taint else "local",
     }
+    if extra:
+        metadata.update(extra)
     if span is not None:
         metadata.update(
             {
@@ -244,7 +365,7 @@ def _observation(
 SQL_DOC = RuleDocumentation(
     detects="User-controlled data or dynamically constructed strings reaching a query API.",
     evidence="Call site, taint reason, surrounding source line, parser backend.",
-    limitations="Intra-procedural plus unique same-file calls. Flow-sensitive at the use site, not path-sensitive. Bounded interprocedural. Does not prove the query is exploitable.",
+    limitations="Intra-procedural plus uniquely resolved same-file and same-repository calls. Flow-sensitive at the use site, not path-sensitive. Bounded interprocedural and bounded cross-file. Does not prove the query is exploitable.",
     false_positives="ORMs, query builders, and sanitized helpers can still match.",
 )
 CMD_DOC = RuleDocumentation(
@@ -280,7 +401,7 @@ DESER_DOC = RuleDocumentation(
 EVAL_DOC = RuleDocumentation(
     detects="Dynamic evaluation/execution of code.",
     evidence="Call site; constant literals are ignored.",
-    limitations="Flow-sensitive at the use site, not path-sensitive. Bounded same-file interprocedural. Cannot see runtime-built strings assembled in other files.",
+    limitations="Flow-sensitive at the use site, not path-sensitive. Bounded same-file and cross-file interprocedural analysis when the callee is unique. Cannot see runtime-built strings assembled outside the repository.",
     false_positives="Test helpers and debug REPL hooks.",
 )
 REDIRECT_DOC = RuleDocumentation(

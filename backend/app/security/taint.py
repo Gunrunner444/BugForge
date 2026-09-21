@@ -15,13 +15,16 @@ Source/sink matching uses syntax-derived callees, member accesses, and
 identifiers — never string-literal or comment text.
 
 Same-file inter-procedural propagation runs only when the callee can be
-resolved uniquely. Ambiguous names do not speculate.
+resolved uniquely. Ambiguous names do not speculate. Optional
+``ExternalCallee`` entries describe uniquely resolved callees in other files;
+they are applied at the call that binds their result, then later sinks use the
+definition reaching that program point.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from app.analyzers.framework_detector import FrameworkInfo
@@ -161,6 +164,34 @@ class TaintState:
         return TaintState(defs=defs, source_pats=tuple(source_pats))
 
 
+@dataclass(frozen=True)
+class ExternalCallee:
+    """A callee in another file, resolved uniquely from an import.
+
+    ``return_effects`` are summary tokens (``source:…``, ``param:N``,
+    ``sanitized:kind:…``). ``param_sinks`` records parameters that reach a sink
+    inside that callee: ``(index, vulnerability_class, sink, line)``.
+    """
+
+    local_name: str
+    callee_file: str
+    callee_function: str
+    return_effects: tuple[str, ...] = ()
+    param_sinks: tuple[tuple[int, str, str, int], ...] = ()
+    partial: bool = False
+
+
+def reaching_sanitizer_kind(taint: str) -> str | None:
+    """Outermost sanitizer kind carried by a use-site reason, if that is all it is."""
+    marker = ":sanitized:"
+    if marker not in taint or "|" in taint:
+        return None
+    kind = taint.split(marker, 1)[1].split(":", 1)[0]
+    if not kind or kind in {"source", "param", "from", "cross_file", "callarg"}:
+        return None
+    return kind
+
+
 def _use_byte(span: object | None, line: int) -> int:
     start = getattr(span, "start_byte", None)
     if isinstance(start, int):
@@ -231,12 +262,130 @@ def _reach_for_definition(
     return _Reach(reason=reason, def_index=binding.definition_index, merged=merged)
 
 
+def _peel_sanitizer(effect: str) -> tuple[str | None, str]:
+    kind: str | None = None
+    core = effect
+    while core.startswith("sanitized:"):
+        rest = core[len("sanitized:") :]
+        part, sep, inner = rest.partition(":")
+        if not sep or not part:
+            break
+        if kind is None:
+            kind = part
+        core = inner
+    return kind, core
+
+
+def _external_for_call(
+    call: CallSite, externals: Mapping[str, ExternalCallee]
+) -> ExternalCallee | None:
+    for key in (call.qualified, call.name):
+        hit = externals.get(key)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _call_matching_binding(
+    binding: Binding,
+    calls: Sequence[CallSite],
+    externals: Mapping[str, ExternalCallee],
+) -> CallSite | None:
+    names: list[str] = []
+    for callee in binding.rhs_callees:
+        simple = callee.rsplit(".", 1)[-1]
+        if callee in externals or simple in externals:
+            names.append(callee)
+            names.append(simple)
+    if not names:
+        return None
+    wanted = set(names)
+    fallback: CallSite | None = None
+    for call in calls:
+        if call.scope_id != binding.scope_id:
+            continue
+        if call.name not in wanted and call.qualified not in wanted:
+            continue
+        if (
+            binding.span is not None
+            and call.span is not None
+            and binding.span.start_byte == call.span.start_byte
+        ):
+            return call
+        if call.line == binding.line:
+            fallback = call
+    return fallback
+
+
+def _render_effect(
+    effect: str,
+    call: CallSite,
+    scope_id: str,
+    source_pats: Sequence[str],
+    reaching: dict[str, _Reach],
+    at_byte: int,
+    ext: ExternalCallee,
+) -> str | None:
+    kind, core = _peel_sanitizer(effect)
+    prefix = f"cross_file:{ext.callee_file}:{ext.callee_function}:"
+    if kind:
+        prefix += f"sanitized:{kind}:"
+    if core.startswith("source:"):
+        return prefix + core
+    if not core.startswith("param:"):
+        return None
+    try:
+        index = int(core.split(":", 1)[1])
+    except ValueError:
+        return None
+    arg = call.argument_at(index)
+    if arg is None:
+        return None
+    reason = _argument_taint(arg, scope_id, reaching, source_pats, at_byte)
+    if not reason:
+        return None
+    return prefix + core + ":" + reason
+
+
+def _external_binding_reason(
+    binding: Binding,
+    calls: Sequence[CallSite],
+    externals: Mapping[str, ExternalCallee],
+    source_pats: Sequence[str],
+    reaching: dict[str, _Reach],
+) -> str | None:
+    if not binding.rhs_callees or _killing_assignment(binding):
+        return None
+    call = _call_matching_binding(binding, calls, externals)
+    if call is None:
+        return None
+    ext = _external_for_call(call, externals)
+    if ext is None or not ext.return_effects:
+        return None
+    at_byte = _use_byte(binding.span, binding.line)
+    unsanitized: list[str] = []
+    sanitized: list[str] = []
+    for effect in ext.return_effects:
+        rendered = _render_effect(effect, call, binding.scope_id, source_pats, reaching, at_byte, ext)
+        if not rendered:
+            continue
+        if ":sanitized:" in rendered:
+            sanitized.append(rendered)
+        else:
+            unsanitized.append(rendered)
+    chosen = unsanitized or sanitized
+    return chosen[0] if chosen else None
+
+
 def analyze_taint(
     graph: SyntaxGraph,
     sources: Sequence[SourceDefinition],
+    externals: Mapping[str, ExternalCallee] | None = None,
 ) -> TaintState:
     """Compute ordered reaching definitions. Use ``taint_at_use`` at sinks."""
     source_pats = tuple(p for src in sources for p in src.patterns)
+    external_map = dict(externals or {})
+    calls = graph.calls
     timeline: dict[str, dict[int, _Def]] = {}
     rounds = 0
     changed = True
@@ -253,6 +402,14 @@ def analyze_taint(
             if applied > MAX_DEFINITIONS:
                 break
             computed = _binding_taint(binding, source_pats, reaching, return_reasons)
+            if not computed:
+                computed = _sanitized_call_result(graph.language, binding, source_pats, reaching)
+            if external_map:
+                ext_reason = _external_binding_reason(
+                    binding, calls, external_map, source_pats, reaching
+                )
+                if ext_reason and (not computed or ":sanitized:" in ext_reason):
+                    computed = ext_reason
             existing = timeline.get(binding.symbol_id, {}).get(binding.definition_index)
             new = _reach_for_definition(
                 binding,
@@ -345,6 +502,12 @@ def _merge_reason(left: str | None, right: str | None) -> str | None:
     return left or right
 
 
+def _callee_is_source(callee: str, source_pats: Sequence[str]) -> bool:
+    if fragment_matches_source(callee, source_pats):
+        return True
+    return fragment_matches_source(callee.rsplit(".", 1)[-1], source_pats) is not None
+
+
 def _binding_taint(
     binding: Binding,
     source_pats: Sequence[str],
@@ -353,19 +516,79 @@ def _binding_taint(
 ) -> str | None:
     if binding.rhs_is_literal and not binding.rhs_callees and not binding.rhs_accesses:
         return None
-    for fragment in (*binding.rhs_accesses, *binding.rhs_callees, *binding.rhs_idents):
-        hit = fragment_matches_source(fragment, source_pats)
-        if hit:
-            return f"source:{hit}"
-    for ident in binding.rhs_idents:
-        sid = _resolve_symbol(ident, binding.scope_id, reaching)
-        if sid is not None and reaching[sid].reason:
-            return f"from:{sid}:{reaching[sid].reason}"
-    for callee in binding.rhs_callees:
+    source_callees = [callee for callee in binding.rhs_callees if _callee_is_source(callee, source_pats)]
+    transforming = [
+        callee
+        for callee in binding.rhs_callees
+        if callee not in source_callees
+        and not any(callee.startswith(source + ".") for source in source_callees)
+    ]
+    if not transforming:
+        for fragment in (*binding.rhs_accesses, *binding.rhs_callees, *binding.rhs_idents):
+            hit = fragment_matches_source(fragment, source_pats)
+            if hit:
+                return f"source:{hit}"
+        for ident in binding.rhs_idents:
+            sid = _resolve_symbol(ident, binding.scope_id, reaching)
+            if sid is not None and reaching[sid].reason:
+                return f"from:{sid}:{reaching[sid].reason}"
+        return None
+    for callee in transforming:
         simple = callee.rsplit(".", 1)[-1]
         if return_reasons and simple in return_reasons:
             return f"from_return:{simple}:{return_reasons[simple]}"
     return None
+
+
+def _sanitized_call_result(
+    language: str,
+    binding: Binding,
+    source_pats: Sequence[str],
+    reaching: dict[str, _Reach],
+) -> str | None:
+    """A known effective sanitizer call keeps taint, marked with its kind."""
+    if not binding.rhs_callees:
+        return None
+    vocab = vocab_for(language)
+    if vocab is None:
+        return None
+    sanitizer: SanitizerDefinition | None = None
+    for candidate in vocab.sanitizers:
+        if not candidate.effective:
+            continue
+        for name in candidate.api_names:
+            for callee in binding.rhs_callees:
+                if callee == name or callee.endswith("." + name):
+                    sanitizer = candidate
+                    break
+            if sanitizer is not None:
+                break
+        if sanitizer is not None:
+            break
+    if sanitizer is None:
+        return None
+    inner: str | None = None
+    for fragment in (*binding.rhs_accesses, *binding.rhs_idents):
+        if any(fragment == callee or callee.endswith("." + fragment) for callee in binding.rhs_callees):
+            continue
+        hit = fragment_matches_source(fragment, source_pats)
+        if hit:
+            inner = f"source:{hit}"
+            break
+    if inner is None:
+        for ident in binding.rhs_idents:
+            if any(
+                ident == callee or callee.endswith("." + ident) or callee.startswith(ident + ".")
+                for callee in binding.rhs_callees
+            ):
+                continue
+            sid = _resolve_symbol(ident, binding.scope_id, reaching)
+            if sid is not None and reaching[sid].reason:
+                inner = f"from:{ident}:{reaching[sid].reason}"
+                break
+    if inner is None:
+        return None
+    return f"sanitized:{sanitizer.kind}:{inner}"
 
 
 def _return_reasons(

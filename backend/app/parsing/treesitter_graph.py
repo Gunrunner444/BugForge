@@ -820,20 +820,38 @@ class _GraphBuilder:
             return
         if ntype == "import_clause":
             return
-        self.imports.append(
-            ParsedImport(
-                module=module,
-                name=imported,
-                alias=alias,
-                line_number=_line(span),
-                is_from_import=is_from,
-                import_type=import_type,
-                column=span.start_column if span else 1,
-                start_byte=span.start_byte if span else 0,
-                end_byte=span.end_byte if span else 0,
-                syntax_kind=syntax_kind,
+        specifiers = _import_specifiers(node) if ntype == "import_statement" else []
+        if specifiers:
+            for spec_name, spec_alias, spec_kind in specifiers:
+                self.imports.append(
+                    ParsedImport(
+                        module=module,
+                        name=spec_name,
+                        alias=spec_alias,
+                        line_number=_line(span),
+                        is_from_import=spec_kind != "namespace",
+                        import_type=import_type,
+                        column=span.start_column if span else 1,
+                        start_byte=span.start_byte if span else 0,
+                        end_byte=span.end_byte if span else 0,
+                        syntax_kind=f"import_{spec_kind}",
+                    )
+                )
+        else:
+            self.imports.append(
+                ParsedImport(
+                    module=module,
+                    name=imported,
+                    alias=alias,
+                    line_number=_line(span),
+                    is_from_import=is_from,
+                    import_type=import_type,
+                    column=span.start_column if span else 1,
+                    start_byte=span.start_byte if span else 0,
+                    end_byte=span.end_byte if span else 0,
+                    syntax_kind=syntax_kind,
+                )
             )
-        )
         self._record_node(SemanticKind.IMPORT, module, span, ntype)
 
     def _extract_return(self, node: object, span: SourceSpan | None) -> None:
@@ -1543,6 +1561,58 @@ def _safe_span(node: object) -> SourceSpan | None:
 
 def _line(span: SourceSpan | None) -> int:
     return span.start_line if span is not None else 1
+
+
+def _import_specifiers(node: object) -> list[tuple[str | None, str | None, str]]:
+    """Named, default, and namespace bindings on an ES ``import`` statement.
+
+    Each item is ``(imported_name, local_alias, kind)`` with kind
+    ``named`` | ``default`` | ``namespace``.
+    """
+    found: list[tuple[str | None, str | None, str]] = []
+
+    def walk(current: object, parent_type: str, depth: int) -> None:
+        if depth > 8:
+            return
+        ntype = str(getattr(current, "type", ""))
+        if ntype == "import_specifier":
+            idents = [
+                child
+                for child in getattr(current, "children", ()) or ()
+                if str(getattr(child, "type", "")) == "identifier"
+            ]
+            texts = [_node_text(ident) for ident in idents]
+            if len(texts) == 1:
+                found.append((texts[0], None, "named"))
+            elif len(texts) >= 2:
+                found.append((texts[0], texts[1], "named"))
+            return
+        if ntype == "namespace_import":
+            idents = [
+                child
+                for child in getattr(current, "children", ()) or ()
+                if str(getattr(child, "type", "")) == "identifier"
+            ]
+            if idents:
+                found.append((None, _node_text(idents[-1]), "namespace"))
+            return
+        if ntype == "identifier" and parent_type == "import_clause":
+            found.append((_node_text(current), None, "default"))
+            return
+        for child in getattr(current, "children", ()) or ():
+            walk(child, ntype, depth + 1)
+
+    walk(node, "", 0)
+    return found
+
+
+def _node_text(node: object) -> str:
+    raw = getattr(node, "text", None)
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", "replace")
+    if isinstance(raw, str):
+        return raw
+    return ""
 
 
 def _child_by_field(node: object, field: str) -> object | None:
