@@ -62,7 +62,6 @@ class SecurityAnalysisEngine:
 
         languages = get_plugin_catalog().languages
         frameworks = self._frameworks.detect(repo_path, file_paths)
-        observations: list[SecurityObservation] = []
         graphs: dict[str, SyntaxGraph] = {}
         used_languages: set[str] = set()
         analyzed = 0
@@ -95,12 +94,33 @@ class SecurityAnalysisEngine:
                         parser_tier=str(graph.parser_tier),
                     )
                 )
+        return self._rules_over_graphs(
+            repo_path,
+            graphs,
+            diagnostics,
+            frameworks,
+            used_languages,
+            analyzed,
+        )
+
+    def _rules_over_graphs(
+        self,
+        repo_path: Path,
+        graphs: dict[str, SyntaxGraph],
+        diagnostics: list[AnalysisDiagnostic],
+        frameworks: list[FrameworkInfo],
+        used_languages: set[str],
+        analyzed: int,
+    ) -> SecurityScanResult:
+        observations: list[SecurityObservation] = []
+        for graph_path in sorted(graphs):
+            graph = graphs[graph_path]
             for rule in self._rules:
                 try:
                     observations.extend(rule.check(graph, frameworks=frameworks))
                 except Exception as exc:
                     logger.warning(
-                        "Security rule %s failed on %s: %s", rule.rule_id, file_path, exc
+                        "Security rule %s failed on %s: %s", rule.rule_id, graph_path, exc
                     )
                     diagnostics.append(
                         AnalysisDiagnostic(

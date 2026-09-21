@@ -137,6 +137,10 @@ stay unresolved. See
 Route decorators and `app.get("/path")` calls are syntactic metadata.
 A path parameter is a source only when that decorator names it. See
 [phase15-framework-aware-analysis.md](phase15-framework-aware-analysis.md).
+Unchanged files can reuse an in-memory syntax graph keyed by path, content
+hash, parser id, and analysis-limit id. The semantic graph and security rules
+still run, and secret files are not stored in that index. See
+[phase17-incremental-analysis.md](phase17-incremental-analysis.md).
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.
