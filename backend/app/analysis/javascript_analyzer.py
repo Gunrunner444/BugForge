@@ -73,7 +73,12 @@ class LooseEqualityRule(CodeQualityRule):
             if event.kind != "loose_eq":
                 continue
             compact = "".join(event.text.split()).lower()
-            if "==null" in compact or "!=null" in compact or "==undefined" in compact or "!=undefined" in compact:
+            if (
+                "==null" in compact
+                or "!=null" in compact
+                or "==undefined" in compact
+                or "!=undefined" in compact
+            ):
                 continue
             findings.append(
                 _finding(
@@ -81,7 +86,9 @@ class LooseEqualityRule(CodeQualityRule):
                     Path(graph.file_path),
                     graph,
                     event.line,
-                    "Use `===` instead of `==`" if "==" in event.text else "Use `!==` instead of `!=`",
+                    "Use `===` instead of `==`"
+                    if "==" in event.text
+                    else "Use `!==` instead of `!=`",
                     "Loose equality coerces types and hides bugs. Strict equality "
                     "(`===` / `!==`) compares without coercion. The `== null` idiom "
                     "is allowed because it matches both `null` and `undefined`.",

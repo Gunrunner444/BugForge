@@ -40,7 +40,10 @@ class PythonAdapter(LanguageAdapter):
 
     @property
     def capabilities(self) -> frozenset[LanguageCapability]:
-        return frozenset(FULL_ANALYSIS_CAPS | {LanguageCapability.CODE_QUALITY, LanguageCapability.STATIC_ANALYSIS})
+        return frozenset(
+            FULL_ANALYSIS_CAPS
+            | {LanguageCapability.CODE_QUALITY, LanguageCapability.STATIC_ANALYSIS}
+        )
 
     def parser_tier(self) -> ParserTier:
         return ParserTier.FULL_AST

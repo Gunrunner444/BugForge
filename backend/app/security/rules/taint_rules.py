@@ -69,7 +69,14 @@ class TaintFlowRule(SecurityRule):
         sources = vocab_sources(vocab, frameworks)
         source_pats = tuple(p for src in sources for p in src.patterns)
         tainted = propagate_taint(graph, sources)
-        framework_name = ",".join(fw.name for fw in frameworks if fw.language.split("/")[0] in {graph.language, "javascript", "typescript"}) or ""
+        framework_name = (
+            ",".join(
+                fw.name
+                for fw in frameworks
+                if fw.language.split("/")[0] in {graph.language, "javascript", "typescript"}
+            )
+            or ""
+        )
         observations: list[SecurityObservation] = []
         seen: set[tuple[str, int, str]] = set()
         for call in graph.calls:
@@ -78,8 +85,9 @@ class TaintFlowRule(SecurityRule):
                 continue
             if argument_is_constant(call):
                 continue
-            if self.vulnerability_class is VulnerabilityClass.SQL_INJECTION and looks_parameterized_sql(
-                call.argument_text
+            if (
+                self.vulnerability_class is VulnerabilityClass.SQL_INJECTION
+                and looks_parameterized_sql(call.argument_text)
             ):
                 continue
             taint = call_taint_reason(call, source_pats, tainted)

@@ -54,9 +54,9 @@ class MutableDefaultArgumentRule(AnalyzerRule):
                             analyzer=self.RULE_ID,
                             evidence=ast.unparse(default),
                             suggested_fix=f"Change default to `None` and add `if param is None: param = {type_name}()`",
-                        catalog=FindingCatalog.CODE_QUALITY,
-                        language="python",
-                        parser_backend="cpython_ast",
+                            catalog=FindingCatalog.CODE_QUALITY,
+                            language="python",
+                            parser_backend="cpython_ast",
                         )
                     )
         return findings

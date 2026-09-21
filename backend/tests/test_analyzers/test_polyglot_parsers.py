@@ -265,7 +265,8 @@ actor Worker {}
     result = analyze_source(tmp_path, "A.swift", src)
     classes = observation_classes(result)
     assert (
-        VulnerabilityClass.SQL_INJECTION in classes or VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
+        VulnerabilityClass.SQL_INJECTION in classes
+        or VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL in classes
     )
 
 

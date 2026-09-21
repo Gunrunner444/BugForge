@@ -103,7 +103,7 @@ def parse_treesitter(
     try:
         from tree_sitter import Parser
 
-        parser = Parser(lang)
+        parser = Parser(lang)  # type: ignore[arg-type]
         tree = parser.parse(encoded)
     except Exception as exc:
         logger.debug("Tree-sitter parse failed for %s: %s", language_id, exc)

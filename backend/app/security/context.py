@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.analyzers.framework_detector import FrameworkInfo
 from app.core.config import settings
+from app.domain.source import ParsedEntity
 from app.parsing.model import SyntaxGraph
 from app.security.correlation import ObservationCluster
 from app.security.rules.base import SecurityObservation
@@ -145,7 +146,9 @@ class SecurityContextBuilder:
                         start_line=enclosing.start_line,
                     )
                 )
-            calls = ", ".join(sorted({c.qualified for c in graph.calls if abs(c.line - cluster.line) <= 8})[:20])
+            calls = ", ".join(
+                sorted({c.qualified for c in graph.calls if abs(c.line - cluster.line) <= 8})[:20]
+            )
             if calls:
                 scored.append(
                     ContextChunk(
@@ -267,7 +270,7 @@ def _rel(path: str, repo_root: Path) -> str:
         return path
 
 
-def _enclosing_entity(graph: SyntaxGraph, line: int):
+def _enclosing_entity(graph: SyntaxGraph, line: int) -> ParsedEntity | None:
     enclosing = None
     for ent in graph.entities:
         if ent.start_line <= line <= (ent.end_line or ent.start_line):
@@ -277,5 +280,5 @@ def _enclosing_entity(graph: SyntaxGraph, line: int):
 
 def _entity_window(graph: SyntaxGraph, entity: object) -> str:
     start = max(1, int(getattr(entity, "start_line", 1)))
-    end = min(len(graph.lines), int(getattr(entity, "end_line", start)) )
+    end = min(len(graph.lines), int(getattr(entity, "end_line", start)))
     return "\n".join(graph.lines[start - 1 : end])[:4_000]

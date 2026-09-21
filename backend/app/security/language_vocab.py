@@ -164,6 +164,7 @@ JAVASCRIPT = LanguageSecurityVocab(
         _src(
             "js.browser", "window.location", "location.search", "document.location", kind="browser"
         ),
+        _src("js.nest", "Query", "Param", "Body", "Headers", kind="http"),
     ),
     sinks=(
         _sink(

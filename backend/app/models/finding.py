@@ -34,7 +34,9 @@ class DBFinding(Base):
     analyzer: Mapped[str] = mapped_column(String(100), nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False, default="")
     suggested_fix: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    catalog: Mapped[str] = mapped_column(String(50), nullable=False, default="code_quality", index=True)
+    catalog: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="code_quality", index=True
+    )
     language: Mapped[str | None] = mapped_column(String(50), nullable=True)
     parser_backend: Mapped[str | None] = mapped_column(String(50), nullable=True)
     node_id: Mapped[str | None] = mapped_column(String(500), nullable=True)

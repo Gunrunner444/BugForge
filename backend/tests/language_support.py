@@ -159,7 +159,8 @@ def profile_supports(language_id: str, category: str) -> bool:
         ):
             return True
         if category == "path" and any(
-            s.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL for s in vocab.sinks
+            s.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL
+            for s in vocab.sinks
         ):
             return True
         return False

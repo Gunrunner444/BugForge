@@ -31,13 +31,22 @@ SQL_CORPUS: dict[str, tuple[str, str]] = {
     "ruby": ("q.rb", "q = params[:q]\nconnection.execute('SELECT ' + q)\n"),
     "c": ("q.c", "void f(char **argv) { char *q = argv[1]; sqlite3_exec(db, q, 0, 0, 0); }\n"),
     "cpp": ("q.cpp", "void f(char **argv) { char *q = argv[1]; sqlite3_exec(db, q, 0, 0, 0); }\n"),
-    "go": ("q.go", "func f(r *http.Request) { q := r.FormValue(\"q\"); db.Query(q) }\n"),
-    "rust": ("q.rs", "fn f() { let q = std::env::var(\"Q\").unwrap(); sqlx::query(&q); }\n"),
-    "java": ("Q.java", "void f(HttpServletRequest req) { String q = req.getParameter(\"q\"); stmt.executeQuery(q); }\n"),
+    "go": ("q.go", 'func f(r *http.Request) { q := r.FormValue("q"); db.Query(q) }\n'),
+    "rust": ("q.rs", 'fn f() { let q = std::env::var("Q").unwrap(); sqlx::query(&q); }\n'),
+    "java": (
+        "Q.java",
+        'void f(HttpServletRequest req) { String q = req.getParameter("q"); stmt.executeQuery(q); }\n',
+    ),
     "php": ("q.php", "<?php $q = $_GET['q']; mysqli_query($db, $q);\n"),
-    "kotlin": ("Q.kt", "fun f(call: ApplicationCall) { val q = call.parameters[\"q\"]; stmt.executeQuery(q) }\n"),
-    "swift": ("q.swift", "func f() { let q = CommandLine.arguments[1]; sqlite3_exec(db, q, nil, nil, nil) }\n"),
-    "csharp": ("Q.cs", "void F() { var q = Request.Query[\"q\"]; cmd.ExecuteReader(q); }\n"),
+    "kotlin": (
+        "Q.kt",
+        'fun f(call: ApplicationCall) { val q = call.parameters["q"]; stmt.executeQuery(q) }\n',
+    ),
+    "swift": (
+        "q.swift",
+        "func f() { let q = CommandLine.arguments[1]; sqlite3_exec(db, q, nil, nil, nil) }\n",
+    ),
+    "csharp": ("Q.cs", 'void F() { var q = Request.Query["q"]; cmd.ExecuteReader(q); }\n'),
 }
 
 CMD_CORPUS: dict[str, tuple[str, str]] = {
@@ -45,11 +54,14 @@ CMD_CORPUS: dict[str, tuple[str, str]] = {
     "javascript": ("c.js", "const q = req.query.c;\nexec(q);\n"),
     "ruby": ("c.rb", "q = params[:c]\nsystem(q)\n"),
     "c": ("c.c", "void f(char **argv) { system(argv[1]); }\n"),
-    "go": ("c.go", "func f(q string) { q = os.Getenv(\"CMD\"); exec.Command(q) }\n"),
-    "rust": ("c.rs", "fn f() { let q = std::env::var(\"CMD\").unwrap(); Command::new(q); }\n"),
-    "java": ("C.java", "void f(HttpServletRequest req) { String q = req.getParameter(\"c\"); Runtime.getRuntime().exec(q); }\n"),
+    "go": ("c.go", 'func f(q string) { q = os.Getenv("CMD"); exec.Command(q) }\n'),
+    "rust": ("c.rs", 'fn f() { let q = std::env::var("CMD").unwrap(); Command::new(q); }\n'),
+    "java": (
+        "C.java",
+        'void f(HttpServletRequest req) { String q = req.getParameter("c"); Runtime.getRuntime().exec(q); }\n',
+    ),
     "php": ("c.php", "<?php $q = $_GET['c']; system($q);\n"),
-    "csharp": ("C.cs", "void F() { var q = Request.Query[\"c\"]; Process.Start(q); }\n"),
+    "csharp": ("C.cs", 'void F() { var q = Request.Query["c"]; Process.Start(q); }\n'),
     "shell": ("c.sh", 'q="$1"\neval "$q"\n'),
 }
 
@@ -65,7 +77,11 @@ def teardown_function() -> None:
 @pytest.mark.parametrize("language_id", ANALYSIS_LANGUAGE_IDS)
 def test_full_ast_parser_tier(language_id: str) -> None:
     assert parser_tier_for(language_id) is ParserTier.FULL_AST
-    graph = graph_for(language_id, f"x{ {'python':'.py','javascript':'.js','typescript':'.ts','ruby':'.rb','c':'.c','cpp':'.cpp','go':'.go','rust':'.rs','java':'.java','php':'.php','kotlin':'.kt','swift':'.swift','csharp':'.cs','shell':'.sh'}[language_id] }", "x")
+    graph = graph_for(
+        language_id,
+        f"x{ {'python': '.py', 'javascript': '.js', 'typescript': '.ts', 'ruby': '.rb', 'c': '.c', 'cpp': '.cpp', 'go': '.go', 'rust': '.rs', 'java': '.java', 'php': '.php', 'kotlin': '.kt', 'swift': '.swift', 'csharp': '.cs', 'shell': '.sh'}[language_id] }",
+        "x",
+    )
     assert graph.parser_backend in {"tree_sitter", "cpython_ast"}
     assert graph.parser_tier is ParserTier.FULL_AST
 
@@ -124,8 +140,12 @@ def test_strings_and_comments_are_not_sinks(
     assert observation_classes(result).isdisjoint(dangerous)
 
 
-@pytest.mark.parametrize("language_id,filename,source", [(k, v[0], v[1]) for k, v in SQL_CORPUS.items()])
-def test_cross_language_sql_injection(language_id: str, filename: str, source: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "language_id,filename,source", [(k, v[0], v[1]) for k, v in SQL_CORPUS.items()]
+)
+def test_cross_language_sql_injection(
+    language_id: str, filename: str, source: str, tmp_path: Path
+) -> None:
     result = analyze_source(tmp_path, filename, source)
     classes = observation_classes(result)
     assert VulnerabilityClass.SQL_INJECTION in classes, classes
@@ -134,7 +154,9 @@ def test_cross_language_sql_injection(language_id: str, filename: str, source: s
         assert obs.line >= 1
 
 
-@pytest.mark.parametrize("language_id,filename,source", [(k, v[0], v[1]) for k, v in CMD_CORPUS.items()])
+@pytest.mark.parametrize(
+    "language_id,filename,source", [(k, v[0], v[1]) for k, v in CMD_CORPUS.items()]
+)
 def test_cross_language_command_injection(
     language_id: str, filename: str, source: str, tmp_path: Path
 ) -> None:
@@ -157,7 +179,11 @@ def test_false_positive_constant_path(tmp_path: Path) -> None:
 def test_path_findings_are_potential(tmp_path: Path) -> None:
     src = "const q = req.query.f;\nfs.readFile(q);\n"
     result = analyze_source(tmp_path, "p.js", src)
-    obs = [o for o in result.observations if o.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL]
+    obs = [
+        o
+        for o in result.observations
+        if o.vulnerability_class is VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL
+    ]
     assert obs
     assert obs[0].metadata.get("path_issue_kind") == "possible_path_traversal"
     assert "verified" not in obs[0].title.lower() or "potential" in obs[0].title.lower()

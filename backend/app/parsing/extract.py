@@ -16,9 +16,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from app.domain.language import ParserTier
 from app.domain.source import ParsedEntity, ParsedImport
 from app.parsing.comments import strip_comments
-from app.domain.language import ParserTier
 from app.parsing.model import Binding, CallSite, LanguageProfile, ParserDiagnostics, SyntaxGraph
 
 _IDENT = re.compile(r"[A-Za-z_$\\][\w$\\]*")

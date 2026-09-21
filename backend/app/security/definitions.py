@@ -65,7 +65,9 @@ class LanguageSecurityVocab:
     sinks: tuple[SinkDefinition, ...] = ()
     sanitizers: tuple[SanitizerDefinition, ...] = ()
     crypto_names: tuple[str, ...] = ()
-    extra_sources_by_framework: dict[str, tuple[SourceDefinition, ...]] = field(default_factory=dict)
+    extra_sources_by_framework: dict[str, tuple[SourceDefinition, ...]] = field(
+        default_factory=dict
+    )
 
     def sinks_for(self, vulnerability_class: VulnerabilityClass) -> tuple[SinkDefinition, ...]:
         return tuple(s for s in self.sinks if s.vulnerability_class is vulnerability_class)

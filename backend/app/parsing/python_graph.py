@@ -35,7 +35,9 @@ def parse_python_graph(file_path: Path, source: str) -> SyntaxGraph:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError as exc:
         errors.append(f"SyntaxError at line {exc.lineno}: {exc.msg}")
-        span = span_from_lineno(source, exc.lineno or 1, exc.lineno or 1, start_column=(exc.offset or 1))
+        span = span_from_lineno(
+            source, exc.lineno or 1, exc.lineno or 1, start_column=(exc.offset or 1)
+        )
         return SyntaxGraph(
             language="python",
             file_path=str(file_path),
@@ -86,9 +88,7 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         self.bindings: list[Binding] = []
         self.returns: list[ReturnSite] = []
         self.events: list[SyntaxEvent] = []
-        self.scopes: list[Scope] = [
-            Scope(scope_id="module", kind=ScopeKind.MODULE, name="module")
-        ]
+        self.scopes: list[Scope] = [Scope(scope_id="module", kind=ScopeKind.MODULE, name="module")]
         self.symbols: list[Symbol] = []
         self.nodes: list[SemanticNode] = []
         self._scope_stack = list(self.scopes)
@@ -187,7 +187,9 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         span = _span(self.source, node)
         kind = ScopeKind.METHOD if self._class else ScopeKind.FUNCTION
         scope_id = f"{self.scope_id}/{kind.value}:{node.name}"
-        scope = Scope(scope_id=scope_id, kind=kind, name=node.name, parent_id=self.scope_id, span=span)
+        scope = Scope(
+            scope_id=scope_id, kind=kind, name=node.name, parent_id=self.scope_id, span=span
+        )
         params = [
             ParsedParameter(name=arg.arg)
             for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
@@ -210,7 +212,12 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                 node_id=f"python:function:{span.start_byte}:{qn}",
             )
         )
-        self._node(SemanticKind.METHOD if self._class else SemanticKind.FUNCTION, node.name, span, type(node).__name__)
+        self._node(
+            SemanticKind.METHOD if self._class else SemanticKind.FUNCTION,
+            node.name,
+            span,
+            type(node).__name__,
+        )
         self._scope_stack.append(scope)
         self.scopes.append(scope)
         for param in params:
@@ -231,7 +238,9 @@ class _PythonGraphVisitor(ast.NodeVisitor):
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is not None:
             meta = _expr_meta(node.value)
-            self._bind_target(node.target, node.lineno, _expr(node.value), meta, _span(self.source, node))
+            self._bind_target(
+                node.target, node.lineno, _expr(node.value), meta, _span(self.source, node)
+            )
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -240,7 +249,11 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         args = ", ".join(_expr(a) for a in node.args)
         meta = _call_arg_meta(node)
         span = _span(self.source, node)
-        kind = CallKind.CONSTRUCTOR if isinstance(node.func, ast.Name) and node.func.id[:1].isupper() else CallKind.DIRECT
+        kind = (
+            CallKind.CONSTRUCTOR
+            if isinstance(node.func, ast.Name) and node.func.id[:1].isupper()
+            else CallKind.DIRECT
+        )
         if isinstance(node.func, ast.Attribute):
             kind = CallKind.METHOD
         self.calls.append(
@@ -412,7 +425,9 @@ class _Meta:
 def _expr_meta(node: ast.AST | None) -> _Meta:
     if node is None:
         return _Meta(is_literal=True)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes, int, float, type(None), bool)):
+    if isinstance(node, ast.Constant) and isinstance(
+        node.value, (str, bytes, int, float, type(None), bool)
+    ):
         return _Meta(is_literal=True)
     callees: list[str] = []
     accesses: list[str] = []
@@ -439,7 +454,6 @@ def _expr_meta(node: ast.AST | None) -> _Meta:
 def _call_arg_meta(node: ast.Call) -> _Meta:
     if not node.args:
         return _Meta(is_literal=True)
-    merged = _Meta(is_literal=True)
     callees: list[str] = []
     accesses: list[str] = []
     idents: list[str] = []

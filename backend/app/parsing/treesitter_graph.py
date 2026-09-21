@@ -7,6 +7,7 @@ and never become calls, sources, or sinks.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from app.domain.language import ParserTier
 from app.domain.source import ParsedEntity, ParsedImport, ParsedParameter
@@ -112,9 +113,9 @@ def parse_treesitter_graph(language_id: str, file_path: Path, source: str) -> Sy
         if not builder.errors:
             builder.errors.append("syntax error")
         if not builder.error_spans:
-            span = _safe_span(root)
-            if span is not None:
-                builder.error_spans.append(span)
+            root_span = _safe_span(root)
+            if root_span is not None:
+                builder.error_spans.append(root_span)
     return builder.build()
 
 
@@ -154,6 +155,7 @@ class _GraphBuilder:
         self._class_stack: list[str] = []
         self._visited = 0
         self._node_seq = 0
+        self._param_sources: dict[str, tuple[str, ...]] = {}
 
     @property
     def current_scope(self) -> Scope:
@@ -210,6 +212,8 @@ class _GraphBuilder:
                 self.error_spans.append(span_from_ts_node(node))
             except Exception:
                 pass
+            if not in_data:
+                self._extract_recovered_calls(node)
         grammar = self.grammar
         data_node = ntype in grammar.string_types or ntype in grammar.comment_types
         # Interpolations are executable even though they sit inside strings.
@@ -318,7 +322,8 @@ class _GraphBuilder:
             SemanticKind.METHOD if is_method else SemanticKind.FUNCTION, name, span, ntype
         )
         for param in params:
-            self._bind_parameter(param.name, span)
+            extras = self._param_sources.pop(param.name, ())
+            self._bind_parameter(param.name, span, callees=extras)
         return True
 
     def _enter_class(self, node: object, ntype: str) -> bool:
@@ -394,9 +399,11 @@ class _GraphBuilder:
             # ``import()`` / ``require()`` are real calls.
             keep_qualified = any(sep in qualified for sep in (".", "::", "->"))
             keep_import = name.lower() in {"import", "require"}
+            keep_ctor = ntype in grammar.constructor_types or kind is CallKind.CONSTRUCTOR
             if (
                 not keep_qualified
                 and not keep_import
+                and not keep_ctor
                 and ntype
                 not in {
                     "echo_statement",
@@ -682,7 +689,9 @@ class _GraphBuilder:
         )
         self._record_node(SemanticKind.EXCEPTION_HANDLER, "catch", span, ntype)
 
-    def _bind_parameter(self, name: str, span: SourceSpan | None) -> None:
+    def _bind_parameter(
+        self, name: str, span: SourceSpan | None, *, callees: tuple[str, ...] = ()
+    ) -> None:
         if not name:
             return
         binding = Binding(
@@ -693,6 +702,7 @@ class _GraphBuilder:
             kind=SymbolKind.PARAMETER,
             span=span,
             node_id=self._nid("param", span, name),
+            rhs_callees=callees,
         )
         self.bindings.append(binding)
         self.symbols.append(
@@ -705,9 +715,54 @@ class _GraphBuilder:
             )
         )
 
+    def _decorator_names(self, node: object) -> tuple[str, ...]:
+        names: list[str] = []
+        for child in _walk_named(node, 12):
+            ctype = str(getattr(child, "type", ""))
+            if ctype == "decorator" or ctype in self.grammar.decorator_types:
+                ident = self._first_identifier(child) or self._qualified(child)
+                if ident:
+                    names.append(ident.split("(")[0].lstrip("@"))
+            elif ctype in self.grammar.call_types:
+                parent_type = str(getattr(getattr(child, "parent", None), "type", ""))
+                if parent_type in {"decorator", *self.grammar.decorator_types}:
+                    ident = self._qualified(child) or self._first_identifier(child)
+                    if ident:
+                        names.append(ident)
+        return _unique(names)
+
+    def _extract_recovered_calls(self, node: object) -> None:
+        children = list(getattr(node, "children", ()) or ())
+        for index, child in enumerate(children):
+            if str(getattr(child, "type", "")) not in self.grammar.identifier_types:
+                continue
+            nxt = children[index + 1] if index + 1 < len(children) else None
+            if nxt is None or self._text(nxt).strip() != "(":
+                continue
+            name = self._normalize_ident(self._text(child))
+            if not name or name.lower() in _NON_CALL_NAMES - {"import", "require"}:
+                continue
+            span = _safe_span(child)
+            self.calls.append(
+                CallSite(
+                    name=name,
+                    qualified=name,
+                    line=_line(span),
+                    argument_text=self._text(node)[:400],
+                    dynamic=True,
+                    kind=CallKind.DIRECT,
+                    span=span,
+                    node_id=self._nid("recover", span, name),
+                    scope_id=self.current_scope.scope_id,
+                    argument_is_literal=False,
+                )
+            )
+            self._record_node(SemanticKind.CALL, name, span, "ERROR")
+
     def _parameters(self, node: object) -> list[ParsedParameter]:
         params: list[ParsedParameter] = []
-        for child in _walk_named(node, 6):
+        container = _child_by_field(node, "parameters") or node
+        for child in _walk_named(container, 24):
             ctype = str(getattr(child, "type", ""))
             if ctype in {
                 "required_parameter",
@@ -717,7 +772,7 @@ class _GraphBuilder:
                 "parameter_declaration",
                 "formal_parameter",
             }:
-                name_node = _child_by_field(child, "name")
+                name_node = _child_by_field(child, "name") or _child_by_field(child, "pattern")
                 if name_node is not None:
                     name = self._normalize_ident(self._text(name_node))
                 else:
@@ -731,6 +786,9 @@ class _GraphBuilder:
                 name = (name or "").lstrip("$").split(":")[0].split("=")[0].strip()
                 if name and name not in _NON_CALL_NAMES:
                     params.append(ParsedParameter(name=name))
+                    hints = self._decorator_names(child)
+                    if hints:
+                        self._param_sources[name] = hints
             elif (
                 ctype in self.grammar.identifier_types
                 and str(getattr(getattr(child, "parent", None), "type", ""))
@@ -1137,7 +1195,7 @@ def _child_by_field(node: object, field: str) -> object | None:
     if not callable(fn):
         return None
     try:
-        return fn(field)
+        return cast(object | None, fn(field))
     except Exception:
         return None
 
@@ -1145,10 +1203,10 @@ def _child_by_field(node: object, field: str) -> object | None:
 def _first_named(node: object) -> object | None:
     named = getattr(node, "named_children", None)
     if named:
-        return named[0]
+        return cast(object, named[0])
     for child in getattr(node, "children", ()) or ():
         if getattr(child, "is_named", False):
-            return child
+            return cast(object, child)
     return None
 
 
@@ -1157,7 +1215,7 @@ def _assignment_rhs(node: object) -> object | None:
         c for c in (getattr(node, "named_children", None) or ()) if getattr(c, "is_named", False)
     ]
     if len(children) >= 2:
-        return children[-1]
+        return cast(object, children[-1])
     return None
 
 

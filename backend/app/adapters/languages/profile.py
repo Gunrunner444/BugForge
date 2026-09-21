@@ -79,7 +79,11 @@ class ProfileLanguageAdapter(LanguageAdapter):
 
     def parser_tier(self) -> ParserTier:
         if self._specialized:
-            return ParserTier.SPECIALIZED if parser_tier_for(self.language_id) is ParserTier.FULL_AST else ParserTier.PROFILE_FALLBACK
+            return (
+                ParserTier.SPECIALIZED
+                if parser_tier_for(self.language_id) is ParserTier.FULL_AST
+                else ParserTier.PROFILE_FALLBACK
+            )
         return parser_tier_for(self.language_id)
 
     def parser_backend(self) -> str:
