@@ -96,12 +96,17 @@ class TaintFlowRule(SecurityRule):
             indexes = matched.argument_indexes
             if argument_is_constant(call, argument_indexes=indexes or None):
                 continue
-            if self.vulnerability_class is VulnerabilityClass.SQL_INJECTION and looks_parameterized_sql(
-                call
+            if (
+                self.vulnerability_class is VulnerabilityClass.SQL_INJECTION
+                and looks_parameterized_sql(call)
             ):
                 continue
             taint = call_taint_reason(
-                call, source_pats, taint_state, argument_indexes=indexes or None
+                call,
+                source_pats,
+                taint_state,
+                argument_indexes=indexes or None,
+                sanitizers=vocab.sanitizers,
             )
             if not taint and not call.dynamic:
                 continue
@@ -132,6 +137,11 @@ class TaintFlowRule(SecurityRule):
             if key in seen:
                 continue
             seen.add(key)
+            local_extra: dict[str, str] = {}
+            if taint_state.incomplete:
+                local_extra["analysis_incomplete"] = taint_state.limit_reason or "bounded"
+            if taint and "merge:" in taint:
+                local_extra["branch_merge"] = "true"
             observations.append(
                 _observation(
                     self,
@@ -144,6 +154,7 @@ class TaintFlowRule(SecurityRule):
                     path_kind=path_kind,
                     sanitizer=sanitizer.sanitizer_id if sanitizer else "",
                     argument_index=indexes[0] if indexes else matched.argument_index,
+                    extra=local_extra or None,
                 )
             )
         if externals:
@@ -210,7 +221,11 @@ def _cross_file_observations(
             if argument_is_constant(call, argument_indexes=(index,)):
                 continue
             taint = call_taint_reason(
-                call, source_pats, taint_state, argument_indexes=(index,)
+                call,
+                source_pats,
+                taint_state,
+                argument_indexes=(index,),
+                sanitizers=vocab.sanitizers,
             )
             if not taint:
                 continue
@@ -251,7 +266,21 @@ def _cross_file_observations(
                         "callee_function": ext.callee_function,
                         "callee_sink": sink_name,
                         "callee_line": str(sink_line),
+                        "parameter_index": str(index),
+                        "cross_file_depth": str(ext.hops),
                         "cross_file_partial": "true" if ext.partial else "false",
+                        "semantic_id": ext.semantic_id
+                        or f"{ext.callee_file}::{ext.callee_function}",
+                        "flow": (
+                            f"{graph.file_path} -> {ext.callee_file}::{ext.callee_function}"
+                            f" param:{index} sink:{sink_name}"
+                        ),
+                        **(
+                            {"analysis_incomplete": taint_state.limit_reason or "bounded"}
+                            if taint_state.incomplete
+                            else {}
+                        ),
+                        **({"branch_merge": "true"} if "merge:" in taint else {}),
                     },
                 )
             )
@@ -315,6 +344,7 @@ def _observation(
         "path_sensitive": "false",
         "taint_use_site": "true",
         "taint_scope": "cross_file" if "cross_file:" in taint else "local",
+        "branch_merge": "true" if "merge:" in taint else "false",
     }
     if extra:
         metadata.update(extra)

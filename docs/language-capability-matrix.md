@@ -1,7 +1,7 @@
 # Language capability and test matrix
 
 This matrix records what BugForge **actually implements and tests** after Phase
-11. A checked cell means a dedicated assertion exists. Parser backend is taken
+12. A checked cell means a dedicated assertion exists. Parser backend is taken
 from runtime diagnostics, not README claims.
 
 Parser backend:
@@ -21,11 +21,14 @@ and `parser_failure`.
 
 Taint is flow-sensitive at the use site (not a file-final symbol map) and not
 path-sensitive. Same-file inter-procedural analysis maps arguments by index
-when the callee is unique. Cross-file analysis adds bounded import edges for
-Python and JavaScript/TypeScript full-AST graphs only: one unique local module,
-module-level functions, no third-party guessing, no profile-fallback dataflow.
-Other full-analysis languages stay intra-file. R, Scala, Dart, Lua, and Elixir
-stay detection-only.
+when the callee is unique, and stops with an explicit incomplete state when the
+interprocedural depth bound is still producing new edges. Cross-file analysis
+adds bounded import edges for Python and JavaScript/TypeScript full-AST graphs
+only: one unique local module, module-level functions, unique re-exports
+(`__init__.py`, `export { name } from`), and methods of a uniquely imported
+class. No third-party guessing, no star-import edges, no profile-fallback
+dataflow, and no summary from a partial callee. Other full-analysis languages
+stay intra-file. R, Scala, Dart, Lua, and Elixir stay detection-only.
 
 ## Analysis languages
 

@@ -89,6 +89,12 @@ export default function SecurityFindingsPanel({ projectId }: Props) {
               {finding.hypothesis && <p>{finding.hypothesis}</p>}
               {finding.ai_analysis && <p className="italic">{finding.ai_analysis}</p>}
               {finding.taint_path && <p>Taint path: {finding.taint_path}</p>}
+              {finding.taint_path?.includes("cross_file:") && (
+                <p>Cross-file static inference. This is not a verified exploit.</p>
+              )}
+              {finding.taint_path?.includes("merge:") && (
+                <p>More than one control-flow path may reach this use. The analysis is not path-sensitive.</p>
+              )}
               {finding.rule_ids && <p>Rules: {finding.rule_ids}</p>}
             </div>
           )}

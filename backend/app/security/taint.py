@@ -43,6 +43,7 @@ TAINT_PATH_SENSITIVE = False
 MAX_TAINT_ROUNDS = 8
 MAX_INTERPROC_DEPTH = 4
 MAX_DEFINITIONS = 10_000
+_PRESERVING_CALLEES = frozenset({"format", "str", "sprintf", "Sprintf", "c_str"})
 
 _IDENT = re.compile(r"[A-Za-z_$/][\w$]*")
 _SQL_PLACEHOLDER = re.compile(r"(?:\?|\$\d+|%s|:\w+)")
@@ -129,6 +130,8 @@ class TaintState:
 
     defs: dict[str, tuple[_Def, ...]]
     source_pats: tuple[str, ...] = ()
+    incomplete: bool = False
+    limit_reason: str = ""
 
     def final_map(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -153,9 +156,7 @@ class TaintState:
         return None
 
     @staticmethod
-    def from_final_map(
-        tainted: dict[str, str], source_pats: Sequence[str] = ()
-    ) -> TaintState:
+    def from_final_map(tainted: dict[str, str], source_pats: Sequence[str] = ()) -> TaintState:
         """Treat a file-final map as definitions at byte 0 (legacy / tests)."""
         defs: dict[str, tuple[_Def, ...]] = {
             sid: (_Def(start_byte=0, line=1, definition_index=0, reason=reason),)
@@ -179,6 +180,8 @@ class ExternalCallee:
     return_effects: tuple[str, ...] = ()
     param_sinks: tuple[tuple[int, str, str, int], ...] = ()
     partial: bool = False
+    hops: int = 0
+    semantic_id: str = ""
 
 
 def reaching_sanitizer_kind(taint: str) -> str | None:
@@ -210,14 +213,23 @@ def _reason_at(defs: tuple[_Def, ...], at_byte: int) -> str | None:
 
 
 def _freeze_timeline(
-    timeline: dict[str, dict[int, _Def]], source_pats: Sequence[str]
+    timeline: dict[str, dict[int, _Def]],
+    source_pats: Sequence[str],
+    *,
+    incomplete: bool = False,
+    limit_reason: str = "",
 ) -> TaintState:
     frozen: dict[str, tuple[_Def, ...]] = {}
     for sid, by_index in timeline.items():
         frozen[sid] = tuple(
             sorted(by_index.values(), key=lambda item: (item.start_byte, item.definition_index))
         )
-    return TaintState(defs=frozen, source_pats=tuple(source_pats))
+    return TaintState(
+        defs=frozen,
+        source_pats=tuple(source_pats),
+        incomplete=incomplete,
+        limit_reason=limit_reason,
+    )
 
 
 def _empty_rhs(binding: Binding) -> bool:
@@ -366,7 +378,9 @@ def _external_binding_reason(
     unsanitized: list[str] = []
     sanitized: list[str] = []
     for effect in ext.return_effects:
-        rendered = _render_effect(effect, call, binding.scope_id, source_pats, reaching, at_byte, ext)
+        rendered = _render_effect(
+            effect, call, binding.scope_id, source_pats, reaching, at_byte, ext
+        )
         if not rendered:
             continue
         if ":sanitized:" in rendered:
@@ -390,6 +404,8 @@ def analyze_taint(
     rounds = 0
     changed = True
     interproc_depth = 0
+    definition_capped = False
+    depth_saturated = False
     while changed and rounds < MAX_TAINT_ROUNDS:
         changed = False
         rounds += 1
@@ -400,6 +416,7 @@ def analyze_taint(
         for binding in _ordered_bindings(graph):
             applied += 1
             if applied > MAX_DEFINITIONS:
+                definition_capped = True
                 break
             computed = _binding_taint(binding, source_pats, reaching, return_reasons)
             if not computed:
@@ -432,6 +449,7 @@ def analyze_taint(
         if interproc_depth < MAX_INTERPROC_DEPTH:
             state = _freeze_timeline(timeline, source_pats)
             live = {s: r.reason for s, r in reaching.items() if r.reason}
+            added_edge = False
             for new_id, reason, idx in _interprocedural_edges(
                 graph, live, source_pats, state=state
             ):
@@ -461,8 +479,23 @@ def analyze_taint(
                     merged=existing.merged if existing is not None else False,
                 )
                 changed = True
+                added_edge = True
             interproc_depth += 1
-    return _freeze_timeline(timeline, source_pats)
+            if interproc_depth >= MAX_INTERPROC_DEPTH and added_edge:
+                depth_saturated = True
+    reasons: list[str] = []
+    if changed and rounds >= MAX_TAINT_ROUNDS:
+        reasons.append("taint round limit")
+    if definition_capped:
+        reasons.append("taint definition limit")
+    if depth_saturated:
+        reasons.append("interprocedural depth limit")
+    return _freeze_timeline(
+        timeline,
+        source_pats,
+        incomplete=bool(reasons),
+        limit_reason="; ".join(reasons),
+    )
 
 
 def propagate_taint(
@@ -482,9 +515,7 @@ def taint_at_use(
 ) -> str | None:
     """Taint reaching ``call`` at its source position."""
     state = analyze_taint(graph, sources)
-    return call_taint_reason(
-        call, state.source_pats, state, argument_indexes=argument_indexes
-    )
+    return call_taint_reason(call, state.source_pats, state, argument_indexes=argument_indexes)
 
 
 def _ordered_bindings(graph: SyntaxGraph) -> list[Binding]:
@@ -497,9 +528,26 @@ def _ordered_bindings(graph: SyntaxGraph) -> list[Binding]:
 
 
 def _merge_reason(left: str | None, right: str | None) -> str | None:
+    """Conservative branch merge. One clean side stays visible in the reason."""
     if left and right:
         return left if left == right else f"merge:{left}|{right}"
-    return left or right
+    present = left or right
+    if present:
+        return f"merge:{present}|clean"
+    return None
+
+
+def _callee_is_known_sanitizer(callee: str, sanitizers: Sequence[SanitizerDefinition]) -> bool:
+    for sanitizer in sanitizers:
+        for name in sanitizer.api_names:
+            if callee == name or callee.endswith("." + name):
+                return True
+    return False
+
+
+def _preserves_taint(callee: str) -> bool:
+    """String formatting and ``str()`` keep the taint of their inputs."""
+    return callee.rsplit(".", 1)[-1] in _PRESERVING_CALLEES
 
 
 def _callee_is_source(callee: str, source_pats: Sequence[str]) -> bool:
@@ -516,12 +564,15 @@ def _binding_taint(
 ) -> str | None:
     if binding.rhs_is_literal and not binding.rhs_callees and not binding.rhs_accesses:
         return None
-    source_callees = [callee for callee in binding.rhs_callees if _callee_is_source(callee, source_pats)]
+    source_callees = [
+        callee for callee in binding.rhs_callees if _callee_is_source(callee, source_pats)
+    ]
     transforming = [
         callee
         for callee in binding.rhs_callees
         if callee not in source_callees
         and not any(callee.startswith(source + ".") for source in source_callees)
+        and not _preserves_taint(callee)
     ]
     if not transforming:
         for fragment in (*binding.rhs_accesses, *binding.rhs_callees, *binding.rhs_idents):
@@ -569,7 +620,9 @@ def _sanitized_call_result(
         return None
     inner: str | None = None
     for fragment in (*binding.rhs_accesses, *binding.rhs_idents):
-        if any(fragment == callee or callee.endswith("." + fragment) for callee in binding.rhs_callees):
+        if any(
+            fragment == callee or callee.endswith("." + fragment) for callee in binding.rhs_callees
+        ):
             continue
         hit = fragment_matches_source(fragment, source_pats)
         if hit:
@@ -693,9 +746,7 @@ def _interprocedural(
     """Parameter and return edges (symbol, reason). Tests inspect this shape."""
     return [
         (sid, reason)
-        for sid, reason, _idx in _interprocedural_edges(
-            graph, tainted, source_pats, state=state
-        )
+        for sid, reason, _idx in _interprocedural_edges(graph, tainted, source_pats, state=state)
     ]
 
 
@@ -822,6 +873,7 @@ def call_taint_reason(
     tainted: TaintState | dict[str, str],
     *,
     argument_indexes: Sequence[int] | None = None,
+    sanitizers: Sequence[SanitizerDefinition] = (),
 ) -> str | None:
     state = (
         tainted
@@ -835,13 +887,13 @@ def call_taint_reason(
             arg = call.argument_at(index)
             if arg is None:
                 continue
-            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte)
+            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte, sanitizers)
             if reason:
                 return reason
         return None
     if call.arguments:
         for arg in call.arguments:
-            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte)
+            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte, sanitizers)
             if reason:
                 return reason
         return None
@@ -864,8 +916,17 @@ def _argument_taint(
     reaching: dict[str, _Reach] | TaintState,
     source_pats: Sequence[str],
     at_byte: int = 0,
+    sanitizers: Sequence[SanitizerDefinition] = (),
 ) -> str | None:
     if arg.is_literal and not arg.dynamic and not arg.idents and not arg.accesses:
+        return None
+    if arg.callees and any(
+        not _callee_is_source(callee, source_pats)
+        and not _preserves_taint(callee)
+        and not _callee_is_known_sanitizer(callee, sanitizers)
+        for callee in arg.callees
+    ):
+        # An unknown call may replace its inputs. Do not assume it preserves taint.
         return None
     for fragment in (*arg.accesses, *arg.callees, *arg.idents):
         hit = fragment_matches_source(fragment, source_pats)

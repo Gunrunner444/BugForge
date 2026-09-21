@@ -820,7 +820,28 @@ class _GraphBuilder:
             return
         if ntype == "import_clause":
             return
-        specifiers = _import_specifiers(node) if ntype == "import_statement" else []
+        if ntype == "export_statement" and " from " not in f" {text} ":
+            return
+        if ntype == "export_statement" and "*" in text.split(" from ", 1)[0]:
+            self.imports.append(
+                ParsedImport(
+                    module=module,
+                    name="*",
+                    alias=None,
+                    line_number=_line(span),
+                    is_from_import=True,
+                    import_type=import_type,
+                    column=span.start_column if span else 1,
+                    start_byte=span.start_byte if span else 0,
+                    end_byte=span.end_byte if span else 0,
+                    syntax_kind="export_star",
+                )
+            )
+            self._record_node(SemanticKind.IMPORT, module, span, ntype)
+            return
+        specifiers = (
+            _import_specifiers(node) if ntype in {"import_statement", "export_statement"} else []
+        )
         if specifiers:
             for spec_name, spec_alias, spec_kind in specifiers:
                 self.imports.append(
@@ -1575,7 +1596,7 @@ def _import_specifiers(node: object) -> list[tuple[str | None, str | None, str]]
         if depth > 8:
             return
         ntype = str(getattr(current, "type", ""))
-        if ntype == "import_specifier":
+        if ntype in {"import_specifier", "export_specifier"}:
             idents = [
                 child
                 for child in getattr(current, "children", ()) or ()

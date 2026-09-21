@@ -68,7 +68,7 @@ class SecurityAnalysisEngine:
         analyzed = 0
         diagnostics: list[AnalysisDiagnostic] = []
 
-        for file_path in file_paths:
+        for file_path in sorted(file_paths, key=lambda path: path.as_posix()):
             adapter = languages.for_path(file_path)
             if adapter is None or not adapter.supports(LanguageCapability.SECURITY_ANALYSIS):
                 continue
@@ -147,7 +147,10 @@ class SecurityAnalysisEngine:
                         )
                     except Exception as exc:
                         logger.warning(
-                            "Security rule %s failed on %s: %s", rule.rule_id, file_path, exc
+                            "Security rule %s failed on %s: %s",
+                            rule.rule_id,
+                            graph_path,
+                            exc,
                         )
                         diagnostics.append(
                             AnalysisDiagnostic(
@@ -170,7 +173,10 @@ class SecurityAnalysisEngine:
             graphs=graphs,
             languages=sorted(used_languages),
             files_analyzed=analyzed,
-            diagnostics=diagnostics,
+            diagnostics=sorted(
+                diagnostics,
+                key=lambda item: (item.file_path, item.kind, item.rule_id, item.message),
+            ),
         )
 
     def _parse(
