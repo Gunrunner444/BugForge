@@ -125,8 +125,11 @@ C#, and Shell** parse with Tree-sitter into `SyntaxGraph`. Every full-analysis
 language has a syntax-aware code-quality catalog. JavaScript/TypeScript rules
 (`==`, `var`, empty `catch`, `with`) operate on syntax events and honor strict
 mode / comparison operands. Taint is flow-sensitive at the use site, not path-sensitive,
-and cross-file only for uniquely resolved Python, JavaScript, and TypeScript
+and cross-file for uniquely resolved Python, JavaScript, and TypeScript
 functions, re-exports, default exports, callable aliases, and methods.
+Go, Java, and Kotlin add the same unique local-file rule for package and
+type imports. Ruby, C#, and Swift imports are not treated as file edges. See
+[phase19-polyglot-interprocedural.md](phase19-polyglot-interprocedural.md).
 Partial callees and ambiguous imports are not edges. Symbol ids are
 `file::module::class::symbol`. Constant field paths (`obj.payload`,
 `obj["key"]`, `items[0]`) are separate symbols with a depth cap; dynamic keys

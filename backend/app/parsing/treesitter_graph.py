@@ -653,7 +653,9 @@ class _GraphBuilder:
             path = path[1:-1]
         if not looks_like_route_path(path):
             return
-        method = "ROUTE" if call.name.lower() in {"route", "api_route", "all"} else call.name.upper()
+        method = (
+            "ROUTE" if call.name.lower() in {"route", "api_route", "all"} else call.name.upper()
+        )
         self.routes.append(
             RouteEndpoint(
                 method=method,
@@ -815,8 +817,38 @@ class _GraphBuilder:
         if ntype in {"preproc_include"}:
             module = text.replace("#include", "").strip().strip('<>"')
             syntax_kind = "include"
-        elif ntype in {"import_spec"}:
-            module = self._strip_quotes(text)
+        elif ntype == "import_spec":
+            path_node = None
+            alias_node = None
+            named = getattr(node, "named_children", None) or ()
+            for child in named:
+                ctype = str(getattr(child, "type", ""))
+                if ctype in {"interpreted_string_literal", "raw_string_literal"}:
+                    path_node = child
+                elif ctype == "package_identifier":
+                    alias_node = child
+            if path_node is None:
+                return
+            module = self._strip_quotes(self._text(path_node))
+            raw = text.strip()
+            if raw.startswith(".") or raw.startswith("_"):
+                syntax_kind = "go_unresolved"
+            elif alias_node is not None:
+                alias_text = self._text(alias_node).strip()
+                if alias_text in {".", "_"} or not alias_text.isidentifier():
+                    syntax_kind = "go_unresolved"
+                else:
+                    alias = alias_text
+        elif ntype == "import_declaration":
+            scoped = None
+            for child in getattr(node, "named_children", None) or ():
+                if str(getattr(child, "type", "")) == "scoped_identifier":
+                    scoped = child
+                    break
+            if scoped is not None:
+                module = self._text(scoped).strip()
+                if " static " in f" {text} ":
+                    syntax_kind = "java_static"
         elif ntype == "using_directive":
             module = text.replace("using", "").replace(";", "").strip()
             syntax_kind = "using"
@@ -830,6 +862,10 @@ class _GraphBuilder:
                 .strip()
             )
             syntax_kind = "use" if "use" in ntype else "import"
+            if ntype == "import_header" and " as " in text:
+                alias_text = text.split(" as ", 1)[1].strip().rstrip(";").split()[0]
+                if alias_text.isidentifier():
+                    alias = alias_text
         elif not module:
             # Generic: last string literal is the module path.
             strings = [
@@ -849,6 +885,27 @@ class _GraphBuilder:
                 module = idents[0]
             if is_from and len(idents) > 1:
                 imported = idents[-1]
+        if ntype == "import_declaration" and not module:
+            if any(
+                str(getattr(child, "type", "")) == "import_spec"
+                for child in getattr(node, "children", ()) or ()
+            ):
+                return
+            strings = [
+                self._strip_quotes(self._text(child))
+                for child in _walk_named(node, 8)
+                if str(getattr(child, "type", ""))
+                in self.grammar.string_types | {"string", "interpreted_string_literal"}
+            ]
+            idents = [
+                self._text(child)
+                for child in _walk_named(node, 6)
+                if str(getattr(child, "type", "")) in self.grammar.identifier_types
+            ]
+            if strings:
+                module = strings[-1]
+            elif idents:
+                module = idents[0]
         if "require" in text:
             syntax_kind = "require"
         relative = module.startswith(".") or module.startswith("./") or ntype.find("relative") >= 0

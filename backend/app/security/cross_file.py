@@ -1,6 +1,6 @@
 """Bounded cross-file taint for uniquely resolved local imports.
 
-Only Python and JavaScript/TypeScript graphs produced by a full syntax parser
+Python, JavaScript/TypeScript, and a few other full-syntax languages
 participate. Profile fallback is not dataflow. Ambiguous or unresolved names
 produce no edge. A partial or truncated callee is not a summary. Limits stop
 the walk and leave an explicit diagnostic; a stopped walk is not a clean result.
@@ -16,7 +16,12 @@ High-confidence extensions, still unique-identity only:
     * methods whose class is imported and constructed, or called as ``Class.method``
     * module-level callable aliases that are assigned once
     * TypeScript ``paths`` mappings read from ``tsconfig.json`` as data
+    * Go ``import "path"`` when one local ``path.go`` matches, including an
+      explicit package alias recorded on the import spec
+    * Java and Kotlin type imports when the dotted path matches one local
+      file and that file has one class or function of the imported name
     * no inheritance guessing and no dynamic dispatch
+    * Ruby, C#, and Swift imports are not resolved to source files
 """
 
 from __future__ import annotations
@@ -57,7 +62,9 @@ from app.security.taint import (
     sanitizer_intervened,
 )
 
-_CROSS_FILE_LANGUAGES = frozenset({"python", "javascript", "typescript"})
+_CROSS_FILE_LANGUAGES = frozenset({"python", "javascript", "typescript", "go", "java", "kotlin"})
+_LOCAL_MODULE_SUFFIX = {"go": ".go", "java": ".java", "kotlin": ".kt"}
+_SKIPPED_IMPORT_KINDS = frozenset({"go_unresolved", "java_static"})
 _FUNCTION_TYPES = frozenset({"function", "async_function"})
 _AMBIGUOUS = "ambiguous"
 
@@ -656,6 +663,8 @@ def _import_targets(
                 continue
             if _is_dynamic_or_side_effect_import(graph, imp):
                 continue
+            if imp.syntax_kind in _SKIPPED_IMPORT_KINDS:
+                continue
             resolved = _resolve_module(graph, imp, graphs, ts_mappings)
             if resolved is None:
                 if (
@@ -699,6 +708,9 @@ def _import_targets(
             names = _unique_function_names(target)
             class_names = _unique_classes(target)
             relationship = "re_export" if imp.syntax_kind.startswith("export_") else "import"
+            if graph.language in {"java", "kotlin"} and imp.syntax_kind == "import":
+                _bind_type_import(path, imp, resolved, names, class_names, bind, bind_class)
+                continue
             if _is_namespace_import(imp) or _is_python_module_import(graph, imp):
                 _bind_module_surface(
                     path, imp, resolved, names, class_names, bind, bind_class, relationship
@@ -931,6 +943,30 @@ def _is_module_alias_import(imp: ParsedImport, function_names: dict[str, ParsedE
     return bool(imported) and imported not in function_names
 
 
+def _bind_type_import(
+    path: str,
+    imp: ParsedImport,
+    resolved: str,
+    names: dict[str, ParsedEntity],
+    class_names: dict[str, ParsedEntity],
+    bind: Callable[..., None],
+    bind_class: Callable[..., None],
+) -> None:
+    """Bind ``import pkg.Name`` to that class or function, not to every name."""
+    simple = (imp.module or "").rsplit(".", 1)[-1].rsplit("/", 1)[-1]
+    local = imp.alias or simple
+    if not simple.isidentifier() or not local.isidentifier():
+        return
+    if simple in class_names and simple in names:
+        bind(path, local, _AMBIGUOUS, path)
+        return
+    if simple in class_names:
+        bind_class(path, local, (resolved, simple), path)
+        return
+    if simple in names:
+        bind(path, local, (resolved, simple), path, kind="import")
+
+
 def _is_namespace_import(imp: ParsedImport) -> bool:
     if imp.syntax_kind == "import_namespace":
         return True
@@ -973,6 +1009,8 @@ def _resolve_module(
         return _resolve_python(graph.file_path, imp, graphs)
     if graph.language in {"javascript", "typescript"}:
         return _resolve_javascript(graph.file_path, imp.module, graphs, ts_mappings)
+    if graph.language in _LOCAL_MODULE_SUFFIX:
+        return _resolve_local_module(graph.language, imp.module, graphs)
     return None
 
 
@@ -1012,6 +1050,41 @@ def _python_relative_file(
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) > 1:
+        return _AMBIGUOUS
+    return None
+
+
+def _resolve_local_module(language: str, module: str, graphs: dict[str, SyntaxGraph]) -> str | None:
+    """Match a dotted or slash path to one local file. Do not guess packages."""
+    suffix = _LOCAL_MODULE_SUFFIX.get(language)
+    if suffix is None:
+        return None
+    text = module.replace("\\", "/").strip()
+    if not text or any(ch in text for ch in ' *?"<>|'):
+        return None
+    if language == "go":
+        parts = [part for part in text.split("/") if part]
+        if any("." in part for part in parts):
+            return None
+    else:
+        if "/" in text:
+            return None
+        parts = [part for part in text.split(".") if part]
+    if not parts or any(not part.isidentifier() for part in parts):
+        return None
+    relative = "/".join(parts) + suffix
+    hits = [
+        path
+        for path, graph in graphs.items()
+        if graph.language == language
+        and (
+            path.replace("\\", "/") == relative or path.replace("\\", "/").endswith("/" + relative)
+        )
+    ]
+    unique = sorted(set(hits))
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
         return _AMBIGUOUS
     return None
 

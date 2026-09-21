@@ -142,7 +142,7 @@ callee graphs are not exported as summaries. Same-file taint that stops at
 ## Known limitations
 
 * Taint is not path-sensitive. A branch merge that keeps taint is labeled `merge:` and `branch_merge=true`.
-* Cross-file taint is limited to uniquely resolved Python and JavaScript/TypeScript functions, default exports, re-exports, once-assigned callable aliases, and methods in the same repository. TypeScript `paths` are read from JSON `tsconfig.json` only. Inheritance and dynamic dispatch are not guessed. Container uses taint the whole value, not a specific key or index. Unknown calls do not preserve taint. `str`, `format`, `sprintf`/`Sprintf`, and `c_str` do.
+* Cross-file taint is limited to uniquely resolved Python and JavaScript/TypeScript functions, default exports, re-exports, once-assigned callable aliases, and methods in the same repository. Go `import "path"`, Java `import pkg.Type`, and Kotlin `import pkg.Name` join that set only when one local file matches the path and the imported function or class is unique. TypeScript `paths` are read from JSON `tsconfig.json` only. Ruby `require`, C# `using`, and Swift `import` are not mapped to source files. Inheritance and dynamic dispatch are not guessed. Constant fields, keys, and indexes are separate symbols; dynamic keys are not. Unknown calls do not preserve taint. `str`, `format`, `sprintf`/`Sprintf`, and `c_str` do.
 * Ambiguous same-named callees are not linked.
 * PHP `echo`/`print` XSS requires HTML output context.
 * Generic APIs (`Write`, `send`, `JSON.parse` as code-exec) are not treated as
