@@ -109,6 +109,7 @@ class TaintFlowRule(SecurityRule):
                 taint_state,
                 argument_indexes=indexes or None,
                 sanitizers=vocab.sanitizers,
+                transparent_callees=_sql_text_wrappers(self.vulnerability_class),
             )
             if not taint and not call.dynamic:
                 continue
@@ -230,6 +231,7 @@ def _cross_file_observations(
                 taint_state,
                 argument_indexes=(index,),
                 sanitizers=vocab.sanitizers,
+                transparent_callees=_sql_text_wrappers(rule.vulnerability_class),
             )
             if not taint:
                 continue
@@ -308,6 +310,13 @@ def _cross_file_observations(
     return observations
 
 
+def _sql_text_wrappers(vuln: VulnerabilityClass) -> tuple[str, ...]:
+    """SQL text constructors keep their input. They are not sinks by themselves."""
+    if vuln is VulnerabilityClass.SQL_INJECTION:
+        return ("text",)
+    return ()
+
+
 def _caller_symbol(call: CallSite) -> str:
     """Enclosing function or method name when the call is not at module scope."""
     scope = call.scope_id or ""
@@ -378,6 +387,12 @@ def _observation(
     field_path = field_path_from_reason(taint)
     if field_path:
         metadata["field_path"] = field_path
+    for route in graph.routes:
+        if route.scope_id == call.scope_id and route.function:
+            metadata["route"] = route.path
+            metadata["route_method"] = route.method
+            metadata["endpoint"] = route.function
+            break
     if extra:
         metadata.update(extra)
     if span is not None:

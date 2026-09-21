@@ -99,7 +99,9 @@ PYTHON = LanguageSecurityVocab(
             "executemany",
             "raw",
             "cursor.execute",
-            alternatives=("parameterized execute",),
+            "objects.extra",
+            "RawSQL",
+            alternatives=("parameterized execute", "QuerySet.filter"),
         ),
         _sink(
             "py.cmd",
@@ -136,7 +138,7 @@ PYTHON = LanguageSecurityVocab(
         ),
         _sink("py.xss", XSS, "Markup", "mark_safe", "html_safe", "jinja2.Markup"),
         _sink("py.deser", DESER, "pickle.loads", "yaml.load", "marshal.loads", "shelve.open"),
-        _sink("py.eval", EVAL, "eval", "exec", "compile"),
+        _sink("py.eval", EVAL, "eval", "exec", "compile", "render_template_string"),
         _sink("py.redir", REDIR, "redirect", "HttpResponseRedirect"),
     ),
     sanitizers=(

@@ -206,6 +206,18 @@ class ReturnSite:
 
 
 @dataclass(frozen=True)
+class RouteEndpoint:
+    """A route declared by syntax. Decorators and calls are not executed."""
+
+    method: str
+    path: str
+    function: str
+    scope_id: str
+    line: int
+    parameter_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SyntaxEvent:
     """Language-neutral syntax event used by code-quality rules."""
 
@@ -241,6 +253,7 @@ class SyntaxGraph:
     file_context: str = ""  # library | test | generated | handler | cli | unknown
     semantic_context: tuple[str, ...] = ()
     default_export: str = ""
+    routes: tuple[RouteEndpoint, ...] = ()
 
     def to_parse_result(self) -> LanguageParseResult:
         diag = self.diagnostics

@@ -420,6 +420,7 @@ def analyze_taint(
     depth_saturated = False
     blocked_fields, field_depth_limited, field_binding_limited = field_limit_facts(graph)
     alias_info = proven_alias_mirrors(graph)
+    route_param_ids = {param_id for route in graph.routes for param_id in route.parameter_ids}
     alias_limited = alias_info.truncated
     mirror_ids: dict[tuple[str, str, int], int] = {}
     next_mirror = 1_000_000
@@ -441,7 +442,13 @@ def analyze_taint(
                 # Drop the definition. Do not write a clean fact that erases an
                 # earlier finding on the same path.
                 continue
-            computed = _binding_taint(binding, source_pats, reaching, return_reasons)
+            computed = None
+            if binding.symbol_id in route_param_ids and (
+                binding.kind is SymbolKind.PARAMETER or binding.declarator == "param"
+            ):
+                computed = f"source:route:{binding.name}"
+            if not computed:
+                computed = _binding_taint(binding, source_pats, reaching, return_reasons)
             if not computed:
                 computed = _sanitized_call_result(graph.language, binding, source_pats, reaching)
             if external_map:
@@ -1174,6 +1181,7 @@ def call_taint_reason(
     *,
     argument_indexes: Sequence[int] | None = None,
     sanitizers: Sequence[SanitizerDefinition] = (),
+    transparent_callees: Sequence[str] = (),
 ) -> str | None:
     state = (
         tainted
@@ -1187,13 +1195,29 @@ def call_taint_reason(
             arg = call.argument_at(index)
             if arg is None:
                 continue
-            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte, sanitizers)
+            reason = _argument_taint(
+                arg,
+                call.scope_id,
+                state,
+                source_pats,
+                at_byte,
+                sanitizers,
+                transparent_callees,
+            )
             if reason:
                 return reason
         return None
     if call.arguments:
         for arg in call.arguments:
-            reason = _argument_taint(arg, call.scope_id, state, source_pats, at_byte, sanitizers)
+            reason = _argument_taint(
+                arg,
+                call.scope_id,
+                state,
+                source_pats,
+                at_byte,
+                sanitizers,
+                transparent_callees,
+            )
             if reason:
                 return reason
         return None
@@ -1217,12 +1241,14 @@ def _argument_taint(
     source_pats: Sequence[str],
     at_byte: int = 0,
     sanitizers: Sequence[SanitizerDefinition] = (),
+    transparent_callees: Sequence[str] = (),
 ) -> str | None:
     if arg.is_literal and not arg.dynamic and not arg.idents and not arg.accesses:
         return None
     if arg.callees and any(
         not _callee_is_source(callee, source_pats)
         and not _preserves_taint(callee)
+        and not _callee_named(callee, transparent_callees)
         and not _callee_is_known_sanitizer(callee, sanitizers)
         for callee in arg.callees
     ):
@@ -1331,6 +1357,11 @@ def sanitizer_intervened(
     return None
 
 
+def _callee_named(callee: str, names: Sequence[str]) -> bool:
+    simple = callee.rsplit(".", 1)[-1]
+    return callee in names or simple in names
+
+
 def looks_parameterized_sql(call: CallSite | str) -> bool:
     """Syntax-aware parameterization, not a substring search on the call text."""
     if isinstance(call, str):
@@ -1342,11 +1373,20 @@ def looks_parameterized_sql(call: CallSite | str) -> bool:
         return False
     if len(call.arguments) >= 2:
         query = call.arguments[0]
-        if query.is_literal and not query.dynamic and _SQL_PLACEHOLDER.search(query.text):
+        if _static_placeholder_query(query):
             return True
     if not call.arguments and not call.dynamic and call.argument_is_literal:
         return bool(_SQL_PLACEHOLDER.search(call.argument_text))
     return False
+
+
+def _static_placeholder_query(query: CallArgument) -> bool:
+    """A fixed SQL string with placeholders. A ``text()`` wrapper may hold that string."""
+    if query.dynamic or query.idents or not _SQL_PLACEHOLDER.search(query.text):
+        return False
+    if query.is_literal and not query.callees:
+        return True
+    return bool(query.callees) and all(_callee_named(callee, ("text",)) for callee in query.callees)
 
 
 def identifiers_in(text: str) -> list[str]:

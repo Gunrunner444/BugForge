@@ -20,6 +20,7 @@ from app.parsing.model import (
     ParserDiagnostics,
     ParserStatus,
     ReturnSite,
+    RouteEndpoint,
     Scope,
     ScopeKind,
     SemanticKind,
@@ -29,6 +30,7 @@ from app.parsing.model import (
     SyntaxEvent,
     SyntaxGraph,
 )
+from app.parsing.routes import is_route_method, looks_like_route_path
 from app.parsing.span import SourceMap, SourceSpan, span_from_ts_node
 from app.parsing.treesitter import (
     MAX_NESTING,
@@ -158,6 +160,7 @@ class _GraphBuilder:
         self.bindings: list[Binding] = []
         self.returns: list[ReturnSite] = []
         self.events: list[SyntaxEvent] = []
+        self.routes: list[RouteEndpoint] = []
         self.scopes: list[Scope] = []
         self.symbols: list[Symbol] = []
         self.nodes: list[SemanticNode] = []
@@ -296,6 +299,7 @@ class _GraphBuilder:
             file_context=_file_context(self.file_path),
             semantic_context=tuple(dict.fromkeys(contexts)),
             default_export="" if self._default_export_ambiguous else self.default_export,
+            routes=tuple(self.routes),
         )
 
     def walk(self, node: object, *, depth: int = 0, in_data: bool = False) -> None:
@@ -601,6 +605,7 @@ class _GraphBuilder:
             )
         )
         self._record_node(SemanticKind.CALL, qualified or name, span, ntype)
+        self._maybe_record_route(self.calls[-1])
         if name in {"require", "import"} or qualified in {"require", "import"}:
             self._import_from_call(name or qualified, arg_text, span)
         self._quality_call_events(name, qualified, span)
@@ -631,6 +636,32 @@ class _GraphBuilder:
                 argument_is_literal=meta.is_literal,
                 argument_idents=meta.idents,
                 argument_accesses=meta.accesses + meta.callees,
+            )
+        )
+
+    def _maybe_record_route(self, call: CallSite) -> None:
+        """``app.get("/item/:id", handler)``. A bare ``get(...)`` is not a route."""
+        if self.language_id not in {"javascript", "typescript"}:
+            return
+        if not is_route_method(call.name) or "." not in call.qualified or not call.arguments:
+            return
+        first = call.arguments[0]
+        if not first.is_literal:
+            return
+        path = first.text.strip()
+        if len(path) >= 2 and path[0] == path[-1] and path[0] in {"'", '"', "`"}:
+            path = path[1:-1]
+        if not looks_like_route_path(path):
+            return
+        method = "ROUTE" if call.name.lower() in {"route", "api_route", "all"} else call.name.upper()
+        self.routes.append(
+            RouteEndpoint(
+                method=method,
+                path=path,
+                function="",
+                scope_id=call.scope_id,
+                line=call.line,
+                parameter_ids=(),
             )
         )
 

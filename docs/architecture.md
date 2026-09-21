@@ -134,6 +134,9 @@ stay unresolved. See
 [phase12-semantic-analysis.md](phase12-semantic-analysis.md),
 [phase13-repository-semantic-graph.md](phase13-repository-semantic-graph.md), and
 [phase14-field-sensitive-dataflow.md](phase14-field-sensitive-dataflow.md).
+Route decorators and `app.get("/path")` calls are syntactic metadata.
+A path parameter is a source only when that decorator names it. See
+[phase15-framework-aware-analysis.md](phase15-framework-aware-analysis.md).
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.

@@ -35,6 +35,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 12 | Deep semantic analysis, cross-file flow, and repository validation | ✅ Implemented |
 | Phase 13 | Repository semantic graph (unique symbols, aliases, path maps) | ✅ Implemented |
 | Phase 14 | Bounded field-sensitive dataflow (constant fields, keys, indexes) | ✅ Implemented |
+| Phase 15 | Framework-aware sources, sinks, and syntactic routes | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -60,7 +61,8 @@ Lua, and Elixir remain detection-only. See
 [docs/language-capability-matrix.md](docs/language-capability-matrix.md),
 [docs/phase12-semantic-analysis.md](docs/phase12-semantic-analysis.md),
 [docs/phase13-repository-semantic-graph.md](docs/phase13-repository-semantic-graph.md), and
-[docs/phase14-field-sensitive-dataflow.md](docs/phase14-field-sensitive-dataflow.md).
+[docs/phase14-field-sensitive-dataflow.md](docs/phase14-field-sensitive-dataflow.md), and
+[docs/phase15-framework-aware-analysis.md](docs/phase15-framework-aware-analysis.md).
 
 Phase 2 adds:
 
