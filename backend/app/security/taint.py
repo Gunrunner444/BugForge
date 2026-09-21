@@ -182,6 +182,7 @@ class ExternalCallee:
     partial: bool = False
     hops: int = 0
     semantic_id: str = ""
+    relationship: str = "import"
 
 
 def reaching_sanitizer_kind(taint: str) -> str | None:
@@ -291,11 +292,18 @@ def _peel_sanitizer(effect: str) -> tuple[str | None, str]:
 def _external_for_call(
     call: CallSite, externals: Mapping[str, ExternalCallee]
 ) -> ExternalCallee | None:
-    for key in (call.qualified, call.name):
-        hit = externals.get(key)
-        if hit is not None:
-            return hit
-    return None
+    """Match a call to one known callee.
+
+    A qualified call such as ``obj.method`` or ``importlib...run`` matches only
+    that qualified key. The bare name is used for an unqualified call. A
+    ``new.Type.method`` call uses the ``Type.method`` key.
+    """
+    qualified = call.qualified or call.name
+    if qualified.startswith("new."):
+        qualified = qualified[4:]
+    if "." in qualified and qualified != call.name:
+        return externals.get(qualified)
+    return externals.get(qualified) or externals.get(call.name)
 
 
 def _call_matching_binding(

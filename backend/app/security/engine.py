@@ -118,7 +118,7 @@ class SecurityAnalysisEngine:
         findings = findings_from_clusters(clusters)
         from app.security.cross_file import build_project
 
-        project = build_project(graphs)
+        project = build_project(graphs, repo_root=repo_path)
         for item in project.diagnostics:
             diagnostics.append(
                 AnalysisDiagnostic(

@@ -201,6 +201,19 @@ class Settings(BaseSettings):
             raise ValueError(f"discovery_mode must be one of {valid}")
         return v
 
+    @field_validator(
+        "taint_max_files",
+        "taint_max_import_depth",
+        "taint_max_cross_file_rounds",
+        "taint_max_cross_file_edges",
+        "taint_cross_file_budget_ms",
+    )
+    @classmethod
+    def validate_taint_limit(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("cross-file taint limits must be >= 0; 0 disables that propagation")
+        return value
+
     @field_validator("ai_provider")
     @classmethod
     def validate_ai_provider(cls, v: str) -> str:

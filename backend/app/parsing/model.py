@@ -240,6 +240,7 @@ class SyntaxGraph:
     framework: str = ""
     file_context: str = ""  # library | test | generated | handler | cli | unknown
     semantic_context: tuple[str, ...] = ()
+    default_export: str = ""
 
     def to_parse_result(self) -> LanguageParseResult:
         diag = self.diagnostics

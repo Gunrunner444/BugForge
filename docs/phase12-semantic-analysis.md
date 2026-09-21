@@ -24,7 +24,19 @@ Python, JavaScript, and TypeScript graphs with `parser_tier=full_ast` only.
 * Branch merges stay conservative and are labeled `merge:` / `branch_merge=true`.
   The analysis is not path-sensitive.
 
-Stable edge identifiers are `file::symbol`. They do not use memory addresses.
+Phase 12 edge identifiers were `file::symbol`. Phase 13 widened them to
+`file::module::class::symbol`. They do not use memory addresses.
+
+## Corrections applied in Phase 13
+
+Phase 12 left three gaps that are fixed without a second dataflow engine:
+
+* `taint_max_files=0` no longer indexes the file list. Zero disables
+  cross-file propagation and emits `cross_file_incomplete`.
+* JavaScript/TypeScript `import name from "./local"` resolves when the
+  default export is one function or class. Anonymous defaults stay unresolved.
+* Index resolution includes `index.jsx`, `index.mjs`, and `index.tsx`. Two
+  matching files stay ambiguous. There is no `.js`-over-`.ts` precedence.
 
 ## What is not supported
 

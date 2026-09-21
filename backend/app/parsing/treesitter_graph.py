@@ -171,6 +171,8 @@ class _GraphBuilder:
         self._visited = 0
         self._node_seq = 0
         self._param_sources: dict[str, tuple[str, ...]] = {}
+        self.default_export = ""
+        self._default_export_ambiguous = False
 
     @property
     def current_scope(self) -> Scope:
@@ -293,6 +295,7 @@ class _GraphBuilder:
             events=tuple(self.events),
             file_context=_file_context(self.file_path),
             semantic_context=tuple(dict.fromkeys(contexts)),
+            default_export="" if self._default_export_ambiguous else self.default_export,
         )
 
     def walk(self, node: object, *, depth: int = 0, in_data: bool = False) -> None:
@@ -810,6 +813,9 @@ class _GraphBuilder:
             syntax_kind = "require"
         relative = module.startswith(".") or module.startswith("./") or ntype.find("relative") >= 0
         import_type = "relative" if relative else syntax_kind
+        if ntype == "export_statement" and " from " not in f" {text} ":
+            self._capture_local_export(node, span)
+            return
         if not module:
             return
         # Avoid duplicating import_statement's children if we also visit import_spec.
@@ -855,7 +861,11 @@ class _GraphBuilder:
                         column=span.start_column if span else 1,
                         start_byte=span.start_byte if span else 0,
                         end_byte=span.end_byte if span else 0,
-                        syntax_kind=f"import_{spec_kind}",
+                        syntax_kind=(
+                            f"export_{spec_kind}"
+                            if ntype == "export_statement"
+                            else f"import_{spec_kind}"
+                        ),
                     )
                 )
         else:
@@ -874,6 +884,38 @@ class _GraphBuilder:
                 )
             )
         self._record_node(SemanticKind.IMPORT, module, span, ntype)
+
+    def _capture_local_export(self, node: object, span: SourceSpan | None) -> None:
+        """Default exports and ``export { local as public }`` with no ``from``."""
+        child_types = [
+            str(getattr(child, "type", "")) for child in getattr(node, "children", ()) or ()
+        ]
+        if "default" in child_types:
+            name = _default_export_binding(node)
+            if not name or (self.default_export and self.default_export != name):
+                self._default_export_ambiguous = True
+                self.default_export = ""
+                return
+            self.default_export = name
+            return
+        for spec_name, spec_alias, spec_kind in _import_specifiers(node):
+            if spec_kind != "named" or not spec_name:
+                continue
+            public = spec_alias or spec_name
+            self.imports.append(
+                ParsedImport(
+                    module="",
+                    name=spec_name,
+                    alias=public,
+                    line_number=_line(span),
+                    is_from_import=True,
+                    import_type="export",
+                    column=span.start_column if span else 1,
+                    start_byte=span.start_byte if span else 0,
+                    end_byte=span.end_byte if span else 0,
+                    syntax_kind="export_local",
+                )
+            )
 
     def _extract_return(self, node: object, span: SourceSpan | None) -> None:
         meta = self._expression_meta(node)
@@ -1582,6 +1624,19 @@ def _safe_span(node: object) -> SourceSpan | None:
 
 def _line(span: SourceSpan | None) -> int:
     return span.start_line if span is not None else 1
+
+
+def _default_export_binding(node: object) -> str:
+    """Named function or class bound by ``export default``. Anonymous defaults are empty."""
+    for child in getattr(node, "children", ()) or ():
+        ntype = str(getattr(child, "type", ""))
+        if ntype == "identifier":
+            return _node_text(child)
+        if ntype in {"function_declaration", "class_declaration", "generator_function_declaration"}:
+            for inner in getattr(child, "children", ()) or ():
+                if str(getattr(inner, "type", "")) == "identifier":
+                    return _node_text(inner)
+    return ""
 
 
 def _import_specifiers(node: object) -> list[tuple[str | None, str | None, str]]:

@@ -2,8 +2,8 @@
 
 Phase 3 adds **controlled, scope-aware security testing**. It is not
 unrestricted autonomous hacking. The human operator remains responsible for
-authorization and for any later disclosure. Phase 12 deepens static dataflow
-only. It does not authorize live activity, change ScopeGuard or
+authorization and for any later disclosure. Phases 12 and 13 deepen static
+dataflow only. They do not authorize live activity, change ScopeGuard or
 SafetyController, or let static analysis or AI mark a finding verified.
 
 HackerOne report submission is implemented behind human review, dry-run,

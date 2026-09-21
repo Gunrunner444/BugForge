@@ -126,8 +126,11 @@ language has a syntax-aware code-quality catalog. JavaScript/TypeScript rules
 (`==`, `var`, empty `catch`, `with`) operate on syntax events and honor strict
 mode / comparison operands. Taint is flow-sensitive at the use site, not path-sensitive,
 and cross-file only for uniquely resolved Python, JavaScript, and TypeScript
-functions, re-exports, and methods. Partial callees and ambiguous imports are
-not edges. See [phase12-semantic-analysis.md](phase12-semantic-analysis.md).
+functions, re-exports, default exports, callable aliases, and methods.
+Partial callees and ambiguous imports are not edges. Symbol ids are
+`file::module::class::symbol`. See
+[phase12-semantic-analysis.md](phase12-semantic-analysis.md) and
+[phase13-repository-semantic-graph.md](phase13-repository-semantic-graph.md).
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.

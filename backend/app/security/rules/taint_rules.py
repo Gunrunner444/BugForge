@@ -17,6 +17,7 @@ from app.security.rules.base import RuleDocumentation, SecurityObservation, Secu
 from app.security.taint import (
     ExternalCallee,
     TaintState,
+    _external_for_call,
     analyze_taint,
     applicable_sanitizer_kinds,
     argument_is_constant,
@@ -206,8 +207,10 @@ def _cross_file_observations(
         return []
     observations: list[SecurityObservation] = []
     for call in graph.calls:
-        ext = externals.get(call.qualified) or externals.get(call.name)
-        if ext is None or ext.callee_file == graph.file_path:
+        ext = _external_for_call(call, externals)
+        if ext is None:
+            continue
+        if ext.callee_file == graph.file_path and ext.relationship != "alias":
             continue
         for index, vuln_value, sink_name, sink_line in ext.param_sinks:
             if vuln_value != rule.vulnerability_class.value:
@@ -261,14 +264,25 @@ def _cross_file_observations(
                     sanitizer="",
                     argument_index=index,
                     extra={
-                        "taint_scope": "cross_file",
+                        "taint_scope": (
+                            "alias" if ext.callee_file == graph.file_path else "cross_file"
+                        ),
+                        "defining_file": ext.callee_file,
+                        "defining_symbol": ext.callee_function,
+                        "caller_file": graph.file_path,
+                        "caller_symbol": _caller_symbol(call),
                         "callee_file": ext.callee_file,
                         "callee_function": ext.callee_function,
                         "callee_sink": sink_name,
                         "callee_line": str(sink_line),
                         "parameter_index": str(index),
                         "cross_file_depth": str(ext.hops),
+                        "hop": str(ext.hops),
                         "cross_file_partial": "true" if ext.partial else "false",
+                        "parser_complete": "false" if ext.partial else "true",
+                        "relationship": ext.relationship,
+                        "re_export": "true" if ext.relationship == "re_export" else "false",
+                        "class_method": "true" if ext.relationship == "method" else "false",
                         "semantic_id": ext.semantic_id
                         or f"{ext.callee_file}::{ext.callee_function}",
                         "flow": (
@@ -285,6 +299,14 @@ def _cross_file_observations(
                 )
             )
     return observations
+
+
+def _caller_symbol(call: CallSite) -> str:
+    """Enclosing function or method name when the call is not at module scope."""
+    scope = call.scope_id or ""
+    if not scope or scope == "module":
+        return ""
+    return scope.rsplit(":", 1)[-1]
 
 
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:

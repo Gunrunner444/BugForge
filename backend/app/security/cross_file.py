@@ -5,21 +5,28 @@ participate. Profile fallback is not dataflow. Ambiguous or unresolved names
 produce no edge. A partial or truncated callee is not a summary. Limits stop
 the walk and leave an explicit diagnostic; a stopped walk is not a clean result.
 
+A limit of zero disables that step. It never indexes an empty list and never
+performs one accidental propagation hop.
+
 High-confidence extensions, still unique-identity only:
 
-* Python and JS/TS re-exports, including package ``__init__.py`` and
-  ``export { name } from ...``
-* methods whose class is imported and constructed, or called as ``Class.method``
-* no inheritance guessing and no dynamic dispatch
+    * Python and JS/TS re-exports, including package ``__init__.py`` and
+      ``export { name } from ...``
+    * local default imports whose default export is a unique function or class
+    * methods whose class is imported and constructed, or called as ``Class.method``
+    * module-level callable aliases that are assigned once
+    * TypeScript ``paths`` mappings read from ``tsconfig.json`` as data
+    * no inheritance guessing and no dynamic dispatch
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from app.core.config import settings
 from app.domain.language import ParserTier
@@ -32,6 +39,7 @@ from app.security.taint import (
     ExternalCallee,
     _callee_is_source,
     _empty_rhs,
+    _external_for_call,
     _killing_assignment,
     _ordered_bindings,
     _peel_sanitizer,
@@ -76,7 +84,11 @@ class FlowDiagnostic:
 
 @dataclass(frozen=True)
 class FlowEdge:
-    """Stable repository edge. Identifiers are ``file::symbol``, never addresses."""
+    """Stable repository edge.
+
+    Identifiers are ``file::module::class::symbol``. They never contain
+    addresses or process-specific values.
+    """
 
     kind: str
     source_id: str
@@ -109,20 +121,16 @@ class ProjectFlow:
         return self.externals.get(file_path, {})
 
     def lookup(self, file_path: str, call: CallSite) -> ExternalCallee | None:
-        table = self.externals_for(file_path)
-        for key in (call.qualified, call.name):
-            hit = table.get(key)
-            if hit is not None:
-                return hit
-        return None
+        return _external_for_call(call, self.externals_for(file_path))
 
 
 def build_project(
     graphs: dict[str, SyntaxGraph],
     *,
     limits: CrossFileLimits | None = None,
+    repo_root: Path | None = None,
 ) -> ProjectFlow:
-    limits = limits or CrossFileLimits.from_settings()
+    limits = _clamp_limits(limits or CrossFileLimits.from_settings())
     project = ProjectFlow()
     started = time.monotonic()
 
@@ -132,19 +140,26 @@ def build_project(
         return (time.monotonic() - started) * 1000 >= limits.budget_ms
 
     if expired():
-        project.incomplete = True
-        project.diagnostics.append(
-            FlowDiagnostic(
-                kind="cross_file_incomplete",
-                message="cross-file taint budget exhausted before propagation",
-                file_path="",
-            )
+        return _stop(
+            project,
+            "cross-file taint budget exhausted before propagation",
         )
-        return project
+    if limits.max_files <= 0:
+        return _stop(project, "cross-file taint stopped after 0 files")
+    if limits.max_edges <= 0:
+        return _stop(project, "cross-file taint stopped at configured edge limit")
+    if limits.max_import_depth <= 0:
+        return _stop(
+            project,
+            "cross-file taint stopped at max import depth",
+            kind="cross_file_depth_limited",
+        )
+    if limits.max_rounds <= 0:
+        return _stop(project, "cross-file taint stopped before any propagation round")
 
     eligible = {path: graph for path, graph in graphs.items() if _eligible(graph)}
     ordered = sorted(eligible)
-    if len(ordered) > limits.max_files:
+    if limits.max_files < len(ordered):
         project.incomplete = True
         project.diagnostics.append(
             FlowDiagnostic(
@@ -156,8 +171,10 @@ def build_project(
         ordered = ordered[: limits.max_files]
         eligible = {path: eligible[path] for path in ordered}
 
-    targets, classes, target_diag = _import_targets(
-        eligible, max_reexport_depth=limits.max_import_depth
+    targets, classes, link_kinds, target_diag = _import_targets(
+        eligible,
+        max_reexport_depth=limits.max_import_depth,
+        ts_mappings=_ts_path_mappings(repo_root),
     )
     project.diagnostics.extend(target_diag)
     summaries: dict[tuple[str, str], _Summary] = {}
@@ -165,100 +182,90 @@ def build_project(
     depth_limited = False
     changed = False
 
-    if limits.max_rounds <= 0:
-        project.incomplete = True
-        project.diagnostics.append(
-            FlowDiagnostic(
-                kind="cross_file_incomplete",
-                message="cross-file taint stopped before any propagation round",
-                file_path="",
-            )
-        )
-    else:
-        for _round in range(limits.max_rounds):
-            if expired():
-                project.incomplete = True
-                project.diagnostics.append(
-                    FlowDiagnostic(
-                        kind="cross_file_incomplete",
-                        message="cross-file taint budget exhausted",
-                        file_path="",
-                    )
+    for _round in range(limits.max_rounds):
+        if expired():
+            project.incomplete = True
+            project.diagnostics.append(
+                FlowDiagnostic(
+                    kind="cross_file_incomplete",
+                    message="cross-file taint budget exhausted",
+                    file_path="",
                 )
-                break
-            changed = False
-            for path in ordered:
-                graph = eligible[path]
-                partial = _graph_partial(graph)
-                for entity in _summarizable(graph):
-                    if expired():
-                        project.incomplete = True
-                        project.diagnostics.append(
-                            FlowDiagnostic(
-                                kind="cross_file_incomplete",
-                                message="cross-file taint budget exhausted",
-                                file_path=path,
-                            )
+            )
+            break
+        changed = False
+        for path in ordered:
+            graph = eligible[path]
+            partial = _graph_partial(graph)
+            for entity in _summarizable(graph):
+                if expired():
+                    project.incomplete = True
+                    project.diagnostics.append(
+                        FlowDiagnostic(
+                            kind="cross_file_incomplete",
+                            message="cross-file taint budget exhausted",
+                            file_path=path,
                         )
-                        break
-                    if edges >= limits.max_edges:
-                        project.incomplete = True
-                        project.diagnostics.append(
-                            FlowDiagnostic(
-                                kind="cross_file_incomplete",
-                                message="cross-file taint stopped at configured edge limit",
-                                file_path=path,
-                            )
-                        )
-                        break
-                    scope_id = _scope_for_entity(graph, entity)
-                    if scope_id is None:
-                        continue
-                    summary_name = entity.qualified_name or entity.name
-                    summary, used_edges, limited, capped = _summarize(
-                        graph,
-                        summary_name,
-                        scope_id,
-                        tuple(p.name for p in entity.parameters),
-                        summaries,
-                        targets,
-                        partial=partial,
-                        max_depth=limits.max_import_depth,
-                        decorators=tuple(entity.decorators),
-                        edge_budget=limits.max_edges - edges,
                     )
-                    edges += used_edges
-                    if limited:
-                        depth_limited = True
-                    if capped:
-                        project.incomplete = True
-                        project.diagnostics.append(
-                            FlowDiagnostic(
-                                kind="cross_file_incomplete",
-                                message="cross-file taint stopped at configured edge limit",
-                                file_path=path,
-                            )
+                    break
+                if edges >= limits.max_edges:
+                    project.incomplete = True
+                    project.diagnostics.append(
+                        FlowDiagnostic(
+                            kind="cross_file_incomplete",
+                            message="cross-file taint stopped at configured edge limit",
+                            file_path=path,
                         )
-                    key = (path, summary_name)
-                    if summaries.get(key) != summary:
-                        summaries[key] = summary
-                        changed = True
-                    if project.incomplete:
-                        break
+                    )
+                    break
+                scope_id = _scope_for_entity(graph, entity)
+                if scope_id is None:
+                    continue
+                summary_name = entity.qualified_name or entity.name
+                summary, used_edges, limited, capped = _summarize(
+                    graph,
+                    summary_name,
+                    scope_id,
+                    tuple(p.name for p in entity.parameters),
+                    summaries,
+                    targets,
+                    partial=partial,
+                    max_depth=limits.max_import_depth,
+                    decorators=tuple(entity.decorators),
+                    edge_budget=limits.max_edges - edges,
+                )
+                edges += used_edges
+                if limited:
+                    depth_limited = True
+                if capped:
+                    project.incomplete = True
+                    project.diagnostics.append(
+                        FlowDiagnostic(
+                            kind="cross_file_incomplete",
+                            message="cross-file taint stopped at configured edge limit",
+                            file_path=path,
+                        )
+                    )
+                key = (path, summary_name)
+                if summaries.get(key) != summary:
+                    summaries[key] = summary
+                    changed = True
                 if project.incomplete:
                     break
-            if project.incomplete or not changed:
+            if project.incomplete:
                 break
-        else:
-            if changed:
-                project.incomplete = True
-                project.diagnostics.append(
-                    FlowDiagnostic(
-                        kind="cross_file_incomplete",
-                        message="cross-file taint stopped at max propagation rounds",
-                        file_path="",
-                    )
+        if project.incomplete or not changed:
+            break
+    else:
+        if changed:
+            project.incomplete = True
+            project.diagnostics.append(
+                FlowDiagnostic(
+                    kind="cross_file_incomplete",
+                    message="cross-file taint stopped at max propagation rounds",
+                    file_path="",
                 )
+            )
 
     if depth_limited:
         project.incomplete = True
@@ -274,6 +281,7 @@ def build_project(
         summaries,
         targets,
         classes,
+        link_kinds,
         max_depth=limits.max_import_depth,
     )
     project.diagnostics.extend(export_diag)
@@ -286,9 +294,47 @@ def build_project(
                 file_path="",
             )
         )
-    project.edges = _flow_edges(targets, classes, project.externals)
+    budgeted = _flow_edges(targets, classes, link_kinds, project.externals)
+    owners = _method_owner_edges(eligible)
+    kept, truncated = _take_edges(budgeted, limits.max_edges)
+    project.edges = _dedupe_edges([*owners, *kept])
+    if truncated:
+        project.incomplete = True
+        project.externals = _externals_for_kept_calls(project.externals, kept)
+        project.diagnostics.append(
+            FlowDiagnostic(
+                kind="cross_file_incomplete",
+                message="cross-file taint stopped at configured edge limit",
+                file_path="",
+            )
+        )
     if any(item.kind == "cross_file_partial" for item in project.diagnostics):
         project.incomplete = True
+    project.diagnostics = _stable_diagnostics(project.diagnostics)
+    return project
+
+
+def _clamp_limits(limits: CrossFileLimits) -> CrossFileLimits:
+    """Negative limits disable the corresponding step. Zero stays zero."""
+    return CrossFileLimits(
+        max_files=max(0, limits.max_files),
+        max_import_depth=max(0, limits.max_import_depth),
+        max_rounds=max(0, limits.max_rounds),
+        max_edges=max(0, limits.max_edges),
+        budget_ms=max(0, limits.budget_ms),
+    )
+
+
+def _stop(
+    project: ProjectFlow,
+    message: str,
+    *,
+    kind: str = "cross_file_incomplete",
+) -> ProjectFlow:
+    project.incomplete = True
+    project.externals = {}
+    project.edges = []
+    project.diagnostics.append(FlowDiagnostic(kind=kind, message=message, file_path=""))
     project.diagnostics = _stable_diagnostics(project.diagnostics)
     return project
 
@@ -358,8 +404,27 @@ def _methods_by_class(graph: SyntaxGraph) -> dict[str, dict[str, ParsedEntity]]:
     return unique
 
 
-def _symbol_id(file_path: str, name: str) -> str:
-    return f"{file_path.replace(chr(92), '/')}::{name}"
+def _module_name(file_path: str) -> str:
+    path = PurePosixPath(file_path.replace("\\", "/"))
+    if path.name == "__init__.py":
+        parent = path.parent.as_posix()
+        return "" if parent == "." else parent.replace("/", ".")
+    stem = path.with_suffix("").as_posix()
+    return "" if stem == "." else stem.replace("/", ".")
+
+
+def _symbol_id(file_path: str, name: str, *, owner: str = "") -> str:
+    """``file::module::class::symbol``. Empty slots stay empty; nothing is hashed."""
+    file_norm = file_path.replace("\\", "/")
+    return f"{file_norm}::{_module_name(file_norm)}::{owner}::{name}"
+
+
+def _summary_symbol_id(file_path: str, function_name: str) -> str:
+    owner = ""
+    symbol = function_name
+    if function_name.count(".") == 1 and "/" not in function_name:
+        owner, symbol = function_name.split(".", 1)
+    return _symbol_id(file_path, symbol, owner=owner)
 
 
 def _stable_diagnostics(items: list[FlowDiagnostic]) -> list[FlowDiagnostic]:
@@ -377,62 +442,161 @@ def _stable_diagnostics(items: list[FlowDiagnostic]) -> list[FlowDiagnostic]:
 def _flow_edges(
     targets: dict[tuple[str, str], tuple[str, str] | str],
     classes: dict[tuple[str, str], tuple[str, str]],
+    link_kinds: dict[tuple[str, str], str],
     externals: dict[str, dict[str, ExternalCallee]],
 ) -> list[FlowEdge]:
     edges: list[FlowEdge] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add(kind: str, source: str, target: str) -> None:
-        key = (kind, source, target)
-        if key in seen:
-            return
-        seen.add(key)
-        edges.append(FlowEdge(kind=kind, source_id=source, target_id=target))
-
     for (importer, local), target in sorted(targets.items()):
         if isinstance(target, tuple):
-            add("import", _symbol_id(importer, local), _symbol_id(target[0], target[1]))
+            kind = link_kinds.get((importer, local), "import")
+            edges.append(
+                FlowEdge(
+                    kind=kind,
+                    source_id=_symbol_id(importer, local),
+                    target_id=_summary_symbol_id(target[0], target[1]),
+                )
+            )
     for (importer, local), (file_path, class_name) in sorted(classes.items()):
-        add("class_import", _symbol_id(importer, local), _symbol_id(file_path, class_name))
+        edges.append(
+            FlowEdge(
+                kind="class_import",
+                source_id=_symbol_id(importer, local),
+                target_id=_symbol_id(file_path, "", owner=class_name),
+            )
+        )
     for file_path, table in sorted(externals.items()):
         for local, ext in sorted(table.items()):
-            add(
-                "call",
-                _symbol_id(file_path, local),
-                ext.semantic_id or _symbol_id(ext.callee_file, ext.callee_function),
+            edges.append(
+                FlowEdge(
+                    kind="call",
+                    source_id=_symbol_id(file_path, local),
+                    target_id=ext.semantic_id
+                    or _summary_symbol_id(ext.callee_file, ext.callee_function),
+                )
             )
+    return _dedupe_edges(edges)
+
+
+def _method_owner_edges(graphs: dict[str, SyntaxGraph]) -> list[FlowEdge]:
+    edges: list[FlowEdge] = []
+    for path, graph in sorted(graphs.items()):
+        for class_name, methods in sorted(_methods_by_class(graph).items()):
+            class_id = _symbol_id(path, "", owner=class_name)
+            for method_name in sorted(methods):
+                edges.append(
+                    FlowEdge(
+                        kind="method_owner",
+                        source_id=_symbol_id(path, method_name, owner=class_name),
+                        target_id=class_id,
+                    )
+                )
     return edges
+
+
+_EDGE_PRIORITY = {
+    "call": 0,
+    "alias": 1,
+    "default": 2,
+    "import": 3,
+    "re_export": 4,
+    "class_import": 5,
+}
+
+
+def _dedupe_edges(edges: list[FlowEdge]) -> list[FlowEdge]:
+    seen: set[tuple[str, str, str]] = set()
+    ordered: list[FlowEdge] = []
+    for edge in edges:
+        key = (edge.kind, edge.source_id, edge.target_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(edge)
+    return ordered
+
+
+def _take_edges(edges: list[FlowEdge], max_edges: int) -> tuple[list[FlowEdge], bool]:
+    """Keep at most ``max_edges`` edges, checking the limit before each append."""
+    ordered = sorted(
+        edges,
+        key=lambda edge: (
+            _EDGE_PRIORITY.get(edge.kind, 9),
+            edge.source_id,
+            edge.target_id,
+            edge.kind,
+        ),
+    )
+    kept: list[FlowEdge] = []
+    truncated = False
+    for edge in ordered:
+        if len(kept) >= max_edges:
+            truncated = True
+            break
+        kept.append(edge)
+    return kept, truncated
+
+
+def _externals_for_kept_calls(
+    externals: dict[str, dict[str, ExternalCallee]],
+    kept: list[FlowEdge],
+) -> dict[str, dict[str, ExternalCallee]]:
+    calls = {(edge.source_id, edge.target_id) for edge in kept if edge.kind == "call"}
+    filtered: dict[str, dict[str, ExternalCallee]] = {}
+    for path, table in sorted(externals.items()):
+        surviving: dict[str, ExternalCallee] = {}
+        for local, ext in table.items():
+            source = _symbol_id(path, local)
+            target = ext.semantic_id or _summary_symbol_id(ext.callee_file, ext.callee_function)
+            if (source, target) in calls:
+                surviving[local] = ext
+        if surviving:
+            filtered[path] = surviving
+    return filtered
 
 
 def _import_targets(
     graphs: dict[str, SyntaxGraph],
     *,
     max_reexport_depth: int,
+    ts_mappings: tuple[tuple[str, str], ...] = (),
 ) -> tuple[
     dict[tuple[str, str], tuple[str, str] | str],
     dict[tuple[str, str], tuple[str, str]],
+    dict[tuple[str, str], str],
     list[FlowDiagnostic],
 ]:
     """Map ``(importer, local call name)`` to ``(file, function)`` or ambiguous.
 
     ``classes`` maps ``(importer, local class name)`` to ``(file, class)``.
-    Re-exports are followed only while the next hop is unique.
+    ``link_kinds`` records ``import``, ``re_export``, ``alias``, or ``default``.
+    Re-exports and aliases are followed only while the next hop is unique.
     """
     targets: dict[tuple[str, str], tuple[str, str] | str] = {}
     classes: dict[tuple[str, str], tuple[str, str]] = {}
+    link_kinds: dict[tuple[str, str], str] = {}
     diagnostics: list[FlowDiagnostic] = []
-    pending: list[tuple[str, str, str, str]] = []
+    pending: list[tuple[str, str, str, str, str]] = []
 
-    def bind(importer: str, local: str, value: tuple[str, str] | str, line_file: str) -> None:
+    def bind(
+        importer: str,
+        local: str,
+        value: tuple[str, str] | str,
+        line_file: str,
+        *,
+        kind: str = "import",
+    ) -> None:
         if not local:
             return
         key = (importer, local)
         current = targets.get(key)
         if current is None:
             targets[key] = value
+            if isinstance(value, tuple):
+                link_kinds[key] = kind
             return
         if current != value:
             targets[key] = _AMBIGUOUS
+            link_kinds.pop(key, None)
             diagnostics.append(
                 FlowDiagnostic(
                     kind="ambiguous_import",
@@ -458,7 +622,20 @@ def _import_targets(
             )
 
     for path, graph in sorted(graphs.items()):
+        names_here = _unique_function_names(graph)
+        classes_here = _unique_classes(graph)
         for imp in graph.imports:
+            if imp.syntax_kind == "export_local":
+                source_name = imp.name or ""
+                public = imp.alias or source_name
+                if source_name and public:
+                    if source_name in names_here:
+                        bind(path, public, (path, source_name), path, kind="re_export")
+                    elif source_name in classes_here:
+                        bind_class(path, public, (path, source_name), path)
+                    else:
+                        pending.append((path, public, path, source_name, "re_export"))
+                continue
             if imp.name == "*" or imp.syntax_kind == "export_star":
                 diagnostics.append(
                     FlowDiagnostic(
@@ -468,12 +645,15 @@ def _import_targets(
                     )
                 )
                 continue
-            resolved = _resolve_module(graph, imp, graphs)
+            if _is_dynamic_or_side_effect_import(graph, imp):
+                continue
+            resolved = _resolve_module(graph, imp, graphs, ts_mappings)
             if resolved is None:
                 if (
                     imp.import_type == "relative"
                     or imp.relative_level > 0
                     or _looks_relative(imp.module)
+                    or _matches_ts_pattern(imp.module, ts_mappings)
                 ):
                     diagnostics.append(
                         FlowDiagnostic(
@@ -509,53 +689,199 @@ def _import_targets(
                 continue
             names = _unique_function_names(target)
             class_names = _unique_classes(target)
-            if _is_namespace_import(imp) or _is_module_alias_import(imp, names):
-                alias = imp.alias or _module_alias(imp.module, imp.name) or imp.name or ""
-                if not alias:
-                    continue
-                for func_name in sorted(names):
-                    bind(path, f"{alias}.{func_name}", (resolved, func_name), path)
-                for class_name in sorted(class_names):
-                    bind_class(path, f"{alias}.{class_name}", (resolved, class_name), path)
+            relationship = "re_export" if imp.syntax_kind.startswith("export_") else "import"
+            if _is_namespace_import(imp) or _is_python_module_import(graph, imp):
+                _bind_module_surface(
+                    path, imp, resolved, names, class_names, bind, bind_class, relationship
+                )
+                continue
+            if _is_module_alias_import(imp, names):
+                _bind_module_surface(
+                    path, imp, resolved, names, class_names, bind, bind_class, relationship
+                )
                 continue
             if imp.syntax_kind == "import_default":
+                _bind_default_import(
+                    path,
+                    imp,
+                    resolved,
+                    target,
+                    names,
+                    class_names,
+                    bind,
+                    bind_class,
+                    pending,
+                    diagnostics,
+                )
                 continue
             imported = imp.name
             if not imported:
                 continue
             local = imp.alias or imported
             if imported in names:
-                bind(path, local, (resolved, imported), path)
+                bind(path, local, (resolved, imported), path, kind=relationship)
                 continue
             if imported in class_names:
                 bind_class(path, local, (resolved, imported), path)
                 continue
-            pending.append((path, local, resolved, imported))
+            pending.append((path, local, resolved, imported, relationship))
 
     for _depth in range(max(0, max_reexport_depth)):
-        if not pending:
+        progressed = _follow_pending(pending, targets, classes, bind, bind_class)
+        pending = progressed[1]
+        alias_progress = _bind_callable_aliases(graphs, targets, classes, bind, bind_class)
+        if not progressed[0] and not alias_progress:
             break
-        progressed = False
-        still: list[tuple[str, str, str, str]] = []
-        for importer, local, src_file, src_name in pending:
-            dest = targets.get((src_file, src_name))
-            if isinstance(dest, tuple):
-                bind(importer, local, dest, importer)
-                progressed = True
+    return targets, classes, link_kinds, diagnostics
+
+
+def _is_dynamic_or_side_effect_import(graph: SyntaxGraph, imp: ParsedImport) -> bool:
+    """``import()`` and side-effect ``import "./x"`` are not namespace bindings."""
+    if graph.language not in {"javascript", "typescript"}:
+        return False
+    return imp.syntax_kind == "import" and not imp.name and not imp.alias
+
+
+def _is_python_module_import(graph: SyntaxGraph, imp: ParsedImport) -> bool:
+    return graph.language == "python" and imp.syntax_kind == "import" and not imp.is_from_import
+
+
+def _bind_module_surface(
+    path: str,
+    imp: ParsedImport,
+    resolved: str,
+    names: dict[str, ParsedEntity],
+    class_names: dict[str, ParsedEntity],
+    bind: Callable[..., None],
+    bind_class: Callable[..., None],
+    relationship: str,
+) -> None:
+    alias = imp.alias or _module_alias(imp.module, imp.name) or imp.name or ""
+    if not alias:
+        return
+    for func_name in sorted(names):
+        bind(path, f"{alias}.{func_name}", (resolved, func_name), path, kind=relationship)
+    for class_name in sorted(class_names):
+        bind_class(path, f"{alias}.{class_name}", (resolved, class_name), path)
+
+
+def _bind_default_import(
+    path: str,
+    imp: ParsedImport,
+    resolved: str,
+    target: SyntaxGraph,
+    names: dict[str, ParsedEntity],
+    class_names: dict[str, ParsedEntity],
+    bind: Callable[..., None],
+    bind_class: Callable[..., None],
+    pending: list[tuple[str, str, str, str, str]],
+    diagnostics: list[FlowDiagnostic],
+) -> None:
+    local = imp.alias or imp.name or ""
+    exported = target.default_export
+    if not local or not exported:
+        diagnostics.append(
+            FlowDiagnostic(
+                kind="unresolved_export",
+                message="default import has no unique default export",
+                file_path=path,
+            )
+        )
+        return
+    if exported in names:
+        bind(path, local, (resolved, exported), path, kind="default")
+        return
+    if exported in class_names:
+        bind_class(path, local, (resolved, exported), path)
+        return
+    pending.append((path, local, resolved, exported, "default"))
+
+
+def _follow_pending(
+    pending: list[tuple[str, str, str, str, str]],
+    targets: dict[tuple[str, str], tuple[str, str] | str],
+    classes: dict[tuple[str, str], tuple[str, str]],
+    bind: Callable[..., None],
+    bind_class: Callable[..., None],
+) -> tuple[bool, list[tuple[str, str, str, str, str]]]:
+    if not pending:
+        return False, pending
+    progressed = False
+    still: list[tuple[str, str, str, str, str]] = []
+    for importer, local, src_file, src_name, kind in pending:
+        dest = targets.get((src_file, src_name))
+        if isinstance(dest, tuple):
+            followed = "re_export" if dest[0] != src_file or kind == "re_export" else kind
+            bind(importer, local, dest, importer, kind=followed)
+            progressed = True
+            continue
+        class_dest = classes.get((src_file, src_name))
+        if class_dest is not None:
+            bind_class(importer, local, class_dest, importer)
+            progressed = True
+            continue
+        if dest == _AMBIGUOUS:
+            bind(importer, local, _AMBIGUOUS, importer)
+            continue
+        still.append((importer, local, src_file, src_name, kind))
+    return progressed, still
+
+
+def _bind_callable_aliases(
+    graphs: dict[str, SyntaxGraph],
+    targets: dict[tuple[str, str], tuple[str, str] | str],
+    classes: dict[tuple[str, str], tuple[str, str]],
+    bind: Callable[..., None],
+    bind_class: Callable[..., None],
+) -> bool:
+    """One hop of ``alias = known_callable`` when the name is assigned exactly once."""
+    snapshot_targets = dict(targets)
+    snapshot_classes = dict(classes)
+    progressed = False
+    for path, graph in sorted(graphs.items()):
+        grouped: dict[str, list[Binding]] = {}
+        for binding in graph.bindings:
+            if binding.kind is SymbolKind.PARAMETER:
                 continue
-            class_dest = classes.get((src_file, src_name))
-            if class_dest is not None:
-                bind_class(importer, local, class_dest, importer)
+            grouped.setdefault(binding.name, []).append(binding)
+        names = _unique_function_names(graph)
+        class_names = _unique_classes(graph)
+        for name, binds in sorted(grouped.items()):
+            if len(binds) != 1 or (path, name) in targets or (path, name) in classes:
+                continue
+            binding = binds[0]
+            if binding.rhs_is_literal or binding.rhs_callees or binding.rhs_accesses:
+                continue
+            if len(binding.rhs_idents) != 1:
+                continue
+            if any(token in binding.rhs for token in (".", "(", "[", "{")):
+                continue
+            ident = binding.rhs_idents[0]
+            if not ident or ident == name:
+                continue
+            calls = [call for call in graph.calls if call.name == name or call.qualified == name]
+            if any(call.scope_id != binding.scope_id for call in calls):
+                continue
+            dest = snapshot_targets.get((path, ident))
+            if isinstance(dest, tuple):
+                bind(path, name, dest, path, kind="alias")
                 progressed = True
                 continue
             if dest == _AMBIGUOUS:
-                bind(importer, local, _AMBIGUOUS, importer)
                 continue
-            still.append((importer, local, src_file, src_name))
-        pending = still
-        if not progressed:
-            break
-    return targets, classes, diagnostics
+            class_dest = snapshot_classes.get((path, ident))
+            if class_dest is not None:
+                bind_class(path, name, class_dest, path)
+                progressed = True
+                continue
+            if ident in names:
+                bind(path, name, (path, ident), path, kind="alias")
+                progressed = True
+                continue
+            if ident in class_names:
+                bind_class(path, name, (path, ident), path)
+                progressed = True
+    return progressed
 
 
 def _is_module_alias_import(imp: ParsedImport, function_names: dict[str, ParsedEntity]) -> bool:
@@ -599,12 +925,15 @@ def _looks_relative(module: str) -> bool:
 
 
 def _resolve_module(
-    graph: SyntaxGraph, imp: ParsedImport, graphs: dict[str, SyntaxGraph]
+    graph: SyntaxGraph,
+    imp: ParsedImport,
+    graphs: dict[str, SyntaxGraph],
+    ts_mappings: tuple[tuple[str, str], ...] = (),
 ) -> str | None:
     if graph.language == "python":
         return _resolve_python(graph.file_path, imp, graphs)
     if graph.language in {"javascript", "typescript"}:
-        return _resolve_javascript(graph.file_path, imp.module, graphs)
+        return _resolve_javascript(graph.file_path, imp.module, graphs, ts_mappings)
     return None
 
 
@@ -671,23 +1000,136 @@ def _unique_suffix(module: str, graphs: dict[str, SyntaxGraph], language: str) -
     return None
 
 
-def _resolve_javascript(importer: str, module: str, graphs: dict[str, SyntaxGraph]) -> str | None:
-    if not _looks_relative(module):
-        return None
-    raw = os.path.normpath(str(PurePosixPath(importer).parent / module))
+_JS_SOURCE_SUFFIXES = (".js", ".jsx", ".mjs", ".ts", ".tsx")
+_JS_INDEX_SUFFIXES = (
+    "",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".ts",
+    ".tsx",
+    "/index.js",
+    "/index.jsx",
+    "/index.mjs",
+    "/index.ts",
+    "/index.tsx",
+)
+
+
+def _resolve_javascript(
+    importer: str,
+    module: str,
+    graphs: dict[str, SyntaxGraph],
+    ts_mappings: tuple[tuple[str, str], ...] = (),
+) -> str | None:
+    if _looks_relative(module):
+        raw = os.path.normpath(str(PurePosixPath(importer).parent / module))
+        return _js_file_candidates(raw, graphs)
+    return _resolve_ts_alias(module, graphs, ts_mappings)
+
+
+def _js_file_candidates(raw: str, graphs: dict[str, SyntaxGraph]) -> str | None:
     norm = PurePosixPath(raw)
-    if ".." in norm.parts:
+    if ".." in norm.parts or "node_modules" in norm.parts:
         return None
     text = norm.as_posix()
-    suffixes = [""]
-    if PurePosixPath(text).suffix not in {".js", ".jsx", ".mjs", ".ts", ".tsx"}:
-        suffixes = ["", ".js", ".jsx", ".mjs", ".ts", ".tsx", "/index.js", "/index.ts"]
+    suffixes: tuple[str, ...] = ("",)
+    if PurePosixPath(text).suffix not in _JS_SOURCE_SUFFIXES:
+        suffixes = _JS_INDEX_SUFFIXES
     hits: list[str] = []
     for suffix in suffixes:
         cand = text + suffix
         graph = graphs.get(cand)
         if graph is not None and graph.language in {"javascript", "typescript"}:
             hits.append(cand)
+    unique = sorted(set(hits))
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        return _AMBIGUOUS
+    return None
+
+
+def _ts_path_mappings(repo_root: Path | None) -> tuple[tuple[str, str], ...]:
+    """Read ``compilerOptions.paths`` as JSON. Configuration is never executed."""
+    if repo_root is None:
+        return ()
+    path = repo_root / "tsconfig.json"
+    if not path.is_file():
+        return ()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    options = data.get("compilerOptions")
+    if not isinstance(options, dict):
+        return ()
+    base = options.get("baseUrl", ".")
+    paths = options.get("paths")
+    if not isinstance(base, str) or not isinstance(paths, dict):
+        return ()
+    mappings: list[tuple[str, str]] = []
+    for pattern, targets in paths.items():
+        if not isinstance(pattern, str) or not isinstance(targets, list):
+            continue
+        if pattern.count("*") > 1:
+            continue
+        concrete = [item for item in targets if isinstance(item, str)]
+        if len(concrete) != 1 or len(targets) != 1:
+            continue
+        target = concrete[0]
+        if target.count("*") > 1:
+            continue
+        rewritten = PurePosixPath(base) / target
+        mappings.append((pattern, rewritten.as_posix()))
+    return tuple(mappings)
+
+
+def _matches_ts_pattern(module: str, mappings: tuple[tuple[str, str], ...]) -> bool:
+    return any(_apply_ts_pattern(pattern, module) is not None for pattern, _target in mappings)
+
+
+def _apply_ts_pattern(pattern: str, module: str) -> str | None:
+    if "*" not in pattern:
+        return "" if pattern == module else None
+    prefix, suffix = pattern.split("*", 1)
+    if not module.startswith(prefix) or not module.endswith(suffix):
+        return None
+    end = len(module) - len(suffix) if suffix else len(module)
+    if end < len(prefix):
+        return None
+    middle = module[len(prefix) : end]
+    if not middle or "*" in middle:
+        return None
+    return middle
+
+
+def _resolve_ts_alias(
+    module: str,
+    graphs: dict[str, SyntaxGraph],
+    mappings: tuple[tuple[str, str], ...],
+) -> str | None:
+    if not mappings or _looks_relative(module):
+        return None
+    hits: list[str] = []
+    for pattern, target in mappings:
+        middle = _apply_ts_pattern(pattern, module)
+        if middle is None:
+            continue
+        if "*" in target:
+            rewritten = target.replace("*", middle, 1)
+        elif middle == "":
+            rewritten = target
+        else:
+            continue
+        resolved = _js_file_candidates(rewritten, graphs)
+        if resolved is None:
+            continue
+        if resolved == _AMBIGUOUS:
+            return _AMBIGUOUS
+        hits.append(resolved)
     unique = sorted(set(hits))
     if len(unique) == 1:
         return unique[0]
@@ -1119,6 +1561,7 @@ def _externals_from(
     summaries: dict[tuple[str, str], _Summary],
     targets: dict[tuple[str, str], tuple[str, str] | str],
     classes: dict[tuple[str, str], tuple[str, str]],
+    link_kinds: dict[tuple[str, str], str],
     *,
     max_depth: int,
 ) -> tuple[dict[str, dict[str, ExternalCallee]], bool, list[FlowDiagnostic]]:
@@ -1144,6 +1587,7 @@ def _externals_from(
                 offset=0,
                 caller_partial=caller_partial,
                 max_depth=max_depth,
+                relationship=link_kinds.get((path, local), "import"),
             )
             if placed == "partial":
                 partial_files.add(target[0])
@@ -1168,6 +1612,7 @@ def _externals_from(
                     offset=_receiver_offset(summary, instance=False),
                     caller_partial=caller_partial,
                     max_depth=max_depth,
+                    relationship="method",
                 )
                 constructed = _place_external(
                     table,
@@ -1177,6 +1622,7 @@ def _externals_from(
                     offset=_receiver_offset(summary, instance=True),
                     caller_partial=caller_partial,
                     max_depth=max_depth,
+                    relationship="method",
                 )
                 if explicit == "partial" or constructed == "partial":
                     partial_files.add(class_file)
@@ -1206,6 +1652,7 @@ def _externals_from(
                         offset=_receiver_offset(summary, instance=True),
                         caller_partial=caller_partial,
                         max_depth=max_depth,
+                        relationship="method",
                     )
                     if placed == "partial":
                         partial_files.add(class_file)
@@ -1262,8 +1709,11 @@ def _place_external(
     offset: int,
     caller_partial: bool,
     max_depth: int,
+    relationship: str = "import",
 ) -> str:
-    if summary is None or summary.file_path == importer:
+    if summary is None:
+        return ""
+    if summary.file_path == importer and relationship != "alias":
         return ""
     if summary.partial:
         return "partial"
@@ -1281,7 +1731,7 @@ def _place_external(
         if shifted_index < 0:
             continue
         sinks.append((shifted_index, vuln, name, line))
-    semantic_id = _symbol_id(summary.file_path, summary.function_name)
+    semantic_id = _summary_symbol_id(summary.file_path, summary.function_name)
     previous = table.get(local)
     if previous is not None and previous.semantic_id and previous.semantic_id != semantic_id:
         table.pop(local, None)
@@ -1295,5 +1745,6 @@ def _place_external(
         partial=caller_partial,
         hops=summary.hops,
         semantic_id=semantic_id,
+        relationship=relationship,
     )
     return "ok"

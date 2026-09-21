@@ -33,6 +33,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 10 | Native polyglot analysis parity (Tree-sitter + scope-aware taint) | ✅ Implemented |
 | Phase 11 | Semantic dataflow & polyglot quality parity | ✅ Implemented |
 | Phase 12 | Deep semantic analysis, cross-file flow, and repository validation | ✅ Implemented |
+| Phase 13 | Repository semantic graph (unique symbols, aliases, path maps) | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -45,17 +46,18 @@ orchestration looks up languages, AI backends, and future security tools by id
 instead of hard-coded conditionals. Python keeps its CPython AST quality
 analysis. Other programming languages parse through Tree-sitter into the same
 `SyntaxGraph`. Taint is flow-sensitive at the use site (not path-sensitive),
-with bounded same-file and cross-file propagation when a callee, re-export, or
-method resolves uniquely. Unknown calls, partial callees, and profile fallback
-are not treated as dataflow.
+with bounded same-file and cross-file propagation when a callee, re-export,
+default export, or method resolves uniquely. Unknown calls, partial callees,
+and profile fallback are not treated as dataflow.
 Every full-analysis language has a syntax-aware **code quality** catalog,
 separate from **security** observations. Parser fallback is labeled
 `PROFILE_FALLBACK` and never advertised as AST. C# and Shell are full analysis
 languages. HTML, CSS/SCSS, and SQL have specialized analysis. R, Scala, Dart,
 Lua, and Elixir remain detection-only. See
 [docs/polyglot-analysis.md](docs/polyglot-analysis.md),
-[docs/language-capability-matrix.md](docs/language-capability-matrix.md), and
-[docs/phase12-semantic-analysis.md](docs/phase12-semantic-analysis.md).
+[docs/language-capability-matrix.md](docs/language-capability-matrix.md),
+[docs/phase12-semantic-analysis.md](docs/phase12-semantic-analysis.md), and
+[docs/phase13-repository-semantic-graph.md](docs/phase13-repository-semantic-graph.md).
 
 Phase 2 adds:
 
