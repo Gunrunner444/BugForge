@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.adapters.languages.base import LanguageAdapter
 from app.analyzers.framework_detector import FrameworkDetector, FrameworkInfo
 from app.core.config import settings
 from app.core.paths import to_relative_path
@@ -24,6 +25,17 @@ from app.security.rules.catalog import builtin_security_rules
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class AnalysisDiagnostic:
+    kind: str
+    message: str
+    file_path: str
+    language: str = ""
+    parser_backend: str = ""
+    parser_tier: str = ""
+    rule_id: str = ""
+
+
 @dataclass
 class SecurityScanResult:
     observations: list[SecurityObservation] = field(default_factory=list)
@@ -33,6 +45,7 @@ class SecurityScanResult:
     graphs: dict[str, SyntaxGraph] = field(default_factory=dict)
     languages: list[str] = field(default_factory=list)
     files_analyzed: int = 0
+    diagnostics: list[AnalysisDiagnostic] = field(default_factory=list)
 
 
 class SecurityAnalysisEngine:
@@ -51,12 +64,15 @@ class SecurityAnalysisEngine:
         graphs: dict[str, SyntaxGraph] = {}
         used_languages: set[str] = set()
         analyzed = 0
+        diagnostics: list[AnalysisDiagnostic] = []
 
         for file_path in file_paths:
             adapter = languages.for_path(file_path)
             if adapter is None or not adapter.supports(LanguageCapability.SECURITY_ANALYSIS):
                 continue
-            graph = self._parse(adapter, file_path)
+            graph, parse_diag = self._parse(adapter, file_path)
+            if parse_diag is not None:
+                diagnostics.append(parse_diag)
             if graph is None:
                 continue
             try:
@@ -66,12 +82,34 @@ class SecurityAnalysisEngine:
             analyzed += 1
             used_languages.add(adapter.language_id)
             graphs[graph.file_path] = graph
+            if graph.diagnostics.truncated or graph.diagnostics.has_errors:
+                diagnostics.append(
+                    AnalysisDiagnostic(
+                        kind="partial_analysis" if graph.diagnostics.truncated else "parser_error",
+                        message=graph.diagnostics.message or "parse reported errors",
+                        file_path=graph.file_path,
+                        language=graph.language,
+                        parser_backend=graph.parser_backend,
+                        parser_tier=str(graph.parser_tier),
+                    )
+                )
             for rule in self._rules:
                 try:
                     observations.extend(rule.check(graph, frameworks=frameworks))
                 except Exception as exc:
                     logger.warning(
                         "Security rule %s failed on %s: %s", rule.rule_id, file_path, exc
+                    )
+                    diagnostics.append(
+                        AnalysisDiagnostic(
+                            kind="analyzer_error",
+                            message=f"{rule.rule_id}: {exc}",
+                            file_path=graph.file_path,
+                            language=graph.language,
+                            parser_backend=graph.parser_backend,
+                            parser_tier=str(graph.parser_tier),
+                            rule_id=rule.rule_id,
+                        )
                     )
 
         clusters = correlate_observations(observations)
@@ -84,24 +122,54 @@ class SecurityAnalysisEngine:
             graphs=graphs,
             languages=sorted(used_languages),
             files_analyzed=analyzed,
+            diagnostics=diagnostics,
         )
 
-    def _parse(self, adapter: object, file_path: Path) -> SyntaxGraph | None:
+    def _parse(
+        self, adapter: LanguageAdapter, file_path: Path
+    ) -> tuple[SyntaxGraph | None, AnalysisDiagnostic | None]:
         try:
             size = file_path.stat().st_size
-        except OSError:
-            return None
+        except OSError as exc:
+            return None, AnalysisDiagnostic(
+                kind="parser_error",
+                message=str(exc),
+                file_path=str(file_path),
+                language=adapter.language_id,
+            )
         if size > settings.max_file_size_bytes:
-            return None
+            return None, AnalysisDiagnostic(
+                kind="parser_error",
+                message="file exceeds max_file_size_bytes",
+                file_path=str(file_path),
+                language=adapter.language_id,
+            )
         try:
             source = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
+        except OSError as exc:
+            return None, AnalysisDiagnostic(
+                kind="parser_error",
+                message=str(exc),
+                file_path=str(file_path),
+                language=adapter.language_id,
+            )
         try:
-            graph = adapter.syntax_graph(file_path, source)  # type: ignore[attr-defined]
+            graph = adapter.syntax_graph(file_path, source)
         except Exception as exc:
             logger.debug("Security parse failed for %s: %s", file_path, exc)
-            return None
+            return None, AnalysisDiagnostic(
+                kind="parser_failure",
+                message=str(exc),
+                file_path=str(file_path),
+                language=adapter.language_id,
+                parser_backend=adapter.parser_backend(),
+                parser_tier=str(adapter.parser_tier()),
+            )
         if not isinstance(graph, SyntaxGraph):
-            return None
-        return graph
+            return None, AnalysisDiagnostic(
+                kind="parser_failure",
+                message="adapter did not return a SyntaxGraph",
+                file_path=str(file_path),
+                language=adapter.language_id,
+            )
+        return graph, None

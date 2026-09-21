@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.database import get_db
 from app.domain.language import LanguageCapability
+from app.parsing.engine import installed_parser_report
 from app.plugins import get_plugin_catalog
 from app.repositories.security_finding_repo import SecurityFindingRepository
 from app.schemas.security import (
@@ -34,6 +35,8 @@ async def security_status() -> SecurityStatusResponse:
             extensions=sorted(adapter.file_extensions),
             parser_tier=str(adapter.parser_tier()),
             parser_backend=adapter.parser_backend(),
+            native_available=bool(installed_parser_report(adapter.language_id)["native_available"]),
+            parser_status=str(installed_parser_report(adapter.language_id)["status"]),
         )
         for adapter in catalog.languages.all_adapters()
         if adapter.supports(LanguageCapability.SECURITY_ANALYSIS)

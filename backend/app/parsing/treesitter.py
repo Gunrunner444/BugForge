@@ -1,7 +1,8 @@
 """Tree-sitter parser cache.
 
-Grammars are loaded once per process. A Parser instance is created per parse
-because tree-sitter parsers are not thread-safe. Source size is bounded.
+Grammars are loaded once per process from the pinned language pack. A Parser
+instance is created per parse because tree-sitter parsers are not thread-safe.
+Source size is bounded. Analysis never downloads grammars from the network.
 """
 
 from __future__ import annotations
@@ -19,7 +20,11 @@ _LOCK = threading.Lock()
 _LANGUAGES: dict[str, object] = {}
 _UNAVAILABLE: set[str] = set()
 
-# tree-sitter-language-pack ids keyed by BugForge language id
+# Tested pair (see tests/test_semantic/test_parser_deps.py):
+#   tree-sitter==0.26.0
+#   tree-sitter-language-pack==1.20.0
+# Official BugForge languages are bundled in the pack. Analysis must not fetch
+# additional grammars over the network while walking an untrusted repository.
 TS_LANGUAGE_IDS: dict[str, str] = {
     "python": "python",
     "javascript": "javascript",
@@ -42,9 +47,22 @@ TS_LANGUAGE_IDS: dict[str, str] = {
     "sql": "sql",
 }
 
+# Grammars exist in the pack but BugForge does not yet meet the full-analysis
+# contract for these languages (quality catalog, taint vocab, fixtures).
+DETECTION_ONLY_TS_IDS: dict[str, str] = {
+    "r": "r",
+    "scala": "scala",
+    "dart": "dart",
+    "lua": "lua",
+    "elixir": "elixir",
+}
+
 MAX_PARSE_BYTES = 2 * 1024 * 1024
 MAX_WALK_NODES = 40_000
 MAX_NESTING = 256
+
+TESTED_TREE_SITTER = "0.26.0"
+TESTED_LANGUAGE_PACK = "1.20.0"
 
 
 @dataclass(frozen=True)
@@ -56,11 +74,50 @@ class TreeSitterTree:
     truncated: bool = False
 
 
+@dataclass(frozen=True)
+class NativeParserStatus:
+    language_id: str
+    available: bool
+    ts_language: str | None
+    reason: str = ""
+
+
 def treesitter_available(language_id: str) -> bool:
     ts_id = TS_LANGUAGE_IDS.get(language_id)
     if ts_id is None:
         return False
     return _language(ts_id) is not None
+
+
+def native_parser_status(language_id: str) -> NativeParserStatus:
+    ts_id = TS_LANGUAGE_IDS.get(language_id)
+    if ts_id is None:
+        return NativeParserStatus(
+            language_id=language_id,
+            available=False,
+            ts_language=None,
+            reason="no bundled grammar mapping",
+        )
+    if _language(ts_id) is None:
+        return NativeParserStatus(
+            language_id=language_id,
+            available=False,
+            ts_language=ts_id,
+            reason="native parser unavailable",
+        )
+    return NativeParserStatus(
+        language_id=language_id,
+        available=True,
+        ts_language=ts_id,
+        reason="native parser available",
+    )
+
+
+def reset_treesitter_cache() -> None:
+    """Test helper. Does not download grammars."""
+    with _LOCK:
+        _LANGUAGES.clear()
+        _UNAVAILABLE.clear()
 
 
 def _language(ts_id: str) -> object | None:

@@ -13,6 +13,7 @@ from pathlib import Path
 from app.analysis.finding import Finding
 from app.domain.language import LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
+from app.parsing.model import SyntaxGraph
 from app.plugins.errors import UnsupportedCapabilityError
 
 
@@ -61,7 +62,7 @@ class LanguageAdapter(ABC):
             detail=f"{self.display_name} parsing is not implemented in this phase.",
         )
 
-    def syntax_graph(self, file_path: Path, source: str) -> object:
+    def syntax_graph(self, file_path: Path, source: str) -> SyntaxGraph:
         """Return a language-neutral syntax graph used by security analysis.
 
         Default implementation uses the shared parser registry. Detection-only

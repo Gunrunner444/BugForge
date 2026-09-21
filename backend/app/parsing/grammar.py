@@ -32,6 +32,15 @@ class Grammar:
     name_fields: tuple[str, ...] = ("name",)
     import_kind: str = "import"
     dollar_idents: bool = False
+    block_types: frozenset[str] = field(default_factory=frozenset)
+    # function: assignments bind to nearest function. block: current block.
+    # mixed: var→function, let/const→block (JavaScript/TypeScript).
+    lexical_model: str = "block"
+    function_scoped_keywords: frozenset[str] = field(default_factory=frozenset)
+    block_scoped_keywords: frozenset[str] = field(default_factory=frozenset)
+    quality_unwrap_names: frozenset[str] = field(default_factory=frozenset)
+    quality_deprecated_calls: frozenset[str] = field(default_factory=frozenset)
+    quality_panic_names: frozenset[str] = field(default_factory=frozenset)
 
 
 _COMMON_COMMENT = frozenset({"comment", "line_comment", "block_comment"})
@@ -70,6 +79,22 @@ GRAMMARS: dict[str, Grammar] = {
         member_types=frozenset({"attribute"}),
         decorator_types=frozenset({"decorator"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "block",
+                "if_statement",
+                "for_statement",
+                "while_statement",
+                "match_statement",
+                "except_clause",
+                "lambda",
+                "list_comprehension",
+                "set_comprehension",
+                "dictionary_comprehension",
+                "generator_expression",
+            }
+        ),
+        lexical_model="function",
     ),
     "javascript": Grammar(
         ts_name="javascript",
@@ -108,6 +133,24 @@ GRAMMARS: dict[str, Grammar] = {
         constructor_types=frozenset({"new_expression"}),
         decorator_types=frozenset({"decorator"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "statement_block",
+                "if_statement",
+                "switch_case",
+                "switch_default",
+                "for_statement",
+                "for_in_statement",
+                "while_statement",
+                "do_statement",
+                "try_statement",
+                "catch_clause",
+                "finally_clause",
+            }
+        ),
+        lexical_model="mixed",
+        function_scoped_keywords=frozenset({"var"}),
+        block_scoped_keywords=frozenset({"let", "const"}),
     ),
     "typescript": Grammar(
         ts_name="typescript",
@@ -148,6 +191,21 @@ GRAMMARS: dict[str, Grammar] = {
         constructor_types=frozenset({"new_expression"}),
         decorator_types=frozenset({"decorator"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "statement_block",
+                "if_statement",
+                "switch_case",
+                "switch_default",
+                "for_statement",
+                "for_in_statement",
+                "while_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="mixed",
+        function_scoped_keywords=frozenset({"var"}),
+        block_scoped_keywords=frozenset({"let", "const"}),
     ),
     "tsx": Grammar(
         ts_name="tsx",
@@ -173,6 +231,10 @@ GRAMMARS: dict[str, Grammar] = {
         member_types=frozenset({"member_expression"}),
         constructor_types=frozenset({"new_expression"}),
         import_kind="import",
+        block_types=frozenset({"statement_block", "if_statement", "catch_clause"}),
+        lexical_model="mixed",
+        function_scoped_keywords=frozenset({"var"}),
+        block_scoped_keywords=frozenset({"let", "const"}),
     ),
     "ruby": Grammar(
         ts_name="ruby",
@@ -192,6 +254,8 @@ GRAMMARS: dict[str, Grammar] = {
         exception_types=frozenset({"begin", "rescue"}),
         member_types=frozenset({"call"}),
         import_kind="require",
+        block_types=frozenset({"then", "else", "if", "unless", "case", "when", "do_block", "block", "rescue"}),
+        lexical_model="function",
     ),
     "c": Grammar(
         ts_name="c",
@@ -209,6 +273,18 @@ GRAMMARS: dict[str, Grammar] = {
         loop_types=frozenset({"for_statement", "while_statement", "do_statement"}),
         member_types=frozenset({"field_expression"}),
         import_kind="include",
+        block_types=frozenset(
+            {
+                "compound_statement",
+                "if_statement",
+                "switch_statement",
+                "for_statement",
+                "while_statement",
+                "do_statement",
+            }
+        ),
+        lexical_model="block",
+        quality_deprecated_calls=frozenset({"gets", "gets_s", "strcpy", "sprintf"}),
     ),
     "cpp": Grammar(
         ts_name="cpp",
@@ -238,6 +314,21 @@ GRAMMARS: dict[str, Grammar] = {
         exception_types=frozenset({"try_statement", "catch_clause"}),
         member_types=frozenset({"field_expression", "qualified_identifier"}),
         import_kind="include",
+        block_types=frozenset(
+            {
+                "compound_statement",
+                "if_statement",
+                "switch_statement",
+                "for_statement",
+                "while_statement",
+                "do_statement",
+                "for_range_loop",
+                "try_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="block",
+        quality_deprecated_calls=frozenset({"gets", "strcpy", "sprintf"}),
     ),
     "go": Grammar(
         ts_name="go",
@@ -255,6 +346,16 @@ GRAMMARS: dict[str, Grammar] = {
         loop_types=frozenset({"for_statement"}),
         member_types=frozenset({"selector_expression"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "block",
+                "if_statement",
+                "expression_switch_statement",
+                "for_statement",
+            }
+        ),
+        lexical_model="block",
+        quality_panic_names=frozenset({"panic"}),
     ),
     "rust": Grammar(
         ts_name="rust",
@@ -272,6 +373,19 @@ GRAMMARS: dict[str, Grammar] = {
         loop_types=frozenset({"loop_expression", "while_expression", "for_expression"}),
         member_types=frozenset({"field_expression", "scoped_identifier"}),
         import_kind="use",
+        block_types=frozenset(
+            {
+                "block",
+                "if_expression",
+                "match_expression",
+                "loop_expression",
+                "while_expression",
+                "for_expression",
+            }
+        ),
+        lexical_model="block",
+        quality_unwrap_names=frozenset({"unwrap", "expect", "unwrap_err", "unwrap_or"}),
+        quality_panic_names=frozenset({"panic", "todo", "unimplemented"}),
     ),
     "java": Grammar(
         ts_name="java",
@@ -300,6 +414,19 @@ GRAMMARS: dict[str, Grammar] = {
         decorator_types=frozenset({"marker_annotation", "annotation"}),
         field_types=frozenset({"field_declaration"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "block",
+                "if_statement",
+                "switch_expression",
+                "for_statement",
+                "enhanced_for_statement",
+                "while_statement",
+                "try_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="block",
     ),
     "php": Grammar(
         ts_name="php",
@@ -333,6 +460,20 @@ GRAMMARS: dict[str, Grammar] = {
         member_types=frozenset({"member_access_expression", "scoped_property_access_expression"}),
         dollar_idents=True,
         import_kind="use",
+        block_types=frozenset(
+            {
+                "compound_statement",
+                "if_statement",
+                "switch_statement",
+                "for_statement",
+                "foreach_statement",
+                "while_statement",
+                "try_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="function",
+        quality_deprecated_calls=frozenset({"mysql_query", "split"}),
     ),
     "kotlin": Grammar(
         ts_name="kotlin",
@@ -355,6 +496,19 @@ GRAMMARS: dict[str, Grammar] = {
         member_types=frozenset({"navigation_expression", "navigation_suffix"}),
         decorator_types=frozenset({"annotation"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "control_structure_body",
+                "if_expression",
+                "when_expression",
+                "for_statement",
+                "while_statement",
+                "try_expression",
+                "catch_block",
+            }
+        ),
+        lexical_model="block",
+        quality_unwrap_names=frozenset({"!!"}),
     ),
     "swift": Grammar(
         ts_name="swift",
@@ -384,6 +538,21 @@ GRAMMARS: dict[str, Grammar] = {
         exception_types=frozenset({"do_statement", "catch_clause"}),
         member_types=frozenset({"navigation_expression", "navigation_suffix"}),
         import_kind="import",
+        block_types=frozenset(
+            {
+                "statements",
+                "if_statement",
+                "guard_statement",
+                "switch_statement",
+                "for_statement",
+                "while_statement",
+                "repeat_while_statement",
+                "do_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="block",
+        quality_unwrap_names=frozenset({"unsafelyUnwrapped"}),
     ),
     "csharp": Grammar(
         ts_name="csharp",
@@ -429,6 +598,19 @@ GRAMMARS: dict[str, Grammar] = {
         constructor_types=frozenset({"object_creation_expression"}),
         decorator_types=frozenset({"attribute"}),
         import_kind="using",
+        block_types=frozenset(
+            {
+                "block",
+                "if_statement",
+                "switch_statement",
+                "for_statement",
+                "foreach_statement",
+                "while_statement",
+                "try_statement",
+                "catch_clause",
+            }
+        ),
+        lexical_model="block",
     ),
     "shell": Grammar(
         ts_name="bash",
@@ -445,6 +627,17 @@ GRAMMARS: dict[str, Grammar] = {
         branch_types=frozenset({"if_statement", "case_statement"}),
         loop_types=frozenset({"for_statement", "while_statement", "c_style_for_statement"}),
         import_kind="source",
+        block_types=frozenset(
+            {
+                "compound_statement",
+                "if_statement",
+                "case_statement",
+                "for_statement",
+                "while_statement",
+                "function_definition",
+            }
+        ),
+        lexical_model="function",
     ),
     "html": Grammar(
         ts_name="html",

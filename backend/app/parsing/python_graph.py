@@ -10,6 +10,7 @@ from app.domain.language import ParserTier
 from app.domain.source import ParsedEntity, ParsedImport, ParsedParameter
 from app.parsing.model import (
     Binding,
+    CallArgument,
     CallKind,
     CallSite,
     ParserDiagnostics,
@@ -69,7 +70,10 @@ def parse_python_graph(file_path: Path, source: str) -> SyntaxGraph:
         errors=(),
         parser_backend="cpython_ast",
         parser_tier=ParserTier.FULL_AST,
-        diagnostics=ParserDiagnostics(),
+            diagnostics=ParserDiagnostics(
+                native_available=True,
+                status="native_parser_available",
+            ),
         scopes=tuple(builder.scopes),
         symbols=tuple(builder.symbols),
         nodes=tuple(builder.nodes),
@@ -93,6 +97,8 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         self.nodes: list[SemanticNode] = []
         self._scope_stack = list(self.scopes)
         self._class: str | None = None
+        self._conditional_depth = 0
+        self._def_index: dict[str, int] = {}
 
     @property
     def scope_id(self) -> str:
@@ -227,6 +233,76 @@ class _PythonGraphVisitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
+    def visit_If(self, node: ast.If) -> None:
+        self._conditional_depth += 1
+        self.generic_visit(node)
+        self._conditional_depth -= 1
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self._conditional_depth += 1
+        self.generic_visit(node)
+        self._conditional_depth -= 1
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self._conditional_depth += 1
+        self.generic_visit(node)
+        self._conditional_depth -= 1
+
+    visit_AsyncFor = visit_For  # noqa: N815
+
+    def visit_While(self, node: ast.While) -> None:
+        self._conditional_depth += 1
+        self.generic_visit(node)
+        self._conditional_depth -= 1
+
+    def visit_Try(self, node: ast.Try) -> None:
+        for stmt in node.body:
+            self.visit(stmt)
+        self._conditional_depth += 1
+        for handler in node.handlers:
+            self.visit(handler)
+        for item in node.orelse:
+            self.visit(item)
+        for item in node.finalbody:
+            self.visit(item)
+        self._conditional_depth -= 1
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        span = _span(self.source, node)
+        scope = Scope(
+            scope_id=f"{self.scope_id}/function:lambda",
+            kind=ScopeKind.FUNCTION,
+            name="lambda",
+            parent_id=self.scope_id,
+            span=span,
+        )
+        self._scope_stack.append(scope)
+        self.scopes.append(scope)
+        for arg in node.args.args:
+            self._bind(arg.arg, node.lineno, "", SymbolKind.PARAMETER, span, rhs_is_literal=True)
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+    def _visit_comprehension(self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> None:
+        span = _span(self.source, node)
+        self._block_seq = getattr(self, "_block_seq", 0) + 1
+        scope = Scope(
+            scope_id=f"{self.scope_id}/block:comp:{self._block_seq}",
+            kind=ScopeKind.BLOCK,
+            name=f"comp:{self._block_seq}",
+            parent_id=self.scope_id,
+            span=span,
+        )
+        self._scope_stack.append(scope)
+        self.scopes.append(scope)
+        self.generic_visit(node)
+        self._scope_stack.pop()
+
+    visit_ListComp = _visit_comprehension  # noqa: N815
+    visit_SetComp = _visit_comprehension  # noqa: N815
+    visit_DictComp = _visit_comprehension  # noqa: N815
+    visit_GeneratorExp = _visit_comprehension  # noqa: N815
+
     def visit_Assign(self, node: ast.Assign) -> None:
         meta = _expr_meta(node.value)
         rhs = _expr(node.value)
@@ -256,6 +332,18 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         )
         if isinstance(node.func, ast.Attribute):
             kind = CallKind.METHOD
+        arguments = tuple(
+            CallArgument(
+                index=i,
+                text=_expr(arg),
+                is_literal=_expr_meta(arg).is_literal,
+                idents=_expr_meta(arg).idents,
+                accesses=_expr_meta(arg).accesses,
+                callees=_expr_meta(arg).callees,
+                dynamic=_expr_meta(arg).dynamic,
+            )
+            for i, arg in enumerate(node.args)
+        )
         self.calls.append(
             CallSite(
                 name=name,
@@ -270,6 +358,8 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                 argument_is_literal=meta.is_literal,
                 argument_idents=meta.idents,
                 argument_accesses=meta.accesses + meta.callees,
+                arguments=arguments,
+                callee_identity=qn_if_method(self._class, name),
             )
         )
         self._node(SemanticKind.CALL, qualified, span, "Call")
@@ -368,6 +458,9 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         rhs_is_literal: bool = False,
     ) -> None:
         meta = meta or _Meta(is_literal=rhs_is_literal)
+        symbol_id = Symbol.make_id(self.scope_id, name)
+        nxt = self._def_index.get(symbol_id, 0) + 1
+        self._def_index[symbol_id] = nxt
         binding = Binding(
             name=name,
             line=line,
@@ -380,6 +473,10 @@ class _PythonGraphVisitor(ast.NodeVisitor):
             rhs_callees=meta.callees,
             rhs_accesses=meta.accesses,
             rhs_idents=meta.idents,
+            definition_index=nxt,
+            is_declaration=kind is SymbolKind.PARAMETER or nxt == 1,
+            is_conditional=self._conditional_depth > 0 and kind is not SymbolKind.PARAMETER,
+            declarator="param" if kind is SymbolKind.PARAMETER else "assign",
         )
         self.bindings.append(binding)
         self.symbols.append(
@@ -420,6 +517,10 @@ class _Meta:
         self.idents = idents
         self.dynamic = dynamic
         self.is_literal = is_literal
+
+
+def qn_if_method(class_name: str | None, name: str) -> str:
+    return f"{class_name}.{name}" if class_name else name
 
 
 def _expr_meta(node: ast.AST | None) -> _Meta:

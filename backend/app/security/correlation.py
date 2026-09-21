@@ -31,7 +31,11 @@ class ObservationCluster:
 
     @property
     def independent_rules(self) -> int:
-        return len(self.rule_ids)
+        """Distinct (sink node, taint path) pairs, not merely distinct rule ids."""
+        keys: set[tuple[str, str]] = set()
+        for obs in self.observations:
+            keys.add((obs.node_id or f"{obs.file_path}:{obs.line}", obs.taint_path or obs.rule_id))
+        return len(keys)
 
     @property
     def corroborated(self) -> bool:

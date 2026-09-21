@@ -15,6 +15,7 @@ from pathlib import Path
 from app.adapters.languages.base import LanguageAdapter
 from app.analysis.base import AnalyzerRule
 from app.analysis.finding import Finding
+from app.analysis.quality import analyzer_error_finding
 from app.domain.language import FULL_ANALYSIS_CAPS, LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
 from app.parsing.engine import parse_source, parser_backend_for, parser_tier_for
@@ -120,7 +121,11 @@ class ProfileLanguageAdapter(LanguageAdapter):
                 else:
                     findings.extend(rule.check_file(file_path, source))
             except Exception as exc:
-                logger.warning("Rule %s failed on %s: %s", rule.RULE_ID, file_path, exc)
+                findings.append(
+                    analyzer_error_finding(
+                        file_path, self.language_id, graph.parser_backend, rule.RULE_ID, exc
+                    )
+                )
         for finding in findings:
             if not finding.language:
                 finding.language = self.language_id

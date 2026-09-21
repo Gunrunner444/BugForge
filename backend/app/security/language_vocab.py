@@ -29,7 +29,13 @@ def _sink(
     alternatives: tuple[str, ...] = (),
     condition: str = "attacker-controlled data reaches this API",
     notes: str = "",
+    argument_index: int = 0,
+    argument_indexes: tuple[int, ...] = (),
+    required_context: str = "",
+    sanitizer_kinds: tuple[str, ...] = (),
 ) -> SinkDefinition:
+    if vuln is SQL and not argument_indexes:
+        argument_indexes = (0,)
     return SinkDefinition(
         sink_id=sink_id,
         vulnerability_class=vuln,
@@ -39,6 +45,10 @@ def _sink(
         dangerous_condition=condition,
         notes=notes,
         qualified_substrings=tuple(names),
+        argument_index=argument_index,
+        argument_indexes=argument_indexes,
+        required_context=required_context,
+        sanitizer_kinds=sanitizer_kinds,
     )
 
 
@@ -131,10 +141,10 @@ PYTHON = LanguageSecurityVocab(
     ),
     sanitizers=(
         _san("py.html", "html.escape", "escape", kind="html_encode", effective=True),
-        _san("py.sql", "execute", kind="sql_param"),
-        _san("py.path", "os.path.realpath", "Path.resolve", kind="path_canon"),
+        _san("py.sql", "execute", kind="sql_parameterize"),
+        _san("py.path", "os.path.realpath", "Path.resolve", kind="path_canonicalize"),
         _san("py.shell", "shlex.quote", kind="shell_escape", effective=True),
-        _san("py.url", "url_has_allowed_host_and_scheme", kind="url_allow", effective=True),
+        _san("py.url", "url_has_allowed_host_and_scheme", kind="url_allowlist", effective=True),
     ),
     crypto_names=_WEAK_CRYPTO,
     extra_sources_by_framework={
@@ -177,7 +187,7 @@ JAVASCRIPT = LanguageSecurityVocab(
             "raw",
             alternatives=("bound parameters",),
         ),
-        _sink("js.cmd", CMD, "exec", "execSync", "spawn", "spawnSync", "child_process.exec"),
+        _sink("js.cmd", CMD, "exec", "execSync", "spawn", "spawnSync", "child_process.exec", "execFile", argument_indexes=(0, 1)),
         _sink(
             "js.path", PATH, "readFile", "readFileSync", "writeFile", "createReadStream", "sendFile"
         ),
@@ -205,8 +215,8 @@ JAVASCRIPT = LanguageSecurityVocab(
             kind="html_encode",
             effective=True,
         ),
-        _san("js.path", "path.normalize", "path.resolve", kind="path_canon"),
-        _san("js.sql", "mysql.format", kind="sql_param"),
+        _san("js.path", "path.normalize", "path.resolve", "path.resolve", kind="path_canonicalize"),
+        _san("js.sql", "mysql.format", kind="sql_parameterize"),
     ),
     crypto_names=_WEAK_CRYPTO,
     extra_sources_by_framework={
@@ -239,7 +249,15 @@ RUBY = LanguageSecurityVocab(
         _sink("rb.ssrf", SSRF, "Net::HTTP", "Faraday", "HTTParty", "RestClient"),
         _sink("rb.xss", XSS, "html_safe", "raw"),
         _sink("rb.deser", DESER, "Marshal.load", "YAML.load", "JSON.load"),
-        _sink("rb.eval", EVAL, "eval", "instance_eval", "class_eval", "module_eval", "send"),
+        _sink(
+            "rb.eval",
+            EVAL,
+            "eval",
+            "instance_eval",
+            "class_eval",
+            "module_eval",
+            notes="Kernel#send is ordinary dynamic dispatch and is not treated as code execution.",
+        ),
         _sink("rb.redir", REDIR, "redirect_to", "redirect_back"),
     ),
     sanitizers=(_san("rb.html", "ERB::Util.html_escape", "h", kind="html_encode", effective=True),),
@@ -258,7 +276,14 @@ C = LanguageSecurityVocab(
         _src("c.file", "fgets", "scanf", "gets", kind="file"),
     ),
     sinks=(
-        _sink("c.sql", SQL, "sqlite3_exec", "PQexec", "mysql_query"),
+        _sink(
+            "c.sql",
+            SQL,
+            "sqlite3_exec",
+            "PQexec",
+            "mysql_query",
+            argument_indexes=(0, 1),
+        ),
         _sink("c.cmd", CMD, "system", "popen", "execl", "execv", "execvp", "execlp"),
         _sink("c.path", PATH, "open", "fopen", "openat"),
     ),
@@ -287,7 +312,7 @@ GO = LanguageSecurityVocab(
         _sink("go.cmd", CMD, "exec.Command", "StartProcess"),
         _sink("go.path", PATH, "os.Open", "os.ReadFile", "ioutil.ReadFile", "http.ServeFile"),
         _sink("go.ssrf", SSRF, "http.Get", "http.Post", "http.NewRequest", "client.Do"),
-        _sink("go.xss", XSS, "template.HTML", "Write"),
+        _sink("go.xss", XSS, "template.HTML"),
         _sink(
             "go.json",
             PDESER,
@@ -322,7 +347,13 @@ RUST = LanguageSecurityVocab(
         _sink("rs.cmd", CMD, "Command::new", "std::process::Command"),
         _sink("rs.path", PATH, "File::open", "fs::read", "fs::write"),
         _sink("rs.ssrf", SSRF, "reqwest", "ureq"),
-        _sink("rs.xss", XSS, "Html"),
+        _sink(
+            "rs.xss",
+            XSS,
+            "Html::from",
+            "Html::new",
+            notes="Generic Html type names are not XSS sinks without HTML construction.",
+        ),
         _sink("rs.json", PDESER, "serde_json::from", certainty=SinkCertainty.INDICATOR),
         _sink("rs.deser", DESER, "bincode::deserialize"),
         _sink("rs.redir", REDIR, "Redirect"),
@@ -343,7 +374,7 @@ JAVA = LanguageSecurityVocab(
         _sink("java.cmd", CMD, "exec", "ProcessBuilder"),
         _sink("java.path", PATH, "File", "Files.read", "FileInputStream", "Paths.get"),
         _sink("java.ssrf", SSRF, "HttpURLConnection", "HttpClient", "URL", "RestTemplate"),
-        _sink("java.xss", XSS, "getWriter", "print"),
+        _sink("java.xss", XSS, "getWriter", required_context="html_output"),
         _sink("java.deser", DESER, "ObjectInputStream", "readObject", "XMLDecoder", "XStream"),
         _sink("java.eval", EVAL, "ScriptEngine", "eval"),
         _sink("java.redir", REDIR, "sendRedirect", "RedirectView"),
@@ -356,18 +387,34 @@ PHP = LanguageSecurityVocab(
     language_id="php",
     sources=(_src("php.http", "_GET", "_POST", "_REQUEST", "_COOKIE", "_SERVER", "_FILES"),),
     sinks=(
-        _sink("php.sql", SQL, "mysqli_query", "query", "exec", "mysql_query", "pg_query"),
+        _sink(
+            "php.sql",
+            SQL,
+            "mysqli_query",
+            "query",
+            "exec",
+            "mysql_query",
+            "pg_query",
+            argument_indexes=(0, 1),
+        ),
         _sink("php.cmd", CMD, "system", "exec", "passthru", "shell_exec", "popen", "backtick"),
         _sink("php.path", PATH, "fopen", "file_get_contents", "include", "require"),
         _sink("php.ssrf", SSRF, "file_get_contents", "curl_exec"),
-        _sink("php.xss", XSS, "echo", "print"),
+        _sink(
+            "php.xss",
+            XSS,
+            "echo",
+            "print",
+            required_context="html_output",
+            notes="echo/print are XSS sinks only in HTML output context.",
+        ),
         _sink("php.deser", DESER, "unserialize"),
         _sink("php.eval", EVAL, "eval", "assert", "create_function"),
         _sink("php.redir", REDIR, "header"),
     ),
     sanitizers=(
         _san("php.html", "htmlspecialchars", "htmlentities", kind="html_encode", effective=True),
-        _san("php.sql", "mysqli_real_escape_string", "PDO", kind="sql_param"),
+        _san("php.sql", "mysqli_real_escape_string", "PDO", kind="sql_parameterize"),
     ),
     crypto_names=_WEAK_CRYPTO + ("md5", "sha1"),
 )
@@ -421,10 +468,10 @@ CSHARP = LanguageSecurityVocab(
     ),
     sinks=(
         _sink("cs.sql", SQL, "ExecuteReader", "ExecuteNonQuery", "SqlCommand", "FromSqlRaw"),
-        _sink("cs.cmd", CMD, "Process.Start", "ProcessStartInfo"),
+        _sink("cs.cmd", CMD, "Process.Start", "ProcessStartInfo", argument_indexes=(0, 1)),
         _sink("cs.path", PATH, "File.Open", "File.ReadAllText", "File.WriteAllText", "FileStream"),
         _sink("cs.ssrf", SSRF, "HttpClient", "WebRequest", "WebClient"),
-        _sink("cs.xss", XSS, "Html.Raw", "Write"),
+        _sink("cs.xss", XSS, "Html.Raw"),
         _sink("cs.deser", DESER, "BinaryFormatter", "SoapFormatter"),
         _sink(
             "cs.json", PDESER, "JsonConvert.DeserializeObject", certainty=SinkCertainty.INDICATOR
@@ -445,9 +492,10 @@ SHELL = LanguageSecurityVocab(
         _src("sh.env", "ENV", kind="env"),
     ),
     sinks=(
-        _sink("sh.cmd", CMD, "eval", "bash", "sh", "system"),
+        _sink("sh.cmd", CMD, "eval", "bash", "sh"),
         _sink("sh.eval", EVAL, "eval"),
-        _sink("sh.path", PATH, "cat", "rm", "cp", "mv", "source", "."),
+        _sink("sh.path", PATH, "cat", "rm", "cp", "mv"),
+        _sink("sh.source", CMD, "source", "."),
         _sink("sh.ssrf", SSRF, "curl", "wget"),
     ),
     sanitizers=(_san("sh.quote", "printf", kind="shell_escape"),),

@@ -121,26 +121,28 @@ it is measurably better for existing Python quality rules. It still fills the
 same `SyntaxGraph` used by security analysis.
 
 **JavaScript, TypeScript, Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, Swift,
-C#, and Shell** parse with Tree-sitter into `SyntaxGraph`. JavaScript/TypeScript
-quality rules (`==`, `var`, empty `catch`, `with`) operate on syntax events, not
-regex over stripped source.
+C#, and Shell** parse with Tree-sitter into `SyntaxGraph`. Every full-analysis
+language has a syntax-aware code-quality catalog. JavaScript/TypeScript rules
+(`==`, `var`, empty `catch`, `with`) operate on syntax events and honor strict
+mode / comparison operands. Taint is flow-sensitive and not path-sensitive.
 
 **HTML, CSS/SCSS, SQL** are specialized: real syntax parse plus format-specific
 security patterns. They do not claim application-language taint parity.
 
 The regex `parse_with_profile` scanner remains as an explicitly labeled
-`PROFILE_FALLBACK` if Tree-sitter cannot load a grammar.
+`PROFILE_FALLBACK` if Tree-sitter cannot load a grammar. Per-file graphs report
+the parser that actually ran. Fallback never advertises AST/SCOPE/DATA_FLOW.
 
-**Ruby, C, C++, Go, Rust, Java, PHP, Kotlin, and Swift** use
-`ProfileLanguageAdapter` without quality static analysis. Security analysis
-runs over the profile-driven graph. Auxiliary formats (Markdown, YAML, JSON,
-…) remain **detection only**.
+**R, Scala, Dart, Lua, Elixir** plus config/docs formats remain **detection
+only**. Grammars may exist in the language pack without meeting BugForge's
+analysis contract.
 
 The generic parser is string-aware: comments and quoted text are not calls,
 `${}` interpolations are scanned as code, `?.` chains are qualified names,
 and `new Type(` constructors keep a `new ` prefix so sink patterns such as
 `new Function` still match. It is not a full language AST. Known limits:
-no macro expansion, limited nested generics, and intra-procedural taint only.
+no macro expansion, limited nested generics, and same-file unique-callee
+inter-procedural taint only.
 
 The core asks the registry *what language is this?*, *can it parse?*, *what
 entities/imports exist?*, and *does it support security analysis?* without

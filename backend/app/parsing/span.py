@@ -26,6 +26,51 @@ class SourceSpan:
         return f"{self.start_byte}:{self.end_byte}:{self.start_line}:{self.start_column}"
 
 
+@dataclass(frozen=True)
+class SourceMap:
+    """Map coordinates from parser input back onto original repository source.
+
+    Some parsers require a synthetic prefix (for example PHP ``<?php ``). The
+    prefix may exist only in parser input. Reported spans always refer to the
+    original file.
+    """
+
+    original: str
+    prefix: str = ""
+
+    @property
+    def prefix_bytes(self) -> int:
+        if not self.prefix:
+            return 0
+        return len(self.prefix.encode("utf-8"))
+
+    def remap(self, span: SourceSpan) -> SourceSpan:
+        shift = self.prefix_bytes
+        if shift <= 0:
+            return span
+        prefix_cols = len(self.prefix)
+        start_byte = max(0, span.start_byte - shift)
+        end_byte = max(start_byte, span.end_byte - shift)
+        start_column = span.start_column
+        end_column = span.end_column
+        if span.start_line == 1:
+            start_column = max(1, span.start_column - prefix_cols)
+            if span.start_byte < shift:
+                start_column = 1
+        if span.end_line == 1:
+            end_column = max(1, span.end_column - prefix_cols)
+            if span.end_byte <= shift:
+                end_column = 1
+        return SourceSpan(
+            start_byte=start_byte,
+            end_byte=end_byte,
+            start_line=span.start_line,
+            start_column=start_column,
+            end_line=span.end_line,
+            end_column=end_column,
+        )
+
+
 def span_from_ts_node(node: object) -> SourceSpan:
     """Build a span from a tree-sitter node (duck-typed)."""
     start_point = getattr(node, "start_point")

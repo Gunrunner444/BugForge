@@ -183,7 +183,11 @@ function OverviewTab({ analysis }: { analysis: Analysis }) {
                         </span>
                       </td>
                       <td className="py-2 pr-4 font-mono text-xs text-slate-600">{row.parser_backend}</td>
-                      <td className="py-2 text-xs text-slate-500">{row.capabilities.join(", ")}</td>
+                      <td className="py-2 text-xs text-slate-500">
+                        {row.native_available === false ? "native unavailable · " : ""}
+                        {row.parser_status === "profile_fallback_used" ? "fallback · " : ""}
+                        {row.capabilities.join(", ")}
+                      </td>
                     </tr>
                   ))}
               </tbody>
@@ -265,7 +269,7 @@ function FilesTab({ files }: { files: RepositoryFile[] }) {
                 ) : (
                   "—"
                 )}
-                {f.has_errors ? <span className="ml-2 text-amber-700">errors</span> : null}
+                {f.has_errors ? <span className="ml-2 text-amber-700">partial/errors</span> : null}
               </td>
               <td className="py-2 pr-4 text-right text-slate-500">{f.line_count || "—"}</td>
             </tr>

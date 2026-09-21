@@ -14,6 +14,7 @@ from app.security.definitions import (
 )
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import (
+    applicable_sanitizer_kinds,
     argument_is_constant,
     call_matches_sink,
     call_taint_reason,
@@ -78,22 +79,37 @@ class TaintFlowRule(SecurityRule):
             or ""
         )
         observations: list[SecurityObservation] = []
-        seen: set[tuple[str, int, str]] = set()
+        seen: set[tuple[str, int, str, str]] = set()
         for call in graph.calls:
             matched = next((sink for sink in sinks if call_matches_sink(call, sink)), None)
             if matched is None:
                 continue
-            if argument_is_constant(call):
+            if matched.required_context and matched.required_context not in graph.semantic_context:
+                if matched.required_context != graph.file_context:
+                    continue
+            indexes = matched.argument_indexes
+            if argument_is_constant(call, argument_indexes=indexes or None):
                 continue
-            if (
-                self.vulnerability_class is VulnerabilityClass.SQL_INJECTION
-                and looks_parameterized_sql(call.argument_text)
+            if self.vulnerability_class is VulnerabilityClass.SQL_INJECTION and looks_parameterized_sql(
+                call
             ):
                 continue
-            taint = call_taint_reason(call, source_pats, tainted)
+            taint = call_taint_reason(
+                call, source_pats, tainted, argument_indexes=indexes or None
+            )
             if not taint and not call.dynamic:
                 continue
-            sanitizer = sanitizer_intervened(call, vocab.sanitizers)
+            if indexes and call.arguments:
+                # Taint must touch a dangerous argument, not an unrelated slot.
+                if not taint:
+                    continue
+            kinds = applicable_sanitizer_kinds(matched)
+            sanitizer = sanitizer_intervened(
+                call,
+                vocab.sanitizers,
+                allowed_kinds=kinds,
+                argument_indexes=indexes or None,
+            )
             if sanitizer is not None and sanitizer.effective:
                 continue
             confidence = "high" if taint else "medium"
@@ -104,7 +120,7 @@ class TaintFlowRule(SecurityRule):
                 path_kind = _path_kind(call, taint)
             else:
                 path_kind = None
-            key = (graph.file_path, call.line, call.qualified)
+            key = (graph.file_path, call.line, call.qualified, str(indexes))
             if key in seen:
                 continue
             seen.add(key)
@@ -119,14 +135,17 @@ class TaintFlowRule(SecurityRule):
                     framework=framework_name or graph.framework,
                     path_kind=path_kind,
                     sanitizer=sanitizer.sanitizer_id if sanitizer else "",
+                    argument_index=indexes[0] if indexes else matched.argument_index,
                 )
             )
         return observations
 
 
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:
-    combined = f"{call.argument_text} {taint or ''}"
-    if ".." in combined:
+    text = call.argument_text
+    if call.arguments:
+        text = " ".join(a.text for a in call.arguments)
+    if ".." in text:
         return PathIssueKind.UNSAFE_PATH_CONSTRUCTION
     if taint:
         return PathIssueKind.POSSIBLE_PATH_TRAVERSAL
@@ -144,6 +163,7 @@ def _observation(
     framework: str,
     path_kind: PathIssueKind | None,
     sanitizer: str,
+    argument_index: int = 0,
 ) -> SecurityObservation:
     line = call.line
     snippet = graph.lines[line - 1].strip() if 0 < line <= len(graph.lines) else call.argument_text
@@ -171,6 +191,10 @@ def _observation(
         "file_context": graph.file_context,
         "sanitizer": sanitizer,
         "taint_path": taint,
+        "argument_index": str(argument_index),
+        "taint_source": taint.split(":", 1)[-1] if taint else "",
+        "taint_precision": "flow-sensitive",
+        "path_sensitive": "false",
     }
     if span is not None:
         metadata.update(
@@ -208,13 +232,18 @@ def _observation(
         taint_path=taint,
         possible_false_positives=rule.documentation.false_positives,
         limitations=limitations,
+        argument_index=argument_index,
+        parser_tier=str(graph.parser_tier),
+        scope_id=call.scope_id,
+        sink_id=sink.sink_id,
+        source_id=taint,
     )
 
 
 SQL_DOC = RuleDocumentation(
     detects="User-controlled data or dynamically constructed strings reaching a query API.",
     evidence="Call site, taint reason, surrounding source line, parser backend.",
-    limitations="Intra-procedural (plus limited same-file calls); does not prove the query is exploitable.",
+    limitations="Intra-procedural plus unique same-file calls. Flow-sensitive, not path-sensitive. Does not prove the query is exploitable.",
     false_positives="ORMs, query builders, and sanitized helpers can still match.",
 )
 CMD_DOC = RuleDocumentation(

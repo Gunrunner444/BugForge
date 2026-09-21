@@ -48,6 +48,8 @@ class SecurityAnalyzerInfo(BaseModel):
     extensions: list[str]
     parser_tier: str = "detection_only"
     parser_backend: str = "none"
+    native_available: bool = False
+    parser_status: str = "native_parser_unavailable"
 
 
 class SecurityStatusResponse(BaseModel):

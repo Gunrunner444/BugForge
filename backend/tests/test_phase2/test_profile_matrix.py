@@ -260,7 +260,7 @@ CASES: list[MatrixCase] = [
         "php",
         "m.php",
         "xss",
-        "$q = $_GET['q'];\necho $q;\n",
+        "$q = $_GET['q'];\necho '<div>'.$q.'</div>';\n",
         "echo 'ok';\n",
         VulnerabilityClass.XSS,
     ),

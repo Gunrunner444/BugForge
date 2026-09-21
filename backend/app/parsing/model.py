@@ -66,6 +66,15 @@ class ScopeKind(StrEnum):
     BLOCK = "block"
 
 
+class ParserStatus(StrEnum):
+    """Runtime parser outcome. Never confuse this with installed capability."""
+
+    NATIVE_AVAILABLE = "native_parser_available"
+    NATIVE_UNAVAILABLE = "native_parser_unavailable"
+    PROFILE_FALLBACK = "profile_fallback_used"
+    PARSER_FAILURE = "parser_failure"
+
+
 @dataclass(frozen=True)
 class ParserDiagnostics:
     has_errors: bool = False
@@ -74,6 +83,9 @@ class ParserDiagnostics:
     recoverable: bool = True
     truncated: bool = False
     message: str = ""
+    native_available: bool = False
+    status: str = ParserStatus.NATIVE_UNAVAILABLE
+    fallback_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,7 @@ class Scope:
     name: str
     parent_id: str | None = None
     span: SourceSpan | None = None
+    conditional: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,19 @@ class SemanticNode:
 
 
 @dataclass(frozen=True)
+class CallArgument:
+    """One actual argument at a call site, in source order."""
+
+    index: int
+    text: str
+    is_literal: bool = False
+    idents: tuple[str, ...] = ()
+    accesses: tuple[str, ...] = ()
+    callees: tuple[str, ...] = ()
+    dynamic: bool = False
+
+
+@dataclass(frozen=True)
 class CallSite:
     """One function/method call (or security-relevant member write) in source."""
 
@@ -128,6 +154,16 @@ class CallSite:
     argument_is_literal: bool = False
     argument_idents: tuple[str, ...] = ()
     argument_accesses: tuple[str, ...] = ()
+    arguments: tuple[CallArgument, ...] = ()
+    callee_identity: str = ""
+
+    def argument_at(self, index: int) -> CallArgument | None:
+        for argument in self.arguments:
+            if argument.index == index:
+                return argument
+        if 0 <= index < len(self.arguments):
+            return self.arguments[index]
+        return None
 
 
 @dataclass(frozen=True)
@@ -145,10 +181,18 @@ class Binding:
     rhs_callees: tuple[str, ...] = ()
     rhs_accesses: tuple[str, ...] = ()
     rhs_idents: tuple[str, ...] = ()
+    definition_index: int = 0
+    is_declaration: bool = True
+    is_conditional: bool = False
+    declarator: str = ""
 
     @property
     def symbol_id(self) -> str:
         return Symbol.make_id(self.scope_id, self.name)
+
+    @property
+    def version_id(self) -> str:
+        return f"{self.symbol_id}#{self.definition_index}"
 
 
 @dataclass(frozen=True)
@@ -195,6 +239,7 @@ class SyntaxGraph:
     events: tuple[SyntaxEvent, ...] = ()
     framework: str = ""
     file_context: str = ""  # library | test | generated | handler | cli | unknown
+    semantic_context: tuple[str, ...] = ()
 
     def to_parse_result(self) -> LanguageParseResult:
         diag = self.diagnostics

@@ -31,6 +31,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 8 | Advanced security research + verification intelligence | ✅ Implemented (orchestrator, identities, replay, memory; AI remains advisory) |
 | Phase 9 | Security research workbench + end-to-end validation | ✅ Implemented (hardening + researcher workflow; live remains human-controlled) |
 | Phase 10 | Native polyglot analysis parity (Tree-sitter + scope-aware taint) | ✅ Implemented |
+| Phase 11 | Semantic dataflow & polyglot quality parity | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -42,10 +43,12 @@ BugForge is organized around **adapters registered in a plugin catalog**. Core
 orchestration looks up languages, AI backends, and future security tools by id
 instead of hard-coded conditionals. Python keeps its CPython AST quality
 analysis. Other programming languages parse through Tree-sitter into the same
-`SyntaxGraph`. JavaScript/TypeScript quality rules are syntax-aware and live
-in the **code quality** catalog, separate from **security** observations.
-C# and Shell are full analysis languages. HTML, CSS/SCSS, and SQL have
-specialized analysis. Remaining auxiliaries stay detection-only. See
+`SyntaxGraph`. Taint is flow-sensitive (not path-sensitive) and argument-aware.
+Every full-analysis language has a syntax-aware **code quality** catalog,
+separate from **security** observations. Parser fallback is labeled
+`PROFILE_FALLBACK` and never advertised as AST. C# and Shell are full analysis
+languages. HTML, CSS/SCSS, and SQL have specialized analysis. R, Scala, Dart,
+Lua, and Elixir remain detection-only. See
 [docs/polyglot-analysis.md](docs/polyglot-analysis.md) and
 [docs/language-capability-matrix.md](docs/language-capability-matrix.md).
 
@@ -237,7 +240,7 @@ Set in `.env` or environment variables:
 | `AI_MAX_CONTEXT_TOKENS` | `8192` | Practical context budget for local models |
 | `AI_TEMPERATURE` | `0.1` | Sampling temperature |
 | `AI_TIMEOUT_SECONDS` | `60` | Request timeout |
-| `LANGUAGE_ANALYZERS` | *(empty)* | Comma-separated quality-analyzer ids. Empty = `STATIC_ANALYSIS` adapters (Python) |
+| `LANGUAGE_ANALYZERS` | *(empty)* | Comma-separated quality-analyzer language ids (`STATIC_ANALYSIS`). Empty = every adapter that implements code-quality analysis (Python and all full-analysis languages). Detection-only languages cannot be listed. |
 
 The **mock provider** is always safe for development — no API key required.
 

@@ -14,9 +14,11 @@ from app.domain.source import ParsedEntity, ParsedImport, ParsedParameter
 from app.parsing.grammar import Grammar, grammar_for
 from app.parsing.model import (
     Binding,
+    CallArgument,
     CallKind,
     CallSite,
     ParserDiagnostics,
+    ParserStatus,
     ReturnSite,
     Scope,
     ScopeKind,
@@ -27,7 +29,7 @@ from app.parsing.model import (
     SyntaxEvent,
     SyntaxGraph,
 )
-from app.parsing.span import SourceSpan, span_from_ts_node
+from app.parsing.span import SourceMap, SourceSpan, span_from_ts_node
 from app.parsing.treesitter import (
     MAX_NESTING,
     MAX_WALK_NODES,
@@ -85,9 +87,11 @@ def parse_treesitter_graph(language_id: str, file_path: Path, source: str) -> Sy
     if grammar is None:
         return None
     ts_name = grammar.ts_name
-    parse_input = source
+    prefix = ""
     if language_id == "php" and "<?" not in source and _looks_like_php_code(source):
-        parse_input = "<?php " + source
+        prefix = "<?php "
+    parse_input = prefix + source
+    source_map = SourceMap(original=source, prefix=prefix)
     parsed = parse_treesitter(language_id, parse_input, ts_language=ts_name)
     if parsed is None:
         return None
@@ -97,10 +101,12 @@ def parse_treesitter_graph(language_id: str, file_path: Path, source: str) -> Sy
     builder = _GraphBuilder(
         language_id=language_id,
         file_path=str(file_path),
-        source=parse_input,
+        source=source,
+        parser_source=parse_input,
         source_bytes=parsed.source_bytes,
         grammar=grammar,
         truncated=parsed.truncated,
+        source_map=source_map,
     )
     builder.walk(root)
     if bool(getattr(root, "has_error", False)):
@@ -108,12 +114,13 @@ def parse_treesitter_graph(language_id: str, file_path: Path, source: str) -> Sy
         if extra:
             seen = {(s.start_byte, s.end_byte) for s in builder.error_spans}
             for span in extra:
-                if (span.start_byte, span.end_byte) not in seen:
-                    builder.error_spans.append(span)
+                mapped = source_map.remap(span)
+                if (mapped.start_byte, mapped.end_byte) not in seen:
+                    builder.error_spans.append(mapped)
         if not builder.errors:
             builder.errors.append("syntax error")
         if not builder.error_spans:
-            root_span = _safe_span(root)
+            root_span = builder._span(root)
             if root_span is not None:
                 builder.error_spans.append(root_span)
     return builder.build()
@@ -126,17 +133,25 @@ class _GraphBuilder:
         language_id: str,
         file_path: str,
         source: str,
+        parser_source: str,
         source_bytes: bytes,
         grammar: Grammar,
         truncated: bool,
+        source_map: SourceMap,
     ) -> None:
         self.language_id = language_id
         self.file_path = file_path
         self.source = source
+        self.parser_source = parser_source
         self.source_bytes = source_bytes
         self.grammar = grammar
         self.truncated = truncated
+        self.source_map = source_map
         self.lines = tuple(source.splitlines() or [""])
+        self._def_index: dict[str, int] = {}
+        self._declared: dict[str, str] = {}
+        self._block_seq = 0
+        self.strict_mode = _detect_strict_mode(language_id, file_path, source)
         self.imports: list[ParsedImport] = []
         self.entities: list[ParsedEntity] = []
         self.calls: list[CallSite] = []
@@ -161,6 +176,75 @@ class _GraphBuilder:
     def current_scope(self) -> Scope:
         return self._scope_stack[-1]
 
+    def _span(self, node: object) -> SourceSpan | None:
+        raw = _safe_span(node)
+        if raw is None:
+            return None
+        return self.source_map.remap(raw)
+
+    def _should_enter_block(self, node: object, ntype: str) -> bool:
+        grammar = self.grammar
+        if ntype in grammar.function_types or ntype in grammar.class_types:
+            return False
+        if ntype in grammar.block_types:
+            parent_type = str(getattr(getattr(node, "parent", None), "type", ""))
+            if parent_type in grammar.function_types:
+                return False
+            return True
+        return False
+
+    def _enter_block(self, node: object, ntype: str) -> bool:
+        grammar = self.grammar
+        parent_type = str(getattr(getattr(node, "parent", None), "type", ""))
+        conditional = ntype in grammar.branch_types or ntype in grammar.loop_types
+        conditional = conditional or ntype in grammar.exception_types
+        conditional = conditional or parent_type in (
+            grammar.branch_types | grammar.loop_types | grammar.exception_types
+        )
+        self._block_seq += 1
+        name = f"{ntype}:{self._block_seq}"
+        scope = Scope(
+            scope_id=f"{self.current_scope.scope_id}/block:{name}",
+            kind=ScopeKind.BLOCK,
+            name=name,
+            parent_id=self.current_scope.scope_id,
+            span=self._span(node),
+            conditional=conditional or self.current_scope.conditional,
+        )
+        self._scope_stack.append(scope)
+        self.scopes.append(scope)
+        return True
+
+    def _nearest_bind_scope(self, *, declarator: str, assignment: bool) -> Scope:
+        model = self.grammar.lexical_model
+        if assignment:
+            return self.current_scope
+        if model == "function":
+            return self._nearest_function_scope()
+        if model == "mixed":
+            if declarator in self.grammar.function_scoped_keywords:
+                return self._nearest_function_scope()
+            return self.current_scope
+        return self.current_scope
+
+    def _nearest_function_scope(self) -> Scope:
+        for scope in reversed(self._scope_stack):
+            if scope.kind in {ScopeKind.FUNCTION, ScopeKind.METHOD, ScopeKind.MODULE}:
+                return scope
+        return self._scope_stack[0]
+
+    def _lookup_declared_scope(self, name: str) -> Scope:
+        for scope in reversed(self._scope_stack):
+            key = Symbol.make_id(scope.scope_id, name)
+            if key in self._declared:
+                return scope
+        return self.current_scope
+
+    def _next_def_index(self, symbol_id: str) -> int:
+        nxt = self._def_index.get(symbol_id, 0) + 1
+        self._def_index[symbol_id] = nxt
+        return nxt
+
     def build(self) -> SyntaxGraph:
         has_errors = bool(self.error_spans) or self.truncated
         if self.truncated and "truncated" not in " ".join(self.errors):
@@ -172,6 +256,14 @@ class _GraphBuilder:
         ):
             self.errors.append("source produced no recoverable syntax nodes")
             has_errors = True
+        contexts: list[str] = []
+        if self.file_path:
+            contexts.append(_file_context(self.file_path))
+        if _looks_like_html(self.source):
+            contexts.append("html_output")
+        status = ParserStatus.NATIVE_AVAILABLE
+        if has_errors and not (self.entities or self.calls or self.bindings):
+            status = ParserStatus.PARSER_FAILURE
         return SyntaxGraph(
             language=self.language_id,
             file_path=self.file_path,
@@ -191,6 +283,8 @@ class _GraphBuilder:
                 recoverable=True,
                 truncated=self.truncated,
                 message="; ".join(self.errors[:5]),
+                native_available=True,
+                status=status,
             ),
             scopes=tuple(self.scopes),
             symbols=tuple(self.symbols),
@@ -198,6 +292,7 @@ class _GraphBuilder:
             returns=tuple(self.returns),
             events=tuple(self.events),
             file_context=_file_context(self.file_path),
+            semantic_context=tuple(dict.fromkeys(contexts)),
         )
 
     def walk(self, node: object, *, depth: int = 0, in_data: bool = False) -> None:
@@ -209,7 +304,8 @@ class _GraphBuilder:
         is_error = ntype == "ERROR" or bool(getattr(node, "is_missing", False))
         if is_error:
             try:
-                self.error_spans.append(span_from_ts_node(node))
+                span = span_from_ts_node(node)
+                self.error_spans.append(self.source_map.remap(span))
             except Exception:
                 pass
             if not in_data:
@@ -236,6 +332,8 @@ class _GraphBuilder:
             pushed = self._enter_function(node, ntype)
         elif not in_data and ntype in grammar.class_types:
             pushed = self._enter_class(node, ntype)
+        elif not in_data and self._should_enter_block(node, ntype):
+            pushed = self._enter_block(node, ntype)
 
         for child in getattr(node, "children", ()) or ():
             self.walk(child, depth=depth + 1, in_data=child_in_data)
@@ -247,7 +345,7 @@ class _GraphBuilder:
 
     def _visit_code_node(self, node: object, ntype: str) -> None:
         grammar = self.grammar
-        span = _safe_span(node)
+        span = self._span(node)
         if ntype in grammar.import_types or (
             self.language_id == "ruby"
             and ntype == "call"
@@ -271,9 +369,30 @@ class _GraphBuilder:
                     SyntaxEvent(kind="var_decl", line=_line(span), text=text[:200], span=span)
                 )
         if ntype == "with_statement":
+            extra = "strict" if self.strict_mode else "sloppy"
             self.events.append(
                 SyntaxEvent(
-                    kind="with_stmt", line=_line(span), text=self._text(node)[:200], span=span
+                    kind="with_stmt",
+                    line=_line(span),
+                    text=self._text(node)[:200],
+                    span=span,
+                    extra=extra,
+                )
+            )
+        if ntype in {"debugger_statement", "debugger"}:
+            self.events.append(
+                SyntaxEvent(
+                    kind="debugger", line=_line(span), text=self._text(node)[:80], span=span
+                )
+            )
+        if ntype in {"goto_statement", "goto"}:
+            self.events.append(
+                SyntaxEvent(kind="goto", line=_line(span), text=self._text(node)[:80], span=span)
+            )
+        if ntype in {"force_try_expression", "forced_unwrapping_expression"}:
+            self.events.append(
+                SyntaxEvent(
+                    kind="force_unwrap", line=_line(span), text=self._text(node)[:120], span=span
                 )
             )
         if ntype in {"catch_clause", "catch_block", "except_clause", "rescue"}:
@@ -287,7 +406,7 @@ class _GraphBuilder:
         is_method = parent is not None
         kind = ScopeKind.METHOD if is_method else ScopeKind.FUNCTION
         scope_id = f"{self.current_scope.scope_id}/{kind.value}:{name}"
-        span = _safe_span(node)
+        span = self._span(node)
         scope = Scope(
             scope_id=scope_id,
             kind=kind,
@@ -328,7 +447,7 @@ class _GraphBuilder:
 
     def _enter_class(self, node: object, ntype: str) -> bool:
         name = self._declared_name(node) or "anonymous"
-        span = _safe_span(node)
+        span = self._span(node)
         scope_id = f"{self.current_scope.scope_id}/class:{name}"
         scope = Scope(
             scope_id=scope_id,
@@ -416,6 +535,9 @@ class _GraphBuilder:
         skip_callee = args_node is node
         args_meta = self._expression_meta(args_node, skip_callee=skip_callee)
         arg_text = self._argument_text(node)
+        arguments = self._call_arguments(args_node, skip_callee=skip_callee)
+        parent = self._class_stack[-1] if self._class_stack else ""
+        identity = f"{parent}::{name}" if parent else name
         self.calls.append(
             CallSite(
                 name=name or qualified,
@@ -430,11 +552,14 @@ class _GraphBuilder:
                 argument_is_literal=args_meta.is_literal,
                 argument_idents=args_meta.idents,
                 argument_accesses=args_meta.accesses + args_meta.callees,
+                arguments=arguments,
+                callee_identity=identity,
             )
         )
         self._record_node(SemanticKind.CALL, qualified or name, span, ntype)
         if name in {"require", "import"} or qualified in {"require", "import"}:
             self._import_from_call(name or qualified, arg_text, span)
+        self._quality_call_events(name, qualified, span)
 
     def _extract_jsx_attribute(self, node: object, span: SourceSpan | None) -> None:
         name = ""
@@ -516,14 +641,49 @@ class _GraphBuilder:
                 )
             )
         for name in names:
-            kind = (
-                SymbolKind.FIELD if self.current_scope.kind is ScopeKind.CLASS else SymbolKind.LOCAL
+            declarator = self._declarator_kind(node, ntype)
+            is_declaration = ntype in {
+                "variable_declarator",
+                "init_declarator",
+                "let_declaration",
+                "short_var_declaration",
+                "property_declaration",
+                "var_spec",
+            } or declarator in {"let", "const", "var", "val"}
+            if is_declaration:
+                bind_scope = self._nearest_bind_scope(declarator=declarator, assignment=False)
+            else:
+                bind_scope = self._lookup_declared_scope(name)
+            kind = SymbolKind.FIELD if bind_scope.kind is ScopeKind.CLASS else SymbolKind.LOCAL
+            symbol_id = Symbol.make_id(bind_scope.scope_id, name)
+            def_index = self._next_def_index(symbol_id)
+            is_conditional = (not is_declaration) and (
+                self.current_scope.conditional or bind_scope.scope_id != self.current_scope.scope_id
             )
+            if is_declaration:
+                self._declared[symbol_id] = bind_scope.scope_id
+                ancestor = bind_scope.parent_id
+                while ancestor:
+                    outer = Symbol.make_id(ancestor, name)
+                    if outer in self._declared:
+                        self.events.append(
+                            SyntaxEvent(
+                                kind="shadowing",
+                                line=_line(span),
+                                text=name,
+                                span=span,
+                                extra=ancestor,
+                            )
+                        )
+                        break
+                    if "/" not in ancestor:
+                        break
+                    ancestor = ancestor.rsplit("/", 1)[0]
             binding = Binding(
                 name=name,
                 line=_line(span),
                 rhs=rhs_text[:500],
-                scope_id=self.current_scope.scope_id,
+                scope_id=bind_scope.scope_id,
                 kind=kind,
                 span=span,
                 node_id=self._nid("bind", span, name),
@@ -531,6 +691,10 @@ class _GraphBuilder:
                 rhs_callees=meta.callees,
                 rhs_accesses=meta.accesses,
                 rhs_idents=meta.idents,
+                definition_index=def_index,
+                is_declaration=is_declaration,
+                is_conditional=is_conditional,
+                declarator=declarator,
             )
             self.bindings.append(binding)
             self.symbols.append(
@@ -639,6 +803,16 @@ class _GraphBuilder:
     def _extract_binary(self, node: object, span: SourceSpan | None) -> None:
         text = self._text(node)
         op = None
+        left_kind = ""
+        right_kind = ""
+        named = [
+            c
+            for c in (getattr(node, "named_children", None) or getattr(node, "children", ()) or ())
+            if getattr(c, "is_named", False)
+        ]
+        if len(named) >= 2:
+            left_kind = str(getattr(named[0], "type", ""))
+            right_kind = str(getattr(named[1], "type", ""))
         for child in getattr(node, "children", ()) or ():
             if not getattr(child, "is_named", True):
                 tok = self._text(child).strip()
@@ -646,8 +820,11 @@ class _GraphBuilder:
                     op = tok
                     break
         if op in {"==", "!="}:
+            extra = f"{op}|{left_kind}|{right_kind}"
             self.events.append(
-                SyntaxEvent(kind="loose_eq", line=_line(span), text=text[:200], span=span, extra=op)
+                SyntaxEvent(
+                    kind="loose_eq", line=_line(span), text=text[:200], span=span, extra=extra
+                )
             )
 
     def _extract_catch(self, node: object, ntype: str, span: SourceSpan | None) -> None:
@@ -694,6 +871,9 @@ class _GraphBuilder:
     ) -> None:
         if not name:
             return
+        symbol_id = Symbol.make_id(self.current_scope.scope_id, name)
+        self._declared[symbol_id] = self.current_scope.scope_id
+        def_index = self._next_def_index(symbol_id)
         binding = Binding(
             name=name,
             line=_line(span),
@@ -703,6 +883,10 @@ class _GraphBuilder:
             span=span,
             node_id=self._nid("param", span, name),
             rhs_callees=callees,
+            definition_index=def_index,
+            is_declaration=True,
+            is_conditional=False,
+            declarator="param",
         )
         self.bindings.append(binding)
         self.symbols.append(
@@ -742,7 +926,7 @@ class _GraphBuilder:
             name = self._normalize_ident(self._text(child))
             if not name or name.lower() in _NON_CALL_NAMES - {"import", "require"}:
                 continue
-            span = _safe_span(child)
+            span = self._span(child)
             self.calls.append(
                 CallSite(
                     name=name,
@@ -1078,13 +1262,99 @@ class _GraphBuilder:
         return text.split("(")[0].strip()
 
     def _argument_text(self, node: object) -> str:
-        args = _child_by_field(node, "arguments") or _child_by_field(node, "arguments")
+        args = _child_by_field(node, "arguments")
         if args is None:
             text = self._text(node)
             if "(" in text and text.endswith(")"):
                 return text[text.find("(") + 1 : -1]
             return text[:400]
         return self._text(args).strip("()")[:400]
+
+    def _call_arguments(self, args_node: object, *, skip_callee: bool) -> tuple[CallArgument, ...]:
+        children: list[object] = []
+        named = list(
+            getattr(args_node, "named_children", None) or getattr(args_node, "children", ()) or ()
+        )
+        first = True
+        for child in named:
+            if not getattr(child, "is_named", False):
+                continue
+            ctype = str(getattr(child, "type", ""))
+            if ctype in {
+                "arguments",
+                "argument_list",
+                "formal_parameters",
+                "comment",
+                "line_comment",
+                "block_comment",
+            }:
+                continue
+            if first and skip_callee:
+                first = False
+                continue
+            first = False
+            if ctype in self.grammar.identifier_types and skip_callee:
+                continue
+            children.append(child)
+        # If args_node is an arguments container, use its named children directly.
+        if str(getattr(args_node, "type", "")) in {
+            "arguments",
+            "argument_list",
+            "parenthesized_arguments",
+        }:
+            children = [
+                c
+                for c in (getattr(args_node, "named_children", None) or ())
+                if getattr(c, "is_named", False)
+                and str(getattr(c, "type", ""))
+                not in self.grammar.comment_types | {"comment"}
+            ]
+        out: list[CallArgument] = []
+        for index, child in enumerate(children[:24]):
+            meta = self._expression_meta(child)
+            out.append(
+                CallArgument(
+                    index=index,
+                    text=self._text(child)[:300],
+                    is_literal=meta.is_literal,
+                    idents=meta.idents,
+                    accesses=meta.accesses,
+                    callees=meta.callees,
+                    dynamic=meta.dynamic,
+                )
+            )
+        return tuple(out)
+
+    def _declarator_kind(self, node: object, ntype: str) -> str:
+        parent = getattr(node, "parent", None)
+        text = ""
+        if parent is not None:
+            text = self._text(parent).lstrip()[:12]
+        else:
+            text = self._text(node).lstrip()[:12]
+        for keyword in ("const ", "let ", "var ", "val "):
+            if text.startswith(keyword):
+                return keyword.strip()
+        if ntype in {"assignment_expression", "assignment", "assignment_statement"}:
+            return "assign"
+        return ""
+
+    def _quality_call_events(self, name: str, qualified: str, span: SourceSpan | None) -> None:
+        grammar = self.grammar
+        if name in grammar.quality_unwrap_names or qualified.endswith(
+            tuple(f".{n}" for n in grammar.quality_unwrap_names)
+        ):
+            self.events.append(
+                SyntaxEvent(kind="unwrap", line=_line(span), text=qualified[:120], span=span)
+            )
+        if name in grammar.quality_deprecated_calls:
+            self.events.append(
+                SyntaxEvent(kind="deprecated_api", line=_line(span), text=name, span=span)
+            )
+        if name in grammar.quality_panic_names:
+            self.events.append(
+                SyntaxEvent(kind="panic", line=_line(span), text=name, span=span)
+            )
 
     def _text(self, node: object | None) -> str:
         if node is None:
@@ -1149,6 +1419,25 @@ def _join_separator(node: object) -> str:
     if ntype in {"scoped_identifier", "scoped_type_identifier"}:
         return "::"
     return "."
+
+
+def _detect_strict_mode(language_id: str, file_path: str, source: str) -> bool:
+    if language_id in {"typescript"}:
+        return True
+    lowered = file_path.replace("\\", "/").lower()
+    if lowered.endswith(".mjs") or lowered.endswith(".ts") or lowered.endswith(".tsx"):
+        return True
+    stripped = source.lstrip()
+    if stripped.startswith(("'use strict'", '"use strict"', "'use strict';", '"use strict";')):
+        return True
+    if "\n'use strict'" in source or '\n"use strict"' in source:
+        return True
+    return False
+
+
+def _looks_like_html(source: str) -> bool:
+    lowered = source.lower()
+    return any(token in lowered for token in ("<html", "<body", "<div", "<span", "<p>", "</p>"))
 
 
 def _looks_like_php_code(source: str) -> bool:

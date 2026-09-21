@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from app.adapters.languages.base import LanguageAdapter
 from app.adapters.languages.profile import ProfileLanguageAdapter
-from app.analysis.javascript_analyzer import ALL_JAVASCRIPT_RULES
+from app.analysis.quality import quality_rules_for
 from app.domain.language import LanguageCapability, ParserTier
 
 
@@ -59,7 +59,7 @@ class JavaScriptAdapter(ProfileLanguageAdapter):
             "javascript",
             "JavaScript",
             frozenset({".js", ".mjs", ".cjs", ".jsx"}),
-            rules=ALL_JAVASCRIPT_RULES,
+            rules=quality_rules_for("javascript"),
         )
 
 
@@ -69,18 +69,18 @@ class TypeScriptAdapter(ProfileLanguageAdapter):
             "typescript",
             "TypeScript",
             frozenset({".ts", ".tsx"}),
-            rules=ALL_JAVASCRIPT_RULES,
+            rules=quality_rules_for("typescript"),
         )
 
 
 class RubyAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("ruby", "Ruby", frozenset({".rb"}))
+        super().__init__("ruby", "Ruby", frozenset({".rb"}), rules=quality_rules_for("ruby"))
 
 
 class CAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("c", "C", frozenset({".c", ".h"}))
+        super().__init__("c", "C", frozenset({".c", ".h"}), rules=quality_rules_for("c"))
 
 
 class CppAdapter(ProfileLanguageAdapter):
@@ -89,47 +89,52 @@ class CppAdapter(ProfileLanguageAdapter):
             "cpp",
             "C++",
             frozenset({".cpp", ".cc", ".cxx", ".hpp"}),
+            rules=quality_rules_for("cpp"),
         )
 
 
 class GoAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("go", "Go", frozenset({".go"}))
+        super().__init__("go", "Go", frozenset({".go"}), rules=quality_rules_for("go"))
 
 
 class RustAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("rust", "Rust", frozenset({".rs"}))
+        super().__init__("rust", "Rust", frozenset({".rs"}), rules=quality_rules_for("rust"))
 
 
 class JavaAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("java", "Java", frozenset({".java"}))
+        super().__init__("java", "Java", frozenset({".java"}), rules=quality_rules_for("java"))
 
 
 class PHPAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("php", "PHP", frozenset({".php"}))
+        super().__init__("php", "PHP", frozenset({".php"}), rules=quality_rules_for("php"))
 
 
 class KotlinAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("kotlin", "Kotlin", frozenset({".kt", ".kts"}))
+        super().__init__(
+            "kotlin", "Kotlin", frozenset({".kt", ".kts"}), rules=quality_rules_for("kotlin")
+        )
 
 
 class SwiftAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("swift", "Swift", frozenset({".swift"}))
+        super().__init__("swift", "Swift", frozenset({".swift"}), rules=quality_rules_for("swift"))
 
 
 class CSharpAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("csharp", "C#", frozenset({".cs"}))
+        super().__init__("csharp", "C#", frozenset({".cs"}), rules=quality_rules_for("csharp"))
 
 
 class ShellAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
-        super().__init__("shell", "Shell", frozenset({".sh", ".bash", ".zsh"}))
+        super().__init__(
+            "shell", "Shell", frozenset({".sh", ".bash", ".zsh"}), rules=quality_rules_for("shell")
+        )
 
 
 class SpecializedLanguageAdapter(ProfileLanguageAdapter):

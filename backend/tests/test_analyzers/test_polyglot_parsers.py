@@ -191,7 +191,7 @@ class App {
     mysqli_query($db, "SELECT * FROM t WHERE x = '".$q."'");
     system($q);
     fopen($q, "r");
-    echo $q;
+    echo "<div>$q</div>";
     unserialize($q);
     eval($q);
     header("Location: ".$q);

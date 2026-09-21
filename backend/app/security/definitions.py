@@ -25,6 +25,28 @@ class SinkCertainty(StrEnum):
     INDICATOR = "indicator"
 
 
+class SanitizerKind(StrEnum):
+    HTML_ENCODE = "html_encode"
+    SQL_PARAMETERIZE = "sql_parameterize"
+    PATH_CANONICALIZE = "path_canonicalize"
+    URL_ALLOWLIST = "url_allowlist"
+    SHELL_ESCAPE = "shell_escape"
+    TYPE_VALIDATION = "type_validation"
+    FRAMEWORK_AUTO_ESCAPE = "framework_auto_escape"
+
+
+SINK_SANITIZER_KINDS: dict[VulnerabilityClass, frozenset[str]] = {
+    VulnerabilityClass.XSS: frozenset(
+        {SanitizerKind.HTML_ENCODE, SanitizerKind.FRAMEWORK_AUTO_ESCAPE}
+    ),
+    VulnerabilityClass.SQL_INJECTION: frozenset({SanitizerKind.SQL_PARAMETERIZE}),
+    VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL: frozenset({SanitizerKind.PATH_CANONICALIZE}),
+    VulnerabilityClass.SSRF: frozenset({SanitizerKind.URL_ALLOWLIST}),
+    VulnerabilityClass.UNSAFE_REDIRECT: frozenset({SanitizerKind.URL_ALLOWLIST}),
+    VulnerabilityClass.COMMAND_INJECTION: frozenset({SanitizerKind.SHELL_ESCAPE}),
+}
+
+
 @dataclass(frozen=True)
 class SourceDefinition:
     source_id: str
@@ -47,13 +69,17 @@ class SinkDefinition:
     dangerous_condition: str = "attacker-controlled data reaches this API"
     notes: str = ""
     qualified_substrings: tuple[str, ...] = ()
+    argument_indexes: tuple[int, ...] = ()
+    sanitizer_kinds: tuple[str, ...] = ()
+    required_context: str = ""
+    receiver_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class SanitizerDefinition:
     sanitizer_id: str
     api_names: tuple[str, ...]
-    kind: str  # html_encode | sql_param | path_canon | url_allow | shell_escape | type_check | framework_escape
+    kind: str  # html_encode | sql_parameterize | path_canonicalize | url_allowlist | shell_escape | type_validation | framework_auto_escape
     effective: bool = False
     notes: str = ""
 

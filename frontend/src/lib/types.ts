@@ -43,6 +43,8 @@ export interface AnalysisSummary {
     parser_tier: string;
     parser_backend: string;
     capabilities: string[];
+    native_available?: boolean;
+    parser_status?: string;
   }>;
 }
 
@@ -734,6 +736,8 @@ export interface SecurityStatus {
     extensions: string[];
     parser_tier?: string;
     parser_backend?: string;
+    native_available?: boolean;
+    parser_status?: string;
   }>;
   rule_ids: string[];
   ai_provider: string;

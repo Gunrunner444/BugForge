@@ -184,7 +184,12 @@ def parse_with_profile(profile: LanguageProfile, file_path: Path, source: str) -
         bindings=tuple(bindings),
         parser_backend="profile",
         parser_tier=ParserTier.PROFILE_FALLBACK,
-        diagnostics=ParserDiagnostics(message="profile fallback parser"),
+        diagnostics=ParserDiagnostics(
+            message="profile fallback parser",
+            native_available=False,
+            status="profile_fallback_used",
+            fallback_reason="profile fallback used",
+        ),
     )
 
 

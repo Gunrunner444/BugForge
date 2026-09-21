@@ -73,11 +73,19 @@ class LooseEqualityRule(CodeQualityRule):
             if event.kind != "loose_eq":
                 continue
             compact = "".join(event.text.split()).lower()
-            if (
-                "==null" in compact
-                or "!=null" in compact
-                or "==undefined" in compact
-                or "!=undefined" in compact
+            parts = event.extra.split("|")
+            right = parts[2] if len(parts) >= 3 else ""
+            if right in {"null", "undefined"}:
+                continue
+            if compact in {"x==null", "x!=null"}:
+                continue
+            # Only skip the null/undefined idiom when that operand is the comparison
+            # itself, not because those words appear elsewhere in the expression.
+            if len(parts) < 3 and (
+                compact.endswith("==null")
+                or compact.endswith("!=null")
+                or compact.endswith("==undefined")
+                or compact.endswith("!=undefined")
             ):
                 continue
             findings.append(
@@ -178,15 +186,28 @@ class WithStatementRule(CodeQualityRule):
         for event in graph.events:
             if event.kind != "with_stmt":
                 continue
+            extra = event.extra or "sloppy"
+            if extra == "strict":
+                message = "`with` statements are forbidden in strict mode"
+                explanation = (
+                    "`with` mutates identifier lookup and is a SyntaxError under "
+                    "`'use strict'`, ES modules, and TypeScript. Reference properties "
+                    "on the object explicitly."
+                )
+            else:
+                message = "`with` is sloppy-mode only and is discouraged"
+                explanation = (
+                    "`with` is allowed only in non-strict scripts and is a SyntaxError "
+                    "in modules and strict mode. Prefer explicit property access."
+                )
             findings.append(
                 _finding(
                     self,
                     Path(graph.file_path),
                     graph,
                     event.line,
-                    "`with` statements are forbidden in strict mode",
-                    "`with` mutates the identifier lookup scope and is banned under "
-                    "`'use strict'`. Reference properties on the object explicitly.",
+                    message,
+                    explanation,
                     "Replace `with (obj) { x }` with `obj.x`",
                     event.text,
                 )

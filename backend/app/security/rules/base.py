@@ -46,6 +46,11 @@ class SecurityObservation:
     taint_path: str = ""
     possible_false_positives: str = ""
     limitations: str = ""
+    argument_index: int | None = None
+    parser_tier: str = ""
+    scope_id: str = ""
+    sink_id: str = ""
+    source_id: str = ""
 
     def to_evidence(self) -> Evidence:
         return Evidence(
@@ -68,6 +73,10 @@ class SecurityObservation:
                 "node_id": self.node_id,
                 "framework": self.framework_context,
                 "taint_path": self.taint_path,
+                "argument_index": str(self.argument_index or ""),
+                "parser_tier": self.parser_tier,
+                "scope_id": self.scope_id,
+                "sink_id": self.sink_id,
                 **self.metadata,
             },
         )

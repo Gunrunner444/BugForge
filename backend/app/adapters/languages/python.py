@@ -10,6 +10,7 @@ from app.adapters.languages.base import LanguageAdapter
 from app.analysis.base import AnalyzerRule
 from app.analysis.finding import Finding
 from app.analysis.python_analyzer import ALL_PYTHON_RULES
+from app.analysis.quality import analyzer_error_finding
 from app.analyzers.python.language_analyzer import PythonLanguageAnalyzer
 from app.domain.language import FULL_ANALYSIS_CAPS, LanguageCapability, ParserTier
 from app.domain.source import LanguageParseResult
@@ -66,7 +67,11 @@ class PythonAdapter(LanguageAdapter):
             try:
                 findings.extend(rule.check_file(file_path, source))
             except Exception as exc:
-                logger.warning("Rule %s failed on %s: %s", rule.RULE_ID, file_path, exc)
+                findings.append(
+                    analyzer_error_finding(
+                        file_path, self.language_id, self.parser_backend(), rule.RULE_ID, exc
+                    )
+                )
         return findings
 
     def static_rules(self) -> Sequence[AnalyzerRule]:

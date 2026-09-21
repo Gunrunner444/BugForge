@@ -10,6 +10,7 @@ from uuid import UUID
 from app.analysis.engine import StaticAnalysisEngine
 from app.analyzers.repo_analyzer import AnalysisResult, RepoAnalyzer
 from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFile
+from app.parsing.engine import installed_parser_report
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,10 @@ def _language_capability_summary() -> list[dict[str, Any]]:
                 "parser_tier": str(adapter.parser_tier()),
                 "parser_backend": adapter.parser_backend(),
                 "capabilities": sorted(cap.value for cap in adapter.capabilities),
+                "native_available": bool(
+                    installed_parser_report(adapter.language_id)["native_available"]
+                ),
+                "parser_status": str(installed_parser_report(adapter.language_id)["status"]),
             }
         )
     return rows

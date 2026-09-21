@@ -1,84 +1,121 @@
 # Polyglot analysis
 
-Phase 10 makes BugForge’s programming-language analysis syntax-aware. The
-security engine never depends on a specific parser. Every backend fills the
-same `SyntaxGraph`.
+Phase 11 makes BugForge’s polyglot analysis flow-sensitive and honest about
+parser fallback. The security engine never depends on a specific parser. Every
+backend fills the same `SyntaxGraph`.
 
 ## Architecture
 
 ```
-LanguageAdapter
-    → SyntaxParser (registry lookup by language id)
-        → Tree-sitter CST  or  CPython AST  or  labeled profile fallback
-            → normalized SyntaxGraph
-                → scope-aware data flow
-                → SecurityRule catalog
-                → CodeQualityRule catalog
+source code
+    → native syntax tree (CPython AST or Tree-sitter)
+        → normalized SyntaxGraph (entities, imports, calls, bindings, scopes, spans)
+            → lexical scopes + definition versions
+                → flow-sensitive taint (not path-sensitive)
+                    → argument-aware sources / sanitizers / sinks
+                        → static security hypothesis + evidence
 ```
 
 Python keeps CPython `ast` as the primary backend (`parser_backend=cpython_ast`,
-`parser_tier=full_ast`). Other analysis languages use Tree-sitter
-(`parser_backend=tree_sitter`). Grammars are cached once per process. Source
-size and walk depth are bounded.
+`parser_tier=full_ast`). Other full-analysis languages use Tree-sitter
+(`parser_backend=tree_sitter`). Grammars are loaded from the pinned
+`tree-sitter-language-pack` (tested with `tree-sitter==0.26.0` and
+`tree-sitter-language-pack==1.20.0`). Analysis never downloads grammars from
+the network.
 
-The regex profile scanner (`parse_with_profile`) is **not** the primary backend.
-If a Tree-sitter grammar cannot be loaded, the adapter reports
-`PROFILE_FALLBACK` instead of pretending to have a full AST.
+## Runtime parser truth
+
+Installed capability (`parser_tier_for`, `/security/status`) reports whether a
+native grammar is available in this process.
+
+Each parsed file reports the parser that **actually** ran:
+
+| Graph field | Meaning |
+|---|---|
+| `parser_backend` | `cpython_ast` / `tree_sitter` / `profile` |
+| `parser_tier` | `full_ast` / `profile_fallback` / `specialized` |
+| `diagnostics.status` | `native_parser_available` / `native_parser_unavailable` / `profile_fallback_used` / `parser_failure` |
+
+The regex profile scanner is **only** an explicitly labeled fallback. Fallback
+graphs never advertise `AST`, `SCOPE_ANALYSIS`, or `DATA_FLOW`. Fallback is not
+equivalent to native analysis.
 
 ## Capability tiers
 
 | Tier | Meaning |
 |---|---|
-| `FULL_AST` | Real syntax tree, entities with end spans, scope-aware symbols |
+| `FULL_AST` | Real syntax tree, entities with end spans, nested lexical scopes |
 | `SPECIALIZED` | Real syntax for HTML/CSS/SQL; not application-language taint parity |
 | `PROFILE_FALLBACK` | Regex/profile scanner; never advertised as AST |
 | `DETECTION_ONLY` | Extension mapping only |
 
+## Taint precision
+
+Taint is **flow-sensitive** and **not path-sensitive**.
+
+* Sequential reassignment replaces the reaching definition: `q = input; q = "safe"; sink(q)` is not tainted.
+* Branch/loop assignments merge conservatively: if either path may taint `q`, later uses stay tainted.
+* Sibling function scopes never share locals. Nested `let`/`const` (JS/TS) and block-scoped declarations are distinct symbols.
+* Same-file inter-procedural propagation maps actual arguments onto the matching formal parameter, and only when the callee is uniquely resolved.
+* Sanitizers apply only when a callee of the relevant argument has a sanitizer kind that matches the sink (HTML encoding does not sanitize SQL).
+* Static analysis never claims a demonstrated directory escape. Path findings are `user_controlled_path`, `unsafe_path_construction`, or `possible_path_traversal`.
+
 ## Security vs code quality
 
 Security rules emit `SecurityObservation` records. Status is `POTENTIAL` or
-`CORROBORATED` — never `VERIFIED` from static analysis.
+`CORROBORATED` — never `VERIFIED` from static analysis, taint, or AI.
 
-Code quality rules (`mutable_default_argument`, `js_loose_equality`, …) use
-`Finding.catalog = code_quality`. The UI labels them **CODE QUALITY**, separate
-from **SECURITY**.
+Code quality rules use `Finding.catalog = code_quality`. The UI labels them
+**CODE QUALITY**, separate from **SECURITY**.
 
-## Taint
-
-Symbols are `scope_id::name`. `function A`’s `q` is not `function B`’s `q`.
-Sources and sinks are matched on syntax nodes (calls, member access,
-identifiers). String literals and comments cannot become sources or sinks.
-Template interpolations remain code.
-
-Path sinks emit `potential_path_traversal` with
-`path_issue_kind=possible_path_traversal`. Static analysis never claims a
-demonstrated directory escape. `JSON.parse` emits
-`potential_unsafe_deserialization` (indicator), not confirmed gadget execution.
+Every full-analysis language has a syntax-aware quality catalog. Quality rules
+are language-appropriate (unwrap in Rust, `goto` in C, `var`/`==`/`with` in JS)
+and do not duplicate security sinks.
 
 ## Languages
 
-Full analysis (Tree-sitter or CPython): Python, JavaScript, TypeScript, Ruby,
-C, C++, Go, Rust, Java, PHP, Kotlin, Swift, C#, Shell.
+Full analysis: Python, JavaScript, TypeScript, Ruby, C, C++, Go, Rust, Java,
+PHP, Kotlin, Swift, C#, Shell.
 
 Specialized: HTML, CSS, SCSS, SQL.
 
 Detection-only: YAML, JSON, TOML, Markdown, reStructuredText, R, Scala, Dart,
-Lua, Elixir.
+Lua, Elixir. Tree-sitter grammars exist for R/Scala/Dart/Lua/Elixir in the
+language pack, but they are **not** promoted: BugForge does not yet have a
+quality catalog, taint vocabulary, or fixture matrix that meets the analysis
+contract. Detection-only is explicit, not implied support.
 
-## Tests
+## Parser installation
 
-- Language contract: `tests/test_analyzers/test_language_contract.py`
-- Cross-language semantic corpus: `tests/test_phase10/test_polyglot_native.py`
-- Lexical fixtures (raw strings, heredocs, templates): `tests/test_phase10/test_lexical_fixtures.py`
-- False-positive corpus: comments, strings, parameterization, sibling scopes
+```bash
+cd backend
+pip install -e ".[dev]"
+```
 
-Unsupported categories (for example SSRF in C) are asserted as unsupported
-rather than faked.
+`tree-sitter` and `tree-sitter-language-pack` are pinned to a tested compatible
+range in `pyproject.toml`. Grammars for official languages are bundled in the
+pack. If a grammar is missing at runtime, analysis uses labeled profile fallback
+or reports `parser_failure` — it does not fetch parsers from the network.
+
+## Configuration
+
+`LANGUAGE_ANALYZERS` is a comma-separated list of language ids that implement
+`STATIC_ANALYSIS` (code quality). Empty means every adapter that actually
+implements static analysis (Python plus every full-analysis language with a
+quality catalog). Detection-only languages cannot be enabled this way.
+
+## Limits
+
+Parse size, walk nodes, nesting, taint rounds, and same-file inter-procedural
+depth are hard-capped. Truncated or erroneous parses remain visible in
+diagnostics; they are not reported as clean analysis.
 
 ## Known limitations
 
-- Inter-procedural taint is limited to unique same-file callees.
-- Macros and preprocessor expansion are not modeled.
-- A recognized sanitizer lowers confidence; it is only treated as effective
-  when the vocabulary marks it `effective=True`.
-- Framework detection is advertised only for registries covered by tests.
+* Taint is not path-sensitive and not inter-file.
+* Ambiguous same-named callees are not linked.
+* PHP `echo`/`print` XSS requires HTML output context.
+* Generic APIs (`Write`, `send`, `JSON.parse` as code-exec) are not treated as
+  those vulnerability classes.
+* AI context is advisory and cannot verify, approve, change scope, or submit
+  HackerOne reports.

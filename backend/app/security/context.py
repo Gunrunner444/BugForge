@@ -204,7 +204,8 @@ class SecurityContextBuilder:
                     content=(
                         f"language={graph.language} backend={graph.parser_backend} "
                         f"tier={graph.parser_tier} framework={graph.framework or 'none'} "
-                        f"context={graph.file_context}"
+                        f"context={graph.file_context} "
+                        f"taint_precision=flow-sensitive path_sensitive=false"
                     ),
                     language=graph.language,
                 )
@@ -216,7 +217,12 @@ class SecurityContextBuilder:
                     path=_rel(obs.file_path, repo_root),
                     kind="static_finding",
                     score=90.0,
-                    content=f"{obs.rule_id} L{obs.line}: {obs.summary}\n{obs.evidence_text}",
+                    content=(
+                        f"{obs.rule_id} L{obs.line}: {obs.summary}\n"
+                        f"node={obs.node_id} scope={obs.scope_id} "
+                        f"sink={obs.sink_id} arg={obs.argument_index} "
+                        f"taint={obs.taint_path}\n{obs.evidence_text}"
+                    ),
                     language=obs.language,
                     start_line=obs.line,
                 )

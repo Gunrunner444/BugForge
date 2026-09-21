@@ -7,17 +7,21 @@ from pathlib import Path
 
 from app.domain.language import ParserTier
 from app.parsing.extract import parse_with_profile
-from app.parsing.model import LanguageProfile, SyntaxGraph
+from app.parsing.model import LanguageProfile, ParserStatus, SyntaxGraph
 from app.parsing.profiles import PROFILES, profile_for
 from app.parsing.python_graph import parse_python_graph
-from app.parsing.treesitter import treesitter_available
+from app.parsing.treesitter import native_parser_status, treesitter_available
 from app.parsing.treesitter_graph import parse_treesitter_graph
 
 ParserFn = Callable[[Path, str], SyntaxGraph]
 
 
 class SyntaxParserRegistry:
-    """Maps language ids to graph builders. Core code looks up by id."""
+    """Maps language ids to graph builders. Core code looks up by id.
+
+    Registry metadata describes *installed* capability. Each SyntaxGraph reports
+    the parser that actually processed that file.
+    """
 
     def __init__(self) -> None:
         self._parsers: dict[str, ParserFn] = {}
@@ -60,27 +64,40 @@ class SyntaxParserRegistry:
         return sorted(self._parsers)
 
 
-def _profile_parser(profile: LanguageProfile) -> ParserFn:
+def _profile_parser(profile: LanguageProfile, *, reason: str = "native parser unavailable") -> ParserFn:
     def parse(file_path: Path, source: str) -> SyntaxGraph:
         graph = parse_with_profile(profile, file_path, source)
         graph.parser_backend = "profile"
         graph.parser_tier = ParserTier.PROFILE_FALLBACK
+        graph.diagnostics = graph.diagnostics.__class__(
+            has_errors=graph.diagnostics.has_errors,
+            error_count=graph.diagnostics.error_count,
+            error_spans=graph.diagnostics.error_spans,
+            recoverable=graph.diagnostics.recoverable,
+            truncated=graph.diagnostics.truncated,
+            message=graph.diagnostics.message or reason,
+            native_available=False,
+            status=ParserStatus.PROFILE_FALLBACK,
+            fallback_reason=reason,
+        )
         return graph
 
     return parse
 
 
 def _treesitter_or_profile(language_id: str, profile: LanguageProfile) -> ParserFn:
-    fallback = _profile_parser(profile)
+    fallback = _profile_parser(profile, reason="profile fallback used")
 
     def parse(file_path: Path, source: str) -> SyntaxGraph:
-        if treesitter_available(language_id) or (
-            language_id == "typescript" and str(file_path).endswith(".tsx")
-        ):
+        native = treesitter_available(language_id) or (
+            language_id == "typescript" and str(file_path).endswith(".tsx") and treesitter_available("tsx")
+        )
+        if native:
             graph = parse_treesitter_graph(language_id, file_path, source)
             if graph is not None:
                 return graph
-        return fallback(file_path, source)
+            return fallback(file_path, source)
+        return _profile_parser(profile, reason="native parser unavailable")(file_path, source)
 
     return parse
 
@@ -106,7 +123,7 @@ def default_syntax_registry() -> SyntaxParserRegistry:
         else:
             registry.register(
                 language_id,
-                _profile_parser(profile),
+                _profile_parser(profile, reason="native parser unavailable"),
                 backend="profile",
                 tier=ParserTier.PROFILE_FALLBACK,
             )
@@ -137,12 +154,52 @@ def can_parse(language_id: str) -> bool:
 
 
 def parser_backend_for(language_id: str) -> str:
-    if get_syntax_registry().has(language_id):
-        return get_syntax_registry().backend(language_id)
+    """Installed backend. Per-file truth lives on SyntaxGraph.parser_backend."""
+    key = language_id.strip().lower()
+    if key == "python":
+        return "cpython_ast"
+    if treesitter_available(key):
+        return "tree_sitter"
+    if profile_for(key) is not None:
+        return "profile"
+    if get_syntax_registry().has(key):
+        return get_syntax_registry().backend(key)
     return "none"
 
 
 def parser_tier_for(language_id: str) -> ParserTier:
-    if get_syntax_registry().has(language_id):
-        return get_syntax_registry().tier(language_id)
+    """Installed capability. Per-file truth lives on SyntaxGraph.parser_tier."""
+    key = language_id.strip().lower()
+    if key == "python":
+        return ParserTier.FULL_AST
+    if treesitter_available(key):
+        return ParserTier.FULL_AST
+    if profile_for(key) is not None:
+        return ParserTier.PROFILE_FALLBACK
+    if get_syntax_registry().has(key):
+        return get_syntax_registry().tier(key)
     return ParserTier.DETECTION_ONLY
+
+
+def installed_parser_report(language_id: str) -> dict[str, str | bool]:
+    key = language_id.strip().lower()
+    status = native_parser_status(key) if key != "python" else None
+    native = True if key == "python" else bool(status and status.available)
+    if key == "python":
+        reason = "native parser available"
+    elif status is not None:
+        reason = status.reason
+    else:
+        reason = "native parser unavailable"
+    tier = parser_tier_for(key)
+    backend = parser_backend_for(key)
+    return {
+        "language_id": key,
+        "native_available": native,
+        "parser_backend": backend,
+        "parser_tier": str(tier),
+        "status": (
+            ParserStatus.NATIVE_AVAILABLE if native else ParserStatus.NATIVE_UNAVAILABLE
+        ),
+        "reason": reason,
+    }

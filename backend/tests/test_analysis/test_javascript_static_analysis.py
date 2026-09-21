@@ -104,7 +104,7 @@ class TestEngineIntegration:
         catalog = get_plugin_catalog()
         assert catalog.languages.get("javascript").supports(LanguageCapability.STATIC_ANALYSIS)
         assert catalog.languages.get("typescript").supports(LanguageCapability.STATIC_ANALYSIS)
-        assert not catalog.languages.get("ruby").supports(LanguageCapability.STATIC_ANALYSIS)
+        assert catalog.languages.get("ruby").supports(LanguageCapability.STATIC_ANALYSIS)
 
     def test_engine_reports_js_issues(self, tmp_path: Path) -> None:
         path = tmp_path / "app.js"
