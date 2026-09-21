@@ -40,6 +40,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 17 | In-memory incremental parse cache with clean-scan equivalence | ✅ Implemented |
 | Phase 18 | Stable finding identity, explanations, and duplicate suppression | ✅ Implemented |
 | Phase 19 | Go, Java, and Kotlin local interprocedural imports | ✅ Implemented |
+| Phase 20 | Adversarial semantic checks and shadowed-builtin handling | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -70,7 +71,8 @@ Lua, and Elixir remain detection-only. See
 [docs/phase16-evidence-correlation.md](docs/phase16-evidence-correlation.md), and
 [docs/phase17-incremental-analysis.md](docs/phase17-incremental-analysis.md), and
 [docs/phase18-finding-intelligence.md](docs/phase18-finding-intelligence.md), and
-[docs/phase19-polyglot-interprocedural.md](docs/phase19-polyglot-interprocedural.md).
+[docs/phase19-polyglot-interprocedural.md](docs/phase19-polyglot-interprocedural.md), and
+[docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md).
 
 Phase 2 adds:
 

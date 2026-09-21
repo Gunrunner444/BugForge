@@ -130,6 +130,8 @@ functions, re-exports, default exports, callable aliases, and methods.
 Go, Java, and Kotlin add the same unique local-file rule for package and
 type imports. Ruby, C#, and Swift imports are not treated as file edges. See
 [phase19-polyglot-interprocedural.md](phase19-polyglot-interprocedural.md).
+A module-level function hides a same-named builtin for bare calls. See
+[phase20-adversarial-validation.md](phase20-adversarial-validation.md).
 Partial callees and ambiguous imports are not edges. Symbol ids are
 `file::module::class::symbol`. Constant field paths (`obj.payload`,
 `obj["key"]`, `items[0]`) are separate symbols with a depth cap; dynamic keys
