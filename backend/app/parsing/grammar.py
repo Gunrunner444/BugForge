@@ -41,6 +41,11 @@ class Grammar:
     quality_unwrap_names: frozenset[str] = field(default_factory=frozenset)
     quality_deprecated_calls: frozenset[str] = field(default_factory=frozenset)
     quality_panic_names: frozenset[str] = field(default_factory=frozenset)
+    quality_for_loop_types: frozenset[str] = field(default_factory=frozenset)
+    quality_posix_test_types: frozenset[str] = field(default_factory=frozenset)
+    quality_force_unwrap_child_types: frozenset[str] = field(default_factory=frozenset)
+    quality_unquoted_expansion: bool = False
+    quality_blank_ident: bool = False
 
 
 _COMMON_COMMENT = frozenset({"comment", "line_comment", "block_comment"})
@@ -254,8 +259,11 @@ GRAMMARS: dict[str, Grammar] = {
         exception_types=frozenset({"begin", "rescue"}),
         member_types=frozenset({"call"}),
         import_kind="require",
-        block_types=frozenset({"then", "else", "if", "unless", "case", "when", "do_block", "block", "rescue"}),
+        block_types=frozenset(
+            {"then", "else", "if", "unless", "case", "when", "do_block", "block", "rescue"}
+        ),
         lexical_model="function",
+        quality_for_loop_types=frozenset({"for"}),
     ),
     "c": Grammar(
         ts_name="c",
@@ -356,6 +364,7 @@ GRAMMARS: dict[str, Grammar] = {
         ),
         lexical_model="block",
         quality_panic_names=frozenset({"panic"}),
+        quality_blank_ident=True,
     ),
     "rust": Grammar(
         ts_name="rust",
@@ -427,6 +436,7 @@ GRAMMARS: dict[str, Grammar] = {
             }
         ),
         lexical_model="block",
+        quality_deprecated_calls=frozenset({"printStackTrace"}),
     ),
     "php": Grammar(
         ts_name="php",
@@ -509,6 +519,7 @@ GRAMMARS: dict[str, Grammar] = {
         ),
         lexical_model="block",
         quality_unwrap_names=frozenset({"!!"}),
+        quality_force_unwrap_child_types=frozenset({"!!"}),
     ),
     "swift": Grammar(
         ts_name="swift",
@@ -553,6 +564,7 @@ GRAMMARS: dict[str, Grammar] = {
         ),
         lexical_model="block",
         quality_unwrap_names=frozenset({"unsafelyUnwrapped"}),
+        quality_force_unwrap_child_types=frozenset({"bang"}),
     ),
     "csharp": Grammar(
         ts_name="csharp",
@@ -638,6 +650,8 @@ GRAMMARS: dict[str, Grammar] = {
             }
         ),
         lexical_model="function",
+        quality_unquoted_expansion=True,
+        quality_posix_test_types=frozenset({"test_command"}),
     ),
     "html": Grammar(
         ts_name="html",

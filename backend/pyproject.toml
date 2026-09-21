@@ -57,6 +57,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/fixtures/**" = ["F821", "F401", "I001", "N"]
+"alembic/**" = ["I001", "E402", "UP007", "UP035", "N815"]
 
 [tool.mypy]
 python_version = "3.12"

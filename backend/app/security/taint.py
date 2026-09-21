@@ -121,11 +121,12 @@ def propagate_taint(
         changed = False
         rounds += 1
         applied = 0
+        return_reasons = _return_reasons(graph, reaching, source_pats)
         for binding in _ordered_bindings(graph):
             applied += 1
             if applied > MAX_DEFINITIONS:
                 break
-            reason = _binding_taint(binding, source_pats, reaching)
+            reason = _binding_taint(binding, source_pats, reaching, return_reasons)
             previous = reaching.get(binding.symbol_id)
             empty_rhs = (
                 not binding.rhs
@@ -184,6 +185,7 @@ def _binding_taint(
     binding: Binding,
     source_pats: Sequence[str],
     reaching: dict[str, _Reach],
+    return_reasons: dict[str, str] | None = None,
 ) -> str | None:
     if binding.rhs_is_literal and not binding.rhs_callees and not binding.rhs_accesses:
         return None
@@ -195,7 +197,47 @@ def _binding_taint(
         sid = _resolve_symbol(ident, binding.scope_id, reaching)
         if sid is not None and reaching[sid].reason:
             return f"from:{sid}:{reaching[sid].reason}"
+    for callee in binding.rhs_callees:
+        simple = callee.rsplit(".", 1)[-1]
+        if return_reasons and simple in return_reasons:
+            return f"from_return:{simple}:{return_reasons[simple]}"
     return None
+
+
+def _return_reasons(
+    graph: SyntaxGraph,
+    reaching: dict[str, _Reach],
+    source_pats: Sequence[str],
+) -> dict[str, str]:
+    """Map uniquely resolved function names to a return taint reason."""
+    functions = [
+        ent
+        for ent in graph.entities
+        if ent.entity_type in {"function", "async_function", "method", "async_method"}
+    ]
+    by_name: dict[str, list[object]] = {}
+    for ent in functions:
+        by_name.setdefault(ent.name, []).append(ent)
+    out: dict[str, str] = {}
+    for ret in graph.returns:
+        func_name = ret.scope_id.rsplit(":", 1)[-1]
+        if len(by_name.get(func_name, [])) != 1:
+            continue
+        reason: str | None = None
+        for fragment in (*ret.accesses, *ret.idents):
+            hit = fragment_matches_source(fragment, source_pats)
+            if hit:
+                reason = f"return:source:{hit}"
+                break
+        if reason is None:
+            for ident in ret.idents:
+                sid = _resolve_symbol(ident, ret.scope_id, reaching)
+                if sid is not None:
+                    reason = f"return:{sid}"
+                    break
+        if reason:
+            out[func_name] = reason
+    return out
 
 
 def _resolve_symbol(
@@ -288,11 +330,17 @@ def _interprocedural(
                 new.append((f"{callee_scope}::{pname}", f"callarg:{arg.index}:{reason}"))
     for ret in graph.returns:
         ret_reason = None
-        for ident in ret.idents:
-            sid = _resolve_symbol(ident, ret.scope_id, reaching_wrap)
-            if sid is not None:
-                ret_reason = f"return:{sid}"
+        for fragment in (*ret.accesses, *ret.idents):
+            hit = fragment_matches_source(fragment, source_pats)
+            if hit:
+                ret_reason = f"return:source:{hit}"
                 break
+        if ret_reason is None:
+            for ident in ret.idents:
+                sid = _resolve_symbol(ident, ret.scope_id, reaching_wrap)
+                if sid is not None:
+                    ret_reason = f"return:{sid}"
+                    break
         if ret_reason is None:
             continue
         func_name = ret.scope_id.rsplit(":", 1)[-1]
@@ -301,10 +349,7 @@ def _interprocedural(
         for binding in graph.bindings:
             if binding.scope_id == ret.scope_id:
                 continue
-            if any(
-                c == func_name or c.endswith(f".{func_name}")
-                for c in binding.rhs_callees
-            ):
+            if any(c == func_name or c.endswith(f".{func_name}") for c in binding.rhs_callees):
                 new.append((binding.symbol_id, ret_reason))
     return new
 

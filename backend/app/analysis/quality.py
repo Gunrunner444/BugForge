@@ -65,9 +65,7 @@ class GraphEventRule(CodeQualityRule):
         for event in graph.events:
             if event.kind != self.EVENT_KIND:
                 continue
-            findings.append(
-                _finding(self, graph, event, self.MESSAGE, self.EXPLANATION, self.FIX)
-            )
+            findings.append(_finding(self, graph, event, self.MESSAGE, self.EXPLANATION, self.FIX))
         return findings
 
 
@@ -163,6 +161,58 @@ class ForceUnwrapQualityRule(GraphEventRule):
     FIX = "Use if-let / guard / try?"
 
 
+class ForLoopQualityRule(GraphEventRule):
+    RULE_ID = "quality_for_loop"
+    SEVERITY = "low"
+    CONFIDENCE = "medium"
+    EVENT_KIND = "for_loop"
+    MESSAGE = "for/in iterates with a separate scope; each/map is the usual Ruby style"
+    EXPLANATION = (
+        "Ruby `for` leaks the iterator into the enclosing scope in some versions and is "
+        "rarely the intended iteration form. Prefer `each`."
+    )
+    FIX = "Replace `for x in xs` with `xs.each do |x|`"
+
+
+class UnquotedExpansionQualityRule(GraphEventRule):
+    RULE_ID = "quality_unquoted_expansion"
+    SEVERITY = "medium"
+    CONFIDENCE = "high"
+    EVENT_KIND = "unquoted_expansion"
+    MESSAGE = "Unquoted shell expansion is subject to word-splitting and globbing"
+    EXPLANATION = (
+        "Unquoted `$var` / `$(...)` expansions split on IFS and expand globs. Quote the "
+        "expansion when the value is a single argument."
+    )
+    FIX = 'Use "$var" or "${var}" instead of $var'
+
+
+class PosixTestQualityRule(GraphEventRule):
+    RULE_ID = "quality_posix_test"
+    SEVERITY = "low"
+    CONFIDENCE = "medium"
+    EVENT_KIND = "posix_test"
+    MESSAGE = "POSIX `[` test is more error-prone than `[[` in bash"
+    EXPLANATION = (
+        "`[` is an ordinary command and requires quoting. Bash `[[` is parsed as syntax "
+        "and avoids several word-splitting pitfalls."
+    )
+    FIX = "Prefer [[ ... ]] in bash scripts, with quoted expansions"
+
+
+class BlankIdentQualityRule(GraphEventRule):
+    RULE_ID = "quality_blank_ident"
+    SEVERITY = "medium"
+    CONFIDENCE = "medium"
+    EVENT_KIND = "blank_ident"
+    MESSAGE = "Blank identifier discards a result, often an error"
+    EXPLANATION = (
+        "Assigning to `_` ignores the value. In Go this commonly discards an error that "
+        "should be checked."
+    )
+    FIX = "Handle the discarded result, especially error values"
+
+
 class AnalyzerErrorRule(CodeQualityRule):
     """Emitted when a quality rule raises; never look like a clean file."""
 
@@ -199,23 +249,19 @@ COMMON_FULL_ANALYSIS_RULES: list[CodeQualityRule] = [
 
 LANGUAGE_QUALITY_RULES: dict[str, Sequence[AnalyzerRule]] = {
     "python": list(ALL_PYTHON_RULES),
-    "javascript": list(ALL_JAVASCRIPT_RULES)
-    + [DebuggerQualityRule(), ShadowingQualityRule()],
-    "typescript": list(ALL_JAVASCRIPT_RULES)
-    + [DebuggerQualityRule(), ShadowingQualityRule()],
-    "ruby": list(COMMON_FULL_ANALYSIS_RULES),
-    "c": list(COMMON_FULL_ANALYSIS_RULES)
-    + [DeprecatedApiQualityRule(), GotoQualityRule()],
-    "cpp": list(COMMON_FULL_ANALYSIS_RULES)
-    + [DeprecatedApiQualityRule(), GotoQualityRule()],
-    "go": list(COMMON_FULL_ANALYSIS_RULES) + [PanicQualityRule()],
+    "javascript": list(ALL_JAVASCRIPT_RULES) + [DebuggerQualityRule(), ShadowingQualityRule()],
+    "typescript": list(ALL_JAVASCRIPT_RULES) + [DebuggerQualityRule(), ShadowingQualityRule()],
+    "ruby": list(COMMON_FULL_ANALYSIS_RULES) + [ForLoopQualityRule()],
+    "c": list(COMMON_FULL_ANALYSIS_RULES) + [DeprecatedApiQualityRule(), GotoQualityRule()],
+    "cpp": list(COMMON_FULL_ANALYSIS_RULES) + [DeprecatedApiQualityRule(), GotoQualityRule()],
+    "go": list(COMMON_FULL_ANALYSIS_RULES) + [PanicQualityRule(), BlankIdentQualityRule()],
     "rust": list(COMMON_FULL_ANALYSIS_RULES) + [UnwrapQualityRule(), PanicQualityRule()],
-    "java": list(COMMON_FULL_ANALYSIS_RULES),
+    "java": list(COMMON_FULL_ANALYSIS_RULES) + [DeprecatedApiQualityRule()],
     "php": list(COMMON_FULL_ANALYSIS_RULES) + [DeprecatedApiQualityRule()],
     "kotlin": list(COMMON_FULL_ANALYSIS_RULES) + [ForceUnwrapQualityRule()],
     "swift": list(COMMON_FULL_ANALYSIS_RULES) + [ForceUnwrapQualityRule()],
-    "csharp": list(COMMON_FULL_ANALYSIS_RULES),
-    "shell": list(COMMON_FULL_ANALYSIS_RULES),
+    "csharp": list(COMMON_FULL_ANALYSIS_RULES) + [GotoQualityRule()],
+    "shell": [UnquotedExpansionQualityRule(), PosixTestQualityRule(), ShadowingQualityRule()],
 }
 
 

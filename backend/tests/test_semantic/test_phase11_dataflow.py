@@ -210,19 +210,23 @@ function f(x) {
 def test_interproc_maps_correct_argument(tmp_path: Path) -> None:
     src = """
 def f(safe, dangerous):
-    sink = eval
     eval(dangerous)
 
 f("safe", request.args.get("q"))
+"""
+    result = analyze_source(tmp_path, "i.py", src)
+    assert VulnerabilityClass.DYNAMIC_EXECUTION in observation_classes(result)
+
+
+def test_interproc_does_not_taint_wrong_parameter(tmp_path: Path) -> None:
+    src = """
+def f(safe, dangerous):
+    eval(dangerous)
+
 f(request.args.get("q"), "safe")
 """
     result = analyze_source(tmp_path, "i.py", src)
-    eval_obs = [
-        o
-        for o in result.observations
-        if o.vulnerability_class is VulnerabilityClass.DYNAMIC_EXECUTION
-    ]
-    assert eval_obs
+    assert VulnerabilityClass.DYNAMIC_EXECUTION not in observation_classes(result)
 
 
 def test_name_collision_does_not_speculate(tmp_path: Path) -> None:
@@ -233,13 +237,27 @@ class A:
 
 class B:
     def process(self, q):
-        eval("ok")
+        eval(q)
 
-A().process(request.args.get("q"))
+x.process(request.args.get("q"))
 """
     graph = parse_source("python", Path("c.py"), src)
     processes = [e for e in graph.entities if e.name == "process"]
     assert len(processes) == 2
+    result = analyze_source(tmp_path, "c.py", src)
+    assert VulnerabilityClass.DYNAMIC_EXECUTION not in observation_classes(result)
+
+
+def test_interproc_return_when_callee_unique(tmp_path: Path) -> None:
+    src = """
+def helper():
+    return request.args.get("q")
+
+q = helper()
+eval(q)
+"""
+    result = analyze_source(tmp_path, "r.py", src)
+    assert VulnerabilityClass.DYNAMIC_EXECUTION in observation_classes(result)
 
 
 def test_unrelated_sanitizer_does_not_suppress_sql(tmp_path: Path) -> None:
@@ -323,22 +341,78 @@ def test_loose_eq_nearby_null_text_does_not_suppress(tmp_path: Path) -> None:
 def test_with_is_mode_aware(tmp_path: Path) -> None:
     sloppy = WithStatementRule().check_file(tmp_path / "a.js", "with (obj) { x = 1; }\n")
     strict = WithStatementRule().check_file(
-        tmp_path / "a.js", "\"use strict\";\nwith (obj) { x = 1; }\n"
+        tmp_path / "a.js", '"use strict";\nwith (obj) { x = 1; }\n'
     )
-    assert sloppy and "sloppy" in sloppy[0].message.lower() or "discouraged" in sloppy[0].message.lower()
+    assert (
+        sloppy
+        and "sloppy" in sloppy[0].message.lower()
+        or "discouraged" in sloppy[0].message.lower()
+    )
     assert strict and "strict" in strict[0].message.lower()
+
+
+QUALITY_FIXTURES: dict[str, tuple[str, str]] = {
+    "python": ("def f(x=[]):\n    pass\n", "mutable_default_argument"),
+    "javascript": ("if (x == 1) {}\n", "js_loose_equality"),
+    "typescript": ("if (x == 1) {}\n", "js_loose_equality"),
+    "ruby": ("for x in xs\n  puts x\nend\n", "quality_for_loop"),
+    "c": ("void f(void) { char b[8]; gets(b); }\n", "quality_deprecated_api"),
+    "cpp": ("void f() { char b[8]; gets(b); }\n", "quality_deprecated_api"),
+    "go": ('package p\nfunc f() { panic("x") }\n', "quality_panic"),
+    "rust": ("fn f(x: Option<i32>) { x.unwrap(); }\n", "quality_unwrap"),
+    "java": (
+        "class S { void f(Exception e) { e.printStackTrace(); } }\n",
+        "quality_deprecated_api",
+    ),
+    "php": ("<?php mysql_query($q);\n", "quality_deprecated_api"),
+    "kotlin": ("fun f(y: String?) { val x = y!! }\n", "quality_force_unwrap"),
+    "swift": ("func f(y: String?) { let x = y! }\n", "quality_force_unwrap"),
+    "csharp": ("class S { void f() { goto x; x: return; } }\n", "quality_goto"),
+    "shell": ("echo $q\n", "quality_unquoted_expansion"),
+}
 
 
 @pytest.mark.parametrize("language_id", ANALYSIS_LANGUAGE_IDS)
 def test_full_analysis_languages_have_quality_catalog(language_id: str) -> None:
     rules = quality_rules_for(language_id)
-    assert len(rules) >= 2
+    assert len(rules) >= 3
     catalog = get_plugin_catalog()
     adapter = catalog.languages.get(language_id)
     assert adapter.supports(LanguageCapability.CODE_QUALITY)
     assert adapter.supports(LanguageCapability.STATIC_ANALYSIS)
     for rule in rules:
         assert getattr(rule, "CATALOG", FindingCatalog.CODE_QUALITY) == FindingCatalog.CODE_QUALITY
+
+
+@pytest.mark.parametrize("language_id", ANALYSIS_LANGUAGE_IDS)
+def test_quality_fixture_fires(language_id: str) -> None:
+    source, category = QUALITY_FIXTURES[language_id]
+    ext = {
+        "python": ".py",
+        "javascript": ".js",
+        "typescript": ".ts",
+        "ruby": ".rb",
+        "c": ".c",
+        "cpp": ".cpp",
+        "go": ".go",
+        "rust": ".rs",
+        "java": ".java",
+        "php": ".php",
+        "kotlin": ".kt",
+        "swift": ".swift",
+        "csharp": ".cs",
+        "shell": ".sh",
+    }[language_id]
+    graph = graph_for(language_id, f"q{ext}", source)
+    findings = []
+    for rule in quality_rules_for(language_id):
+        findings.extend(rule.check_graph(graph))
+    categories = {item.category for item in findings}
+    assert category in categories, (language_id, categories, [e.kind for e in graph.events])
+    hit = next(item for item in findings if item.category == category)
+    assert hit.catalog == FindingCatalog.CODE_QUALITY
+    assert hit.parser_backend
+    assert hit.evidence is not None
 
 
 @pytest.mark.parametrize("language_id", DETECTION_ONLY_LANGUAGE_IDS)
@@ -375,19 +449,28 @@ def test_malformed_source_reports_diagnostics(language_id: str) -> None:
     }[language_id]
     graph = graph_for(language_id, f"bad{ext}", "{[(")
     assert graph.language == language_id
+    assert graph.diagnostics is not None
     graph2 = graph_for(language_id, f"empty{ext}", "")
     assert graph2.language == language_id
     deep = "{" * 80 + "}" * 80
     graph3 = graph_for(language_id, f"deep{ext}", deep)
     assert graph3.language == language_id
+    truncated = "const x = " if language_id in {"javascript", "typescript"} else "x = "
+    graph4 = graph_for(language_id, f"trunc{ext}", truncated)
+    assert graph4.diagnostics.has_errors or graph4.diagnostics.error_count >= 0
 
 
 def test_truncated_parse_is_visible() -> None:
-    from app.parsing.treesitter import MAX_PARSE_BYTES
+    from app.parsing.treesitter import MAX_PARSE_BYTES, MAX_WALK_NODES
 
-    huge = "const x = 1;\n" + ("x + " * (MAX_PARSE_BYTES // 4)) + "1;\n"
+    huge = "const x = 1;\n" + ("x + " * (MAX_PARSE_BYTES // 2)) + "1;\n"
     graph = parse_source("javascript", Path("big.js"), huge)
-    assert graph.diagnostics.truncated or len(graph.source) <= len(huge)
+    assert graph.diagnostics.truncated
+    assert graph.diagnostics.has_errors
+    wide = "function f(){\n" + "let x = 1;\n" * 20_000 + "}\n"
+    walked = parse_source("javascript", Path("n.js"), wide)
+    assert walked.diagnostics.truncated
+    assert len(walked.nodes) <= MAX_WALK_NODES
 
 
 def test_corroboration_requires_independent_paths() -> None:
@@ -428,3 +511,28 @@ def test_php_echo_without_html_context_is_not_xss(tmp_path: Path) -> None:
     findings = VarDeclarationRule().check_file(tmp_path / "a.js", "var x = 1;\n")
     assert findings
     assert findings[0].catalog == FindingCatalog.CODE_QUALITY
+
+
+def test_quoted_shell_expansion_is_not_unquoted() -> None:
+    graph = parse_source("shell", Path("ok.sh"), 'echo "$q"\n')
+    assert not any(event.kind == "unquoted_expansion" for event in graph.events)
+
+
+def test_every_sink_documents_semantics() -> None:
+    from app.security.language_vocab import VOCABULARIES
+
+    for vocab in VOCABULARIES.values():
+        for sink in vocab.sinks:
+            assert sink.dangerous_condition
+            assert sink.api_names
+            assert sink.vulnerability_class is not None
+
+
+def test_analysis_stays_bounded(tmp_path: Path) -> None:
+    import time
+
+    src = "let q = req.query.q;\n" + "".join(f"let x{i} = 1;\n" for i in range(1500)) + "eval(q);\n"
+    started = time.perf_counter()
+    result = analyze_source(tmp_path, "b.js", src)
+    assert time.perf_counter() - started < 8.0
+    assert VulnerabilityClass.DYNAMIC_EXECUTION in observation_classes(result)

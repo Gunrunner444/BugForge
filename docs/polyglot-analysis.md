@@ -69,8 +69,21 @@ Code quality rules use `Finding.catalog = code_quality`. The UI labels them
 **CODE QUALITY**, separate from **SECURITY**.
 
 Every full-analysis language has a syntax-aware quality catalog. Quality rules
-are language-appropriate (unwrap in Rust, `goto` in C, `var`/`==`/`with` in JS)
-and do not duplicate security sinks.
+are language-appropriate and do not duplicate security sinks:
+
+| Language | Representative quality rules |
+|---|---|
+| Python | mutable defaults, bare except (CPython AST) |
+| JavaScript / TypeScript | `==`, `var`, `with` (mode-aware), `debugger` |
+| Ruby | empty `rescue`, shadowing, `for`/`in` |
+| C / C++ | `gets`/`strcpy`/`sprintf`, `goto` |
+| Go | `panic`, discarded `_` results |
+| Rust | `unwrap`/`expect`, `panic!` |
+| Java | empty catch, `printStackTrace` |
+| PHP | empty catch, `mysql_query` |
+| Kotlin / Swift | force-unwrap |
+| C# | empty catch, `goto` |
+| Shell | unquoted `$var`, POSIX `[` |
 
 ## Languages
 

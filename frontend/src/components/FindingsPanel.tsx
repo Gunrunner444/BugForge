@@ -152,6 +152,7 @@ function FindingRow({
             {f.file_path}:{f.line}
           </p>
         </div>
+        <span className="text-xs px-2 py-0.5 rounded border bg-white/70 text-slate-700 shrink-0">CODE QUALITY</span>
         <span className="text-xs opacity-60 shrink-0 capitalize">{f.category.replace(/_/g, " ")}</span>
         <svg
           className={`w-4 h-4 opacity-50 shrink-0 mt-0.5 transition-transform ${isExpanded ? "rotate-180" : ""}`}

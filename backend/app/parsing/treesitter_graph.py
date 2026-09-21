@@ -395,6 +395,47 @@ class _GraphBuilder:
                     kind="force_unwrap", line=_line(span), text=self._text(node)[:120], span=span
                 )
             )
+        if ntype == "postfix_expression":
+            for child in getattr(node, "children", ()) or ():
+                ctype = str(getattr(child, "type", ""))
+                if ctype in grammar.quality_force_unwrap_child_types:
+                    self.events.append(
+                        SyntaxEvent(
+                            kind="force_unwrap",
+                            line=_line(span),
+                            text=self._text(node)[:120],
+                            span=span,
+                        )
+                    )
+                    break
+        if ntype in grammar.quality_for_loop_types:
+            self.events.append(
+                SyntaxEvent(
+                    kind="for_loop", line=_line(span), text=self._text(node)[:120], span=span
+                )
+            )
+        if ntype in grammar.quality_posix_test_types:
+            text = self._text(node)
+            if not text.lstrip().startswith("[["):
+                self.events.append(
+                    SyntaxEvent(kind="posix_test", line=_line(span), text=text[:120], span=span)
+                )
+        if grammar.quality_unquoted_expansion and ntype in {
+            "simple_expansion",
+            "expansion",
+            "command_substitution",
+        }:
+            parent = getattr(node, "parent", None)
+            ptype = str(getattr(parent, "type", "")) if parent is not None else ""
+            if ptype not in grammar.string_types:
+                self.events.append(
+                    SyntaxEvent(
+                        kind="unquoted_expansion",
+                        line=_line(span),
+                        text=self._text(node)[:80],
+                        span=span,
+                    )
+                )
         if ntype in {"catch_clause", "catch_block", "except_clause", "rescue"}:
             self._extract_catch(node, ntype, span)
         if ntype in grammar.field_types:
@@ -654,6 +695,15 @@ class _GraphBuilder:
                 bind_scope = self._nearest_bind_scope(declarator=declarator, assignment=False)
             else:
                 bind_scope = self._lookup_declared_scope(name)
+            if self.grammar.quality_blank_ident and name == "_":
+                self.events.append(
+                    SyntaxEvent(
+                        kind="blank_ident",
+                        line=_line(span),
+                        text=self._text(node)[:120],
+                        span=span,
+                    )
+                )
             kind = SymbolKind.FIELD if bind_scope.kind is ScopeKind.CLASS else SymbolKind.LOCAL
             symbol_id = Symbol.make_id(bind_scope.scope_id, name)
             def_index = self._next_def_index(symbol_id)
@@ -835,26 +885,45 @@ class _GraphBuilder:
                 "block",
                 "compound_statement",
                 "function_body",
+                "do",
+                "body_statement",
+                "control_structure_body",
             }:
                 body = child
                 break
-        text = self._text(body if body is not None else node)
+        target = body if body is not None else node
+        skip_types = self.grammar.comment_types | {
+            "rescue",
+            "catch",
+            "except",
+            "identifier",
+            "constant",
+            "type_identifier",
+            "simple_identifier",
+            "exceptions",
+            "catch_parameter",
+            "formal_parameter",
+            "simple_symbol",
+            "optional_parameter",
+        }
+        text = self._text(target)
         meaningful = [
             c
-            for c in (getattr(body, "named_children", None) or getattr(body, "children", ()) or ())
-            if getattr(c, "is_named", False)
-            and str(getattr(c, "type", "")) not in self.grammar.comment_types
+            for c in (
+                getattr(target, "named_children", None) or getattr(target, "children", ()) or ()
+            )
+            if getattr(c, "is_named", False) and str(getattr(c, "type", "")) not in skip_types
         ]
         comment_text = " ".join(
             self._text(c)
-            for c in (getattr(body, "children", ()) or ())
+            for c in (getattr(target, "children", ()) or ())
             if str(getattr(c, "type", "")) in self.grammar.comment_types
         ).lower()
         intentional = any(
             token in comment_text
             for token in ("intentionally", "ignore", "expected", "noop", "no-op")
         )
-        empty = body is not None and not meaningful
+        empty = not meaningful
         self.events.append(
             SyntaxEvent(
                 kind="empty_catch" if empty and not intentional else "catch",
@@ -1306,8 +1375,7 @@ class _GraphBuilder:
                 c
                 for c in (getattr(args_node, "named_children", None) or ())
                 if getattr(c, "is_named", False)
-                and str(getattr(c, "type", ""))
-                not in self.grammar.comment_types | {"comment"}
+                and str(getattr(c, "type", "")) not in self.grammar.comment_types | {"comment"}
             ]
         out: list[CallArgument] = []
         for index, child in enumerate(children[:24]):
@@ -1352,9 +1420,7 @@ class _GraphBuilder:
                 SyntaxEvent(kind="deprecated_api", line=_line(span), text=name, span=span)
             )
         if name in grammar.quality_panic_names:
-            self.events.append(
-                SyntaxEvent(kind="panic", line=_line(span), text=name, span=span)
-            )
+            self.events.append(SyntaxEvent(kind="panic", line=_line(span), text=name, span=span))
 
     def _text(self, node: object | None) -> str:
         if node is None:

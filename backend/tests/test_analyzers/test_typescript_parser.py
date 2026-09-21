@@ -79,6 +79,20 @@ db.query("SELECT * FROM t WHERE x = '" + q + "'");
         assert any(c.name == "query" for c in graph.calls)
         assert any(b.name == "q" for b in graph.bindings)
 
+    def test_optional_chaining_nullish_and_assertion(self) -> None:
+        src = """
+const q = req?.query?.q ?? "safe";
+const n = user!.name as string;
+enum Mode { On, Off }
+class Box<T> { value!: T }
+"""
+        graph = _graph(src)
+        names = {b.name for b in graph.bindings}
+        assert "q" in names
+        assert "n" in names
+        assert any(e.name == "Mode" for e in graph.entities)
+        assert any(e.name == "Box" for e in graph.entities)
+
 
 class TestTypeScriptSecurity:
     def test_nestjs_decorators(self, tmp_path: Path) -> None:

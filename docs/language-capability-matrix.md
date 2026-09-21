@@ -47,6 +47,10 @@ not implemented.
 Path findings are `potential_path_traversal`. Static analysis does not emit
 demonstrated directory escape.
 
+Each sink records `dangerous_condition`, `safe_alternatives` when known, and
+`required_context` when a generic API is only dangerous in a specific output
+or HTML context. Unrelated sanitizer kinds cannot suppress a finding.
+
 ## Specialized formats
 
 HTML: script and event-handler sinks. CSS/SCSS: `expression()` / `javascript:`
