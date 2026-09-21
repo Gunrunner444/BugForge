@@ -25,7 +25,12 @@ from app.parsing.model import (
     SyntaxEvent,
     SyntaxGraph,
 )
-from app.parsing.routes import is_route_method, looks_like_route_path, path_parameters
+from app.parsing.routes import (
+    is_route_method,
+    known_route_receiver,
+    looks_like_route_path,
+    path_parameters,
+)
 from app.parsing.span import SourceSpan, span_from_lineno
 
 _STDLIB = frozenset(sys.stdlib_module_names)
@@ -561,6 +566,9 @@ class _Meta:
 def _decorator_route(node: ast.AST) -> tuple[str, str] | None:
     """``@app.get("/item/{id}")`` and ``@app.route("/item/<id>")`` only."""
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return None
+    receiver = node.func.value
+    if not isinstance(receiver, ast.Name) or not known_route_receiver(receiver.id):
         return None
     if not is_route_method(node.func.attr) or not node.args:
         return None

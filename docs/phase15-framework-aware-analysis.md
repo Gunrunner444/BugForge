@@ -20,12 +20,15 @@ def item(id: str):
 ```
 
 `@app.route("/item/<int:id>", methods=["GET"])` is the same idea. The path
-must be a string literal starting with `/`. `@cache.get("user")` is not a
-route. A function with the same signature and no decorator is not a route.
-The decorator is not called.
+must be a string literal starting with `/`, and the receiver must be a route
+object registered for a known framework. Flask, FastAPI, and Express register
+`app`. `@cache.get("/not-a-real-route/{id}")` is not a route, and neither is
+`@cache.get("user")`. A function with the same signature and no decorator is
+not a route. The decorator is not called.
 
 JavaScript and TypeScript record `app.get("/search", handler)` as route
-metadata. A bare `get("/search", handler)` is not a route. Callback
+metadata. A bare `get("/search", handler)` is not a route, and
+`cache.get("/not-a-route", handler)` is not a route. Callback
 parameters are not inferred from the path, so `function (id) { eval(id) }`
 stays unresolved even when it is passed to `app.get`.
 

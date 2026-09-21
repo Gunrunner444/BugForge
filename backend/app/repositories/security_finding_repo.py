@@ -77,6 +77,7 @@ def _to_row(
             "details": item.details,
             "artifact_path": item.artifact_path,
             "provenance": item.provenance.value if item.provenance else None,
+            "metadata": _json_metadata(item.metadata),
         }
         for item in finding.evidence.items
     ]
@@ -185,6 +186,20 @@ def to_security_response(row: DBSecurityFinding) -> SecurityFindingResponse:
     return SecurityFindingResponse.model_validate(data)
 
 
+def _json_metadata(metadata: object) -> dict[str, object]:
+    """Keep evidence metadata in the existing JSON blob. Non-JSON values are dropped."""
+    if not isinstance(metadata, dict):
+        return {}
+    try:
+        encoded = json.dumps(metadata, sort_keys=True)
+    except (TypeError, ValueError):
+        return {}
+    loaded = json.loads(encoded)
+    if not isinstance(loaded, dict):
+        return {}
+    return loaded
+
+
 def _intelligence(finding: SecurityFinding) -> dict[str, str]:
     return {
         "finding_key": finding.finding_key,
@@ -218,6 +233,8 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
                 kind = EvidenceKind(str(item.get("kind") or "reproduction"))
             except ValueError:
                 kind = EvidenceKind.REPRODUCTION
+            raw_meta = item.get("metadata", {})
+            metadata = raw_meta if isinstance(raw_meta, dict) else {}
             items.append(
                 Evidence(
                     kind=kind,
@@ -225,6 +242,7 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
                     summary=str(item.get("summary") or "evidence"),
                     details=str(item.get("details") or ""),
                     artifact_path=item.get("artifact_path"),
+                    metadata=metadata,
                 )
             )
     status = FindingStatus(row.status)

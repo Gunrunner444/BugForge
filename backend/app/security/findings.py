@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.domain.evidence import Evidence, EvidenceBundle
-from app.domain.findings import FindingStatus, SecurityFinding, SourceLocation
+from app.domain.findings import SecurityFinding, SourceLocation
 from app.domain.security import EvidenceTier
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import explain_cluster
@@ -77,12 +77,9 @@ def attach_ai_hypothesis(
 
     extra = Evidence.from_ai(hypothesis, details=analysis, source="security_agent")
     merged = finding.evidence.extend([extra])
-    status = finding.status
-    if status is FindingStatus.VERIFIED:
-        status = FindingStatus.POTENTIAL
     return replace(
         finding,
-        status=status,
+        status=finding.status,
         hypothesis=hypothesis,
         ai_analysis=analysis,
         impact=impact or finding.impact,

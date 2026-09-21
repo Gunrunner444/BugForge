@@ -30,7 +30,7 @@ from app.parsing.model import (
     SyntaxEvent,
     SyntaxGraph,
 )
-from app.parsing.routes import is_route_method, looks_like_route_path
+from app.parsing.routes import is_route_method, known_route_receiver, looks_like_route_path
 from app.parsing.span import SourceMap, SourceSpan, span_from_ts_node
 from app.parsing.treesitter import (
     MAX_NESTING,
@@ -644,6 +644,9 @@ class _GraphBuilder:
         if self.language_id not in {"javascript", "typescript"}:
             return
         if not is_route_method(call.name) or "." not in call.qualified or not call.arguments:
+            return
+        receiver = call.qualified.rsplit(".", 1)[0]
+        if not known_route_receiver(receiver):
             return
         first = call.arguments[0]
         if not first.is_literal:

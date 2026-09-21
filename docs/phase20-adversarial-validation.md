@@ -16,11 +16,12 @@ The tests cover:
 - AI-only and static-only findings, which still cannot call `verify`
 - analysis identity that does not include secrets
 
-A module-level function whose name matches a builtin sink hides that builtin
-for bare calls in the file. `def eval(value): return value` followed by
-`eval(...)` is not a dynamic-execution finding. If that function calls
+A bare builtin sink is hidden only when a definition of that name reaches the
+call. `eval(...)` before `def eval` is still the builtin. `def eval(value):
+return value` followed by `eval(...)` is not a dynamic-execution finding, and
+neither is `eval = keep` followed by `eval(...)`. If that function calls
 `exec`, the finding stays on `exec`. A qualified call such as `obj.eval` is
-unchanged. A nested function with the same name does not hide the builtin for
-the rest of the module.
+unchanged. A nested function hides the builtin only inside its enclosing
+scope.
 
 Static findings remain `POTENTIAL` or `CORROBORATED`.

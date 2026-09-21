@@ -89,6 +89,8 @@ def explain_confidence(finding: SecurityFinding) -> ConfidenceExplanation:
 def correlate_finding(
     finding: SecurityFinding,
     evidence: Sequence[Evidence],
+    *,
+    peers: Sequence[SecurityFinding] = (),
 ) -> SecurityFinding:
     """Attach same-issue evidence. Status is unchanged.
 
@@ -98,7 +100,7 @@ def correlate_finding(
     accepted: list[Evidence] = []
     seen = {_evidence_key(item) for item in finding.evidence.items}
     for item in sorted(evidence, key=_evidence_sort):
-        if not _same_issue(finding, item):
+        if not _same_issue(finding, item, peers):
             continue
         key = _evidence_key(item)
         if key in seen:
@@ -112,20 +114,64 @@ def correlate_finding(
     return replace(finding, evidence=merged, status=finding.status)
 
 
-def _same_issue(finding: SecurityFinding, evidence: Evidence) -> bool:
+def _same_issue(
+    finding: SecurityFinding,
+    evidence: Evidence,
+    peers: Sequence[SecurityFinding] = (),
+) -> bool:
     loc = finding.source_location
     path = evidence.artifact_path or _meta_str(evidence, "file_path")
     if not path or loc is None or not loc.file_path:
         return False
     if not _same_path(loc.file_path, path):
         return False
-    line = evidence.metadata.get("line")
-    if line is not None and loc.line is not None and int(line) != loc.line:
-        return False
+    identity = _meta_str(evidence, "finding_key")
+    if identity:
+        return bool(finding.finding_key) and identity == finding.finding_key
     vuln = _meta_str(evidence, "vulnerability_class")
     if vuln and finding.vulnerability_class and vuln != finding.vulnerability_class:
         return False
-    return True
+    sink = _meta_str(evidence, "sink")
+    if sink:
+        recorded = _finding_sink(finding)
+        if recorded and sink != recorded:
+            return False
+    parsed = _coerce_line(evidence.metadata.get("line"))
+    if parsed is None or loc.line is None or parsed != loc.line:
+        return False
+    return not any(_competes_for_line(finding, peer, parsed) for peer in peers)
+
+
+def _coerce_line(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            return int(text)
+    return None
+
+
+def _finding_sink(finding: SecurityFinding) -> str:
+    for item in finding.evidence.items:
+        sink = _meta_str(item, "sink")
+        if sink:
+            return sink
+    return ""
+
+
+def _competes_for_line(finding: SecurityFinding, peer: SecurityFinding, line: int) -> bool:
+    loc = peer.source_location
+    own = finding.source_location
+    if loc is None or own is None or peer is finding:
+        return False
+    if peer.vulnerability_class != finding.vulnerability_class:
+        return False
+    if not _same_path(own.file_path, loc.file_path):
+        return False
+    return loc.line == line
 
 
 def _same_path(left: str, right: str) -> bool:

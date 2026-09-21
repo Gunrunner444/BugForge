@@ -169,7 +169,10 @@ A positive file cap keeps the first N paths in sorted order and records
 `taint_max_import_depth` iterations records `cross_file_depth_limited` and
 does not invent the missing hop. A positive edge cap keeps at most N budgeted edges
 (`call` first, then alias, default, import, re-export, class import) and drops
-callees whose call edge was not kept. Same-file `MAX_INTERPROC_DEPTH` still
+callees whose call edge was not kept. During propagation, one caller/callee
+relationship is charged once. A later round may reuse that relationship
+without charging it again. A new relationship that does not fit still stops
+the walk and marks it incomplete. Same-file `MAX_INTERPROC_DEPTH` still
 marks the file incomplete when a further hop was added on the last allowed
 round. An incomplete walk is not a clean repository. Local findings in files
 that were analyzed remain.

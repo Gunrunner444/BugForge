@@ -21,6 +21,7 @@ from app.security.taint import (
     analyze_taint,
     applicable_sanitizer_kinds,
     argument_is_constant,
+    builtin_call_shadowed,
     call_matches_sink,
     call_taint_reason,
     field_path_from_reason,
@@ -92,7 +93,7 @@ class TaintFlowRule(SecurityRule):
             matched = next((sink for sink in sinks if call_matches_sink(call, sink)), None)
             if matched is None:
                 continue
-            if _module_function_shadows_call(graph, call):
+            if builtin_call_shadowed(graph, call):
                 continue
             if matched.required_context and matched.required_context not in graph.semantic_context:
                 if matched.required_context != graph.file_context:
@@ -177,23 +178,6 @@ class TaintFlowRule(SecurityRule):
                 )
             )
         return observations
-
-
-def _module_function_shadows_call(graph: SyntaxGraph, call: CallSite) -> bool:
-    """A module-level function hides a same-named builtin for bare calls.
-
-    ``obj.eval`` stays a sink match. Nested functions are not treated as a
-    module-wide shadow.
-    """
-    qualified = call.qualified or call.name
-    if qualified != call.name or "." in qualified:
-        return False
-    return any(
-        entity.name == call.name
-        and entity.entity_type in {"function", "async_function"}
-        and not entity.parent
-        for entity in graph.entities
-    )
 
 
 def _externals(project: object | None, file_path: str) -> dict[str, ExternalCallee]:

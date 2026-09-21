@@ -18,6 +18,21 @@ def is_route_method(name: str) -> bool:
     return name.lower() in _ROUTE_METHODS
 
 
+def known_route_receiver(name: str) -> bool:
+    """True when ``name`` is a route object declared by a registered framework.
+
+    The receiver comes from the framework registry, not from a guess about
+    variable names. ``cache.get`` is not a route. ``app.get`` is, because Flask,
+    FastAPI, and Express register that object.
+    """
+    from app.analyzers.framework_registry import get_framework_registry
+
+    for spec in get_framework_registry().all_specs():
+        if name in spec.route_receivers:
+            return True
+    return False
+
+
 def looks_like_route_path(path: str) -> bool:
     """A literal path, not an arbitrary string such as a cache key."""
     return path.startswith("/")

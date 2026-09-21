@@ -27,7 +27,7 @@ definition reaching that program point.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from app.analyzers.framework_detector import FrameworkInfo
@@ -207,6 +207,170 @@ def _use_byte(span: object | None, line: int) -> int:
     return max(0, line) * 10_000
 
 
+def receiver_argument_offset(
+    parameters: Sequence[str],
+    decorators: Sequence[str],
+    *,
+    instance: bool,
+) -> int:
+    """Map a call argument index onto a callee parameter index.
+
+    Instance calls skip ``self`` or ``cls``. An explicit ``Class.method`` call
+    does not, except for a classmethod, whose first parameter is implicit.
+    ``@staticmethod`` never shifts. This is the same rule for same-file calls
+    and cross-file summaries.
+    """
+    if not parameters:
+        return 0
+    text = " ".join(decorators)
+    if "staticmethod" in text:
+        return 0
+    first = parameters[0]
+    if "classmethod" in text and first in {"cls", "self"}:
+        return 1
+    if first in {"self", "cls"}:
+        return 1 if instance else 0
+    return 0
+
+
+def builtin_call_shadowed(graph: SyntaxGraph, call: CallSite) -> bool:
+    """True when a bare name is bound to a local definition that reaches this call.
+
+    A later ``def`` or assignment does not hide an earlier call. A nested
+    definition hides the name only in its enclosing scope. Qualified calls such
+    as ``obj.eval`` are left to the normal sink rule.
+    """
+    qualified = call.qualified or call.name
+    if not call.name or qualified != call.name or "." in qualified:
+        return False
+    at = _use_byte(call.span, call.line)
+    current = call.scope_id or "module"
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        if _scope_defines_name(graph, current, call.name, at):
+            return True
+        if "/" not in current:
+            break
+        current = current.rsplit("/", 1)[0]
+    if "module" not in seen and _scope_defines_name(graph, "module", call.name, at):
+        return True
+    return False
+
+
+def calls_contained_in(
+    calls: Sequence[CallSite],
+    *,
+    scope_id: str,
+    line: int,
+    span: object | None,
+    names: Collection[str] | None = None,
+    outermost: bool = False,
+) -> list[CallSite]:
+    """Calls that belong to a binding or return, by source span.
+
+    Line equality is used only when one side has no span. Nested calls stay in
+    the result unless ``outermost`` drops those strictly inside another match.
+    """
+    host_start = getattr(span, "start_byte", None)
+    host_end = getattr(span, "end_byte", None)
+    chosen: list[CallSite] = []
+    for call in calls:
+        if call.scope_id != scope_id:
+            continue
+        if names is not None and not _call_name_selected(call, names):
+            continue
+        call_start = getattr(call.span, "start_byte", None)
+        call_end = getattr(call.span, "end_byte", None)
+        if (
+            isinstance(host_start, int)
+            and isinstance(host_end, int)
+            and isinstance(call_start, int)
+            and isinstance(call_end, int)
+        ):
+            if host_start <= call_start and call_end <= host_end:
+                chosen.append(call)
+            continue
+        if call.line == line:
+            chosen.append(call)
+    if not outermost:
+        return chosen
+    return [
+        call
+        for call in chosen
+        if not any(
+            _call_strictly_contains(other, call) for other in chosen if other is not call
+        )
+    ]
+
+
+def _call_name_selected(call: CallSite, names: Collection[str]) -> bool:
+    if call.name in names or call.qualified in names:
+        return True
+    simple = (call.qualified or call.name).rsplit(".", 1)[-1]
+    return simple in names
+
+
+def _call_strictly_contains(outer: CallSite, inner: CallSite) -> bool:
+    if outer.span is None or inner.span is None:
+        return False
+    inside = (
+        outer.span.start_byte <= inner.span.start_byte
+        and inner.span.end_byte <= outer.span.end_byte
+    )
+    if not inside:
+        return False
+    return (
+        outer.span.start_byte < inner.span.start_byte
+        or outer.span.end_byte > inner.span.end_byte
+    )
+
+
+def _scope_defines_name(graph: SyntaxGraph, scope_id: str, name: str, at_byte: int) -> bool:
+    for binding in graph.bindings:
+        if binding.scope_id != scope_id or binding.name != name:
+            continue
+        if _import_binding(binding):
+            continue
+        if _use_byte(binding.span, binding.line) <= at_byte:
+            return True
+    for entity in graph.entities:
+        if entity.name != name or entity.entity_type not in {
+            "function",
+            "async_function",
+            "method",
+            "async_method",
+        }:
+            continue
+        if _entity_binding_scope(graph, entity) != scope_id:
+            continue
+        if entity.start_byte <= at_byte:
+            return True
+    return False
+
+
+def _import_binding(binding: Binding) -> bool:
+    """An imported name is the callee, not a local replacement for it."""
+    for callee in binding.rhs_callees:
+        simple = callee.rsplit(".", 1)[-1]
+        if simple in {"require", "import", "__import__"}:
+            return True
+    return False
+
+
+def _entity_binding_scope(graph: SyntaxGraph, entity: object) -> str | None:
+    name = getattr(entity, "name", "")
+    start = getattr(entity, "start_byte", None)
+    if not isinstance(start, int):
+        return None
+    for scope in graph.scopes:
+        if scope.name != name or scope.span is None:
+            continue
+        if abs(scope.span.start_byte - start) <= 2:
+            return scope.parent_id or "module"
+    return None
+
+
 def _reason_at(defs: tuple[_Def, ...], at_byte: int) -> str | None:
     hitting: _Def | None = None
     for item in defs:
@@ -323,22 +487,22 @@ def _call_matching_binding(
             names.append(simple)
     if not names:
         return None
-    wanted = set(names)
-    fallback: CallSite | None = None
-    for call in calls:
-        if call.scope_id != binding.scope_id:
-            continue
-        if call.name not in wanted and call.qualified not in wanted:
-            continue
-        if (
-            binding.span is not None
-            and call.span is not None
-            and binding.span.start_byte == call.span.start_byte
-        ):
+    chosen = calls_contained_in(
+        calls,
+        scope_id=binding.scope_id,
+        line=binding.line,
+        span=binding.span,
+        names=set(names),
+        outermost=True,
+    )
+    if len(chosen) == 1:
+        return chosen[0]
+    if binding.span is None:
+        return None
+    for call in chosen:
+        if call.span is not None and call.span.start_byte == binding.span.start_byte:
             return call
-        if call.line == binding.line:
-            fallback = call
-    return fallback
+    return None
 
 
 def _render_effect(
@@ -1080,8 +1244,11 @@ def _interprocedural_edges(
         if ent.parent:
             by_qualified.setdefault(f"{ent.parent}.{ent.name}", []).append(ent)
 
-    def resolve_callee(call: CallSite) -> object | None:
-        candidates = by_qualified.get(call.qualified) or by_name.get(call.name) or []
+    def resolve_bare(call: CallSite) -> object | None:
+        qualified = call.qualified or call.name
+        if "." in qualified and qualified != call.name:
+            return None
+        candidates = by_qualified.get(qualified) or by_name.get(call.name) or []
         if len(candidates) == 1:
             return candidates[0]
         qualified_hits = [
@@ -1096,13 +1263,30 @@ def _interprocedural_edges(
 
     use_state = state or TaintState.from_final_map(tainted, source_pats)
     for call in graph.calls:
-        callee = resolve_callee(call)
-        if callee is None:
-            continue
+        qualified = call.qualified or call.name
+        instance = False
+        if "." in qualified and qualified != call.name:
+            known = _known_method(graph, call)
+            if known is None:
+                continue
+            callee, instance = known
+        else:
+            callee = resolve_bare(call)
+            if callee is None:
+                continue
         callee_scope = _scope_for_entity(graph, callee)
         if callee_scope is None:
             continue
         params = list(getattr(callee, "parameters", ()) or ())
+        offset = (
+            receiver_argument_offset(
+                [param.name for param in params],
+                tuple(getattr(callee, "decorators", ()) or ()),
+                instance=instance,
+            )
+            if "." in qualified and qualified != call.name
+            else 0
+        )
         args = list(call.arguments)
         if not args and (call.argument_idents or call.argument_accesses):
             args = [
@@ -1120,8 +1304,9 @@ def _interprocedural_edges(
             reason = _argument_taint(arg, call.scope_id, use_state, source_pats, at_byte)
             if not reason:
                 continue
-            if arg.index < len(params):
-                pname = params[arg.index].name
+            slot = arg.index + offset
+            if slot < len(params):
+                pname = params[slot].name
                 sid = f"{callee_scope}::{pname}"
                 new.append((sid, f"callarg:{arg.index}:{reason}", _parameter_def_index(graph, sid)))
     for ret in graph.returns:
@@ -1153,6 +1338,107 @@ def _interprocedural_edges(
             if any(c == func_name or c.endswith(f".{func_name}") for c in binding.rhs_callees):
                 new.append((binding.symbol_id, ret_reason, binding.definition_index))
     return new
+
+
+def _known_method(graph: SyntaxGraph, call: CallSite) -> tuple[object, bool] | None:
+    """Resolve a method only when the receiver's class is already established.
+
+    A unique method name is not enough. Unknown receivers, ambiguous
+    constructions, and inherited methods stay unresolved.
+    """
+    qualified = call.qualified or ""
+    if "." not in qualified:
+        return None
+    receiver, method = qualified.rsplit(".", 1)
+    if receiver.endswith("()"):
+        class_name: str | None = receiver[:-2].rsplit(".", 1)[-1]
+        instance = True
+    elif any(entity.entity_type == "class" and entity.name == receiver for entity in graph.entities):
+        class_name = receiver
+        instance = False
+    elif receiver in {"self", "cls"}:
+        class_name = _enclosing_class(graph, call.scope_id)
+        instance = True
+    else:
+        binding = _reaching_binding(
+            graph, receiver, call.scope_id, _use_byte(call.span, call.line)
+        )
+        if binding is None:
+            return None
+        found = _constructed_classes(graph, binding)
+        if len(found) != 1:
+            return None
+        class_name = next(iter(found))
+        instance = True
+    if not class_name:
+        return None
+    entity = _method_on(graph, class_name, method)
+    if entity is None:
+        return None
+    return entity, instance
+
+
+def _method_on(graph: SyntaxGraph, class_name: str, method_name: str) -> object | None:
+    hits = [
+        entity
+        for entity in graph.entities
+        if entity.entity_type in {"method", "async_method"}
+        and entity.parent == class_name
+        and entity.name == method_name
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _enclosing_class(graph: SyntaxGraph, scope_id: str) -> str | None:
+    scopes = {scope.scope_id: scope for scope in graph.scopes}
+    current: str | None = scope_id
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        scope = scopes.get(current)
+        if scope is not None and scope.kind.value == "class":
+            return scope.name
+        if "/" not in current:
+            break
+        current = current.rsplit("/", 1)[0]
+    return None
+
+
+def _reaching_binding(graph: SyntaxGraph, name: str, scope_id: str, at_byte: int) -> Binding | None:
+    current: str | None = scope_id or "module"
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        hits = [
+            binding
+            for binding in graph.bindings
+            if binding.scope_id == current
+            and binding.name == name
+            and _use_byte(binding.span, binding.line) <= at_byte
+        ]
+        if hits:
+            chosen = max(hits, key=lambda binding: (_use_byte(binding.span, binding.line), binding.definition_index))
+            if chosen.is_conditional:
+                return None
+            return chosen
+        if "/" not in current:
+            break
+        current = current.rsplit("/", 1)[0]
+    if "module" not in seen:
+        return _reaching_binding(graph, name, "module", at_byte)
+    return None
+
+
+def _constructed_classes(graph: SyntaxGraph, binding: Binding) -> set[str]:
+    classes = {entity.name for entity in graph.entities if entity.entity_type == "class"}
+    found: set[str] = set()
+    for callee in binding.rhs_callees:
+        simple = callee.rsplit(".", 1)[-1]
+        if simple in classes:
+            found.add(simple)
+    return found
 
 
 def _scope_for_entity(graph: SyntaxGraph, entity: object) -> str | None:
