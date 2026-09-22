@@ -454,9 +454,10 @@ async def test_repeated_scan_does_not_duplicate_or_downgrade(
     created = await repo.bulk_create([first, other], project_id=project.id, analysis_id=None)
     assert len(created) == 2
     proof = Evidence(
-        kind=EvidenceKind.REPRODUCTION,
-        source="reproducer",
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
         summary="exploit ran",
+        details="shown",
         artifact_path="app.py",
     )
     verified = first.verify(EvidenceBundle.from_items([proof]))
@@ -488,7 +489,7 @@ async def test_repeated_scan_does_not_duplicate_or_downgrade(
     assert by_key["same-key"].line == 8
     assert by_key["other-key"].status == FindingStatus.REJECTED.value
     restored = to_domain(by_key["same-key"])
-    assert any(item.kind is EvidenceKind.REPRODUCTION for item in restored.evidence.items)
+    assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in restored.evidence.items)
     assert restored.source_location is not None
     assert restored.source_location.line == 8
 
@@ -553,9 +554,10 @@ def test_equivalent_rule_observations_without_occurrence_still_collapse() -> Non
 @pytest.mark.asyncio
 async def test_agent_does_not_downgrade_verified_or_accepted(tmp_path: Path) -> None:
     proof = Evidence(
-        kind=EvidenceKind.REPRODUCTION,
-        source="reproducer",
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
         summary="exploit ran",
+        details="shown",
         artifact_path="app.py",
     )
     verified = SecurityFinding.potential(
@@ -577,7 +579,7 @@ async def test_agent_does_not_downgrade_verified_or_accepted(tmp_path: Path) -> 
 
     result = await FrozenAgent(provider=MockLLMProvider()).analyze(tmp_path, use_ai=True)
     assert result.findings[0].status is FindingStatus.VERIFIED
-    assert any(item.kind is EvidenceKind.REPRODUCTION for item in result.findings[0].evidence.items)
+    assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in result.findings[0].evidence.items)
     assert any(item.kind is EvidenceKind.AI_ANALYSIS for item in result.findings[0].evidence.items)
 
     accepted = verified.human_accept()

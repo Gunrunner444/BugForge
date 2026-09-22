@@ -47,7 +47,12 @@ class SecurityFindingResponse(BaseModel):
 
 
 class SecurityLifecycleRequest(BaseModel):
-    """Operator transition. Extra fields such as ``status`` are rejected."""
+    """Operator transition against evidence the server already stored.
+
+    ``extra="forbid"`` rejects client fields ``status``, ``evidence``,
+    ``finding_key``, ``finding_id``, ``execution_id``, ``verified``, and
+    ``reproduced``. The path identifies the finding. The server loads it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

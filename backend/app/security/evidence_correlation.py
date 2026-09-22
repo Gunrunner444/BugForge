@@ -7,11 +7,16 @@ is attached evidence, not a bypass of ``SecurityFinding.verify``.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from app.domain.evidence import Evidence, EvidenceKind, EvidenceProvenance
+from app.domain.evidence import (
+    Evidence,
+    EvidenceKind,
+    EvidenceProvenance,
+    evidence_contradicts,
+    observation_identity,
+)
 from app.domain.findings import SecurityFinding
 
 _RUNTIME_KINDS = frozenset(
@@ -128,15 +133,15 @@ def _same_issue(
     parsed = _coerce_line(evidence.metadata.get("line"))
     if parsed is not None and loc is not None and loc.line is not None and parsed != loc.line:
         return False
-    identity = _meta_str(evidence, "finding_key")
-    if identity and finding.finding_key and identity != finding.finding_key:
-        return False
     sink = _meta_str(evidence, "sink")
     recorded_sink = _finding_sink(finding)
     if sink and recorded_sink and sink != recorded_sink:
         return False
-    if _server_attributed(evidence) and _trusted_identity(finding, evidence):
-        return True
+    if _server_attributed(evidence):
+        # Unstamped client keys are ignored above. Only a server stamp can
+        # name the finding, and a stamp for a different finding does not
+        # fall through to location matching.
+        return _trusted_identity(finding, evidence)
     if not path or loc is None or not loc.file_path or not _same_path(loc.file_path, path):
         return False
     vuln = _meta_str(evidence, "vulnerability_class")
@@ -223,18 +228,7 @@ def _same_path(left: str, right: str) -> bool:
 
 def evidence_identity(item: Evidence) -> tuple[str, ...]:
     """Stable evidence identity. Object ids are excluded because reload mints new ones."""
-    digest = hashlib.sha256(item.details.encode("utf-8")).hexdigest()[:16]
-    return (
-        item.kind.value,
-        item.source,
-        item.summary,
-        digest,
-        item.artifact_path or "",
-        _meta_str(item, "line"),
-        _meta_str(item, "contradicts") or _meta_str(item, "reached"),
-        _meta_str(item, "execution_id"),
-        _meta_str(item, "outcome"),
-    )
+    return observation_identity(item)
 
 
 def _evidence_sort(item: Evidence) -> tuple[str, str, str, str]:
@@ -246,15 +240,8 @@ def _meta_str(item: Evidence, key: str) -> str:
     return "" if value is None else str(value)
 
 
-def evidence_contradicts(item: Evidence) -> bool:
-    """True when runtime evidence says the suspected path was not reached."""
-    return _contradicts(item)
-
-
 def _contradicts(item: Evidence) -> bool:
-    flag = _meta_str(item, "contradicts").lower()
-    reached = _meta_str(item, "reached").lower()
-    return flag in {"1", "true", "yes"} or reached in {"0", "false", "no", "not_reached"}
+    return evidence_contradicts(item)
 
 
 def _runtime_label(finding: SecurityFinding) -> str:
@@ -293,7 +280,10 @@ def _because(
     if runtime == "supports":
         parts.append("a test or reproduction names the same location")
     elif runtime == "contradicts":
-        parts.append("a test says this path was not reached; the static result is kept")
+        parts.append(
+            "the static result is kept; stored lifecycle state stays; "
+            "a later observation says this path was not reached"
+        )
     elif runtime == "ai_only":
         parts.append("AI text is attached and is not verification")
     else:

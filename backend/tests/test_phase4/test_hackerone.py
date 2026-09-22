@@ -294,7 +294,7 @@ def _verified_finding(
         expected_behavior="HTTP 403",
         evidence=[
             Evidence(
-                kind=EvidenceKind.REPRODUCTION,
+                kind=EvidenceKind.HTTP_RESPONSE,
                 source="researcher",
                 summary="Reproduced IDOR",
                 details="status 200 for /users/3",
@@ -585,7 +585,12 @@ def test_secret_redaction_blocks_draft_validation() -> None:
         impact="session token stolen",
         reproduction="see token",
         evidence=[
-            Evidence(kind=EvidenceKind.REPRODUCTION, source="researcher", summary="reproduced")
+            Evidence(
+                kind=EvidenceKind.HTTP_RESPONSE,
+                source="researcher",
+                summary="reproduced",
+                details="token reflected",
+            )
         ],
     )
     draft = provider.draft_from_finding(

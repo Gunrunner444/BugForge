@@ -11,7 +11,11 @@ from dataclasses import dataclass, replace
 from app.domain.evidence import Evidence
 from app.domain.findings import SecurityFinding
 
-_CLIENT_IDENTITY_KEYS = frozenset({"attribution", "execution_id", "finding_id"})
+# Client metadata must not carry lifecycle identity. These fields are removed
+# from every untrusted record, including a forged ``attribution=server`` stamp.
+_CLIENT_IDENTITY_KEYS = frozenset(
+    {"attribution", "execution_id", "finding_id", "finding_key"}
+)
 
 
 @dataclass(frozen=True)
@@ -43,16 +47,15 @@ class ServerAttribution:
 
 
 def strip_client_attribution(item: Evidence) -> Evidence:
-    """Drop a forged server stamp. A mismatched finding key is left in place.
+    """Remove client-supplied lifecycle identity.
 
-    Correlation rejects a key that names a different finding. It does not
-    treat an unstamped key as proof on its own.
+    A finding key, finding id, execution id, or ``attribution=server`` marker
+    is not trusted because the caller knew the words. The lifecycle service
+    stamps those fields only after it has loaded the persisted finding.
     """
-    metadata = dict(item.metadata)
-    if metadata.get("attribution") == "server":
-        for key in _CLIENT_IDENTITY_KEYS:
-            metadata.pop(key, None)
-        metadata.pop("attribution", None)
+    metadata = {
+        key: value for key, value in item.metadata.items() if key not in _CLIENT_IDENTITY_KEYS
+    }
     return replace(item, metadata=metadata)
 
 

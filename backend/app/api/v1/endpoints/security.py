@@ -128,8 +128,10 @@ async def transition_security_finding(
 ) -> SecurityFindingResponse:
     """Apply a domain transition to evidence the server already stored.
 
-    The body names the operation. It cannot carry a status or homemade
-    verification evidence.
+    Collection happens first. This route only names the operation. It does
+    not accept ``status``, ``evidence``, ``finding_key``, ``finding_id``,
+    ``execution_id``, ``verified``, or ``reproduced``. A refused transition
+    still commits evidence the service retained, then returns 409.
     """
     repo = SecurityFindingRepository(db)
     service = FindingLifecycleService(repo)
@@ -141,8 +143,11 @@ async def transition_security_finding(
             transition=LifecycleTransition(body.operation),
         )
     except (FindingNotFoundError, FindingProjectMismatchError) as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found") from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        ) from exc
     except ValueError as exc:
+        await db.commit()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await db.commit()
     row = await repo.get(updated.id)

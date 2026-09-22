@@ -7,8 +7,8 @@ from typing import Any
 
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import SecurityFinding
-from app.security.lifecycle_rules import positive_reproduction
-from app.security_agent.correlation import finding_fingerprint, independent_provenances
+from app.domain.lifecycle_policy import can_corroborate, positive_reproduction
+from app.security_agent.correlation import finding_fingerprint
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import HypothesisStatus, ReproductionOutcome
 from app.security_testing.errors import RestrictedActivityError
@@ -21,7 +21,6 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
     The agent never calls verify.
     """
     existing = _existing(session, hypothesis)
-    independent = independent_provenances(hypothesis, session.graph)
     evidence = _evidence_from_graph(session, hypothesis)
     if existing is None:
         finding = SecurityFinding.from_hypothesis(
@@ -41,13 +40,14 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
             else EvidenceBundle.from_items(evidence)
         )
         finding = replace(finding, evidence=merged)
-    if len(independent) >= 1 and finding.status.value == "potential":
+    if can_corroborate(finding.evidence) and finding.status.value == "potential":
         finding = finding.corroborate()
         if hypothesis.status is HypothesisStatus.OPEN:
             hypothesis.status = HypothesisStatus.SUPPORTED
-    if (
+    elif (
         hypothesis.status is HypothesisStatus.REQUIRES_REPRODUCTION
         and finding.status.value == "potential"
+        and can_corroborate(finding.evidence)
     ):
         finding = finding.corroborate()
     if existing is None:

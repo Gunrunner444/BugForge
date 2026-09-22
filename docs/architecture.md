@@ -396,13 +396,15 @@ The security analyze API and `AnalysisService` both persist the initial
 static finding through `FindingLifecycleService`. Later evidence and every
 status change go through that same service. Statuses are `potential`,
 `corroborated`, `reproduced`, `verified`, `human_accepted`, and `rejected`.
-Correlation attaches matching evidence only. A successful reproduction
-record is required before `REPRODUCED`. Verification requires a separate
-HTTP, browser, scanner, API, replay, fuzzing, or proxy observation.
-AI text, static analysis, a failed test, and a generated test that was
-never executed cannot reproduce or verify. The operator transition endpoint
-names the operation. It does not accept a client `status`. See
-[phase22-production-security-lifecycle.md](phase22-production-security-lifecycle.md).
+Correlation attaches matching evidence only. A successful reproduction record requires an explicit positive outcome.
+`SecurityFinding.verify()` requires a separate HTTP, browser, scanner, API,
+replay, fuzzing, or proxy observation whose identity and execution id are
+not the reproduction record. AI text, static analysis, a failed test, and a
+generated test that was never executed cannot reproduce or verify. Client
+metadata cannot supply `finding_key`, `finding_id`, `execution_id`, or
+`attribution=server`. The operator transition endpoint names the operation.
+It does not accept a client `status` or evidence body. See
+[phase23-verification-authority.md](phase23-verification-authority.md).
 
 ## Configuration
 

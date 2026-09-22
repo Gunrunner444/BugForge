@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.adapters.reports import LocalReportProvider
@@ -31,7 +33,11 @@ def test_draft_from_finding_is_not_a_submission() -> None:
 def test_local_report_includes_corroborated() -> None:
     findings = [
         SecurityFinding.potential("A"),
-        SecurityFinding.potential("B").corroborate(),
+        replace(
+            SecurityFinding.potential("B"),
+            status=FindingStatus.CORROBORATED,
+            evidence_tier=EvidenceTier.CORROBORATED,
+        ),
     ]
     report = LocalReportProvider().render(findings)
     assert report.potential_count == 1

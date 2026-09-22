@@ -225,6 +225,7 @@ def _to_row(
             "details": item.details,
             "artifact_path": item.artifact_path,
             "provenance": item.provenance.value if item.provenance else None,
+            "collected_at": item.collected_at.isoformat(),
             "metadata": _json_metadata(item.metadata),
         }
         for item in finding.evidence.items
@@ -503,10 +504,12 @@ def _parse_evidence_list(raw: str) -> list[dict[str, object]]:
 
 
 def merge_lifecycle_state(current: SecurityFinding, incoming: SecurityFinding) -> SecurityFinding:
-    """Union evidence and keep the stronger lifecycle state.
+    """Union evidence and keep the row's static facts and stronger lifecycle.
 
-    A stale writer that still holds ``POTENTIAL`` cannot erase reproduction
-    evidence or a verified status saved by an earlier writer.
+    Lifecycle saves start from the current row. A stale snapshot cannot
+    replace location, flow, report text, or AI analysis that the row already
+    holds. Empty current fields may be filled from the incoming object.
+    Runtime evidence is the union of both sides. ``created_at`` stays original.
     """
     from dataclasses import replace
 
@@ -519,24 +522,60 @@ def merge_lifecycle_state(current: SecurityFinding, incoming: SecurityFinding) -
         seen.add(key)
         items.append(item)
     status = _prefer_status(current.status, incoming.status)
-    review = incoming.human_review_state
+    review = current.human_review_state
     if (
-        current.human_review_state is not HumanReviewState.UNREVIEWED
-        and incoming.human_review_state is HumanReviewState.UNREVIEWED
+        review is HumanReviewState.UNREVIEWED
+        and incoming.human_review_state is not HumanReviewState.UNREVIEWED
     ):
-        review = current.human_review_state
+        review = incoming.human_review_state
     if status is FindingStatus.HUMAN_ACCEPTED:
         review = HumanReviewState.ACCEPTED
     return replace(
-        incoming,
-        id=current.id,
-        finding_key=current.finding_key or incoming.finding_key,
+        current,
+        description=_fill(current.description, incoming.description),
+        vulnerability_class=_fill(current.vulnerability_class, incoming.vulnerability_class),
+        target=_fill(current.target, incoming.target),
+        endpoint=_fill(current.endpoint, incoming.endpoint),
+        source_location=current.source_location or incoming.source_location,
+        hypothesis=_fill(current.hypothesis, incoming.hypothesis),
         evidence=EvidenceBundle.from_items(items),
-        status=status,
+        reproduction=_fill(current.reproduction, incoming.reproduction),
+        observed_behavior=_fill(current.observed_behavior, incoming.observed_behavior),
+        expected_behavior=_fill(current.expected_behavior, incoming.expected_behavior),
+        impact=_fill(current.impact, incoming.impact),
+        confidence=current.confidence or incoming.confidence,
+        reproducibility=_fill(current.reproducibility, incoming.reproducibility),
+        tools=current.tools or incoming.tools,
+        ai_analysis=_fill(current.ai_analysis, incoming.ai_analysis),
         human_review_state=review,
         evidence_tier=_tier_for(status, current=current, incoming=incoming),
+        rule_ids=current.rule_ids or incoming.rule_ids,
+        analyzer=_fill(current.analyzer, incoming.analyzer),
+        observation_refs=current.observation_refs or incoming.observation_refs,
+        finding_key=current.finding_key or incoming.finding_key,
+        flow_summary=_fill(current.flow_summary, incoming.flow_summary),
+        flow_source=_fill(current.flow_source, incoming.flow_source),
+        flow_sink=_fill(current.flow_sink, incoming.flow_sink),
+        field_path=_fill(current.field_path, incoming.field_path),
+        files_crossed=_fill(current.files_crossed, incoming.files_crossed),
+        analysis_incomplete=_fill(current.analysis_incomplete, incoming.analysis_incomplete),
+        parser_completeness=_fill(current.parser_completeness, incoming.parser_completeness),
+        evidence_summary=_fill(current.evidence_summary, incoming.evidence_summary),
+        related_group=_fill(current.related_group, incoming.related_group),
+        asset=_fill(current.asset, incoming.asset),
+        report_title=_fill(current.report_title, incoming.report_title),
+        report_description=_fill(current.report_description, incoming.report_description),
+        status=status,
+        id=current.id,
         created_at=current.created_at,
     )
+
+
+def _fill[T](current: T, incoming: T) -> T:
+    """Keep a current value. Use the incoming value only when current is empty."""
+    if current is None or current == "":
+        return incoming
+    return current
 
 
 _STATUS_RANK = {
@@ -585,6 +624,9 @@ def _same_stored_path(left: str, right: str) -> bool:
 
 
 def to_domain(row: DBSecurityFinding) -> SecurityFinding:
+    from dataclasses import replace
+    from datetime import datetime
+
     from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceProvenance
     from app.domain.findings import FindingStatus, HumanReviewState, SourceLocation
     from app.domain.security import EvidenceTier
@@ -611,17 +653,25 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
                     provenance = EvidenceProvenance(raw_prov)
                 except ValueError:
                     provenance = None
-            items.append(
-                Evidence(
-                    kind=kind,
-                    source=str(item.get("source") or "unknown"),
-                    summary=str(item.get("summary") or "evidence"),
-                    details=str(item.get("details") or ""),
-                    artifact_path=item.get("artifact_path"),
-                    metadata=metadata,
-                    provenance=provenance,
-                )
-            )
+            collected_at = None
+            raw_collected = item.get("collected_at")
+            if isinstance(raw_collected, str) and raw_collected:
+                try:
+                    collected_at = datetime.fromisoformat(raw_collected)
+                except ValueError:
+                    collected_at = None
+            evidence_kwargs: dict[str, object] = {
+                "kind": kind,
+                "source": str(item.get("source") or "unknown"),
+                "summary": str(item.get("summary") or "evidence"),
+                "details": str(item.get("details") or ""),
+                "artifact_path": item.get("artifact_path"),
+                "metadata": metadata,
+                "provenance": provenance,
+            }
+            if collected_at is not None:
+                evidence_kwargs["collected_at"] = collected_at
+            items.append(Evidence(**evidence_kwargs))  # type: ignore[arg-type]
     status = FindingStatus(row.status)
     title = row.title
     intel = _row_intelligence(row)
@@ -669,7 +719,11 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         return SecurityFinding.rejected(title, **kwargs)  # type: ignore[arg-type]
     finding = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
     if status is FindingStatus.CORROBORATED:
-        return finding.corroborate()
+        return replace(
+            finding,
+            status=FindingStatus.CORROBORATED,
+            evidence_tier=EvidenceTier.CORROBORATED,
+        )
     if status is FindingStatus.REPRODUCED:
         return finding.reproduce()
     return finding

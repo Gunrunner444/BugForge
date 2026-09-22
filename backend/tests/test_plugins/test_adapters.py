@@ -337,7 +337,7 @@ def test_hypothesis_is_never_auto_verified() -> None:
 
 
 def test_verified_finding_requires_evidence() -> None:
-    with pytest.raises(ValueError, match="evidence"):
+    with pytest.raises(ValueError, match="independent"):
         SecurityFinding.verified("RCE", evidence=EvidenceBundle())
 
 
@@ -385,9 +385,10 @@ def test_local_report_provider_renders_potential_and_verified() -> None:
     evidence = EvidenceBundle.from_items(
         [
             Evidence(
-                kind=EvidenceKind.REPRODUCTION,
-                source="reproduction_engine",
+                kind=EvidenceKind.HTTP_RESPONSE,
+                source="lab-http",
                 summary="Reproduced consistently",
+                details="shown",
             )
         ]
     )

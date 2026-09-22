@@ -43,6 +43,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 20 | Adversarial semantic checks and shadowed-builtin handling | ✅ Implemented |
 | Phase 21 | Evidence correlation and finding lifecycle integration | ✅ Implemented |
 | Phase 22 | Production security lifecycle and evidence integrity | ✅ Implemented |
+| Phase 23 | Verification authority and evidence provenance | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -76,7 +77,8 @@ Lua, and Elixir remain detection-only. See
 [docs/phase19-polyglot-interprocedural.md](docs/phase19-polyglot-interprocedural.md), and
 [docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md), and
 [docs/phase21-evidence-lifecycle.md](docs/phase21-evidence-lifecycle.md), and
-[docs/phase22-production-security-lifecycle.md](docs/phase22-production-security-lifecycle.md).
+[docs/phase22-production-security-lifecycle.md](docs/phase22-production-security-lifecycle.md), and
+[docs/phase23-verification-authority.md](docs/phase23-verification-authority.md).
 
 Phase 2 adds:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.domain.evidence import Evidence, EvidenceBundle
 from app.domain.findings import SecurityFinding, SourceLocation
+from app.domain.lifecycle_policy import can_corroborate
 from app.domain.security import EvidenceTier
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import explain_cluster
@@ -40,9 +41,7 @@ def finding_from_cluster(cluster: ObservationCluster) -> SecurityFinding:
             function=None,
         ),
         confidence=confidence,
-        evidence_tier=(
-            EvidenceTier.CORROBORATED if cluster.corroborated else EvidenceTier.STATIC_INDICATOR
-        ),
+        evidence_tier=EvidenceTier.STATIC_INDICATOR,
         rule_ids=cluster.rule_ids,
         analyzer="security_rules",
         observation_refs=tuple(observation_ref(obs) for obs in observations),
@@ -60,7 +59,7 @@ def finding_from_cluster(cluster: ObservationCluster) -> SecurityFinding:
         report_description=summary,
         asset=cluster.file_path,
     )
-    if cluster.corroborated:
+    if cluster.corroborated and can_corroborate(finding.evidence):
         finding = finding.corroborate()
     return finding
 

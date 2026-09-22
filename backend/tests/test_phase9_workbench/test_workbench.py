@@ -164,9 +164,10 @@ async def test_local_lab_end_to_end(lab_server: LabServer, db_session: AsyncSess
     reproduced = [node for node in session.graph.nodes.values() if node.kind == "reproduction"]
     if reproduced:
         evidence = Evidence(
-            kind=EvidenceKind.REPRODUCTION,
+            kind=EvidenceKind.HTTP_RESPONSE,
             source="lab",
             summary=reproduced[0].summary or "reproduced owner=anyone",
+            details="other owner",
         )
         finding = SecurityFinding.verified(
             "IDOR on orders",

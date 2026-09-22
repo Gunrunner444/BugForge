@@ -378,9 +378,10 @@ async def test_findings_and_tool_history_survive_restart(db_session: AsyncSessio
     session = _session()
     SecurityResearchAgent(session)
     evidence = Evidence(
-        kind=EvidenceKind.REPRODUCTION,
+        kind=EvidenceKind.HTTP_RESPONSE,
         source="lab",
         summary="reproduced IDOR",
+        details="other user object",
     )
     finding = SecurityFinding.verified(
         "Verified IDOR",

@@ -75,10 +75,9 @@ artifact cannot be reused as verification. One such observational event can
 verify when it is not that reproduction record. The rule is explicit in
 `independent_verification_items`.
 
-`SecurityFinding.verify()` still requires verification-compatible
-provenance for database round-trips and direct domain use. Production
-verification goes through the lifecycle service, which applies the stricter
-independence rule before calling `verify()`.
+Phase 23 moves that independence rule into `SecurityFinding.verify()`.
+A direct `verify()` call fails when the only evidence is the reproduction
+record or a duplicate of it.
 
 Contradictory evidence stays attached when it identifies the finding. It
 does not verify, erase earlier evidence, or delete the row. A later

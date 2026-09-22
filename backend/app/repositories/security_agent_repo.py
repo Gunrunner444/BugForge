@@ -674,7 +674,18 @@ def _finding_from_row(
             return SecurityFinding.potential(title, evidence=bundle, **common)
     finding = SecurityFinding.potential(title, evidence=bundle, **common)
     if status is FindingStatus.CORROBORATED:
-        return finding.corroborate()
+        from dataclasses import replace
+
+        from app.domain.security import EvidenceTier
+
+        try:
+            return finding.corroborate()
+        except ValueError:
+            return replace(
+                finding,
+                status=FindingStatus.CORROBORATED,
+                evidence_tier=EvidenceTier.CORROBORATED,
+            )
     if status is FindingStatus.REPRODUCED:
         try:
             return finding.reproduce(bundle)

@@ -257,7 +257,9 @@ def test_strategy_is_more_than_tool_names() -> None:
 
 def test_export_specific_finding_and_unknown_404() -> None:
     session = _session()
-    evidence = Evidence(kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR")
+    evidence = Evidence(
+        kind=EvidenceKind.HTTP_RESPONSE, source="lab", summary="reproduced IDOR", details="shown"
+    )
     finding = SecurityFinding.verified(
         "Verified IDOR",
         evidence=EvidenceBundle.from_items([evidence]),
@@ -277,7 +279,9 @@ def test_export_specific_finding_and_unknown_404() -> None:
 
 def test_handoff_uses_evaluator_not_substring() -> None:
     session = _session()
-    evidence = Evidence(kind=EvidenceKind.REPRODUCTION, source="lab", summary="reproduced IDOR")
+    evidence = Evidence(
+        kind=EvidenceKind.HTTP_RESPONSE, source="lab", summary="reproduced IDOR", details="shown"
+    )
     finding = SecurityFinding.verified(
         "Verified IDOR",
         evidence=EvidenceBundle.from_items([evidence]),

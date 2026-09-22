@@ -23,6 +23,11 @@ from app.domain.evidence import (
     Evidence,
     EvidenceBundle,
 )
+from app.domain.lifecycle_policy import (
+    can_corroborate,
+    independent_verification_items,
+    positive_reproduction,
+)
 from app.domain.security import EvidenceTier
 
 
@@ -105,8 +110,25 @@ class SecurityFinding:
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("Finding title must be non-empty")
-        if self.status in _VERIFIED_STATUSES or self.status is FindingStatus.REPRODUCED:
-            _require_verifying_evidence(self.evidence)
+        if self.status is FindingStatus.REPRODUCED and not _has_positive_reproduction(self.evidence):
+            raise ValueError(
+                "A reproduced finding requires an explicit successful reproduction record."
+            )
+        if self.status is FindingStatus.VERIFIED and not independent_verification_items(
+            self.evidence.items
+        ):
+            raise ValueError(
+                "Verification requires an independent observation. "
+                "The reproduction record alone cannot verify a finding."
+            )
+        if self.status is FindingStatus.HUMAN_ACCEPTED and not (
+            _has_positive_reproduction(self.evidence)
+            or independent_verification_items(self.evidence.items)
+        ):
+            raise ValueError(
+                "Human acceptance requires a successful reproduction "
+                "or an independent verification observation."
+            )
 
     @property
     def is_verified(self) -> bool:
@@ -129,7 +151,12 @@ class SecurityFinding:
             if evidence is not None
             else self.evidence
         )
-        _require_verifying_evidence(merged)
+        if not independent_verification_items(merged.items):
+            raise ValueError(
+                "Verification requires an independent observation. "
+                "The reproduction record alone cannot verify a finding. "
+                "A duplicate of that record is the same observation."
+            )
         return replace(
             self,
             status=FindingStatus.VERIFIED,
@@ -146,6 +173,11 @@ class SecurityFinding:
             raise ValueError("Rejected findings cannot be corroborated")
         if self.status in _VERIFIED_STATUSES or self.status is FindingStatus.REPRODUCED:
             raise ValueError("Finding is already beyond corroboration")
+        if not can_corroborate(self.evidence):
+            raise ValueError(
+                "Corroboration requires two independent non-AI observations. "
+                "One static record, a duplicate of that record, or AI text is not enough."
+            )
         return replace(
             self,
             status=FindingStatus.CORROBORATED,
@@ -165,7 +197,11 @@ class SecurityFinding:
             if evidence is not None
             else self.evidence
         )
-        _require_verifying_evidence(merged)
+        if not _has_positive_reproduction(merged):
+            raise ValueError(
+                "Reproduction requires an explicit successful reproduction record. "
+                "A bare REPRODUCTION kind, a failed attempt, or an unknown outcome is not enough."
+            )
         return replace(
             self,
             status=FindingStatus.REPRODUCED,
@@ -186,7 +222,14 @@ class SecurityFinding:
                 "Human acceptance requires a reproduced or independently verified finding. "
                 "AI hypotheses and static corroboration are not sufficient."
             )
-        _require_verifying_evidence(self.evidence)
+        if not (
+            _has_positive_reproduction(self.evidence)
+            or independent_verification_items(self.evidence.items)
+        ):
+            raise ValueError(
+                "Human acceptance requires a successful reproduction "
+                "or an independent verification observation."
+            )
         return replace(
             self,
             status=FindingStatus.HUMAN_ACCEPTED,
@@ -252,7 +295,11 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
-        _require_verifying_evidence(bundle)
+        if not independent_verification_items(bundle.items):
+            raise ValueError(
+                "Verification requires an independent observation. "
+                "The reproduction record alone cannot verify a finding."
+            )
         kwargs.setdefault("evidence_tier", EvidenceTier.VERIFIED)
         return cls(title=title, status=FindingStatus.VERIFIED, evidence=bundle, **kwargs)
 
@@ -278,6 +325,10 @@ def _as_bundle(evidence: EvidenceBundle | Sequence[Evidence] | None) -> Evidence
     if isinstance(evidence, EvidenceBundle):
         return evidence
     return EvidenceBundle.from_items(evidence)
+
+
+def _has_positive_reproduction(bundle: EvidenceBundle) -> bool:
+    return any(positive_reproduction(item) for item in bundle.items)
 
 
 def _require_verifying_evidence(bundle: EvidenceBundle) -> None:

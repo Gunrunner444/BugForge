@@ -15,13 +15,16 @@ _FAILED_REPRODUCTION = frozenset(
         "not_reproduced",
         "blocked",
         "inconclusive",
+        "intermittent",
         "error",
         "no_evidence",
         "environment_error",
         "timeout",
     }
 )
-_POSITIVE_REPRODUCTION = frozenset({"reproduced", "success", "exploited"})
+_POSITIVE_REPRODUCTION = frozenset(
+    {"reproduced", "consistently_reproduced", "success", "exploited"}
+)
 
 
 class StaticAnalysisEvidenceCollector(EvidenceCollector):
@@ -127,17 +130,20 @@ class ReproductionEvidenceCollector(EvidenceCollector):
                 or ""
             ).lower()
             reproduced = getattr(reproduction, "reproduced", None)
-            success = reproduced is True or outcome in _POSITIVE_REPRODUCTION
-            failed = reproduced is False or outcome in _FAILED_REPRODUCTION
+            failed = outcome in _FAILED_REPRODUCTION or reproduced is False
+            success = (not failed) and (reproduced is True or outcome in _POSITIVE_REPRODUCTION)
             kind = EvidenceKind.LOG
-            if success and not failed:
+            if success:
                 kind = EvidenceKind.REPRODUCTION
             elif failed:
                 kind = EvidenceKind.TEST_FAILURE
-            metadata: dict[str, object] = {
-                "outcome": outcome or ("reproduced" if success else "attempt")
-            }
-            metadata["reproduced"] = "true" if success and not failed else "false"
+            recorded_outcome = outcome
+            if success and recorded_outcome not in _POSITIVE_REPRODUCTION:
+                recorded_outcome = "reproduced"
+            elif not success and not failed:
+                recorded_outcome = recorded_outcome or "attempt"
+            metadata: dict[str, object] = {"outcome": recorded_outcome}
+            metadata["reproduced"] = "true" if success else "false"
             file_path = getattr(reproduction, "file_path", None)
             line = getattr(reproduction, "line", None)
             if file_path:

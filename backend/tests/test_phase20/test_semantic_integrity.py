@@ -548,9 +548,10 @@ def test_evidence_metadata_survives_a_database_round_trip() -> None:
 
 def test_ai_hypothesis_does_not_downgrade_verified_findings() -> None:
     proof = Evidence(
-        kind=EvidenceKind.REPRODUCTION,
-        source="reproducer",
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
         summary="exploit ran",
+        details="shown",
         artifact_path="app.py",
     )
     verified = SecurityFinding.potential(
@@ -560,7 +561,7 @@ def test_ai_hypothesis_does_not_downgrade_verified_findings() -> None:
     ).verify()
     updated = attach_ai_hypothesis(verified, hypothesis="maybe", analysis="model text")
     assert updated.status is FindingStatus.VERIFIED
-    assert any(item.kind is EvidenceKind.REPRODUCTION for item in updated.evidence.items)
+    assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in updated.evidence.items)
     assert any(item.kind is EvidenceKind.AI_ANALYSIS for item in updated.evidence.items)
     accepted = updated.human_accept()
     kept = attach_ai_hypothesis(accepted, hypothesis="still maybe", analysis="more text")

@@ -7,6 +7,7 @@ records. Verification requires observational or executable provenance.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -193,3 +194,36 @@ class EvidenceBundle:
     @classmethod
     def from_items(cls, items: Iterable[Evidence]) -> EvidenceBundle:
         return cls(items=tuple(items))
+
+
+def observation_identity(item: Evidence) -> tuple[str, ...]:
+    """Stable observation identity. Generated UUIDs are not part of it.
+
+    Two ``Evidence`` objects with the same kind, source, summary, details,
+    location, contradiction flag, execution, and outcome are the same
+    observation. A new object id does not make them independent.
+    """
+    digest = hashlib.sha256(item.details.encode("utf-8")).hexdigest()[:16]
+    return (
+        item.kind.value,
+        item.source,
+        item.summary,
+        digest,
+        item.artifact_path or "",
+        _meta_text(item, "line"),
+        _meta_text(item, "contradicts") or _meta_text(item, "reached"),
+        _meta_text(item, "execution_id"),
+        _meta_text(item, "outcome"),
+    )
+
+
+def evidence_contradicts(item: Evidence) -> bool:
+    """True when the record says the suspected path was not reached."""
+    flag = _meta_text(item, "contradicts").lower()
+    reached = _meta_text(item, "reached").lower()
+    return flag in {"1", "true", "yes"} or reached in {"0", "false", "no", "not_reached"}
+
+
+def _meta_text(item: Evidence, key: str) -> str:
+    value = item.metadata.get(key)
+    return "" if value is None else str(value)

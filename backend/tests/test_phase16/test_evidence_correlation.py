@@ -148,15 +148,16 @@ def test_status_transitions_stay_on_the_existing_model() -> None:
         ai_refused = False
     assert ai_refused
     executed = Evidence(
-        kind=EvidenceKind.REPRODUCTION,
-        source="reproducer",
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
         summary="exploit ran",
+        details="shown",
         artifact_path="app.py",
-        metadata={"line": "3", "vulnerability_class": "dynamic_execution"},
+        metadata={"line": "3", "vulnerability_class": "dynamic_execution", "execution_id": "http-1"},
     )
     attached = correlate_finding(finding, [executed])
     assert attached.status is FindingStatus.POTENTIAL
-    verified = attached.verify([executed])
+    verified = attached.verify()
     assert verified.status is FindingStatus.VERIFIED
     assert verified.is_verified
 

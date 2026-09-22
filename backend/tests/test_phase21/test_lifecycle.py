@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.mock_provider import MockLLMProvider
 from app.adapters.evidence.base import EvidenceCollector
+from app.adapters.evidence.attribution import strip_client_attribution
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceSource
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding, SourceLocation
 from app.models.analysis import Analysis
@@ -111,6 +112,22 @@ class _Carry(EvidenceCollector):
         return (self._item,)
 
 
+def _http_observation(*, key: str, line: int, summary: str = "response reflected payload") -> Evidence:
+    return Evidence(
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
+        summary=summary,
+        details="shown",
+        artifact_path="app.py",
+        metadata={
+            "line": str(line),
+            "vulnerability_class": EVAL,
+            "execution_id": f"verify-{key}",
+            "finding_key": key,
+        },
+    )
+
+
 def _runtime(
     *,
     key: str,
@@ -129,6 +146,9 @@ def _runtime(
         "reached": reached,
         "contradicts": contradicts,
     }
+    if kind is EvidenceKind.REPRODUCTION:
+        metadata["outcome"] = "reproduced"
+        metadata["reproduced"] = "true"
     if extra:
         metadata.update(extra)
     return Evidence(
@@ -166,13 +186,15 @@ async def test_rescan_preserves_human_review_and_terminal_status(
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
     proof = _runtime(key="keep-key", line=3)
+    observed = _http_observation(key="keep-key", line=3)
 
     accepted = (
         _static_finding(key="keep-key", line=3)
-        .verify([proof])
+        .reproduce([proof])
+        .verify([observed])
         .human_accept()
     )
-    verified = _static_finding(key="verified-key", line=4).verify([proof])
+    verified = _static_finding(key="verified-key", line=4).verify([_http_observation(key="verified-key", line=4)])
     reproduced = _static_finding(key="reproduced-key", line=5).reproduce([proof])
     rejected = _static_finding(key="rejected-key", line=6).reject()
 
@@ -383,8 +405,13 @@ async def test_unique_constraint_reconciles_raced_insert(
     db_session.add(project)
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
-    proof = _runtime(key="race-key", line=3)
-    verified = _static_finding(key="race-key", line=3).verify([proof]).human_accept()
+    proof = _http_observation(key="race-key", line=3)
+    verified = (
+        _static_finding(key="race-key", line=3)
+        .reproduce([_runtime(key="race-key", line=3)])
+        .verify([proof])
+        .human_accept()
+    )
     await repo.bulk_create([verified], project_id=project.id, analysis_id=None)
 
     async def miss(_project_id, _findings):
@@ -522,7 +549,10 @@ async def test_lifecycle_negative_paths(db_session: AsyncSession, tmp_path: Path
         [_runtime(key="other-key", line=3)],
         project_id=project.id,
     )
-    assert all(item.summary != "exploit ran" for item in wrong_key.evidence.items)
+    kept_runtime = [item for item in wrong_key.evidence.items if item.summary == "exploit ran"]
+    assert kept_runtime
+    assert "finding_key" not in kept_runtime[0].metadata
+    assert kept_runtime[0].metadata.get("attribution") != "server"
 
     wrong_file = Evidence(
         kind=EvidenceKind.REPRODUCTION,
@@ -697,8 +727,11 @@ def test_correlation_rules_reject_ambiguous_and_wrong_identity() -> None:
     other = _static_finding(key="k2", line=3, title="other")
     exact = correlate_finding(finding, [_runtime(key="k1", line=3)])
     assert any(item.kind is EvidenceKind.REPRODUCTION for item in exact.evidence.items)
-    wrong_key = correlate_finding(finding, [_runtime(key="nope", line=3)])
-    assert all(item.kind is not EvidenceKind.REPRODUCTION for item in wrong_key.evidence.items)
+    stripped = strip_client_attribution(_runtime(key="nope", line=3))
+    assert "finding_key" not in stripped.metadata
+    wrong_key = correlate_finding(finding, [stripped])
+    assert any(item.kind is EvidenceKind.REPRODUCTION for item in wrong_key.evidence.items)
+    assert all(item.metadata.get("attribution") != "server" for item in wrong_key.evidence.items)
     wrong_line = correlate_finding(
         finding,
         [

@@ -42,9 +42,10 @@ project matches. Competing findings on the same line leave the evidence
 unattached. Duplicate items are not stored twice.
 
 Correlation never changes status. Verification is only
-`SecurityFinding.verify()` with independent observational or executable
-evidence. AI text, static analysis, generated tests that were never run, and
-source excerpts cannot verify.
+`SecurityFinding.verify()` with an independent observation. Phase 23 defines
+independence as a different observation identity and a different execution
+id from the reproduction record. AI text, static analysis, generated tests
+that were never run, and the reproduction record itself cannot verify.
 
 ## Lifecycle states
 
