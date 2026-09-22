@@ -143,6 +143,13 @@ class ResearchMode(StrEnum):
     LIVE_HACKERONE = "live_hackerone"
 
 
+class ResearchController(StrEnum):
+    """Who reasons. Cursor mode does not call a BugForge language model."""
+
+    INTERNAL_LLM = "internal_llm"
+    CURSOR = "cursor"
+
+
 class ToolCapability(StrEnum):
     UNAVAILABLE = "unavailable"
     PLANNING_ONLY = "planning_only"

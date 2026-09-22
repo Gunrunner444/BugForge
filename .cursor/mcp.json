@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "bugforge": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "backend",
+        "python",
+        "../tools/bugforge_mcp_server.py"
+      ],
+      "env": {
+        "BUGFORGE_API_URL": "http://127.0.0.1:8000"
+      }
+    }
+  }
+}

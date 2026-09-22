@@ -51,6 +51,7 @@ from app.security_agent.privilege import (
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import (
     HypothesisStatus,
+    ResearchController,
     ResearchMode,
     ResearchState,
     TerminationReason,
@@ -367,6 +368,7 @@ class SecurityAgentRepository:
             except GraphIntegrityError:
                 continue
         overrides = row.human_overrides if isinstance(row.human_overrides, dict) else {}
+        provider_id = str((row.model_config or {}).get("provider_id") or "")
         research = ResearchSession(
             id=row.id,
             project_id=str(row.project_id or ""),
@@ -393,6 +395,11 @@ class SecurityAgentRepository:
             strategy=str(overrides.get("strategy") or "passive_recon"),
             operator_identity=row.operator_identity or "",
             research_project_id=row.research_project_id or "",
+            controller=(
+                ResearchController.CURSOR
+                if provider_id == "cursor_external"
+                else ResearchController.INTERNAL_LLM
+            ),
         )
         if row.termination_reason:
             try:

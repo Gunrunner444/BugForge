@@ -37,6 +37,14 @@ Session states include `CREATED`, `RECON`, `ANALYZING`, `HYPOTHESIS_CREATED`,
 `COMPLETED_SUCCESS`, `COMPLETED_NO_FINDINGS`, `MAX_ITERATIONS`,
 `BUDGET_EXHAUSTED`, `USER_STOPPED`, `USER_PAUSED`, `FAILED`, `INCONCLUSIVE`.
 
+## Cursor-controlled mode
+
+`controller=cursor` means the Cursor model is the planner. BugForge stores
+`provider=cursor_external` and does not call `MockLLMProvider`, OpenAI,
+Anthropic, local, or MLX providers for that session. `POST .../step` is
+rejected. Cursor submits decisions to `POST .../decision`, and BugForge
+still authorizes every tool. See [cursor-control.md](cursor-control.md).
+
 ## Local lab vs live HackerOne
 
 **Local lab** uses the same tool APIs against loopback fixtures

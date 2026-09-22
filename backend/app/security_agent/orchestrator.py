@@ -293,6 +293,13 @@ class AdvancedResearchOrchestrator:
             "program": self.session.program_handle,
             "target": self.session.target,
             "mode": self.session.mode.value,
+            "controller": self.session.controller.value,
+            "ai_controller": (
+                "cursor" if self.session.controller.value == "cursor" else "bugforge_llm"
+            ),
+            "ai_execution": (
+                "none" if self.session.controller.value == "cursor" else self.session.provider.provider_name
+            ),
             "session_kind": "LAB" if self.session.mode.value == "lab" else "LIVE",
             "execution_mode": "ACTIVE" if active else "DRY-RUN",
             "scope": {

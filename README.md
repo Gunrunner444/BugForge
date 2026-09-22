@@ -117,6 +117,11 @@ Playwright) report `UNAVAILABLE` or ingest-only results — they are not
 stubs pretending to have scanned. Live HackerOne sessions default to dry-run
 with scanners and fuzzing disabled.
 
+Cursor-controlled mode is a separate controller. The Cursor model plans the
+research. BugForge does not call its own language model in that mode, and
+ScopeGuard, SafetyController, RateLimiter, and human approval stay in force.
+See [docs/cursor-control.md](docs/cursor-control.md).
+
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),
 [docs/scope-model.md](docs/scope-model.md),
@@ -124,6 +129,7 @@ Details: [docs/architecture.md](docs/architecture.md),
 [docs/hackerone.md](docs/hackerone.md),
 [docs/reporting.md](docs/reporting.md),
 [docs/security-agent.md](docs/security-agent.md),
+[docs/cursor-control.md](docs/cursor-control.md),
 [docs/agent-tools.md](docs/agent-tools.md),
 [docs/agent-safety.md](docs/agent-safety.md),
 [docs/research-workbench.md](docs/research-workbench.md),
