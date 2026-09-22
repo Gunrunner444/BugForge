@@ -36,19 +36,28 @@ AUTHZ_DOC = RuleDocumentation(
 )
 
 _JWT = re.compile(
-    r"jwt\.decode\s*\([^)]*(?:verify\s*=\s*False|verify_signature['\"]\s*:\s*False)",
+    r"jwt\.decode\s*\([^)\n]*(?:verify\s*=\s*False"
+    r"|verify_signature['\"]?\s*[:=]\s*False"
+    r"|['\"]verify_signature['\"]\s*:\s*false)",
     re.IGNORECASE,
 )
 _PASSWORD_EQ = re.compile(
-    r"(?:password|passwd|secret_key|api_secret)\s*==\s*[^=]",
+    r"(?:password|passwd|secret_key|api_secret)\s*==\s*(?!['\"]['\"]|None\b)[^=\n]",
     re.IGNORECASE,
 )
-_CSRF = re.compile(r"csrf_exempt|csrf\s*=\s*False|csrf_protection\s*=\s*False", re.IGNORECASE)
+_CSRF = re.compile(
+    r"csrf_exempt|WTF_CSRF_ENABLED\s*=\s*False|csrf_protect\s*=\s*False|"
+    r"csrf\s*=\s*False|csrf_protection\s*=\s*False",
+    re.IGNORECASE,
+)
 _IDOR = re.compile(
-    r"(get_object_or_404|find_by_id|findById|objects\.get)\s*\([^)]*(?:id|pk)\s*=",
+    r"(get_object_or_404|find_by_id|findById|objects\.get)\s*\([^)\n]*(?:id|pk)\s*=",
     re.IGNORECASE,
 )
-_OWNER = re.compile(r"request\.user|current_user|owner|user_id", re.IGNORECASE)
+_OWNER = re.compile(
+    r"request\.user|current_user|g\.user|principal|owner\s*==|user_id\s*==",
+    re.IGNORECASE,
+)
 
 
 class JwtUnverifiedRule(SecurityRule):
@@ -114,8 +123,8 @@ class UnscopedLookupRule(SecurityRule):
         for i, line in enumerate(graph.lines, start=1):
             if _IDOR.search(line) is None:
                 continue
-            window = "\n".join(graph.lines[max(0, i - 3) : min(len(graph.lines), i + 3)])
-            if _OWNER.search(window):
+            window = _function_window(graph, i)
+            if window is None or _OWNER.search(window):
                 continue
             observations.append(
                 SecurityObservation(
@@ -132,6 +141,32 @@ class UnscopedLookupRule(SecurityRule):
                 )
             )
         return observations
+
+
+def _function_window(graph: SyntaxGraph, line: int) -> str | None:
+    """Lines of the smallest function that contains ``line``.
+
+    Admin-named functions are skipped. When no scope is available, a short
+    adjacent window is used and middleware authorization stays a documented gap.
+    """
+    chosen = None
+    for scope in graph.scopes:
+        span = scope.span
+        if span is None or not (span.start_line <= line <= span.end_line):
+            continue
+        if scope.kind.value not in {"function", "method"}:
+            continue
+        width = span.end_line - span.start_line
+        if chosen is None or width < chosen[0]:
+            chosen = (width, scope)
+    if chosen is None:
+        return "\n".join(graph.lines[max(0, line - 3) : min(len(graph.lines), line + 3)])
+    scope = chosen[1]
+    if re.search(r"admin", scope.name, re.IGNORECASE):
+        return None
+    span = scope.span
+    assert span is not None
+    return "\n".join(graph.lines[span.start_line - 1 : span.end_line])
 
 
 def _line_hits(

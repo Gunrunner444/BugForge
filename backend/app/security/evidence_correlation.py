@@ -26,6 +26,11 @@ _RUNTIME_KINDS = frozenset(
         EvidenceKind.API_TEST,
         EvidenceKind.REPLAY,
         EvidenceKind.HTTP_RESPONSE,
+        EvidenceKind.HTTP_REQUEST,
+        EvidenceKind.BROWSER,
+        EvidenceKind.SCANNER,
+        EvidenceKind.FUZZING,
+        EvidenceKind.PROXY,
         EvidenceKind.LOG,
     }
 )

@@ -1724,7 +1724,9 @@ def sanitizer_intervened(
                 callee_n = _canon_qual(callee)
                 if callee == name or callee_n == name_n:
                     return sanitizer
-                if name_n and (callee_n.endswith("." + name_n)):
+                # Qualified sanitizers match only their full API name.
+                # ``my_module.escape`` is not ``html.escape``.
+                if "." in name_n and callee_n.endswith("." + name_n):
                     return sanitizer
     return None
 

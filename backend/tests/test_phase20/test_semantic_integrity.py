@@ -547,6 +547,8 @@ def test_evidence_metadata_survives_a_database_round_trip() -> None:
 
 
 def test_ai_hypothesis_does_not_downgrade_verified_findings() -> None:
+    from app.domain.trusted_evidence import issue_for_finding
+
     proof = Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
         source="lab-http",
@@ -554,11 +556,13 @@ def test_ai_hypothesis_does_not_downgrade_verified_findings() -> None:
         details="shown",
         artifact_path="app.py",
     )
-    verified = SecurityFinding.potential(
+    shell = SecurityFinding.potential(
         "Potential dynamic execution",
-        evidence=EvidenceBundle.from_items([proof]),
         vulnerability_class="dynamic_execution",
-    ).verify()
+    )
+    verified = shell.verify(
+        EvidenceBundle.from_items([issue_for_finding(shell, proof, "exec-v")])
+    )
     updated = attach_ai_hypothesis(verified, hypothesis="maybe", analysis="model text")
     assert updated.status is FindingStatus.VERIFIED
     assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in updated.evidence.items)

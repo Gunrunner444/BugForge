@@ -16,6 +16,7 @@ from app.domain.evidence import (
     evidence_contradicts,
     observation_identity,
 )
+from app.domain.trusted_evidence import is_trusted_observation
 
 # Observations that can verify a finding. A reproduction record, log,
 # screenshot, test failure, generated test, static analysis result, and AI
@@ -90,18 +91,22 @@ def positive_reproduction(item: Evidence) -> bool:
     return reproduced in _POSITIVE_FLAGS and outcome in {"", *_POSITIVE_OUTCOMES}
 
 
-def independent_verification_items(items: Sequence[Evidence]) -> tuple[Evidence, ...]:
-    """Observations that verify a finding apart from its reproduction record.
+def independent_verification_items(
+    items: Sequence[Evidence], *, target_id: str = ""
+) -> tuple[Evidence, ...]:
+    """Trusted observations that verify one semantic target.
 
-    Independence means all of the following:
+    An observation counts only when all of the following hold:
 
-    * the kind is an observational verification kind
-    * the stable observation identity is not a positive reproduction record
-    * the execution id, when present, is not a reproduction execution id
+    * it is a ``ServerObservation`` whose signature matches the server secret
+    * its kind is an observational verification kind
+    * its ``observed_target`` is the finding's current semantic target
+    * its canonical identity is not a positive reproduction record
+    * its execution id is not a reproduction execution id
 
-    A second ``Evidence`` object with a new UUID and the same content is the
-    same observation. Two executions are independent when their execution ids
-    differ.
+    A new ``Evidence`` UUID is not independence. Unstamped HTTP, browser,
+    scanner, API, replay, fuzzing, or proxy evidence does not verify.
+    Client metadata, including ``attribution=server``, does not verify.
     """
     reproductions = [item for item in items if positive_reproduction(item)]
     reproduction_ids = {observation_identity(item) for item in reproductions}
@@ -110,9 +115,11 @@ def independent_verification_items(items: Sequence[Evidence]) -> tuple[Evidence,
     }
     found: list[Evidence] = []
     for item in items:
-        if evidence_contradicts(item) or not item.contributes_to_verification:
+        if evidence_contradicts(item) or not is_trusted_observation(item):
             continue
         if item.kind not in INDEPENDENT_VERIFICATION_KINDS:
+            continue
+        if not target_id or _meta(item, "observed_target") != target_id:
             continue
         if observation_identity(item) in reproduction_ids:
             continue

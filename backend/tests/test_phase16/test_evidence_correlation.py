@@ -155,9 +155,11 @@ def test_status_transitions_stay_on_the_existing_model() -> None:
         artifact_path="app.py",
         metadata={"line": "3", "vulnerability_class": "dynamic_execution", "execution_id": "http-1"},
     )
+    from app.domain.trusted_evidence import issue_for_finding
+
     attached = correlate_finding(finding, [executed])
     assert attached.status is FindingStatus.POTENTIAL
-    verified = attached.verify()
+    verified = attached.verify([issue_for_finding(attached, executed, "http-1")])
     assert verified.status is FindingStatus.VERIFIED
     assert verified.is_verified
 

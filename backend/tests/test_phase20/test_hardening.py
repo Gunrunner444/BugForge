@@ -453,6 +453,8 @@ async def test_repeated_scan_does_not_duplicate_or_downgrade(
     repo = SecurityFindingRepository(db_session)
     created = await repo.bulk_create([first, other], project_id=project.id, analysis_id=None)
     assert len(created) == 2
+    from app.domain.trusted_evidence import issue_for_finding
+
     proof = Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
         source="lab-http",
@@ -460,7 +462,7 @@ async def test_repeated_scan_does_not_duplicate_or_downgrade(
         details="shown",
         artifact_path="app.py",
     )
-    verified = first.verify(EvidenceBundle.from_items([proof]))
+    verified = first.verify(EvidenceBundle.from_items([issue_for_finding(first, proof, "exec-v")]))
     verified_row = await repo.get(created[0].id)
     assert verified_row is not None
     verified_row.status = FindingStatus.VERIFIED.value
@@ -553,6 +555,8 @@ def test_equivalent_rule_observations_without_occurrence_still_collapse() -> Non
 
 @pytest.mark.asyncio
 async def test_agent_does_not_downgrade_verified_or_accepted(tmp_path: Path) -> None:
+    from app.domain.trusted_evidence import issue_for_finding
+
     proof = Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
         source="lab-http",
@@ -560,13 +564,13 @@ async def test_agent_does_not_downgrade_verified_or_accepted(tmp_path: Path) -> 
         details="shown",
         artifact_path="app.py",
     )
-    verified = SecurityFinding.potential(
+    shell = SecurityFinding.potential(
         "Potential dynamic execution",
-        evidence=EvidenceBundle.from_items([proof]),
         vulnerability_class="dangerous_dynamic_execution",
         source_location=SourceLocation(file_path="app.py", line=3),
         finding_key="verified-key",
-    ).verify()
+    )
+    verified = shell.verify([issue_for_finding(shell, proof, "exec-agent")])
     cluster = ObservationCluster(
         vulnerability_class=VulnerabilityClass.DYNAMIC_EXECUTION,
         file_path="app.py",

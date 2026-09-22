@@ -569,13 +569,59 @@ async def _engine_for_restore(
     return engine
 
 
+_RESEARCH_META_KEEP = frozenset(
+    {
+        "attribution",
+        "check_id",
+        "contradicts",
+        "event",
+        "execution_id",
+        "finding_id",
+        "finding_key",
+        "method",
+        "observation_signature",
+        "observed_target",
+        "outcome",
+        "reached",
+        "reproduced",
+        "result_id",
+        "route",
+        "rule_id",
+        "server_observation_id",
+        "session_id",
+        "status",
+        "status_code",
+        "target",
+        "url",
+    }
+)
+
+
+def _research_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep lifecycle fields. Redact other string values so secrets are not stored."""
+    stored: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key in _RESEARCH_META_KEEP:
+            stored[key] = value
+        elif isinstance(value, str):
+            stored[key] = redact_text(value)
+        elif isinstance(value, (int, float, bool)) or value is None:
+            stored[key] = value
+    return stored
+
+
 def _finding_row(session: ResearchSession, finding: SecurityFinding) -> DBResearchFinding:
     evidence_items = [
         {
             "kind": item.kind.value,
             "provenance": item.provenance.value if item.provenance is not None else "",
             "summary": redact_text(item.summary),
+            "details": redact_text(item.details),
             "source": item.source,
+            "artifact_path": item.artifact_path,
+            "metadata": _research_metadata(item.metadata),
+            "collected_at": item.collected_at.isoformat(),
+            "server_observation_id": getattr(item, "server_observation_id", "") or "",
         }
         for item in finding.evidence.items
     ]
@@ -609,24 +655,9 @@ def _finding_from_row(
     for raw in extra.get("evidence_items") or []:
         if not isinstance(raw, dict):
             continue
-        try:
-            kind = EvidenceKind(str(raw.get("kind") or "reproduction"))
-        except ValueError:
-            kind = EvidenceKind.REPRODUCTION
-        try:
-            provenance = EvidenceProvenance(str(raw.get("provenance") or "execution"))
-        except ValueError:
-            provenance = EvidenceProvenance.EXECUTION
-        if provenance is EvidenceProvenance.REPLAY:
-            kind = EvidenceKind.REPLAY
-        items.append(
-            Evidence(
-                kind=kind,
-                source=str(raw.get("source") or "research"),
-                summary=str(raw.get("summary") or "persisted evidence"),
-                provenance=provenance,
-            )
-        )
+        loaded = _research_evidence(raw)
+        if loaded is not None:
+            items.append(loaded)
     refs = list(row.evidence_ids or ())
     if graph is not None:
         refs = [ident for ident in refs if ident in graph.nodes]
@@ -674,18 +705,10 @@ def _finding_from_row(
             return SecurityFinding.potential(title, evidence=bundle, **common)
     finding = SecurityFinding.potential(title, evidence=bundle, **common)
     if status is FindingStatus.CORROBORATED:
-        from dataclasses import replace
-
-        from app.domain.security import EvidenceTier
-
         try:
             return finding.corroborate()
         except ValueError:
-            return replace(
-                finding,
-                status=FindingStatus.CORROBORATED,
-                evidence_tier=EvidenceTier.CORROBORATED,
-            )
+            return finding
     if status is FindingStatus.REPRODUCED:
         try:
             return finding.reproduce(bundle)
@@ -693,10 +716,51 @@ def _finding_from_row(
             return finding
     if status is FindingStatus.HUMAN_ACCEPTED:
         try:
+            from app.domain.lifecycle_policy import independent_verification_items
+            from app.domain.target_identity import semantic_target_identity
+
+            if independent_verification_items(
+                bundle.items, target_id=semantic_target_identity(finding)
+            ):
+                return SecurityFinding.verified(title, evidence=bundle, **common).human_accept()
             return finding.reproduce(bundle).human_accept()
         except ValueError:
             return finding
     return finding
+
+
+def _research_evidence(raw: dict[str, Any]) -> Evidence | None:
+    from app.domain.trusted_evidence import restore_server_observation
+
+    try:
+        kind = EvidenceKind(str(raw.get("kind") or ""))
+    except ValueError:
+        return Evidence(
+            kind=EvidenceKind.LOG,
+            source="quarantine",
+            summary="quarantined evidence",
+            metadata={"quarantined": "true", "raw_kind": str(raw.get("kind") or "")[:80]},
+        )
+    metadata = raw.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        item = Evidence(
+            kind=kind,
+            source=str(raw.get("source") or "research"),
+            summary=str(raw.get("summary") or "persisted evidence"),
+            details=str(raw.get("details") or ""),
+            artifact_path=raw.get("artifact_path") if isinstance(raw.get("artifact_path"), str) else None,
+            metadata=dict(metadata),
+        )
+    except ValueError:
+        return Evidence(
+            kind=EvidenceKind.LOG,
+            source="quarantine",
+            summary="quarantined evidence",
+            metadata={"quarantined": "true"},
+        )
+    return restore_server_observation(item)
 
 
 def _redact_json(value: Any) -> Any:

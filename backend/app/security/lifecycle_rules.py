@@ -17,6 +17,7 @@ from app.domain.lifecycle_policy import (
 from app.domain.lifecycle_policy import (
     independent_verification_items as _independent_items,
 )
+from app.domain.target_identity import semantic_target_identity
 
 __all__ = [
     "INDEPENDENT_VERIFICATION_KINDS",
@@ -28,4 +29,6 @@ __all__ = [
 
 def independent_verification_items(finding: SecurityFinding) -> tuple[Evidence, ...]:
     """Verification observations on a finding. See the domain policy."""
-    return _independent_items(finding.evidence.items)
+    return _independent_items(
+        finding.evidence.items, target_id=semantic_target_identity(finding)
+    )

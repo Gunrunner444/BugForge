@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.evidence import EvidenceBundle
+from app.domain.evidence import Evidence, EvidenceBundle
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
 from app.domain.lifecycle_policy import independent_verification_items
 from app.domain.security import EvidenceTier
@@ -349,6 +349,9 @@ def to_security_response(row: DBSecurityFinding) -> SecurityFindingResponse:
         "language": row.language,
     }
     data.update(_row_intelligence(row))
+    domain = to_domain(row)
+    data["status"] = domain.status.value
+    data["evidence_tier"] = domain.evidence_tier.value
     return SecurityFindingResponse.model_validate(data)
 
 
@@ -384,6 +387,83 @@ def _intelligence(finding: SecurityFinding) -> dict[str, str]:
     return payload
 
 
+def _evidence_from_stored(item: dict[str, object]) -> Evidence | None:
+    """Rebuild one stored record. Unknown or inconsistent records stay non-authoritative."""
+    from app.domain.evidence import Evidence, EvidenceKind, EvidenceProvenance
+    from app.domain.trusted_evidence import restore_server_observation
+
+    raw_kind = item.get("kind")
+    try:
+        kind = EvidenceKind(str(raw_kind or ""))
+    except ValueError:
+        return _quarantine(str(raw_kind or ""))
+    derived = {
+        EvidenceKind.AI_ANALYSIS: EvidenceProvenance.AI_HYPOTHESIS,
+        EvidenceKind.STATIC_ANALYSIS: EvidenceProvenance.STATIC_ANALYSIS,
+        EvidenceKind.SOURCE_CODE: EvidenceProvenance.SOURCE_OBSERVATION,
+        EvidenceKind.GENERATED_TEST: EvidenceProvenance.SOURCE_OBSERVATION,
+        EvidenceKind.TEST_FAILURE: EvidenceProvenance.EXECUTION,
+        EvidenceKind.REPRODUCTION: EvidenceProvenance.REPRODUCTION,
+        EvidenceKind.BROWSER: EvidenceProvenance.BROWSER_OBSERVATION,
+        EvidenceKind.PROXY: EvidenceProvenance.HTTP_OBSERVATION,
+        EvidenceKind.HTTP_REQUEST: EvidenceProvenance.HTTP_OBSERVATION,
+        EvidenceKind.HTTP_RESPONSE: EvidenceProvenance.HTTP_OBSERVATION,
+        EvidenceKind.SCANNER: EvidenceProvenance.SCANNER_RESULT,
+        EvidenceKind.SCANNER_PLAN: EvidenceProvenance.SCANNER_PLAN,
+        EvidenceKind.TOOL_STATUS: EvidenceProvenance.TOOL_STATUS,
+        EvidenceKind.FUZZING: EvidenceProvenance.FUZZING_RESULT,
+        EvidenceKind.API_TEST: EvidenceProvenance.API_TEST,
+        EvidenceKind.LOG: EvidenceProvenance.LOG,
+        EvidenceKind.SCREENSHOT: EvidenceProvenance.SCREENSHOT,
+        EvidenceKind.REPLAY: EvidenceProvenance.REPLAY,
+    }[kind]
+    raw_prov = item.get("provenance")
+    if isinstance(raw_prov, str) and raw_prov:
+        try:
+            stored = EvidenceProvenance(raw_prov)
+        except ValueError:
+            return _quarantine(str(raw_kind or ""))
+        if stored is not derived:
+            return _quarantine(str(raw_kind or ""))
+    raw_meta = item.get("metadata", {})
+    metadata = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    collected_at = None
+    raw_collected = item.get("collected_at")
+    if isinstance(raw_collected, str) and raw_collected:
+        try:
+            from datetime import datetime
+
+            collected_at = datetime.fromisoformat(raw_collected)
+        except ValueError:
+            collected_at = None
+    evidence_kwargs: dict[str, object] = {
+        "kind": kind,
+        "source": str(item.get("source") or "stored"),
+        "summary": str(item.get("summary") or "stored evidence"),
+        "details": str(item.get("details") or ""),
+        "artifact_path": item.get("artifact_path"),
+        "metadata": metadata,
+    }
+    if collected_at is not None:
+        evidence_kwargs["collected_at"] = collected_at
+    try:
+        built = Evidence(**evidence_kwargs)  # type: ignore[arg-type]
+    except ValueError:
+        return _quarantine(str(raw_kind or ""))
+    return restore_server_observation(built)
+
+
+def _quarantine(raw_kind: str) -> Evidence:
+    from app.domain.evidence import Evidence, EvidenceKind
+
+    return Evidence(
+        kind=EvidenceKind.LOG,
+        source="quarantine",
+        summary="quarantined evidence",
+        metadata={"quarantined": "true", "raw_kind": raw_kind[:80]},
+    )
+
+
 def _reconcile_row(
     row: DBSecurityFinding,
     finding: SecurityFinding,
@@ -392,11 +472,18 @@ def _reconcile_row(
 ) -> None:
     """Update static facts without destroying higher-trust lifecycle state.
 
-    A rescan may refresh location and flow fields. It must not erase status,
-    human review state, or independent verification evidence. ``analysis_id``
-    is the latest scan that observed this finding; older analyses are not a
-    historical finding store.
+    A rescan may refresh location and flow fields. Formatting and line
+    movement keep the semantic target, so verification stays. A material
+    target change keeps the historical evidence and requires a new
+    verification: the row returns to the scan's potential or corroborated
+    status. ``analysis_id`` is the latest scan that observed this finding.
     """
+    from app.domain.target_identity import semantic_target_identity
+
+    previous_target = semantic_target_identity(to_domain(row))
+    incoming_target = semantic_target_identity(finding)
+    target_changed = previous_target != incoming_target
+    previous_status = row.status
     incoming = _to_row(finding, project_id=row.project_id, analysis_id=analysis_id)
     row.title = incoming.title
     row.vulnerability_class = incoming.vulnerability_class
@@ -421,6 +508,19 @@ def _reconcile_row(
     row.report_title = incoming.report_title
     row.report_description = incoming.report_description
     row.evidence_json = _merge_evidence_json(row.evidence_json, incoming.evidence_json)
+    if target_changed and previous_status in {
+        "corroborated",
+        "reproduced",
+        "verified",
+        "human_accepted",
+    }:
+        row.status = finding.status.value
+        row.evidence_tier = finding.evidence_tier.value
+        stored = _stored_intelligence(row.intelligence_json)
+        stored["human_review_state"] = "unreviewed"
+        row.intelligence_json = intelligence_with_column_key(
+            json.dumps(stored, sort_keys=True), incoming.finding_key
+        )
     if analysis_id is not None:
         row.analysis_id = analysis_id
     if incoming.hypothesis and not row.hypothesis:
@@ -429,8 +529,8 @@ def _reconcile_row(
         row.ai_analysis = incoming.ai_analysis
     if incoming.impact:
         row.impact = incoming.impact
-    # Status, tier, reproduction notes, and review stay on the existing row.
-    # Incoming static scans are potential/unreviewed and must not downgrade.
+    # Same-target rescans keep status, tier, and review. A changed semantic
+    # target above replaces verification with the scan's own static status.
 
 
 def _overwrite_row(
@@ -579,13 +679,16 @@ def _human_accepted_from_stored(title: str, kwargs: dict[str, object]) -> Securi
     through ``verified()``. An accepted finding that only has a successful
     reproduction reloads through ``reproduce()``. Neither path assigns
     ``HUMAN_ACCEPTED`` when the stored evidence fails the domain rule.
+    The observation must be bound to this finding's semantic target.
     """
+    from app.domain.target_identity import semantic_target_identity
+
     bundle = kwargs.get("evidence")
     items = bundle.items if isinstance(bundle, EvidenceBundle) else ()
-    if independent_verification_items(items):
+    probe = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
+    if independent_verification_items(items, target_id=semantic_target_identity(probe)):
         return SecurityFinding.verified(title, **kwargs).human_accept()  # type: ignore[arg-type]
-    finding = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
-    return finding.reproduce().human_accept()
+    return probe.reproduce().human_accept()
 
 
 def _fill[T](current: T, incoming: T) -> T:
@@ -641,10 +744,7 @@ def _same_stored_path(left: str, right: str) -> bool:
 
 
 def to_domain(row: DBSecurityFinding) -> SecurityFinding:
-    from dataclasses import replace
-    from datetime import datetime
-
-    from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceProvenance
+    from app.domain.evidence import EvidenceBundle
     from app.domain.findings import FindingStatus, HumanReviewState, SourceLocation
     from app.domain.security import EvidenceTier
 
@@ -657,38 +757,9 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         for item in raw:
             if not isinstance(item, dict):
                 continue
-            try:
-                kind = EvidenceKind(str(item.get("kind") or "reproduction"))
-            except ValueError:
-                kind = EvidenceKind.REPRODUCTION
-            raw_meta = item.get("metadata", {})
-            metadata = raw_meta if isinstance(raw_meta, dict) else {}
-            provenance = None
-            raw_prov = item.get("provenance")
-            if isinstance(raw_prov, str) and raw_prov:
-                try:
-                    provenance = EvidenceProvenance(raw_prov)
-                except ValueError:
-                    provenance = None
-            collected_at = None
-            raw_collected = item.get("collected_at")
-            if isinstance(raw_collected, str) and raw_collected:
-                try:
-                    collected_at = datetime.fromisoformat(raw_collected)
-                except ValueError:
-                    collected_at = None
-            evidence_kwargs: dict[str, object] = {
-                "kind": kind,
-                "source": str(item.get("source") or "unknown"),
-                "summary": str(item.get("summary") or "evidence"),
-                "details": str(item.get("details") or ""),
-                "artifact_path": item.get("artifact_path"),
-                "metadata": metadata,
-                "provenance": provenance,
-            }
-            if collected_at is not None:
-                evidence_kwargs["collected_at"] = collected_at
-            items.append(Evidence(**evidence_kwargs))  # type: ignore[arg-type]
+            loaded = _evidence_from_stored(item)
+            if loaded is not None:
+                items.append(loaded)
     status = FindingStatus(row.status)
     title = row.title
     intel = _row_intelligence(row)
@@ -729,18 +800,26 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         except ValueError:
             pass
     if status is FindingStatus.VERIFIED:
-        return SecurityFinding.verified(title, **kwargs)  # type: ignore[arg-type]
+        try:
+            return SecurityFinding.verified(title, **kwargs)  # type: ignore[arg-type]
+        except ValueError:
+            return SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
     if status is FindingStatus.HUMAN_ACCEPTED:
-        return _human_accepted_from_stored(title, kwargs)
+        try:
+            return _human_accepted_from_stored(title, kwargs)
+        except ValueError:
+            return SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
     if status is FindingStatus.REJECTED:
         return SecurityFinding.rejected(title, **kwargs)  # type: ignore[arg-type]
     finding = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
     if status is FindingStatus.CORROBORATED:
-        return replace(
-            finding,
-            status=FindingStatus.CORROBORATED,
-            evidence_tier=EvidenceTier.CORROBORATED,
-        )
+        try:
+            return finding.corroborate()
+        except ValueError:
+            return finding
     if status is FindingStatus.REPRODUCED:
-        return finding.reproduce()
+        try:
+            return finding.reproduce()
+        except ValueError:
+            return finding
     return finding

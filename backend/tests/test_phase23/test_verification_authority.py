@@ -14,9 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.adapters.evidence.attribution import strip_client_attribution
 from app.adapters.evidence.collectors import ReproductionEvidenceCollector
-from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceSource, observation_identity
+from app.domain.evidence import (
+    Evidence,
+    EvidenceBundle,
+    EvidenceKind,
+    EvidenceSource,
+    observation_identity,
+)
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding, SourceLocation
 from app.domain.lifecycle_policy import positive_reproduction
+from app.domain.trusted_evidence import issue_for_finding
 from app.models.base import Base
 from app.models.project import Project
 from app.models.security_finding import DBSecurityFinding  # noqa: F401
@@ -88,22 +95,36 @@ def _http(execution: str = "exec-b", details: str = "uid=0") -> Evidence:
 def test_verify_requires_an_independent_observation() -> None:
     base = _finding()
     reproduced = base.reproduce([_repro()])
-    with pytest.raises(ValueError, match="independent"):
+    with pytest.raises(ValueError, match="independent|server-issued"):
         reproduced.verify()
     copy = replace(_repro(), id=uuid4())
-    with pytest.raises(ValueError, match="independent"):
+    with pytest.raises(ValueError, match="independent|server-issued"):
         reproduced.verify([copy])
-    same_execution = _http(execution="exec-a")
-    with pytest.raises(ValueError, match="independent"):
-        reproduced.verify([same_execution])
-    for kind in (EvidenceKind.HTTP_RESPONSE, EvidenceKind.BROWSER, EvidenceKind.SCANNER, EvidenceKind.API_TEST):
-        observed = Evidence(
+    with pytest.raises(ValueError, match="independent|server-issued"):
+        reproduced.verify([issue_for_finding(reproduced, copy, "exec-copy")])
+    for kind in (
+        EvidenceKind.HTTP_RESPONSE,
+        EvidenceKind.BROWSER,
+        EvidenceKind.SCANNER,
+        EvidenceKind.API_TEST,
+    ):
+        raw = Evidence(
             kind=kind,
             source="lab",
             summary=f"{kind.value} saw the result",
             details="distinct",
-            metadata={"execution_id": "exec-b"},
+            metadata={
+                "execution_id": "exec-b",
+                "finding_key": "forged",
+                "attribution": "server",
+            },
         )
+        with pytest.raises(ValueError, match="independent|server-issued"):
+            reproduced.verify([raw])
+        same_execution = issue_for_finding(reproduced, raw, "exec-a")
+        with pytest.raises(ValueError, match="independent|server-issued"):
+            reproduced.verify([same_execution])
+        observed = issue_for_finding(reproduced, raw, "exec-b")
         verified = reproduced.verify([observed])
         assert verified.status is FindingStatus.VERIFIED
 
@@ -363,11 +384,15 @@ async def test_human_accepted_reproduction_reloads_without_verification(
     db_session.add(project)
     await db_session.flush()
     service = FindingLifecycleService(SecurityFindingRepository(db_session))
-    accepted = (
-        _finding(_static("accepted"), key="accepted-repro").reproduce([_repro()]).human_accept()
+    created = await service.persist_static_scan(
+        [_finding(_static("accepted"), key="accepted-repro")],
+        project_id=project.id,
+        analysis_id=None,
     )
-    rows = await service.persist_static_scan([accepted], project_id=project.id, analysis_id=None)
-    restored = to_domain(rows[0])
+    current = to_domain(created[0])
+    accepted = current.reproduce([_repro()]).human_accept()
+    await SecurityFindingRepository(db_session).save_lifecycle(accepted, project_id=project.id)
+    restored = to_domain(created[0])
     assert restored.status is FindingStatus.HUMAN_ACCEPTED
     assert restored.human_review_state is HumanReviewState.ACCEPTED
     assert any(positive_reproduction(item) for item in restored.evidence.items)
@@ -383,24 +408,37 @@ async def test_rescan_preserves_each_lifecycle_state(db_session: AsyncSession, t
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
     service = FindingLifecycleService(repo)
-    states = {
+    shells = {
         "potential": _finding(_static("p"), key="potential"),
         "corroborated": _finding(_static("c1"), _static("c2"), key="corroborated").corroborate(),
-        "reproduced": _finding(_static("r"), key="reproduced").reproduce([_repro()]),
-        "verified": _finding(_static("v"), key="verified").reproduce([_repro()]).verify([_http()]),
-        "human_accepted": _finding(_static("h"), key="human_accepted")
-        .reproduce([_repro(execution_id="exec-h")])
-        .verify([_http(execution="exec-h2")])
-        .human_accept(),
-        "rejected": _finding(_static("x"), key="rejected").reject(),
+        "reproduced": _finding(_static("r"), key="reproduced"),
+        "verified": _finding(_static("v"), key="verified"),
+        "human_accepted": _finding(_static("h"), key="human_accepted"),
+        "rejected": _finding(_static("x"), key="rejected"),
     }
-    await service.persist_static_scan(list(states.values()), project_id=project.id, analysis_id=None)
+    await service.persist_static_scan(list(shells.values()), project_id=project.id, analysis_id=None)
+    rows_now, _total = await repo.list_for_project(project.id)
+    by_id = {row.finding_key: to_domain(row) for row in rows_now}
+    promotions = {
+        "reproduced": by_id["reproduced"].reproduce([_repro()]),
+        "verified": by_id["verified"].reproduce([_repro()]).verify(
+            [issue_for_finding(by_id["verified"], _http(), "exec-b")]
+        ),
+        "human_accepted": by_id["human_accepted"]
+        .reproduce([_repro(execution_id="exec-h")])
+        .verify([issue_for_finding(by_id["human_accepted"], _http(), "exec-h2")])
+        .human_accept(),
+        "rejected": by_id["rejected"].reject(),
+    }
+    for promoted in promotions.values():
+        await repo.save_lifecycle(promoted, project_id=project.id)
+    states = {**shells, **promotions}
     analysis_id = uuid4()
     moved = []
-    for key, finding in states.items():
+    for key in shells:
         moved.append(
             replace(
-                finding,
+                shells[key],
                 source_location=SourceLocation(file_path="app.py", line=8),
                 flow_summary=f"moved {key}",
             )
@@ -562,16 +600,39 @@ async def test_postgres_concurrent_evidence_updates() -> None:
             base = to_domain(await SecurityFindingRepository(session_a).get(finding_id))
         async with factory() as session_b:
             other = to_domain(await SecurityFindingRepository(session_b).get(finding_id))
-        async with factory() as session_a:
-            await SecurityFindingRepository(session_a).save_lifecycle(
-                base.reproduce([_repro()]), project_id=project_id
-            )
-            await session_a.commit()
-        async with factory() as session_b:
-            await SecurityFindingRepository(session_b).save_lifecycle(
-                other.verify([_http()]), project_id=project_id
-            )
-            await session_b.commit()
+        stale_flow = "stale static flow"
+        writer_a = replace(base, flow_summary=stale_flow).reproduce([_repro()])
+        writer_b = replace(other, flow_summary=stale_flow).verify(
+            [issue_for_finding(other, _http(details="from-b"), "exec-b")]
+        )
+        started = asyncio.Event()
+        release_a = asyncio.Event()
+
+        async def save_reproduction() -> None:
+            async with factory() as session:
+                repo = SecurityFindingRepository(session)
+                row = await repo.get_for_update(finding_id)
+                assert row is not None
+                started.set()
+                await release_a.wait()
+                await repo.save_lifecycle(writer_a, project_id=project_id)
+                await session.commit()
+
+        async def save_verification() -> None:
+            await started.wait()
+            async with factory() as session:
+                repo = SecurityFindingRepository(session)
+                await repo.save_lifecycle(writer_b, project_id=project_id)
+                await session.commit()
+
+        first = asyncio.create_task(save_reproduction())
+        second = asyncio.create_task(save_verification())
+        await started.wait()
+        blocked, _pending = await asyncio.wait({second}, timeout=0.4)
+        assert second not in blocked
+        release_a.set()
+        await first
+        await second
 
         held = asyncio.Event()
         release = asyncio.Event()
@@ -599,8 +660,10 @@ async def test_postgres_concurrent_evidence_updates() -> None:
 
         async with factory() as session:
             final = to_domain(await SecurityFindingRepository(session).get(finding_id))
+        assert final.status is FindingStatus.VERIFIED
+        assert final.flow_summary == "new flow"
         assert any(item.kind is EvidenceKind.REPRODUCTION for item in final.evidence.items)
-        assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in final.evidence.items)
+        assert any(item.details == "from-b" for item in final.evidence.items)
     finally:
         if finding_id is not None and project_id is not None:
             async with factory() as session:

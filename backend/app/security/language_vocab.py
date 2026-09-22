@@ -142,7 +142,13 @@ PYTHON = LanguageSecurityVocab(
         _sink("py.redir", REDIR, "redirect", "HttpResponseRedirect"),
     ),
     sanitizers=(
-        _san("py.html", "html.escape", "escape", kind="html_encode", effective=True),
+        _san(
+            "py.html",
+            "html.escape",
+            "markupsafe.escape",
+            kind="html_encode",
+            effective=True,
+        ),
         _san("py.sql", "execute", kind="sql_parameterize"),
         _san("py.path", "os.path.realpath", "Path.resolve", kind="path_canonicalize"),
         _san("py.shell", "shlex.quote", kind="shell_escape", effective=True),

@@ -257,8 +257,20 @@ def test_strategy_is_more_than_tool_names() -> None:
 
 def test_export_specific_finding_and_unknown_404() -> None:
     session = _session()
-    evidence = Evidence(
-        kind=EvidenceKind.HTTP_RESPONSE, source="lab", summary="reproduced IDOR", details="shown"
+    from app.domain.trusted_evidence import issue_for_finding
+
+    shell = SecurityFinding.potential(
+        "Verified IDOR", vulnerability_class="idor", target="http://127.0.0.1/users/2"
+    )
+    evidence = issue_for_finding(
+        shell,
+        Evidence(
+            kind=EvidenceKind.HTTP_RESPONSE,
+            source="lab",
+            summary="reproduced IDOR",
+            details="shown",
+        ),
+        "exec-export",
     )
     finding = SecurityFinding.verified(
         "Verified IDOR",
@@ -279,8 +291,20 @@ def test_export_specific_finding_and_unknown_404() -> None:
 
 def test_handoff_uses_evaluator_not_substring() -> None:
     session = _session()
-    evidence = Evidence(
-        kind=EvidenceKind.HTTP_RESPONSE, source="lab", summary="reproduced IDOR", details="shown"
+    from app.domain.trusted_evidence import issue_for_finding
+
+    shell = SecurityFinding.potential(
+        "Verified IDOR", vulnerability_class="idor", target="http://127.0.0.1/users/2"
+    )
+    evidence = issue_for_finding(
+        shell,
+        Evidence(
+            kind=EvidenceKind.HTTP_RESPONSE,
+            source="lab",
+            summary="reproduced IDOR",
+            details="shown",
+        ),
+        "exec-handoff",
     )
     finding = SecurityFinding.verified(
         "Verified IDOR",

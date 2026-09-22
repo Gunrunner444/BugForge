@@ -20,7 +20,9 @@ from app.adapters.evidence.attribution import (
 )
 from app.adapters.evidence.base import EvidenceCollector
 from app.domain.evidence import Evidence, EvidenceSource
-from app.domain.findings import SecurityFinding
+from app.domain.findings import FindingStatus, SecurityFinding
+from app.domain.target_identity import semantic_target_identity
+from app.domain.trusted_evidence import issue_server_observation
 from app.models.security_finding import DBSecurityFinding
 from app.repositories.security_finding_repo import SecurityFindingRepository, to_domain
 from app.security.evidence_correlation import correlate_finding
@@ -44,6 +46,9 @@ class FindingProjectMismatchError(LookupError):
     """The finding exists, but it does not belong to the supplied project."""
 
 
+_STATIC_SCAN_STATUSES = frozenset({FindingStatus.POTENTIAL, FindingStatus.CORROBORATED})
+
+
 class FindingLifecycleService:
     def __init__(self, repo: SecurityFindingRepository) -> None:
         self._repo = repo
@@ -56,6 +61,12 @@ class FindingLifecycleService:
         analysis_id: UUID | None,
     ) -> list[DBSecurityFinding]:
         """Persist potential or corroborated scan output. This is not verification."""
+        illegal = [item.status.value for item in findings if item.status not in _STATIC_SCAN_STATUSES]
+        if illegal:
+            raise ValueError(
+                "Static scan ingress accepts potential or corroborated findings only. "
+                f"Refused: {', '.join(illegal)}."
+            )
         return await self._repo.bulk_create(
             findings, project_id=project_id, analysis_id=analysis_id
         )
@@ -68,17 +79,15 @@ class FindingLifecycleService:
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
         transition: LifecycleTransition = LifecycleTransition.NONE,
-        trusted_server_stamp: bool = False,
     ) -> SecurityFinding:
-        """Correlate evidence that a server workflow already built.
+        """Correlate evidence already built by the server.
 
-        Client-forged ``attribution=server`` stamps are removed unless
-        ``trusted_server_stamp`` is set by :meth:`record_collected_evidence`.
+        This path strips client identity and does not issue a trusted
+        observation. Verification evidence must come from
+        :meth:`record_collected_evidence`.
         """
         row, finding = await self._load_for_update(finding_id, project_id=project_id)
-        prepared = [
-            item if trusted_server_stamp else strip_client_attribution(item) for item in evidence
-        ]
+        prepared = [strip_client_attribution(item) for item in evidence]
         return await self._apply(
             row,
             finding,
@@ -105,18 +114,29 @@ class FindingLifecycleService:
         one. Collector output does not keep a client-supplied finding key.
         """
         row, finding = await self._load_for_update(finding_id, project_id=project_id)
-        attribution = ServerAttribution.from_finding(finding, execution_id or uuid4().hex)
+        server_execution = execution_id or uuid4().hex
+        attribution = ServerAttribution.from_finding(finding, server_execution)
         extra = dict(source.extra)
         extra["attribution"] = attribution
         source.extra = extra
         collected: list[Evidence] = []
         for collector in collectors:
             collected.extend(collector.collect(source))
+        target_id = semantic_target_identity(finding)
         stamped: list[Evidence] = []
         for item in collected:
             attributed = stamp_server_attribution(strip_client_attribution(item), attribution)
-            if attributed is not None:
-                stamped.append(attributed)
+            if attributed is None:
+                continue
+            stamped.append(
+                issue_server_observation(
+                    attributed,
+                    execution_id=server_execution,
+                    observed_target=target_id,
+                    finding_id=attribution.finding_id,
+                    finding_key=attribution.finding_key,
+                )
+            )
         return await self._apply(
             row,
             finding,

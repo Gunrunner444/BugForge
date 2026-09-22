@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
@@ -12,6 +13,7 @@ from app.security.definitions import (
     PathIssueKind,
     SinkCertainty,
     SinkDefinition,
+    SourceDefinition,
 )
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import (
@@ -75,7 +77,7 @@ class TaintFlowRule(SecurityRule):
         ]
         if not sinks:
             return []
-        sources = vocab_sources(vocab, frameworks)
+        sources = _visible_sources(graph, vocab_sources(vocab, frameworks))
         source_pats = tuple(p for src in sources for p in src.patterns)
         externals = _externals(project, graph.file_path)
         taint_state = analyze_taint(graph, sources, externals=externals or None)
@@ -94,6 +96,11 @@ class TaintFlowRule(SecurityRule):
             if matched is None:
                 continue
             if builtin_call_shadowed(graph, call):
+                continue
+            if (
+                matched.vulnerability_class is VulnerabilityClass.COMMAND_INJECTION
+                and _safe_command_argv(call)
+            ):
                 continue
             if matched.required_context and matched.required_context not in graph.semantic_context:
                 if matched.required_context != graph.file_context:
@@ -178,6 +185,60 @@ class TaintFlowRule(SecurityRule):
                 )
             )
         return observations
+
+
+_IMPORT_GATED_SOURCES = {
+    "Query": ("fastapi", "nestjs"),
+    "Path": ("fastapi",),
+    "Body": ("fastapi", "nestjs"),
+    "Param": ("nestjs",),
+    "Headers": ("nestjs",),
+}
+
+
+def _visible_sources(
+    graph: SyntaxGraph, sources: tuple[SourceDefinition, ...]
+) -> tuple[SourceDefinition, ...]:
+    """Bare framework names count only when this file imports that framework."""
+    visible: list[SourceDefinition] = []
+    for source in sources:
+        patterns = tuple(
+            pattern for pattern in source.patterns if _source_pattern_allowed(graph, pattern)
+        )
+        if not patterns:
+            continue
+        if patterns != source.patterns:
+            source = replace(source, patterns=patterns)
+        visible.append(source)
+    return tuple(visible)
+
+
+def _source_pattern_allowed(graph: SyntaxGraph, pattern: str) -> bool:
+    required = _IMPORT_GATED_SOURCES.get(pattern)
+    if required is None:
+        return True
+    for item in graph.imports:
+        module = item.module or ""
+        if any(token in module for token in required):
+            return True
+    return False
+
+
+def _safe_command_argv(call: CallSite) -> bool:
+    """True for a list-form command whose program is not a shell wrapper.
+
+    ``subprocess.run(["git", user])`` is not shell injection.
+    ``shell=True`` and ``["sh", "-c", user]`` stay dangerous.
+    """
+    text = call.argument_text or ""
+    compact = "".join(text.split()).lower().replace('"', "'")
+    if "shell=true" in compact:
+        return False
+    first = call.arguments[0].text if call.arguments else text
+    if not first.lstrip().startswith("["):
+        return False
+    wrappers = ("['sh','-c'", "['bash','-c'", "['cmd','/c'", "['powershell','-c'")
+    return not any(token in compact for token in wrappers)
 
 
 def _externals(project: object | None, file_path: str) -> dict[str, ExternalCallee]:
@@ -452,6 +513,8 @@ def _observation(
             break
     if extra:
         metadata.update(extra)
+    if str(graph.parser_tier) in {"profile_fallback", "detection_only"}:
+        metadata.setdefault("analysis_incomplete", "parser_fallback")
     metadata.setdefault("sink_occurrence", _sink_occurrence(graph, call))
     if span is not None:
         metadata.update(

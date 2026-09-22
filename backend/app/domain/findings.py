@@ -29,6 +29,7 @@ from app.domain.lifecycle_policy import (
     positive_reproduction,
 )
 from app.domain.security import EvidenceTier
+from app.domain.target_identity import semantic_target_identity
 
 
 class FindingStatus(StrEnum):
@@ -114,16 +115,14 @@ class SecurityFinding:
             raise ValueError(
                 "A reproduced finding requires an explicit successful reproduction record."
             )
-        if self.status is FindingStatus.VERIFIED and not independent_verification_items(
-            self.evidence.items
-        ):
+        if self.status is FindingStatus.VERIFIED and not _trusted_for(self):
             raise ValueError(
                 "Verification requires an independent observation. "
                 "The reproduction record alone cannot verify a finding."
             )
         if self.status is FindingStatus.HUMAN_ACCEPTED and not (
             _has_positive_reproduction(self.evidence)
-            or independent_verification_items(self.evidence.items)
+            or _trusted_for(self)
         ):
             raise ValueError(
                 "Human acceptance requires a successful reproduction "
@@ -151,7 +150,9 @@ class SecurityFinding:
             if evidence is not None
             else self.evidence
         )
-        if not independent_verification_items(merged.items):
+        if not independent_verification_items(
+            merged.items, target_id=semantic_target_identity(self)
+        ):
             raise ValueError(
                 "Verification requires an independent observation. "
                 "The reproduction record alone cannot verify a finding. "
@@ -222,10 +223,7 @@ class SecurityFinding:
                 "Human acceptance requires a reproduced or independently verified finding. "
                 "AI hypotheses and static corroboration are not sufficient."
             )
-        if not (
-            _has_positive_reproduction(self.evidence)
-            or independent_verification_items(self.evidence.items)
-        ):
+        if not (_has_positive_reproduction(self.evidence) or _trusted_for(self)):
             raise ValueError(
                 "Human acceptance requires a successful reproduction "
                 "or an independent verification observation."
@@ -295,10 +293,13 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
-        if not independent_verification_items(bundle.items):
+        probe = cls.potential(title, evidence=bundle, **kwargs)
+        if not independent_verification_items(
+            bundle.items, target_id=semantic_target_identity(probe)
+        ):
             raise ValueError(
-                "Verification requires an independent observation. "
-                "The reproduction record alone cannot verify a finding."
+                "Verification requires a server-issued independent observation "
+                "for this semantic target."
             )
         kwargs.setdefault("evidence_tier", EvidenceTier.VERIFIED)
         return cls(title=title, status=FindingStatus.VERIFIED, evidence=bundle, **kwargs)
@@ -325,6 +326,12 @@ def _as_bundle(evidence: EvidenceBundle | Sequence[Evidence] | None) -> Evidence
     if isinstance(evidence, EvidenceBundle):
         return evidence
     return EvidenceBundle.from_items(evidence)
+
+
+def _trusted_for(finding: SecurityFinding) -> tuple[Evidence, ...]:
+    return independent_verification_items(
+        finding.evidence.items, target_id=semantic_target_identity(finding)
+    )
 
 
 def _has_positive_reproduction(bundle: EvidenceBundle) -> bool:

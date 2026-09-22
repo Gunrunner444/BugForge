@@ -282,24 +282,32 @@ An AI hypothesis never becomes a verified finding by itself.
 | `ai_hypothesis` | `ai_analysis` | **No** |
 | `static_analysis` | `static_analysis` | **No** |
 | `source_observation` | `source_code`, generated tests | **No** |
-| `execution` | test failures, logs | Yes |
-| `reproduction` | reproduction engine | Yes |
-| `browser_observation` | browser / screenshot | Yes |
-| `http_observation` | proxy / HTTP | Yes |
-| `scanner_observation` | scanner | Yes |
-| `api_test` | API test | Yes |
-| `fuzzing_result` | fuzzer | Yes |
+| `execution` | test failures, logs | **No** |
+| `reproduction` | reproduction engine | **No** |
+| `browser_observation` | browser / screenshot | Only as a signed server observation |
+| `http_observation` | proxy / HTTP | Only as a signed server observation |
+| `scanner_observation` | scanner | Only as a signed server observation |
+| `api_test` | API test | Only as a signed server observation |
+| `fuzzing_result` | fuzzer | Only as a signed server observation |
 
-AI text is forced to `ai_hypothesis` even if a caller tries to label it as
-execution. Evidence records are frozen so provenance cannot be rewritten.
+AI text is forced to `ai_hypothesis`. Provenance is derived from kind.
+A caller-supplied provenance that disagrees with the kind is rejected.
+Evidence records are frozen so provenance cannot be rewritten.
+
+Phase 24 narrows verification further. A matching provenance is not enough.
+`SecurityFinding.verify()` accepts only a `ServerObservation` issued by
+`issue_server_observation`: the observation id and HMAC are generated with
+the server secret, and `observed_target` must equal the finding's semantic
+target. Reproduction provenance does not verify. See
+[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md).
 
 `SecurityFinding` is frozen. Status is not a mutable field. Use constructors
 and transitions:
 
 - `potential` / `from_hypothesis` → `potential`
 - `corroborate()` → `corroborated` (independent static observations; **not** verified)
-- `verify(evidence)` / `verified(evidence)` → `verified` only when the bundle
-  contains at least one verifying provenance
+- `verify(evidence)` / `verified(evidence)` → `verified` only for a
+  server-issued observation of this semantic target
 - `reject` → `rejected`
 - `with_review` → human review state without changing verification
 
@@ -397,14 +405,20 @@ static finding through `FindingLifecycleService`. Later evidence and every
 status change go through that same service. Statuses are `potential`,
 `corroborated`, `reproduced`, `verified`, `human_accepted`, and `rejected`.
 Correlation attaches matching evidence only. A successful reproduction record requires an explicit positive outcome.
-`SecurityFinding.verify()` requires a separate HTTP, browser, scanner, API,
-replay, fuzzing, or proxy observation whose identity and execution id are
-not the reproduction record. AI text, static analysis, a failed test, and a
-generated test that was never executed cannot reproduce or verify. Client
-metadata cannot supply `finding_key`, `finding_id`, `execution_id`, or
-`attribution=server`. The operator transition endpoint names the operation.
-It does not accept a client `status` or evidence body. See
-[phase23-verification-authority.md](phase23-verification-authority.md).
+`SecurityFinding.verify()` requires a server-issued HTTP, browser, scanner,
+API, replay, fuzzing, or proxy observation whose identity and execution id
+are not the reproduction record and whose `observed_target` matches the
+finding's semantic target. Unstamped client evidence cannot verify, even
+when it copies `finding_key`, `finding_id`, `execution_id`, or
+`attribution=server`. A material sink, function, argument, field, source, or
+file change keeps the old evidence and returns the finding to the new scan's
+potential or corroborated status. Static scan ingress accepts only those two
+statuses. AI text, static analysis, a failed test, and a generated test that
+was never executed cannot reproduce or verify. The operator transition
+endpoint names the operation. It does not accept a client `status` or
+evidence body. See
+[phase23-verification-authority.md](phase23-verification-authority.md) and
+[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md).
 
 ## Configuration
 

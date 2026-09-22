@@ -16,8 +16,10 @@ _SECRET_ASSIGN = re.compile(
     r"(?i)(api[_-]?key|secret|password|passwd|token|private[_-]?key)\s*[=:]\s*['\"]([^'\"]{8,})['\"]"
 )
 _PLACEHOLDER = re.compile(
-    r"(?i)(change_me|placeholder|example|todo|xxx|your[_-]?secret|changeme|dummy)"
+    r"(?i)(change_me|placeholder|example|todo|xxx|your[_-]?|changeme|dummy|"
+    r"fake|sample|notasecret|redacted|test[-_ ]?secret|password123)"
 )
+_CHECKSUM_NAME = re.compile(r"(?i)checksum|etag|digest|sha256|crc32|md5sum")
 _AWS_KEY = re.compile(r"AKIA[0-9A-Z]{16}")
 _PEM = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
 
@@ -71,6 +73,8 @@ class HardcodedSecretRule(SecurityRule):
                 if 0 < binding.line <= len(graph.lines)
                 else binding.rhs
             )
+            if _CHECKSUM_NAME.search(binding.name) and not _PEM.search(line) and not _AWS_KEY.search(line):
+                continue
             if _PEM.search(line):
                 observations.append(
                     self._obs(graph, binding.line, "PEM private key in source", line)
@@ -128,18 +132,23 @@ class WeakCryptoRule(SecurityRule):
     ) -> list[SecurityObservation]:
         del frameworks
         vocab = vocab_for(graph.language)
-        names = tuple(
+        algorithms = tuple(
             token.lower()
             for token in (vocab.crypto_names if vocab is not None else ())
-            if token.lower() not in {"createhash", "hash", "digest"}
+            if token.lower() not in {"createhash", "hash", "digest", "new", "getinstance", "cipher"}
         )
-        if not names:
+        if not algorithms:
             return []
         observations: list[SecurityObservation] = []
+        crypto_callees = {"new", "getinstance", "createhash", "cipher", "pbkdf2"}
         for call in graph.calls:
-            hay = f"{call.qualified}({call.argument_text})".lower()
-            if not any(token in hay for token in names):
+            simple = call.qualified.rsplit(".", 1)[-1].lower()
+            argument = call.argument_text.lower()
+            direct = simple in algorithms
+            configured = simple in crypto_callees and any(token in argument for token in algorithms)
+            if not direct and not configured:
                 continue
+            hay = f"{call.qualified}({call.argument_text})".lower()
             observations.append(
                 SecurityObservation(
                     rule_id=self.rule_id,
@@ -173,6 +182,9 @@ class InsecureConfigRule(SecurityRule):
         del frameworks
         patterns = compile_patterns(_DEBUG_PATTERNS)
         observations: list[SecurityObservation] = []
+        path = graph.file_path.replace("\\", "/")
+        if "/tests/" in path or path.rsplit("/", 1)[-1].startswith("test_"):
+            return []
         for i, line in enumerate(graph.lines, start=1):
             if matches_any(line, patterns) is None:
                 continue

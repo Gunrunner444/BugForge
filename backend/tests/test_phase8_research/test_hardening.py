@@ -377,11 +377,20 @@ async def test_findings_and_tool_history_survive_restart(db_session: AsyncSessio
 
     session = _session()
     SecurityResearchAgent(session)
-    evidence = Evidence(
-        kind=EvidenceKind.HTTP_RESPONSE,
-        source="lab",
-        summary="reproduced IDOR",
-        details="other user object",
+    from app.domain.trusted_evidence import issue_for_finding
+
+    shell = SecurityFinding.potential(
+        "Verified IDOR", vulnerability_class="idor", target="http://127.0.0.1/users/2"
+    )
+    evidence = issue_for_finding(
+        shell,
+        Evidence(
+            kind=EvidenceKind.HTTP_RESPONSE,
+            source="lab",
+            summary="reproduced IDOR",
+            details="other user object",
+        ),
+        "exec-idor",
     )
     finding = SecurityFinding.verified(
         "Verified IDOR",

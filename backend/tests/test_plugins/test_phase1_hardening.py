@@ -28,6 +28,7 @@ from app.domain.evidence import (
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
 from app.domain.language import LanguageCapability
 from app.domain.source import LanguageParseResult
+from app.domain.trusted_evidence import issue_for_finding
 from app.plugins import AdapterNotFoundError, AdapterRegistry, DuplicateAdapterError
 from app.plugins.errors import (
     ActiveTestingNotPermittedError,
@@ -344,16 +345,19 @@ def test_rejected_finding() -> None:
 
 
 def test_valid_verified_finding() -> None:
-    with pytest.raises(ValueError, match="independent"):
+    with pytest.raises(ValueError, match="independent|server-issued"):
         SecurityFinding.verified("Confirmed XSS", evidence=[_repro_evidence()])
-    finding = SecurityFinding.verified("Confirmed XSS", evidence=[_http_evidence()])
+    shell = SecurityFinding.potential("Confirmed XSS")
+    finding = SecurityFinding.verified(
+        "Confirmed XSS", evidence=[issue_for_finding(shell, _http_evidence(), "verify-1")]
+    )
     assert finding.status is FindingStatus.VERIFIED
     assert finding.is_verified is True
     assert finding.evidence.verifying_items()
 
 
 def test_invalid_verified_finding_without_evidence() -> None:
-    with pytest.raises(ValueError, match="independent"):
+    with pytest.raises(ValueError, match="independent|server-issued"):
         SecurityFinding.verified("RCE", evidence=EvidenceBundle())
 
 
@@ -407,7 +411,7 @@ def test_verify_transition_requires_independent_evidence() -> None:
         finding.verify([Evidence.from_ai("still just a guess")])
     with pytest.raises(ValueError, match="independent"):
         finding.verify([_repro_evidence()])
-    verified = finding.verify([_http_evidence()])
+    verified = finding.verify([issue_for_finding(finding, _http_evidence(), "verify-1")])
     assert verified.status is FindingStatus.VERIFIED
     assert finding.status is FindingStatus.POTENTIAL
 
@@ -715,7 +719,10 @@ def test_local_report_separates_statuses_and_review() -> None:
 
     findings = [
         SecurityFinding.potential("Maybe"),
-        SecurityFinding.verified("Yes", evidence=[_http_evidence()]).with_review(
+        SecurityFinding.verified(
+            "Yes",
+            evidence=[issue_for_finding(SecurityFinding.potential("Yes"), _http_evidence(), "verify-1")],
+        ).with_review(
             HumanReviewState.ACCEPTED
         ),
         SecurityFinding.rejected("No"),

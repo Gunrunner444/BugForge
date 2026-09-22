@@ -14,7 +14,15 @@ from app.domain.findings import SecurityFinding
 # Client metadata must not carry lifecycle identity. These fields are removed
 # from every untrusted record, including a forged ``attribution=server`` stamp.
 _CLIENT_IDENTITY_KEYS = frozenset(
-    {"attribution", "execution_id", "finding_id", "finding_key"}
+    {
+        "attribution",
+        "execution_id",
+        "finding_id",
+        "finding_key",
+        "observation_signature",
+        "observed_target",
+        "server_observation_id",
+    }
 )
 
 

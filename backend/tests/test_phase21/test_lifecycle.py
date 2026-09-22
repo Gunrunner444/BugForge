@@ -11,11 +11,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.mock_provider import MockLLMProvider
-from app.adapters.evidence.base import EvidenceCollector
 from app.adapters.evidence.attribution import strip_client_attribution
+from app.adapters.evidence.base import EvidenceCollector
+from app.ai.mock_provider import MockLLMProvider
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceSource
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding, SourceLocation
+from app.domain.trusted_evidence import issue_for_finding
 from app.models.analysis import Analysis
 from app.models.project import Project
 from app.models.security_finding import DBSecurityFinding
@@ -188,13 +189,14 @@ async def test_rescan_preserves_human_review_and_terminal_status(
     proof = _runtime(key="keep-key", line=3)
     observed = _http_observation(key="keep-key", line=3)
 
-    accepted = (
-        _static_finding(key="keep-key", line=3)
-        .reproduce([proof])
-        .verify([observed])
-        .human_accept()
+    accepted_base = _static_finding(key="keep-key", line=3).reproduce([proof])
+    accepted = accepted_base.verify(
+        [issue_for_finding(accepted_base, observed, "verify-keep-key")]
+    ).human_accept()
+    verified_base = _static_finding(key="verified-key", line=4)
+    verified = verified_base.verify(
+        [issue_for_finding(verified_base, _http_observation(key="verified-key", line=4), "verify-verified-key")]
     )
-    verified = _static_finding(key="verified-key", line=4).verify([_http_observation(key="verified-key", line=4)])
     reproduced = _static_finding(key="reproduced-key", line=5).reproduce([proof])
     rejected = _static_finding(key="rejected-key", line=6).reject()
 
@@ -406,11 +408,12 @@ async def test_unique_constraint_reconciles_raced_insert(
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
     proof = _http_observation(key="race-key", line=3)
-    verified = (
-        _static_finding(key="race-key", line=3)
-        .reproduce([_runtime(key="race-key", line=3)])
-        .verify([proof])
-        .human_accept()
+    race_base = _static_finding(key="race-key", line=3).reproduce(
+        [_runtime(key="race-key", line=3)]
+    )
+    verified = race_base.verify(
+        [issue_for_finding(race_base, proof, "verify-race-key")]
+    ).human_accept(
     )
     await repo.bulk_create([verified], project_id=project.id, analysis_id=None)
 
@@ -495,10 +498,12 @@ async def test_end_to_end_lifecycle(db_session: AsyncSession, tmp_path: Path) ->
         kind=EvidenceKind.HTTP_RESPONSE,
         summary="response reflected payload",
     )
-    verified = await service.attach_evidence(
+    verified = await service.record_collected_evidence(
         finding_id,
-        [verify_ev],
+        EvidenceSource(),
+        [_Carry(verify_ev)],
         project_id=project.id,
+        execution_id="exec-verify",
         transition=LifecycleTransition.VERIFY,
     )
     assert verified.status is FindingStatus.VERIFIED
