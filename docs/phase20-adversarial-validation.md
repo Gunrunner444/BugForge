@@ -16,12 +16,19 @@ The tests cover:
 - AI-only and static-only findings, which still cannot call `verify`
 - analysis identity that does not include secrets
 
-A bare builtin sink is hidden only when a definition of that name reaches the
-call. `eval(...)` before `def eval` is still the builtin. `def eval(value):
+A bare builtin sink is hidden only when a definition of that name is in
+scope at the call. Python module scope stays sequential: `eval(...)` before
+`def eval` is still the builtin. Inside a Python function, a later assignment
+or nested `def eval` makes `eval` local for the whole function, so an earlier
+call in that function is not treated as the builtin. `def eval(value):
 return value` followed by `eval(...)` is not a dynamic-execution finding, and
 neither is `eval = keep` followed by `eval(...)`. If that function calls
 `exec`, the finding stays on `exec`. A qualified call such as `obj.eval` is
 unchanged. A nested function hides the builtin only inside its enclosing
-scope.
+function.
+
+AI text can attach a hypothesis, explanation, impact, and AI evidence. It
+cannot verify a finding and cannot change `VERIFIED` or `HUMAN_ACCEPTED` back
+to `POTENTIAL`.
 
 Static findings remain `POTENTIAL` or `CORROBORATED`.

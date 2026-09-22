@@ -26,8 +26,8 @@ from app.parsing.model import (
     SyntaxGraph,
 )
 from app.parsing.routes import (
+    constructed_route_receiver,
     is_route_method,
-    known_route_receiver,
     looks_like_route_path,
     path_parameters,
 )
@@ -129,6 +129,8 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     syntax_kind="import",
                 )
             )
+            bound = alias.asname or alias.name.split(".", 1)[0]
+            self._bind(bound, node.lineno, alias.name, SymbolKind.LOCAL, span)
         self._node(SemanticKind.IMPORT, alias.name if node.names else "import", span, "Import")
         self.generic_visit(node)
 
@@ -153,6 +155,10 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     relative_level=node.level or 0,
                 )
             )
+            bound = alias.asname or alias.name
+            if bound and bound != "*":
+                rhs = f"{module}.{alias.name}" if module else alias.name
+                self._bind(bound, node.lineno, rhs, SymbolKind.LOCAL, span)
         self._node(SemanticKind.IMPORT, module, span, "ImportFrom")
         self.generic_visit(node)
 
@@ -253,7 +259,7 @@ class _PythonGraphVisitor(ast.NodeVisitor):
     ) -> None:
         names = {param.name for param in params}
         for dec in node.decorator_list:
-            recorded = _decorator_route(dec)
+            recorded = self._decorator_route(dec)
             if recorded is None:
                 continue
             method, path = recorded
@@ -270,6 +276,36 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                     parameter_ids=param_ids,
                 )
             )
+
+    def _decorator_route(self, node: ast.AST) -> tuple[str, str] | None:
+        """``@app.get("/item/{id}")`` only when ``app`` is a constructed framework app."""
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            return None
+        receiver = node.func.value
+        if not isinstance(receiver, ast.Name):
+            return None
+        enclosing = self._scope_stack[-1].parent_id or "module"
+        at_byte = _span(self.source, node).start_byte
+        if not constructed_route_receiver(
+            self.bindings,
+            language="python",
+            name=receiver.id,
+            at_byte=at_byte,
+            scope_id=enclosing,
+        ):
+            return None
+        if not is_route_method(node.func.attr) or not node.args:
+            return None
+        path_node = node.args[0]
+        if not isinstance(path_node, ast.Constant) or not isinstance(path_node.value, str):
+            return None
+        path = path_node.value
+        if not looks_like_route_path(path):
+            return None
+        method = node.func.attr.lower()
+        if method in {"route", "api_route"}:
+            return _explicit_methods(node) or "ROUTE", path
+        return method.upper(), path
 
     def visit_If(self, node: ast.If) -> None:
         self._conditional_depth += 1
@@ -561,27 +597,6 @@ class _Meta:
         self.idents = idents
         self.dynamic = dynamic
         self.is_literal = is_literal
-
-
-def _decorator_route(node: ast.AST) -> tuple[str, str] | None:
-    """``@app.get("/item/{id}")`` and ``@app.route("/item/<id>")`` only."""
-    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-        return None
-    receiver = node.func.value
-    if not isinstance(receiver, ast.Name) or not known_route_receiver(receiver.id):
-        return None
-    if not is_route_method(node.func.attr) or not node.args:
-        return None
-    path_node = node.args[0]
-    if not isinstance(path_node, ast.Constant) or not isinstance(path_node.value, str):
-        return None
-    path = path_node.value
-    if not looks_like_route_path(path):
-        return None
-    method = node.func.attr.lower()
-    if method in {"route", "api_route"}:
-        return _explicit_methods(node) or "ROUTE", path
-    return method.upper(), path
 
 
 def _explicit_methods(node: ast.Call) -> str:

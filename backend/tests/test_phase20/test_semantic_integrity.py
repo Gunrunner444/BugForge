@@ -388,14 +388,14 @@ def test_fake_route_names_are_not_http_routes(tmp_path: Path) -> None:
     routed = parse_source(
         "python",
         Path("route.py"),
-        '@app.get("/item/{id}")\ndef item(id):\n    eval(id)\n',
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/item/{id}')\ndef item(id):\n    eval(id)\n",
     )
     assert len(routed.routes) == 1
     assert routed.routes[0].path == "/item/{id}"
     express = parse_source(
         "javascript",
         Path("app.js"),
-        'app.get("/search", (req, res) => { eval(req.query.q); });\n',
+        'const express = require("express");\nconst app = express();\napp.get("/search", (req, res) => { eval(req.query.q); });\n',
     )
     assert len(express.routes) == 1
     assert express.routes[0].path == "/search"

@@ -95,6 +95,7 @@ def _identity_parts(obs: SecurityObservation) -> tuple[str, ...]:
         str(obs.metadata.get("argument_index") or obs.argument_index or ""),
         _source_family(obs),
         " ".join(obs.evidence_text.split()),
+        str(obs.metadata.get("sink_occurrence") or ""),
     )
 
 

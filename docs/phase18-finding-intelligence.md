@@ -11,9 +11,9 @@ Findings from the security engine now carry:
 - `parser_completeness` and `analysis_incomplete`
 - `evidence_summary`, which states that the result is static and not verified
 
-`finding_key` does not include the line number or a parser byte offset. Inserting blank lines above a sink keeps the key. Two different sink texts, fields, or callee sinks stay separate findings. Two observations of the same sink text and source collapse into one finding. Distinct vulnerabilities are not merged just because they share a file.
+`finding_key` does not include the line number or a parser byte offset. Inserting blank lines above a sink keeps the key. Two different sink texts, fields, or callee sinks stay separate findings. Two observations of the same sink text, source, and occurrence still collapse into one finding. Distinct call sites of the same sink text in one scope stay separate by a stable occurrence ordinal (how many earlier same-named calls exist in that scope). Distinct vulnerabilities are not merged just because they share a file.
 
-The API adds these fields on `SecurityFindingResponse`. Older fields stay. Stored rows keep the payload in `security_findings.intelligence_json`. Rows from before this column have an empty object and the new fields are blank.
+The API adds these fields on `SecurityFindingResponse`. Older fields stay. Stored rows keep the payload in `security_findings.intelligence_json` and persist `finding_key` as an indexed column scoped to the project. A later scan of the same project reuses that row. `VERIFIED`, `HUMAN_ACCEPTED`, `REPRODUCED`, and `REJECTED` status and verification evidence survive a rescan; only static location and flow fields are refreshed. Rows from before this column have a null key and the new fields are blank.
 
 The findings panel shows the flow, field, files, parser completeness, incomplete analysis, evidence summary, and confidence. Potential and corroborated results are labeled “Not verified”. A verified badge is shown only when the stored status is verified.
 

@@ -328,6 +328,28 @@ def _caller_symbol(call: CallSite) -> str:
     return scope.rsplit(":", 1)[-1]
 
 
+def _sink_occurrence(graph: SyntaxGraph, call: CallSite) -> str:
+    """Ordinal of this callee in its scope. Distinct calls stay distinct.
+
+    The index is the number of earlier same-named calls in the same scope. It
+    does not use the source line or a parser byte offset as identity.
+    """
+    qualified = call.qualified or call.name
+    call_byte = call.span.start_byte if call.span is not None else call.line * 10_000
+    earlier = 0
+    for other in graph.calls:
+        if other is call:
+            continue
+        if other.scope_id != call.scope_id:
+            continue
+        if (other.qualified or other.name) != qualified:
+            continue
+        other_byte = other.span.start_byte if other.span is not None else other.line * 10_000
+        if (other_byte, other.line) < (call_byte, call.line):
+            earlier += 1
+    return str(earlier)
+
+
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:
     text = call.argument_text
     if call.arguments:
@@ -398,6 +420,7 @@ def _observation(
             break
     if extra:
         metadata.update(extra)
+    metadata.setdefault("sink_occurrence", _sink_occurrence(graph, call))
     if span is not None:
         metadata.update(
             {

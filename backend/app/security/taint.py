@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 from app.analyzers.framework_detector import FrameworkInfo
 from app.core.config import settings
-from app.parsing.model import Binding, CallArgument, CallSite, SymbolKind, SyntaxGraph
+from app.parsing.model import Binding, CallArgument, CallSite, ScopeKind, SymbolKind, SyntaxGraph
 from app.security.definitions import (
     SINK_SANITIZER_KINDS,
     LanguageSecurityVocab,
@@ -233,22 +233,39 @@ def receiver_argument_offset(
     return 0
 
 
-def builtin_call_shadowed(graph: SyntaxGraph, call: CallSite) -> bool:
-    """True when a bare name is bound to a local definition that reaches this call.
+_PYTHON_BUILTIN_SINKS = frozenset({"eval", "exec", "compile", "__import__"})
+_JS_BUILTIN_SINKS = frozenset({"eval"})
 
-    A later ``def`` or assignment does not hide an earlier call. A nested
-    definition hides the name only in its enclosing scope. Qualified calls such
-    as ``obj.eval`` are left to the normal sink rule.
+
+def builtin_call_shadowed(graph: SyntaxGraph, call: CallSite) -> bool:
+    """True when a bare builtin name is bound to a local definition at this call.
+
+    Python function and method scopes treat a name assigned or defined anywhere
+    in that scope as local for the whole function. Module scope stays sequential:
+    a later ``def eval`` does not hide an earlier module-level builtin call.
+    Nested definitions hide the name only in their enclosing function. Qualified
+    calls such as ``obj.eval`` are left to the normal sink rule. Imported library
+    APIs such as ``Markup`` are not builtins and still match their sink rules.
     """
     qualified = call.qualified or call.name
     if not call.name or qualified != call.name or "." in qualified:
+        return False
+    if graph.language == "python" and call.name not in _PYTHON_BUILTIN_SINKS:
+        return False
+    if graph.language in {"javascript", "typescript"} and call.name not in _JS_BUILTIN_SINKS:
         return False
     at = _use_byte(call.span, call.line)
     current = call.scope_id or "module"
     seen: set[str] = set()
     while current and current not in seen:
         seen.add(current)
-        if _scope_defines_name(graph, current, call.name, at):
+        if _scope_defines_name(
+            graph,
+            current,
+            call.name,
+            at,
+            whole_scope=_python_function_scope(graph, current),
+        ):
             return True
         if "/" not in current:
             break
@@ -326,13 +343,29 @@ def _call_strictly_contains(outer: CallSite, inner: CallSite) -> bool:
     )
 
 
-def _scope_defines_name(graph: SyntaxGraph, scope_id: str, name: str, at_byte: int) -> bool:
+def _python_function_scope(graph: SyntaxGraph, scope_id: str) -> bool:
+    if graph.language != "python":
+        return False
+    for scope in graph.scopes:
+        if scope.scope_id == scope_id:
+            return scope.kind in {ScopeKind.FUNCTION, ScopeKind.METHOD}
+    return False
+
+
+def _scope_defines_name(
+    graph: SyntaxGraph,
+    scope_id: str,
+    name: str,
+    at_byte: int,
+    *,
+    whole_scope: bool = False,
+) -> bool:
     for binding in graph.bindings:
         if binding.scope_id != scope_id or binding.name != name:
             continue
         if _import_binding(binding):
             continue
-        if _use_byte(binding.span, binding.line) <= at_byte:
+        if whole_scope or _use_byte(binding.span, binding.line) <= at_byte:
             return True
     for entity in graph.entities:
         if entity.name != name or entity.entity_type not in {
@@ -344,7 +377,7 @@ def _scope_defines_name(graph: SyntaxGraph, scope_id: str, name: str, at_byte: i
             continue
         if _entity_binding_scope(graph, entity) != scope_id:
             continue
-        if entity.start_byte <= at_byte:
+        if whole_scope or entity.start_byte <= at_byte:
             return True
     return False
 
@@ -612,7 +645,9 @@ def analyze_taint(
             ):
                 computed = f"source:route:{binding.name}"
             if not computed:
-                computed = _binding_taint(binding, source_pats, reaching, return_reasons)
+                computed = _binding_taint(
+                    binding, source_pats, reaching, return_reasons, graph=graph
+                )
             if not computed:
                 computed = _sanitized_call_result(graph.language, binding, source_pats, reaching)
             if external_map:
@@ -1007,6 +1042,7 @@ def _binding_taint(
     source_pats: Sequence[str],
     reaching: dict[str, _Reach],
     return_reasons: dict[str, str] | None = None,
+    graph: SyntaxGraph | None = None,
 ) -> str | None:
     if binding.rhs_is_literal and not binding.rhs_callees and not binding.rhs_accesses:
         return None
@@ -1038,10 +1074,22 @@ def _binding_taint(
         if field_reason:
             return field_reason
         return None
-    for callee in transforming:
-        simple = callee.rsplit(".", 1)[-1]
-        if return_reasons and simple in return_reasons:
-            return f"from_return:{simple}:{return_reasons[simple]}"
+    if graph is not None and return_reasons:
+        for call in calls_contained_in(
+            graph.calls,
+            scope_id=binding.scope_id,
+            line=binding.line,
+            span=binding.span,
+            outermost=True,
+        ):
+            resolved = _resolve_local_callee(graph, call)
+            if resolved is None:
+                continue
+            callee, _instance = resolved
+            callee_scope = _scope_for_entity(graph, callee)
+            if callee_scope and callee_scope in return_reasons:
+                name = getattr(callee, "name", "") or call.name
+                return f"from_return:{name}:{return_reasons[callee_scope]}"
     return None
 
 
@@ -1110,20 +1158,9 @@ def _return_reasons(
     reaching: dict[str, _Reach] | TaintState,
     source_pats: Sequence[str],
 ) -> dict[str, str]:
-    """Map uniquely resolved function names to a return taint reason."""
-    functions = [
-        ent
-        for ent in graph.entities
-        if ent.entity_type in {"function", "async_function", "method", "async_method"}
-    ]
-    by_name: dict[str, list[object]] = {}
-    for ent in functions:
-        by_name.setdefault(ent.name, []).append(ent)
+    """Map a function scope to the taint reason of its return."""
     out: dict[str, str] = {}
     for ret in graph.returns:
-        func_name = ret.scope_id.rsplit(":", 1)[-1]
-        if len(by_name.get(func_name, [])) != 1:
-            continue
         reason: str | None = None
         for fragment in (*ret.accesses, *ret.idents):
             hit = fragment_matches_source(fragment, source_pats)
@@ -1150,7 +1187,7 @@ def _return_reasons(
             if field_reason:
                 reason = f"return:{field_reason}"
         if reason:
-            out[func_name] = reason
+            out[ret.scope_id] = reason
     return out
 
 
@@ -1231,53 +1268,17 @@ def _interprocedural_edges(
     whose RHS is that call, not a later definition of the same symbol.
     """
     new: list[tuple[str, str, int]] = []
-    functions = [
-        ent
-        for ent in graph.entities
-        if ent.entity_type in {"function", "async_function", "method", "async_method"}
-    ]
-    by_name: dict[str, list[object]] = {}
-    by_qualified: dict[str, list[object]] = {}
-    for ent in functions:
-        by_name.setdefault(ent.name, []).append(ent)
-        by_qualified.setdefault(ent.qualified_name, []).append(ent)
-        if ent.parent:
-            by_qualified.setdefault(f"{ent.parent}.{ent.name}", []).append(ent)
-
-    def resolve_bare(call: CallSite) -> object | None:
-        qualified = call.qualified or call.name
-        if "." in qualified and qualified != call.name:
-            return None
-        candidates = by_qualified.get(qualified) or by_name.get(call.name) or []
-        if len(candidates) == 1:
-            return candidates[0]
-        qualified_hits = [
-            ent
-            for ent in candidates
-            if getattr(ent, "qualified_name", "") == call.qualified
-            or call.qualified.endswith(f".{getattr(ent, 'name', '')}")
-        ]
-        if len(qualified_hits) == 1:
-            return qualified_hits[0]
-        return None
-
     use_state = state or TaintState.from_final_map(tainted, source_pats)
     for call in graph.calls:
-        qualified = call.qualified or call.name
-        instance = False
-        if "." in qualified and qualified != call.name:
-            known = _known_method(graph, call)
-            if known is None:
-                continue
-            callee, instance = known
-        else:
-            callee = resolve_bare(call)
-            if callee is None:
-                continue
+        resolved = _resolve_local_callee(graph, call)
+        if resolved is None:
+            continue
+        callee, instance = resolved
         callee_scope = _scope_for_entity(graph, callee)
         if callee_scope is None:
             continue
         params = list(getattr(callee, "parameters", ()) or ())
+        qualified = call.qualified or call.name
         offset = (
             receiver_argument_offset(
                 [param.name for param in params],
@@ -1329,14 +1330,26 @@ def _interprocedural_edges(
                     ret_reason = f"return:{field_reason}"
         if ret_reason is None:
             continue
-        func_name = ret.scope_id.rsplit(":", 1)[-1]
-        if len(by_name.get(func_name, [])) != 1:
+        callee_entity = _entity_for_scope(graph, ret.scope_id)
+        if callee_entity is None:
             continue
         for binding in graph.bindings:
             if binding.scope_id == ret.scope_id:
                 continue
-            if any(c == func_name or c.endswith(f".{func_name}") for c in binding.rhs_callees):
-                new.append((binding.symbol_id, ret_reason, binding.definition_index))
+            for call in calls_contained_in(
+                graph.calls,
+                scope_id=binding.scope_id,
+                line=binding.line,
+                span=binding.span,
+                outermost=True,
+            ):
+                resolved = _resolve_local_callee(graph, call)
+                if resolved is None:
+                    continue
+                entity, _instance = resolved
+                if _same_entity(entity, callee_entity):
+                    new.append((binding.symbol_id, ret_reason, binding.definition_index))
+                    break
     return new
 
 
@@ -1376,6 +1389,79 @@ def _known_method(graph: SyntaxGraph, call: CallSite) -> tuple[object, bool] | N
     if entity is None:
         return None
     return entity, instance
+
+
+def _resolve_local_callee(graph: SyntaxGraph, call: CallSite) -> tuple[object, bool] | None:
+    """Resolve a same-file callee only when the call uniquely names that entity."""
+    qualified = call.qualified or call.name
+    if "." in qualified and qualified != call.name:
+        return _known_method(graph, call)
+    functions = [
+        ent
+        for ent in graph.entities
+        if ent.entity_type in {"function", "async_function", "method", "async_method"}
+    ]
+    by_name: dict[str, list[object]] = {}
+    by_qualified: dict[str, list[object]] = {}
+    for ent in functions:
+        by_name.setdefault(ent.name, []).append(ent)
+        by_qualified.setdefault(ent.qualified_name, []).append(ent)
+        if ent.parent:
+            by_qualified.setdefault(f"{ent.parent}.{ent.name}", []).append(ent)
+    if _imported_name(graph, call.name) and by_name.get(call.name):
+        return None
+    candidates = by_qualified.get(qualified) or by_name.get(call.name) or []
+    callee: object | None = None
+    if len(candidates) == 1:
+        callee = candidates[0]
+    else:
+        qualified_hits = [
+            ent
+            for ent in candidates
+            if getattr(ent, "qualified_name", "") == call.qualified
+            or call.qualified.endswith(f".{getattr(ent, 'name', '')}")
+        ]
+        if len(qualified_hits) == 1:
+            callee = qualified_hits[0]
+    if callee is None:
+        return None
+    return callee, False
+
+
+def _imported_name(graph: SyntaxGraph, name: str) -> bool:
+    if not name:
+        return False
+    for item in graph.imports:
+        bound = item.alias or (
+            item.name if item.is_from_import else (item.module or "").split(".", 1)[0]
+        )
+        if bound == name:
+            return True
+    return False
+
+
+def _entity_for_scope(graph: SyntaxGraph, scope_id: str) -> object | None:
+    hits = [
+        entity
+        for entity in graph.entities
+        if entity.entity_type in {"function", "async_function", "method", "async_method"}
+        and _scope_for_entity(graph, entity) == scope_id
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _same_entity(left: object, right: object) -> bool:
+    left_id = getattr(left, "node_id", "") or ""
+    right_id = getattr(right, "node_id", "") or ""
+    if left_id and right_id:
+        return left_id == right_id
+    return (
+        getattr(left, "name", None) == getattr(right, "name", None)
+        and getattr(left, "start_byte", None) == getattr(right, "start_byte", None)
+        and getattr(left, "qualified_name", None) == getattr(right, "qualified_name", None)
+    )
 
 
 def _method_on(graph: SyntaxGraph, class_name: str, method_name: str) -> object | None:
