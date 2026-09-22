@@ -31,4 +31,8 @@ AI text can attach a hypothesis, explanation, impact, and AI evidence. It
 cannot verify a finding and cannot change `VERIFIED` or `HUMAN_ACCEPTED` back
 to `POTENTIAL`.
 
-Static findings remain `POTENTIAL` or `CORROBORATED`.
+Static findings remain `POTENTIAL` or `CORROBORATED` until independent evidence
+and an explicit domain transition move them. Phase 21 preserves human review
+state and terminal status across rescans, proves framework constructors from
+import origin, and correlates trusted evidence without letting correlation
+verify a finding.

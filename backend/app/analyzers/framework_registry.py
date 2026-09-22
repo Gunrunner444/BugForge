@@ -20,6 +20,7 @@ class FrameworkSpec:
     manifests: dict[str, tuple[str, ...]] = field(default_factory=dict)
     route_receivers: tuple[str, ...] = ()
     constructors: tuple[str, ...] = ()
+    constructor_modules: tuple[str, ...] = ()
 
 
 _PYTHON_CONFIG = (
@@ -45,6 +46,7 @@ DEFAULT_FRAMEWORKS: tuple[FrameworkSpec, ...] = (
         config_patterns=(r"flask",),
         config_files=_PYTHON_CONFIG,
         constructors=("Flask",),
+        constructor_modules=("flask",),
     ),
     FrameworkSpec(
         name="fastapi",
@@ -52,6 +54,7 @@ DEFAULT_FRAMEWORKS: tuple[FrameworkSpec, ...] = (
         config_patterns=(r"fastapi",),
         config_files=_PYTHON_CONFIG,
         constructors=("FastAPI",),
+        constructor_modules=("fastapi",),
     ),
     FrameworkSpec(
         name="pytest",
@@ -89,6 +92,7 @@ DEFAULT_FRAMEWORKS: tuple[FrameworkSpec, ...] = (
         language="javascript",
         manifests={"package.json": (r'"express"',)},
         constructors=("express",),
+        constructor_modules=("express",),
     ),
     FrameworkSpec(
         name="nestjs",

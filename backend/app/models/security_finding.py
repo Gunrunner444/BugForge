@@ -26,6 +26,9 @@ class DBSecurityFinding(Base):
     analysis_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("analyses.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # analysis_id is the latest scan that observed this finding. Reconcile
+    # reuses the row and points it at the newer analysis; older analyses are
+    # not a historical finding store.
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="potential", index=True)
     vulnerability_class: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)

@@ -329,12 +329,14 @@ def _caller_symbol(call: CallSite) -> str:
 
 
 def _sink_occurrence(graph: SyntaxGraph, call: CallSite) -> str:
-    """Ordinal of this callee in its scope. Distinct calls stay distinct.
+    """Ordinal among same-scope calls with the same callee and argument shape.
 
-    The index is the number of earlier same-named calls in the same scope. It
-    does not use the source line or a parser byte offset as identity.
+    Identity does not use the source line or a parser byte offset. Unrelated
+    same-named calls with different argument text do not shift this index.
+    Inserting another identical snippet before this call does shift it; removing
+    that snippet restores the previous ordinal.
     """
-    qualified = call.qualified or call.name
+    structure = _call_structure(graph, call)
     call_byte = call.span.start_byte if call.span is not None else call.line * 10_000
     earlier = 0
     for other in graph.calls:
@@ -342,12 +344,23 @@ def _sink_occurrence(graph: SyntaxGraph, call: CallSite) -> str:
             continue
         if other.scope_id != call.scope_id:
             continue
-        if (other.qualified or other.name) != qualified:
+        if _call_structure(graph, other) != structure:
             continue
         other_byte = other.span.start_byte if other.span is not None else other.line * 10_000
         if (other_byte, other.line) < (call_byte, call.line):
             earlier += 1
     return str(earlier)
+
+
+def _call_structure(graph: SyntaxGraph, call: CallSite) -> str:
+    pieces = [call.qualified or call.name]
+    if call.arguments:
+        pieces.extend(" ".join(argument.text.split()) for argument in call.arguments)
+    elif call.argument_text.strip():
+        pieces.append(" ".join(call.argument_text.split()))
+    elif 0 < call.line <= len(graph.lines):
+        pieces.append(" ".join(graph.lines[call.line - 1].split()))
+    return "\x1f".join(pieces)
 
 
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:

@@ -1,7 +1,11 @@
 """Stable finding identity and explanations for static observations.
 
-Identity ignores line numbers and parser byte offsets. Explanations use only
-metadata the observation already recorded. Missing relationships are omitted.
+Identity ignores line numbers and parser byte offsets. ``sink_occurrence`` is
+the ordinal of identical callee+argument structure in the same scope, so a
+harmless ``eval("constant")`` does not shift ``eval(request.args.get("q"))``.
+Inserting another identical finding before an existing one does change later
+ordinals; removing it restores them. Explanations use only metadata the
+observation already recorded. Missing relationships are omitted.
 """
 
 from __future__ import annotations

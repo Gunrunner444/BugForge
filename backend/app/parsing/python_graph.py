@@ -292,6 +292,8 @@ class _PythonGraphVisitor(ast.NodeVisitor):
             name=receiver.id,
             at_byte=at_byte,
             scope_id=enclosing,
+            imports=self.imports,
+            entities=self.entities,
         ):
             return None
         if not is_route_method(node.func.attr) or not node.args:

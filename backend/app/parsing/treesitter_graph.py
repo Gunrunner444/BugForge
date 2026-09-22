@@ -653,6 +653,8 @@ class _GraphBuilder:
             name=receiver,
             at_byte=at_byte,
             scope_id=call.scope_id,
+            imports=self.imports,
+            entities=self.entities,
         ):
             return
         first = call.arguments[0]

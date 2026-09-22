@@ -5,12 +5,12 @@ Revises: 021
 Create Date: 2026-09-22 00:00:00.000000
 """
 
-import json
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 
 from alembic import op
+from app.repositories.finding_identity import FindingKeyRecord, canonicalize_finding_key_rows
 
 revision: str = "022"
 down_revision: str | None = "021"
@@ -21,36 +21,34 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column("security_findings", sa.Column("finding_key", sa.Text(), nullable=True))
     conn = op.get_bind()
-    rows = conn.execute(sa.text("SELECT id, intelligence_json FROM security_findings"))
-    for row in rows:
-        try:
-            loaded = json.loads(row[1] or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            loaded = {}
-        key = ""
-        if isinstance(loaded, dict):
-            key = str(loaded.get("finding_key") or "")
-        if key:
-            conn.execute(
-                sa.text("UPDATE security_findings SET finding_key = :key WHERE id = :id"),
-                {"key": key, "id": row[0]},
-            )
-    result = conn.execute(
+    rows = conn.execute(
         sa.text(
-            "SELECT id, project_id, finding_key FROM security_findings "
-            "WHERE finding_key IS NOT NULL ORDER BY created_at ASC"
+            "SELECT id, project_id, created_at, intelligence_json FROM security_findings"
         )
     )
-    seen: set[tuple[object, str]] = set()
-    for row in result:
-        pair = (row[1], row[2])
-        if pair in seen:
-            conn.execute(
-                sa.text("UPDATE security_findings SET finding_key = NULL WHERE id = :id"),
-                {"id": row[0]},
-            )
-        else:
-            seen.add(pair)
+    records = [
+        FindingKeyRecord(
+            id=row[0],
+            project_id=row[1],
+            created_at=row[2],
+            intelligence_json=row[3] or "{}",
+            finding_key=None,
+        )
+        for row in rows
+    ]
+    for updated in canonicalize_finding_key_rows(records):
+        conn.execute(
+            sa.text(
+                "UPDATE security_findings "
+                "SET finding_key = :key, intelligence_json = :intel "
+                "WHERE id = :id"
+            ),
+            {
+                "key": updated.finding_key,
+                "intel": updated.intelligence_json,
+                "id": updated.id,
+            },
+        )
     op.create_index(
         "ix_security_findings_finding_key",
         "security_findings",

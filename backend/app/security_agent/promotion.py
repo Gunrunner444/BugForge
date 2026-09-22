@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
@@ -38,19 +39,7 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
             if finding.evidence
             else EvidenceBundle.from_items(evidence)
         )
-        finding = SecurityFinding(
-            title=finding.title,
-            status=finding.status,
-            description=finding.description,
-            vulnerability_class=finding.vulnerability_class,
-            target=finding.target,
-            endpoint=finding.endpoint,
-            hypothesis=finding.hypothesis,
-            evidence=merged,
-            impact=finding.impact,
-            confidence=finding.confidence,
-            id=finding.id,
-        )
+        finding = replace(finding, evidence=merged)
     if len(independent) >= 1 and finding.status.value == "potential":
         finding = finding.corroborate()
         if hypothesis.status is HypothesisStatus.OPEN:

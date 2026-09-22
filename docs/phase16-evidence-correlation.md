@@ -23,9 +23,11 @@ the static observation stays. The explanation says the results disagree.
 Unrelated files and vulnerability classes are not merged. Identical evidence
 is not stored twice. Evidence order does not depend on input order.
 
-`correlate_finding` is not invoked by the security analysis API, the AI
-agent, or finding persistence. Static scans write findings directly. Wiring
-correlation into that lifecycle is a later requirement and is not faked here.
+`correlate_finding` is a pure matching helper. Phase 21 wires it through
+`FindingLifecycleService`, which loads a persisted finding, attaches only
+matching evidence, and applies an explicit domain transition when asked.
+Correlation still never calls `verify`. A public JSON body cannot mark a
+finding verified.
 
 `SecurityFinding.verify` is unchanged. AI-only evidence still cannot verify.
 Human acceptance still requires a reproduced or verified finding.

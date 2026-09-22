@@ -382,6 +382,21 @@ budget. Whole repositories are never sent to the model.
 
 The AI agent may attach a hypothesis. It cannot create a verified finding.
 
+Finding lifecycle (Phase 21):
+
+```
+Repository → static semantic analysis → potential / corroborated finding
+  → stable finding_key + persistence → trusted evidence → correlation
+  → reproduce / verify domain transition → human review
+```
+
+Statuses are `potential`, `corroborated`, `reproduced`, `verified`,
+`human_accepted`, and `rejected`. Correlation attaches matching evidence
+only. It does not equal verification. Only `SecurityFinding.verify()` with
+independent observational or executable evidence can mark a finding
+`VERIFIED`. AI text, static analysis, and a generated test that was never
+executed cannot. See [phase21-evidence-lifecycle.md](phase21-evidence-lifecycle.md).
+
 ## Configuration
 
 | Variable | Default | Meaning |

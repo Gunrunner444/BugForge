@@ -41,6 +41,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 18 | Stable finding identity, explanations, and duplicate suppression | ✅ Implemented |
 | Phase 19 | Go, Java, and Kotlin local interprocedural imports | ✅ Implemented |
 | Phase 20 | Adversarial semantic checks and shadowed-builtin handling | ✅ Implemented |
+| Phase 21 | Evidence correlation and finding lifecycle integration | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 

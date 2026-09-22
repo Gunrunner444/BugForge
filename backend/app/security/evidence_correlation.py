@@ -136,6 +136,11 @@ def _same_issue(
         recorded = _finding_sink(finding)
         if recorded and sink != recorded:
             return False
+    source = _meta_str(evidence, "taint_source") or _meta_str(evidence, "flow_source")
+    if source:
+        recorded_source = finding.flow_source or _finding_source(finding)
+        if recorded_source and source != recorded_source:
+            return False
     parsed = _coerce_line(evidence.metadata.get("line"))
     if parsed is None or loc.line is None or parsed != loc.line:
         return False
@@ -155,10 +160,22 @@ def _coerce_line(value: object) -> int | None:
 
 
 def _finding_sink(finding: SecurityFinding) -> str:
+    if finding.flow_sink:
+        return finding.flow_sink
     for item in finding.evidence.items:
         sink = _meta_str(item, "sink")
         if sink:
             return sink
+    return ""
+
+
+def _finding_source(finding: SecurityFinding) -> str:
+    if finding.flow_source:
+        return finding.flow_source
+    for item in finding.evidence.items:
+        source = _meta_str(item, "taint_source") or _meta_str(item, "flow_source")
+        if source:
+            return source
     return ""
 
 
@@ -202,6 +219,11 @@ def _evidence_sort(item: Evidence) -> tuple[str, str, str, str]:
 def _meta_str(item: Evidence, key: str) -> str:
     value = item.metadata.get(key)
     return "" if value is None else str(value)
+
+
+def evidence_contradicts(item: Evidence) -> bool:
+    """True when runtime evidence says the suspected path was not reached."""
+    return _contradicts(item)
 
 
 def _contradicts(item: Evidence) -> bool:
