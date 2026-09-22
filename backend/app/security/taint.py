@@ -234,7 +234,6 @@ def receiver_argument_offset(
 
 
 _PYTHON_BUILTIN_SINKS = frozenset({"eval", "exec", "compile", "__import__"})
-_JS_BUILTIN_SINKS = frozenset({"eval"})
 
 
 def builtin_call_shadowed(graph: SyntaxGraph, call: CallSite) -> bool:
@@ -251,8 +250,6 @@ def builtin_call_shadowed(graph: SyntaxGraph, call: CallSite) -> bool:
     if not call.name or qualified != call.name or "." in qualified:
         return False
     if graph.language == "python" and call.name not in _PYTHON_BUILTIN_SINKS:
-        return False
-    if graph.language in {"javascript", "typescript"} and call.name not in _JS_BUILTIN_SINKS:
         return False
     at = _use_byte(call.span, call.line)
     current = call.scope_id or "module"
@@ -1031,6 +1028,74 @@ def _mirror_field_timeline(
     return changed, capped, next_mirror
 
 
+def lexically_shadows(
+    graph: SyntaxGraph | None, scope_id: str, name: str, at_byte: int
+) -> bool:
+    """True when ``name`` is rebound in the scope that contains this use.
+
+    Import bindings are not shadows. A nested function or assignment hides the
+    imported name in that function. A module-level assignment hides it only
+    after the assignment. Qualified ``fastapi.Query`` is hidden when ``fastapi``
+    itself is rebound. Unknown re-exports are not resolved here.
+    """
+    if graph is None or not name:
+        return False
+    root = name.split(".", 1)[0]
+    return _name_rebound(graph, scope_id or "module", root, at_byte)
+
+
+def _name_rebound(graph: SyntaxGraph, scope_id: str, name: str, at_byte: int) -> bool:
+    """A local binding hides a name only when that name was imported.
+
+    ``req.query`` stays a source when ``req`` is a parameter. ``Query`` stops
+    being a FastAPI source when the file imported ``Query`` and a nested
+    function or assignment rebinds it. Names that were never imported are not
+    framework bindings, so ordinary parameters do not suppress them.
+    """
+    if not _imported_name(graph, name):
+        return False
+    scopes = {scope.scope_id: scope for scope in graph.scopes}
+    current: str | None = scope_id
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        scope = scopes.get(current)
+        function_scope = scope is not None and scope.kind.value in {"function", "method"}
+        for binding in graph.bindings:
+            if binding.scope_id != current or binding.name != name or _is_import_binding(graph, binding):
+                continue
+            if function_scope:
+                return True
+            start = binding.span.start_byte if binding.span is not None else 0
+            if start < at_byte:
+                return True
+        for child in graph.scopes:
+            if child.parent_id != current or child.name != name:
+                continue
+            if child.kind.value not in {"function", "method", "class"}:
+                continue
+            if function_scope:
+                return True
+            start = child.span.start_byte if child.span is not None else 0
+            if start < at_byte:
+                return True
+        current = scope.parent_id if scope is not None else None
+    return False
+
+
+def _is_import_binding(graph: SyntaxGraph, binding: Binding) -> bool:
+    if binding.span is None:
+        return False
+    for item in graph.imports:
+        if item.is_from_import:
+            bound = item.alias or item.name or ""
+        else:
+            bound = item.alias or (item.module or "").split(".", 1)[0]
+        if bound == binding.name and item.start_byte == binding.span.start_byte:
+            return True
+    return False
+
+
 def _callee_is_source(callee: str, source_pats: Sequence[str]) -> bool:
     if fragment_matches_source(callee, source_pats):
         return True
@@ -1046,8 +1111,12 @@ def _binding_taint(
 ) -> str | None:
     if binding.rhs_is_literal and not binding.rhs_callees and not binding.rhs_accesses:
         return None
+    at_byte = _use_byte(binding.span, binding.line)
     source_callees = [
-        callee for callee in binding.rhs_callees if _callee_is_source(callee, source_pats)
+        callee
+        for callee in binding.rhs_callees
+        if _callee_is_source(callee, source_pats)
+        and not lexically_shadows(graph, binding.scope_id, callee, at_byte)
     ]
     transforming = [
         callee
@@ -1059,7 +1128,7 @@ def _binding_taint(
     if not transforming:
         for fragment in (*binding.rhs_accesses, *binding.rhs_callees, *binding.rhs_idents):
             hit = fragment_matches_source(fragment, source_pats)
-            if hit:
+            if hit and not lexically_shadows(graph, binding.scope_id, fragment, at_byte):
                 return f"source:{hit}"
         for ident in binding.rhs_idents:
             sid = _resolve_symbol(ident, binding.scope_id, reaching)
@@ -1554,6 +1623,7 @@ def call_taint_reason(
     argument_indexes: Sequence[int] | None = None,
     sanitizers: Sequence[SanitizerDefinition] = (),
     transparent_callees: Sequence[str] = (),
+    graph: SyntaxGraph | None = None,
 ) -> str | None:
     state = (
         tainted
@@ -1575,12 +1645,15 @@ def call_taint_reason(
                 at_byte,
                 sanitizers,
                 transparent_callees,
+                graph,
             )
             if reason:
                 return reason
         return None
     if call.arguments:
         for arg in call.arguments:
+            if arg.keyword:
+                continue
             reason = _argument_taint(
                 arg,
                 call.scope_id,
@@ -1589,6 +1662,7 @@ def call_taint_reason(
                 at_byte,
                 sanitizers,
                 transparent_callees,
+                graph,
             )
             if reason:
                 return reason
@@ -1614,6 +1688,7 @@ def _argument_taint(
     at_byte: int = 0,
     sanitizers: Sequence[SanitizerDefinition] = (),
     transparent_callees: Sequence[str] = (),
+    graph: SyntaxGraph | None = None,
 ) -> str | None:
     if arg.is_literal and not arg.dynamic and not arg.idents and not arg.accesses:
         return None
@@ -1628,7 +1703,7 @@ def _argument_taint(
         return None
     for fragment in (*arg.accesses, *arg.callees, *arg.idents):
         hit = fragment_matches_source(fragment, source_pats)
-        if hit:
+        if hit and not lexically_shadows(graph, scope_id, fragment, at_byte):
             return f"source:{hit}"
     if isinstance(reaching, TaintState):
         for ident in arg.idents:
@@ -1745,6 +1820,8 @@ def looks_parameterized_sql(call: CallSite | str) -> bool:
         return bool(_SQL_PLACEHOLDER.search(call)) and "," in call
     if call.dynamic:
         return False
+    if call.arguments and _association_argument(call.arguments[0]):
+        return True
     if len(call.arguments) >= 2:
         query = call.arguments[0]
         if _static_placeholder_query(query):
@@ -1752,6 +1829,25 @@ def looks_parameterized_sql(call: CallSite | str) -> bool:
     if not call.arguments and not call.dynamic and call.argument_is_literal:
         return bool(_SQL_PLACEHOLDER.search(call.argument_text))
     return False
+
+
+def _association_argument(query: CallArgument) -> bool:
+    """A keyword or ``name: value`` argument is not a raw SQL string.
+
+    ``where(name: user)`` binds a column. ``where(user_sql)`` and
+    ``where("name = " + user)`` do not take this path.
+    """
+    if query.dynamic or query.is_literal:
+        return False
+    if query.keyword:
+        return True
+    text = query.text.strip()
+    if not text or text[0] in {"'", '"', "`", "["}:
+        return False
+    if ":" not in text:
+        return False
+    head = text.partition(":")[0].strip()
+    return bool(head) and head.replace("_", "").isalnum() and not head[0].isdigit()
 
 
 def _static_placeholder_query(query: CallArgument) -> bool:

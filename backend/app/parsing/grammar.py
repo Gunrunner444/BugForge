@@ -450,6 +450,10 @@ GRAMMARS: dict[str, Grammar] = {
                 "echo_statement",
                 "print_intrinsic",
                 "shell_command_expression",
+                "include_expression",
+                "include_once_expression",
+                "require_expression",
+                "require_once_expression",
             }
         ),
         assignment_types=frozenset({"assignment_expression"}),

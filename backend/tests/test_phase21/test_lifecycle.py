@@ -710,9 +710,10 @@ def test_promotion_preserves_identity_and_lifecycle_fields() -> None:
     promoted = promote_hypothesis(session, hyp)
     assert promoted is not None
     for field in fields(SecurityFinding):
-        if field.name in {"evidence", "status", "evidence_tier", "created_at"}:
+        if field.name in {"evidence", "status", "evidence_tier", "created_at", "project_id"}:
             continue
         assert getattr(promoted, field.name) == getattr(rich, field.name), field.name
+    assert promoted.project_id == session.project_id
     assert promoted.finding_key == "promo-key"
     assert promoted.source_location == rich.source_location
     assert promoted.human_review_state is HumanReviewState.IN_REVIEW

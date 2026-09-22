@@ -12,6 +12,7 @@ from app.domain.lifecycle_policy import (
     can_corroborate,
     positive_reproduction,
 )
+from app.domain.target_identity import semantic_target_identity
 from app.domain.trusted_evidence import issue_for_finding
 from app.security_agent.correlation import finding_fingerprint
 from app.security_agent.schemas import ResearchHypothesis
@@ -38,6 +39,9 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
         )
     else:
         finding = existing
+    project_id = str(getattr(session, "project_id", "") or "")
+    if project_id and finding.project_id != project_id:
+        finding = replace(finding, project_id=project_id)
     if evidence:
         stamped = _stamp_research_evidence(finding, evidence)
         merged = (
@@ -49,6 +53,7 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
     if (
         can_corroborate(
             finding.evidence,
+            target_id=semantic_target_identity(finding),
             finding_id=str(finding.id),
             finding_key=finding.finding_key,
             project_id=finding.project_id,
@@ -63,6 +68,7 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
         and finding.status.value == "potential"
         and can_corroborate(
             finding.evidence,
+            target_id=semantic_target_identity(finding),
             finding_id=str(finding.id),
             finding_key=finding.finding_key,
             project_id=finding.project_id,

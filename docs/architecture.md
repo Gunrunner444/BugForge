@@ -303,10 +303,14 @@ target. Reproduction provenance does not verify.
 Phase 25 binds that observation to the exact finding id, finding key,
 project id, and semantic target. A valid signature for a different finding
 or project does not verify. Signed metadata is a read-only mapping, and the
-HMAC covers the identity fields used by the lifecycle. See
-[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md)
+HMAC covers the identity fields used by the lifecycle. Phase 26 requires the
+finding's current semantic target for runtime corroboration, static stamps,
+and reproduction. A historical record stays stored and does not prove a
+changed target. See
+[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md),
+[phase25-verification-binding-adversarial.md](phase25-verification-binding-adversarial.md),
 and
-[phase25-verification-binding-adversarial.md](phase25-verification-binding-adversarial.md).
+[phase26-polyglot-security-coverage.md](phase26-polyglot-security-coverage.md).
 
 `SecurityFinding` is frozen. Status is not a mutable field. Use constructors
 and transitions:

@@ -120,6 +120,7 @@ class TaintFlowRule(SecurityRule):
                 argument_indexes=indexes or None,
                 sanitizers=vocab.sanitizers,
                 transparent_callees=_sql_text_wrappers(self.vulnerability_class),
+                graph=graph,
             )
             if not taint and not call.dynamic:
                 continue
@@ -271,12 +272,12 @@ def _bound_framework_names(
             if imported != pattern:
                 continue
             bound = item.alias or imported
-            if not bound or bound == "*" or _name_shadowed(graph, bound):
+            if not bound or bound == "*":
                 continue
             names.append(bound)
             continue
         root = item.alias or module.split(".", 1)[0]
-        if not root or root == "*" or _name_shadowed(graph, root):
+        if not root or root == "*":
             continue
         names.append(f"{root}.{pattern}")
     return tuple(dict.fromkeys(names))
@@ -290,36 +291,35 @@ def _module_matches(module: str, tokens: tuple[str, ...]) -> bool:
     return False
 
 
-def _name_shadowed(graph: SyntaxGraph, name: str) -> bool:
-    for entity in graph.entities:
-        if entity.name != name or entity.parent:
-            continue
-        if entity.entity_type in {"function", "async_function"}:
-            return True
-    return False
-
-
 _SHELL_PROGRAMS = frozenset(
     {"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh", "cmd.exe"}
 )
 
 
 def _safe_command_argv(call: CallSite) -> bool:
-    """True only for a list argv whose program is a fixed non-shell literal.
+    """True only when the program is a fixed non-shell literal and shell is off.
 
-    ``subprocess.run(["git", user])`` is not shell injection.
-    ``subprocess.run([user])``, ``shell=True``, and ``["/bin/sh", "-c", user]``
-    stay dangerous. The decision uses the argument nodes, not a substring of
-    the whole call.
+    ``subprocess.run(["git", user])`` and ``exec.Command("git", user)`` are not
+    shell injection. ``subprocess.run([user])``, ``shell=True``, and
+    ``["/bin/sh", "-c", user]`` stay dangerous. Keyword ``shell`` is read from
+    the argument node, not from a substring of the file.
     """
     if _shell_keyword(call):
         return False
-    if not call.arguments:
+    positional = [argument for argument in call.arguments if not argument.keyword]
+    if not positional:
         return False
-    elements = _list_items(call.arguments[0].text)
-    if not elements:
+    elements = _list_items(positional[0].text)
+    if elements is not None:
+        # subprocess.run(["git", user]) — the list's first item is the program.
+        program = _literal_string(elements[0]) if elements else None
+    elif len(positional) >= 2:
+        # exec.Command("git", user) — a later argument is argv, not the program.
+        program = _literal_string(positional[0].text)
+    else:
+        # eval "$q" and system(user) pass one command string. That string is
+        # not a fixed executable name.
         return False
-    program = _literal_string(elements[0])
     if program is None:
         return False
     base = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -329,7 +329,9 @@ def _safe_command_argv(call: CallSite) -> bool:
 def _shell_keyword(call: CallSite) -> bool:
     for argument in call.arguments:
         compact = "".join(argument.text.split()).lower()
-        if compact in {"shell=true", "shell=1"}:
+        if argument.keyword == "shell" and compact in {"true", "1"}:
+            return True
+        if not argument.keyword and compact in {"shell=true", "shell=1"}:
             return True
     return False
 
@@ -437,6 +439,7 @@ def _cross_file_observations(
                 argument_indexes=(index,),
                 sanitizers=vocab.sanitizers,
                 transparent_callees=_sql_text_wrappers(rule.vulnerability_class),
+                graph=graph,
             )
             if not taint:
                 continue

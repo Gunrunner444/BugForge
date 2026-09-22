@@ -27,6 +27,7 @@ from app.domain.lifecycle_policy import (
     can_corroborate,
     independent_verification_items,
     positive_reproduction,
+    reproduction_for_target,
 )
 from app.domain.security import EvidenceTier
 from app.domain.target_identity import semantic_target_identity
@@ -112,9 +113,9 @@ class SecurityFinding:
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("Finding title must be non-empty")
-        if self.status is FindingStatus.REPRODUCED and not _has_positive_reproduction(self.evidence):
+        if self.status is FindingStatus.REPRODUCED and not _has_target_reproduction(self):
             raise ValueError(
-                "A reproduced finding requires an explicit successful reproduction record."
+                "A reproduced finding requires a successful reproduction of this semantic target."
             )
         if self.status is FindingStatus.VERIFIED and not _trusted_for(self):
             raise ValueError(
@@ -122,7 +123,7 @@ class SecurityFinding:
                 "The reproduction record alone cannot verify a finding."
             )
         if self.status is FindingStatus.HUMAN_ACCEPTED and not (
-            _has_positive_reproduction(self.evidence)
+            _has_target_reproduction(self)
             or _trusted_for(self)
         ):
             raise ValueError(
@@ -175,6 +176,7 @@ class SecurityFinding:
             raise ValueError("Finding is already beyond corroboration")
         if not can_corroborate(
             self.evidence,
+            target_id=semantic_target_identity(self),
             finding_id=str(self.id),
             finding_key=self.finding_key,
             project_id=self.project_id,
@@ -197,15 +199,19 @@ class SecurityFinding:
             raise ValueError("Rejected findings cannot be reproduced")
         if self.status in _VERIFIED_STATUSES:
             raise ValueError("Verified findings are already beyond reproduction")
-        merged = (
+        target = semantic_target_identity(self)
+        base = (
             self.evidence.extend(_as_bundle(evidence).items)
             if evidence is not None
             else self.evidence
         )
-        if not _has_positive_reproduction(merged):
+        # Bind unstamped successes to this target. A record that already names
+        # a target, including a previous one, is left unchanged.
+        merged = EvidenceBundle.from_items(_stamp_reproductions(base.items, target))
+        if not any(reproduction_for_target(item, target) for item in merged.items):
             raise ValueError(
-                "Reproduction requires an explicit successful reproduction record. "
-                "A bare REPRODUCTION kind, a failed attempt, or an unknown outcome is not enough."
+                "Reproduction requires a successful reproduction of this semantic target. "
+                "A historical reproduction, a failed attempt, or an unknown outcome is not enough."
             )
         return replace(
             self,
@@ -227,7 +233,7 @@ class SecurityFinding:
                 "Human acceptance requires a reproduced or independently verified finding. "
                 "AI hypotheses and static corroboration are not sufficient."
             )
-        if not (_has_positive_reproduction(self.evidence) or _trusted_for(self)):
+        if not (_has_target_reproduction(self) or _trusted_for(self)):
             raise ValueError(
                 "Human acceptance requires a successful reproduction "
                 "or an independent verification observation."
@@ -365,6 +371,32 @@ def _adopted_finding_id(bundle: EvidenceBundle) -> UUID | None:
 
 def _trusted_for(finding: SecurityFinding) -> tuple[Evidence, ...]:
     return independent_verification_items(finding.evidence.items, **_verification_binding(finding))
+
+
+def _has_target_reproduction(finding: SecurityFinding) -> bool:
+    target = semantic_target_identity(finding)
+    return any(reproduction_for_target(item, target) for item in finding.evidence.items)
+
+
+def _stamp_reproductions(items: tuple[Evidence, ...] | list[Evidence], target_id: str) -> list[Evidence]:
+    """Bind new successful reproductions to the finding's current target.
+
+    Records that already name a target are left unchanged, including when that
+    target is a previous one. Unsuccessful records are not stamped.
+    """
+    stamped: list[Evidence] = []
+    for item in items:
+        if (
+            positive_reproduction(item)
+            and target_id
+            and not str(item.metadata.get("observed_target") or "")
+        ):
+            metadata = dict(item.metadata)
+            metadata["observed_target"] = target_id
+            stamped.append(replace(item, metadata=metadata))
+        else:
+            stamped.append(item)
+    return stamped
 
 
 def _has_positive_reproduction(bundle: EvidenceBundle) -> bool:

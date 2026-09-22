@@ -46,6 +46,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 23 | Verification authority and evidence provenance | ✅ Implemented |
 | Phase 24 | Security coverage, precision, and verification trust | ✅ Implemented |
 | Phase 25 | Verification binding and adversarial detection | ✅ Implemented |
+| Phase 26 | Polyglot security coverage and semantic target binding | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -82,7 +83,8 @@ Lua, and Elixir remain detection-only. See
 [docs/phase22-production-security-lifecycle.md](docs/phase22-production-security-lifecycle.md), and
 [docs/phase23-verification-authority.md](docs/phase23-verification-authority.md), and
 [docs/phase24-security-coverage-precision.md](docs/phase24-security-coverage-precision.md), and
-[docs/phase25-verification-binding-adversarial.md](docs/phase25-verification-binding-adversarial.md).
+[docs/phase25-verification-binding-adversarial.md](docs/phase25-verification-binding-adversarial.md), and
+[docs/phase26-polyglot-security-coverage.md](docs/phase26-polyglot-security-coverage.md).
 
 Phase 2 adds:
 

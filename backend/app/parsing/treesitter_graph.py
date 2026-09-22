@@ -528,6 +528,7 @@ class _GraphBuilder:
 
     def _extract_call(self, node: object, ntype: str, span: SourceSpan | None) -> None:
         grammar = self.grammar
+        bare_args = False
         if ntype in {"echo_statement", "print_intrinsic"}:
             qualified = (
                 "echo"
@@ -536,6 +537,18 @@ class _GraphBuilder:
             )
             args_node = node
             kind = CallKind.BARE
+            # The statement's children are the values, not a callee to skip.
+            bare_args = True
+        elif ntype in {
+            "include_expression",
+            "include_once_expression",
+            "require_expression",
+            "require_once_expression",
+        }:
+            qualified = "include" if "include" in ntype else "require"
+            args_node = node
+            kind = CallKind.BARE
+            bare_args = True
         elif ntype == "command":
             qualified = self._command_name(node)
             args_node = node
@@ -580,7 +593,7 @@ class _GraphBuilder:
                 }
             ):
                 return
-        skip_callee = args_node is node
+        skip_callee = args_node is node and not bare_args
         args_meta = self._expression_meta(args_node, skip_callee=skip_callee)
         arg_text = self._argument_text(node)
         arguments = self._call_arguments(args_node, skip_callee=skip_callee)
@@ -864,6 +877,22 @@ class _GraphBuilder:
         elif ntype == "using_directive":
             module = text.replace("using", "").replace(";", "").strip()
             syntax_kind = "using"
+        elif ntype in {
+            "include_expression",
+            "include_once_expression",
+            "require_expression",
+            "require_once_expression",
+        }:
+            # A variable path is a call, not a module import.
+            strings = [
+                self._strip_quotes(self._text(child))
+                for child in _walk_named(node, 6)
+                if str(getattr(child, "type", "")) in self.grammar.string_types
+            ]
+            if not strings:
+                return
+            module = strings[-1]
+            syntax_kind = "include" if "include" in ntype else "require"
         elif ntype in {"use_declaration", "namespace_use_declaration", "import_header"}:
             module = (
                 text.replace("use ", "")
@@ -1174,6 +1203,30 @@ class _GraphBuilder:
                         names.append(ident)
         return _unique(names)
 
+    def _preceding_decorator_names(self, node: object) -> tuple[str, ...]:
+        """Decorator on the previous parameter-list sibling, including an ERROR wrapper.
+
+        The JavaScript grammar recovers ``@Query() name`` as an error node
+        followed by the parameter identifier. TypeScript may attach the
+        decorator to the parameter itself; this covers the recovered shape.
+        """
+        parent = getattr(node, "parent", None)
+        if parent is None:
+            return ()
+        children = list(getattr(parent, "children", ()) or ())
+        try:
+            index = children.index(node)
+        except ValueError:
+            return ()
+        previous = None
+        for child in reversed(children[:index]):
+            if getattr(child, "is_named", False):
+                previous = child
+                break
+        if previous is None:
+            return ()
+        return self._decorator_names(previous)
+
     def _extract_recovered_calls(self, node: object) -> None:
         children = list(getattr(node, "children", ()) or ())
         for index, child in enumerate(children):
@@ -1241,6 +1294,9 @@ class _GraphBuilder:
                 name = self._normalize_ident(self._text(child))
                 if name and name not in _NON_CALL_NAMES:
                     params.append(ParsedParameter(name=name))
+                    hints = self._preceding_decorator_names(child)
+                    if hints:
+                        self._param_sources[name] = hints
         # Dedup while preserving order
         seen: set[str] = set()
         unique: list[ParsedParameter] = []
@@ -1462,6 +1518,16 @@ class _GraphBuilder:
             qualified = f"{left}.{right}" if left else right
             kind = CallKind.METHOD if left else CallKind.DIRECT
             return qualified, kind
+        receiver = _child_by_field(node, "receiver")
+        if func is not None and receiver is not None:
+            left = self._qualified(receiver)
+            right = (
+                self._normalize_ident(self._text(func))
+                if str(getattr(func, "type", "")) in self.grammar.identifier_types
+                else self._qualified(func)
+            )
+            if left and right:
+                return f"{left}.{right}", CallKind.METHOD
         callee = func or _first_named(node)
         qualified = self._qualified(callee) if callee is not None else self._first_identifier(node)
         kind = (
@@ -1495,6 +1561,7 @@ class _GraphBuilder:
                 return self._qualified(func)
         path = (
             _child_by_field(node, "path")
+            or _child_by_field(node, "scope")
             or _child_by_field(node, "object")
             or _child_by_field(node, "expression")
             or _child_by_field(node, "value")
@@ -1624,20 +1691,38 @@ class _GraphBuilder:
                 and str(getattr(c, "type", "")) not in self.grammar.comment_types | {"comment"}
             ]
         out: list[CallArgument] = []
-        for index, child in enumerate(children[:24]):
+        positional = 0
+        for child in children[:24]:
             meta = self._expression_meta(child)
+            keyword = self._argument_keyword(child)
             out.append(
                 CallArgument(
-                    index=index,
+                    index=-1 if keyword else positional,
                     text=self._text(child)[:300],
                     is_literal=meta.is_literal,
                     idents=meta.idents,
                     accesses=meta.accesses,
                     callees=meta.callees,
                     dynamic=meta.dynamic,
+                    keyword=keyword,
                 )
             )
+            if not keyword:
+                positional += 1
         return tuple(out)
+
+    def _argument_keyword(self, node: object) -> str:
+        """Named argument label, when the grammar exposes one."""
+        ntype = str(getattr(node, "type", ""))
+        if ntype not in {"keyword_argument", "named_argument", "argument"}:
+            return ""
+        name = _child_by_field(node, "name") or _child_by_field(node, "key")
+        if name is None:
+            return ""
+        text = self._text(name).strip()
+        if not text or text in {"=", ":"}:
+            return ""
+        return text.split(".")[-1]
 
     def _declarator_kind(self, node: object, ntype: str) -> str:
         parent = getattr(node, "parent", None)

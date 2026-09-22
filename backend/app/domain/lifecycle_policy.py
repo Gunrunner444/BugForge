@@ -75,6 +75,8 @@ def positive_reproduction(item: Evidence) -> bool:
     Kind ``REPRODUCTION`` is not enough. The record needs ``reproduced=true``
     or an outcome of ``reproduced`` or ``consistently_reproduced``. Failed,
     intermittent, inconclusive, blocked, and unknown outcomes are not success.
+    This predicate does not check the semantic target. Lifecycle transitions
+    use :func:`reproduction_for_target`.
     """
     if item.kind is not EvidenceKind.REPRODUCTION:
         return False
@@ -89,6 +91,18 @@ def positive_reproduction(item: Evidence) -> bool:
     if outcome in _POSITIVE_OUTCOMES:
         return True
     return reproduced in _POSITIVE_FLAGS and outcome in {"", *_POSITIVE_OUTCOMES}
+
+
+def reproduction_for_target(item: Evidence, target_id: str) -> bool:
+    """Successful reproduction bound to one semantic target.
+
+    A positive record without ``observed_target``, or one bound to a different
+    target, is historical only. It does not establish ``REPRODUCED`` or
+    ``HUMAN_ACCEPTED`` for the current finding. This is not a server signature.
+    """
+    if not target_id or not positive_reproduction(item):
+        return False
+    return _meta(item, "observed_target") == target_id
 
 
 def independent_verification_items(
@@ -146,18 +160,24 @@ def independent_verification_items(
 def can_corroborate(
     evidence: EvidenceBundle | Sequence[Evidence],
     *,
+    target_id: str = "",
     finding_id: str = "",
     finding_key: str = "",
     project_id: str = "",
 ) -> bool:
-    """True when authorized non-AI observations support the same finding.
+    """True when authorized non-AI observations support this finding's target.
 
-    Two distinct static or source observations corroborate. One static record,
-    two copies of that record, static plus AI text, and a contradictory record
-    do not. A runtime observation corroborates only when it is a
-    ``ServerObservation`` bound to this finding. Plain client HTTP evidence
-    and forged attribution do not. A trusted runtime observation still cannot
-    verify.
+    Two distinct static or source observations corroborate when each one is
+    either unbound (legacy evidence with no ``observed_target``) or stamped
+    with ``target_id``. A stamp for a different target does not count.
+    One static record, two copies of that record, static plus AI text, and a
+    contradictory record do not corroborate.
+
+    A runtime observation corroborates only when it is a ``ServerObservation``
+    whose finding id, finding key, project id, and ``observed_target`` match
+    the current finding. The observation's own target is not used as the
+    expected target. Plain client HTTP evidence and forged attribution do
+    not corroborate. A trusted runtime observation still cannot verify.
     """
     items = evidence.items if isinstance(evidence, EvidenceBundle) else evidence
     seen: set[tuple[str, ...]] = set()
@@ -166,13 +186,14 @@ def can_corroborate(
         if item.kind is EvidenceKind.AI_ANALYSIS or evidence_contradicts(item):
             continue
         if item.kind in _CORROBORATING_KINDS:
-            seen.add(observation_identity(item))
+            if _static_matches_target(item, target_id):
+                seen.add(observation_identity(item))
         elif (
             item.kind in _RESEARCH_OBSERVATION_KINDS
             and is_trusted_observation(item)
             and _bound_to_finding(
                 item,
-                target_id=_meta(item, "observed_target"),
+                target_id=target_id,
                 finding_id=finding_id,
                 finding_key=finding_key,
                 project_id=project_id,
@@ -180,6 +201,19 @@ def can_corroborate(
         ):
             research = True
     return len(seen) >= 2 or research
+
+
+def _static_matches_target(item: Evidence, target_id: str) -> bool:
+    """Legacy static evidence has no target stamp and still counts.
+
+    Analysis stamps ``observed_target`` when the finding is created. A later
+    material target change leaves that stamp behind, so the old record stays
+    stored without corroborating the new target.
+    """
+    bound = _meta(item, "observed_target")
+    if not bound:
+        return True
+    return bool(target_id) and bound == target_id
 
 
 def _bound_to_finding(

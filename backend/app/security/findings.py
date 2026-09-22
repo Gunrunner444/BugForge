@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from app.domain.evidence import Evidence, EvidenceBundle
+from dataclasses import replace
+
+from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import SecurityFinding, SourceLocation
 from app.domain.lifecycle_policy import can_corroborate
 from app.domain.security import EvidenceTier
+from app.domain.target_identity import semantic_target_identity
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import explain_cluster
 from app.security.rules.base import SecurityObservation
@@ -59,9 +62,25 @@ def finding_from_cluster(cluster: ObservationCluster) -> SecurityFinding:
         report_description=summary,
         asset=cluster.file_path,
     )
-    if cluster.corroborated and can_corroborate(finding.evidence):
+    target = semantic_target_identity(finding)
+    stamped = [
+        _stamp_static_target(item, target)
+        if item.kind in {EvidenceKind.STATIC_ANALYSIS, EvidenceKind.SOURCE_CODE}
+        else item
+        for item in finding.evidence.items
+    ]
+    finding = replace(finding, evidence=EvidenceBundle.from_items(stamped))
+    if cluster.corroborated and can_corroborate(finding.evidence, target_id=target):
         finding = finding.corroborate()
     return finding
+
+
+def _stamp_static_target(item: Evidence, target_id: str) -> Evidence:
+    if item.metadata.get("observed_target"):
+        return item
+    metadata = dict(item.metadata)
+    metadata["observed_target"] = target_id
+    return replace(item, metadata=metadata)
 
 
 def attach_ai_hypothesis(

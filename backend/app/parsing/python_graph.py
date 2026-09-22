@@ -408,7 +408,7 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         )
         if isinstance(node.func, ast.Attribute):
             kind = CallKind.METHOD
-        arguments = tuple(
+        arguments_list = [
             CallArgument(
                 index=i,
                 text=_expr(arg),
@@ -419,7 +419,22 @@ class _PythonGraphVisitor(ast.NodeVisitor):
                 dynamic=_expr_meta(arg).dynamic,
             )
             for i, arg in enumerate(node.args)
-        )
+        ]
+        for keyword in node.keywords:
+            meta = _expr_meta(keyword.value)
+            arguments_list.append(
+                CallArgument(
+                    index=-1,
+                    text=_expr(keyword.value),
+                    is_literal=meta.is_literal,
+                    idents=meta.idents,
+                    accesses=meta.accesses,
+                    callees=meta.callees,
+                    dynamic=meta.dynamic,
+                    keyword=keyword.arg or "**",
+                )
+            )
+        arguments = tuple(arguments_list)
         self.calls.append(
             CallSite(
                 name=name,

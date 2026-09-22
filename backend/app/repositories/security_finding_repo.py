@@ -684,20 +684,24 @@ def _human_accepted_from_stored(title: str, kwargs: dict[str, object]) -> Securi
     ``HUMAN_ACCEPTED`` when the stored evidence fails the domain rule.
     The observation must be bound to this finding's semantic target.
     """
+    from app.domain.lifecycle_policy import reproduction_for_target
     from app.domain.target_identity import semantic_target_identity
 
     bundle = kwargs.get("evidence")
     items = bundle.items if isinstance(bundle, EvidenceBundle) else ()
     probe = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
+    target = semantic_target_identity(probe)
     if independent_verification_items(
         items,
-        target_id=semantic_target_identity(probe),
+        target_id=target,
         finding_id=str(probe.id),
         finding_key=str(probe.finding_key),
         project_id=str(probe.project_id),
     ):
         return SecurityFinding.verified(title, **kwargs).human_accept()  # type: ignore[arg-type]
-    return probe.reproduce().human_accept()
+    if any(reproduction_for_target(item, target) for item in items):
+        return probe.reproduce().human_accept()
+    raise ValueError("stored acceptance does not match the current semantic target")
 
 
 def _fill[T](current: T, incoming: T) -> T:
@@ -829,8 +833,14 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         except ValueError:
             return finding
     if status is FindingStatus.REPRODUCED:
-        try:
-            return finding.reproduce()
-        except ValueError:
-            return finding
+        from app.domain.lifecycle_policy import reproduction_for_target
+        from app.domain.target_identity import semantic_target_identity
+
+        target = semantic_target_identity(finding)
+        if any(reproduction_for_target(item, target) for item in finding.evidence.items):
+            try:
+                return finding.reproduce()
+            except ValueError:
+                return finding
+        return finding
     return finding

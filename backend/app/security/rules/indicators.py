@@ -53,6 +53,22 @@ DEBUG_DOC = RuleDocumentation(
     false_positives="Tests that intentionally enable debug.",
 )
 
+_PEM_MATERIAL = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+
+def _redact_secrets(raw: str) -> str:
+    """Remove secret material from one evidence line, including same-line tails."""
+    redacted = _PEM_MATERIAL.sub("-----BEGIN PRIVATE KEY----- *** -----END PRIVATE KEY-----", raw)
+    redacted = _SECRET_ASSIGN.sub(lambda match: f"{match.group(1)} = '***'", redacted)
+    redacted = _CONN.sub("scheme://***:***@", redacted)
+    redacted = _BEARER.sub("Bearer ***", redacted)
+    redacted = _AWS_KEY.sub("AKIA***", redacted)
+    return redacted
+
+
 def _placeholder_value(value: str) -> bool:
     return _PLACEHOLDER_VALUE.fullmatch(value.strip().strip("'\"")) is not None
 
@@ -60,6 +76,20 @@ def _placeholder_value(value: str) -> bool:
 def _test_path(graph: SyntaxGraph) -> bool:
     path = graph.file_path.replace("\\", "/")
     return "/tests/" in path or path.rsplit("/", 1)[-1].startswith("test_")
+
+
+def _cipher_tokens(token: str) -> tuple[str, ...]:
+    """Exact algorithm names, or slash-separated cipher segments.
+
+    ``not-md5`` is one value and does not match ``md5``. ``AES/ECB/PKCS5Padding``
+    yields ``ecb`` because the cipher string names that mode.
+    """
+    text = token.strip().lower()
+    if not text:
+        return ()
+    if "/" in text:
+        return tuple(part for part in text.split("/") if part)
+    return (text,)
 
 
 def _crypto_literals(call: object) -> tuple[str, ...]:
@@ -163,9 +193,7 @@ class HardcodedSecretRule(SecurityRule):
         return observations
 
     def _obs(self, graph: SyntaxGraph, line: int, summary: str, raw: str) -> SecurityObservation:
-        redacted = _SECRET_ASSIGN.sub(r"\1 = '***'", raw)
-        redacted = _CONN.sub("scheme://***:***@", redacted)
-        redacted = _BEARER.sub("Bearer ***", redacted)
+        redacted = _redact_secrets(raw)
         return SecurityObservation(
             rule_id=self.rule_id,
             vulnerability_class=self.vulnerability_class,
@@ -207,7 +235,7 @@ class WeakCryptoRule(SecurityRule):
             literals = _crypto_literals(call)
             direct = simple in algorithms
             configured = simple in crypto_callees and any(
-                part in algorithms for token in literals for part in re.split(r"[^a-z0-9]+", token)
+                part in algorithms for token in literals for part in _cipher_tokens(token)
             )
             if not direct and not configured:
                 continue

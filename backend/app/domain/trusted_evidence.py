@@ -20,7 +20,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from app.core.config import settings
-from app.domain.evidence import Evidence
+from app.domain.evidence import Evidence, EvidenceKind
 from app.domain.target_identity import semantic_target_identity
 
 _DROPPED = frozenset(
@@ -249,14 +249,25 @@ def _canon(value: object) -> str:
 
 
 def _without_trust_markers(item: Evidence) -> Evidence:
-    """Drop a forged stamp. Keep execution metadata so dedup stays stable."""
+    """Drop a forged runtime stamp. Keep execution metadata so dedup stays stable.
+
+    Static, source, and reproduction records are not server signatures. Their
+    ``observed_target`` is the lifecycle binding and must survive reload.
+    Unsigned HTTP and other runtime records lose that field so they cannot
+    corroborate or verify.
+    """
     from dataclasses import replace
 
     dropped = {
         "attribution",
         "observation_signature",
-        "observed_target",
         "server_observation_id",
     }
+    if item.kind not in {
+        EvidenceKind.STATIC_ANALYSIS,
+        EvidenceKind.SOURCE_CODE,
+        EvidenceKind.REPRODUCTION,
+    }:
+        dropped.add("observed_target")
     metadata = {key: value for key, value in item.metadata.items() if key not in dropped}
     return replace(item, metadata=metadata)

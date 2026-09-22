@@ -1,10 +1,12 @@
 # Polyglot analysis
 
-Phase 14 keeps BugForge’s polyglot analysis flow-sensitive and honest about
+Phase 26 keeps BugForge’s polyglot analysis flow-sensitive and honest about
 parser fallback. The security engine never depends on a specific parser. Every
-backend fills the same `SyntaxGraph`. Cross-file reasoning uses one repository
-semantic graph, and constant field paths use the same taint engine. Neither is
-a second dataflow engine. Dynamic keys and profile fallback are not field facts.
+backend fills the same `SyntaxGraph`. Language behavior stays in vocabularies,
+parser normalization, and framework binding. Cross-file reasoning uses one
+repository semantic graph for Python and JavaScript/TypeScript only, and
+constant field paths use the same taint engine. Neither is a second dataflow
+engine. Dynamic keys and profile fallback are not field facts.
 
 ## Architecture
 

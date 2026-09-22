@@ -253,7 +253,11 @@ def _type_identity(item: Evidence) -> tuple[str, ...]:
     if kind is EvidenceKind.FUZZING:
         return (_norm_meta(item, "target"), _norm_meta(item, "result_id"))
     if kind is EvidenceKind.REPRODUCTION:
-        return (_norm_meta(item, "result_id"), _norm_meta(item, "reproduced"))
+        return (
+            _norm_meta(item, "result_id"),
+            _norm_meta(item, "reproduced"),
+            _norm_meta(item, "observed_target"),
+        )
     if kind in {EvidenceKind.STATIC_ANALYSIS, EvidenceKind.SOURCE_CODE}:
         return (
             _norm_meta(item, "rule") or _norm_meta(item, "sink"),

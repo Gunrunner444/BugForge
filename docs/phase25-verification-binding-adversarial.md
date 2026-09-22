@@ -8,6 +8,12 @@ lifecycle service.
 AI remains a hypothesis and explanation source. It cannot corroborate,
 reproduce, or verify a finding.
 
+Phase 26 corrects two gaps in this phase's enforcement. Corroboration used
+the observation's own `observed_target` as the expected target, so a bound
+observation matched itself. Python `CallArgument` records omitted keyword
+arguments, so `shell=True` never reached the command rule. Both are enforced
+in Phase 26. The trust order below is unchanged.
+
 ```text
 static analysis
     ↓
