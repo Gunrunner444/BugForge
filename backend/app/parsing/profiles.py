@@ -595,6 +595,20 @@ SQL = LanguageProfile(
     tree_sitter_language="sql",
 )
 
+SOLIDITY = LanguageProfile(
+    language_id="solidity",
+    display_name="Solidity",
+    extensions=frozenset({".sol"}),
+    line_comment="//",
+    block_comment=("/*", "*/"),
+    import_patterns=(r'import\s+(?:\{[^}]*\}\s+from\s+)?["\']([^"\']+)["\']',),
+    function_patterns=(r"function\s+([A-Za-z_][\w]*)\s*\(",),
+    class_patterns=(r"(?:contract|interface|library)\s+([A-Za-z_][\w]*)",),
+    assignment_patterns=(),
+    source_patterns=(),
+    tree_sitter_language="solidity",
+)
+
 
 PROFILES: dict[str, LanguageProfile] = {
     p.language_id: p
@@ -617,6 +631,7 @@ PROFILES: dict[str, LanguageProfile] = {
         CSS,
         SCSS,
         SQL,
+        SOLIDITY,
     )
 }
 

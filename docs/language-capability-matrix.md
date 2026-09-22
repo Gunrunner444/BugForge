@@ -78,3 +78,14 @@ BugForge does **not** claim FULL_AST or analysis parity. They stay
 `DETECTION_ONLY` until quality rules, taint vocabularies, and fixtures exist.
 Contract tests assert `parse_file` / `analyze_file` raise
 `UnsupportedCapabilityError`.
+
+## Solidity
+
+Solidity is not in the generic taint table above. Its parser is Tree-sitter
+when the bundled grammar loads (`FULL_AST`, backend `tree_sitter`). If that
+parser cannot load, the file is `PROFILE_FALLBACK` and Solidity security rules
+do not run. The capability matrix uses `YES`, `LIMITED`, `UNSUPPORTED`, and
+`UNAVAILABLE_AT_RUNTIME`. Same-file call/state order is `LIMITED` data flow.
+Compiler storage layout is not claimed. External Foundry, Slither, Echidna,
+Medusa, Halmos, and Wake capabilities follow the installed binary. See
+[phase27-multi-engine-solidity.md](phase27-multi-engine-solidity.md).

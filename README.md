@@ -47,6 +47,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 24 | Security coverage, precision, and verification trust | ✅ Implemented |
 | Phase 25 | Verification binding and adversarial detection | ✅ Implemented |
 | Phase 26 | Polyglot security coverage and semantic target binding | ✅ Implemented |
+| Phase 27 | Multi-engine discovery and Solidity analysis | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -66,8 +67,10 @@ dynamic keys, partial callees, and profile fallback are not treated as dataflow.
 Every full-analysis language has a syntax-aware **code quality** catalog,
 separate from **security** observations. Parser fallback is labeled
 `PROFILE_FALLBACK` and never advertised as AST. C# and Shell are full analysis
-languages. HTML, CSS/SCSS, and SQL have specialized analysis. R, Scala, Dart,
-Lua, and Elixir remain detection-only. See
+languages. HTML, CSS/SCSS, and SQL have specialized analysis. Solidity has its own
+security and quality catalogs. Foundry, Slither, Echidna, Medusa, Halmos, and
+Wake are optional executables and do not invent results when they are absent.
+R, Scala, Dart, Lua, and Elixir remain detection-only. See
 [docs/polyglot-analysis.md](docs/polyglot-analysis.md),
 [docs/language-capability-matrix.md](docs/language-capability-matrix.md),
 [docs/phase12-semantic-analysis.md](docs/phase12-semantic-analysis.md),
@@ -84,7 +87,8 @@ Lua, and Elixir remain detection-only. See
 [docs/phase23-verification-authority.md](docs/phase23-verification-authority.md), and
 [docs/phase24-security-coverage-precision.md](docs/phase24-security-coverage-precision.md), and
 [docs/phase25-verification-binding-adversarial.md](docs/phase25-verification-binding-adversarial.md), and
-[docs/phase26-polyglot-security-coverage.md](docs/phase26-polyglot-security-coverage.md).
+[docs/phase26-polyglot-security-coverage.md](docs/phase26-polyglot-security-coverage.md), and
+[docs/phase27-multi-engine-solidity.md](docs/phase27-multi-engine-solidity.md).
 
 Phase 2 adds:
 

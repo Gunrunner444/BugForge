@@ -27,6 +27,12 @@ class VulnerabilityClass(StrEnum):
     UNSAFE_REDIRECT = "unsafe_redirect"
     MISSING_SECURITY_CONTROL = "missing_security_control"
     BUSINESS_LOGIC = "business_logic_risk"
+    REENTRANCY = "reentrancy"
+    UNSAFE_EXTERNAL_CALL = "unsafe_external_call"
+    UNSAFE_ARITHMETIC = "unsafe_arithmetic"
+    SIGNATURE_FLAW = "signature_flaw"
+    UNSAFE_PROXY = "unsafe_proxy"
+    DENIAL_OF_SERVICE = "denial_of_service"
 
 
 class EvidenceTier(StrEnum):

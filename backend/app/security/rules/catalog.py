@@ -11,11 +11,13 @@ from app.security.rules.controls import (
 )
 from app.security.rules.indicators import HardcodedSecretRule, InsecureConfigRule, WeakCryptoRule
 from app.security.rules.taint_rules import default_taint_rules
+from app.security.solidity.rules import solidity_security_rules
 
 
 def builtin_security_rules() -> list[SecurityRule]:
     return [
         *default_taint_rules(),
+        *solidity_security_rules(),
         HardcodedSecretRule(),
         WeakCryptoRule(),
         InsecureConfigRule(),

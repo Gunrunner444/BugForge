@@ -130,6 +130,24 @@ class CSharpAdapter(ProfileLanguageAdapter):
         super().__init__("csharp", "C#", frozenset({".cs"}), rules=quality_rules_for("csharp"))
 
 
+class SolidityAdapter(ProfileLanguageAdapter):
+    def __init__(self) -> None:
+        super().__init__(
+            "solidity",
+            "Solidity",
+            frozenset({".sol"}),
+            rules=quality_rules_for("solidity"),
+        )
+
+    def analysis_diagnostics(self) -> dict[str, object]:
+        from app.adapters.languages.capabilities import capability_matrix, promotion_stage
+
+        report = super().analysis_diagnostics()
+        report["capability_matrix"] = capability_matrix(self.language_id)
+        report["promotion_stage"] = promotion_stage(self.language_id)
+        return report
+
+
 class ShellAdapter(ProfileLanguageAdapter):
     def __init__(self) -> None:
         super().__init__(
@@ -197,6 +215,7 @@ PROGRAMMING_LANGUAGE_ADAPTERS: tuple[type[LanguageAdapter], ...] = (
     SwiftAdapter,
     CSharpAdapter,
     ShellAdapter,
+    SolidityAdapter,
     HtmlAdapter,
     CssAdapter,
     ScssAdapter,

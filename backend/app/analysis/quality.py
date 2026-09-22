@@ -247,6 +247,13 @@ COMMON_FULL_ANALYSIS_RULES: list[CodeQualityRule] = [
     ShadowingQualityRule(),
 ]
 
+
+def _solidity_quality_rules() -> list[AnalyzerRule]:
+    from app.analysis.solidity_quality import SOLIDITY_QUALITY_RULES
+
+    return list(SOLIDITY_QUALITY_RULES)
+
+
 LANGUAGE_QUALITY_RULES: dict[str, Sequence[AnalyzerRule]] = {
     "python": list(ALL_PYTHON_RULES),
     "javascript": list(ALL_JAVASCRIPT_RULES) + [DebuggerQualityRule(), ShadowingQualityRule()],
@@ -262,6 +269,7 @@ LANGUAGE_QUALITY_RULES: dict[str, Sequence[AnalyzerRule]] = {
     "swift": list(COMMON_FULL_ANALYSIS_RULES) + [ForceUnwrapQualityRule()],
     "csharp": list(COMMON_FULL_ANALYSIS_RULES) + [GotoQualityRule()],
     "shell": [UnquotedExpansionQualityRule(), PosixTestQualityRule(), ShadowingQualityRule()],
+    "solidity": list(_solidity_quality_rules()),
 }
 
 

@@ -171,6 +171,16 @@ DEFAULT_FRAMEWORKS: tuple[FrameworkSpec, ...] = (
         indicator_files=("symfony.lock",),
     ),
     FrameworkSpec(
+        name="foundry",
+        language="solidity",
+        indicator_files=("foundry.toml",),
+    ),
+    FrameworkSpec(
+        name="hardhat",
+        language="solidity",
+        indicator_files=("hardhat.config.js", "hardhat.config.ts"),
+    ),
+    FrameworkSpec(
         name="servlet",
         language="java",
         config_patterns=(r"javax\.servlet", r"jakarta\.servlet", r"HttpServlet"),

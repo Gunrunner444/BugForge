@@ -45,6 +45,7 @@ TS_LANGUAGE_IDS: dict[str, str] = {
     "css": "css",
     "scss": "scss",
     "sql": "sql",
+    "solidity": "solidity",
 }
 
 # Grammars exist in the pack but BugForge does not yet meet the full-analysis

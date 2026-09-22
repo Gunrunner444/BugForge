@@ -43,6 +43,9 @@ class PluginCatalog:
     evidence_collectors: AdapterRegistry[EvidenceCollector] = field(
         default_factory=lambda: AdapterRegistry[EvidenceCollector]("evidence collector")
     )
+    discovery_engines: AdapterRegistry[object] = field(
+        default_factory=lambda: AdapterRegistry[object]("discovery engine")
+    )
 
 
 _catalog: PluginCatalog | None = None

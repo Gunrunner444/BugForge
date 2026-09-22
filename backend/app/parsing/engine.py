@@ -113,6 +113,17 @@ def default_syntax_registry() -> SyntaxParserRegistry:
     for language_id, profile in PROFILES.items():
         if language_id == "python":
             continue
+        if language_id == "solidity":
+            from app.parsing.solidity_graph import parse_solidity_source
+
+            available = treesitter_available(language_id)
+            registry.register(
+                language_id,
+                parse_solidity_source,
+                backend="tree_sitter" if available else "profile",
+                tier=ParserTier.FULL_AST if available else ParserTier.PROFILE_FALLBACK,
+            )
+            continue
         if treesitter_available(language_id):
             registry.register(
                 language_id,

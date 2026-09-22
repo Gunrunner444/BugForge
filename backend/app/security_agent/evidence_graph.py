@@ -23,6 +23,8 @@ ALLOWED_RELATIONS = frozenset(
         "same_issue_as",
         "identity_diff",
         "follows",
+        "motivates",
+        "produces",
     }
 )
 

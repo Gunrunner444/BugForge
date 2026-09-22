@@ -40,6 +40,29 @@ def _register_security_testing(catalog: PluginCatalog) -> None:
         ControlledFuzzingAdapter,
         description="Gated fuzzing engine (requires a SecurityTestEngine)",
     )
+    _register_discovery(catalog)
+
+
+def _register_discovery(catalog: PluginCatalog) -> None:
+    from app.adapters.discovery.external import (
+        EchidnaEngine,
+        FoundryEngine,
+        HalmosEngine,
+        MedusaEngine,
+        SlitherEngine,
+        WakeEngine,
+    )
+    from app.discovery.builtin import BugforgeStaticEngine
+
+    catalog.discovery_engines.register(
+        "bugforge-static", BugforgeStaticEngine, description="In-process static analysis"
+    )
+    catalog.discovery_engines.register("slither", SlitherEngine, description="Optional Slither")
+    catalog.discovery_engines.register("foundry", FoundryEngine, description="Optional Foundry")
+    catalog.discovery_engines.register("echidna", EchidnaEngine, description="Optional Echidna")
+    catalog.discovery_engines.register("medusa", MedusaEngine, description="Optional Medusa")
+    catalog.discovery_engines.register("halmos", HalmosEngine, description="Optional Halmos")
+    catalog.discovery_engines.register("wake", WakeEngine, description="Optional Wake")
 
 
 def register_builtin_adapters(catalog: PluginCatalog) -> None:

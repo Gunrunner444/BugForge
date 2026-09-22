@@ -75,6 +75,15 @@ from a `SeedRequest`. JSON mutations parse the seed and use `json.dumps`
 Fuzzer limits are the stricter of `FuzzLimits` and `SafetyController`
 (RPS, concurrency, timeout, payload count, request count, body size).
 
+## Discovery engines
+
+Discovery engines are registered on the plugin catalog and selected by
+`DiscoveryScheduler`. A missing binary returns `UNAVAILABLE` and `executed=false`.
+Slither and Echidna/Medusa are AGPL executables and are not vendored. Foundry
+is MIT/Apache. Wake is ISC and optional. Halmos is used only after a target is
+marked difficult to reach. `forge test` never adds `--fork-url`. Tool text is
+redacted and is not a verification decision.
+
 ## Manual evidence
 
 Researchers can record observations, request/response, reproduction
