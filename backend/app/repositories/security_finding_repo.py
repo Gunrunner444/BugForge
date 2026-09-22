@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.evidence import EvidenceBundle
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
+from app.domain.lifecycle_policy import independent_verification_items
 from app.domain.security import EvidenceTier
 from app.models.security_finding import DBSecurityFinding
 from app.repositories.finding_identity import intelligence_with_column_key
@@ -571,6 +572,22 @@ def merge_lifecycle_state(current: SecurityFinding, incoming: SecurityFinding) -
     )
 
 
+def _human_accepted_from_stored(title: str, kwargs: dict[str, object]) -> SecurityFinding:
+    """Reload an accepted finding without treating reproduction as verification.
+
+    An accepted finding that already has an independent observation reloads
+    through ``verified()``. An accepted finding that only has a successful
+    reproduction reloads through ``reproduce()``. Neither path assigns
+    ``HUMAN_ACCEPTED`` when the stored evidence fails the domain rule.
+    """
+    bundle = kwargs.get("evidence")
+    items = bundle.items if isinstance(bundle, EvidenceBundle) else ()
+    if independent_verification_items(items):
+        return SecurityFinding.verified(title, **kwargs).human_accept()  # type: ignore[arg-type]
+    finding = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
+    return finding.reproduce().human_accept()
+
+
 def _fill[T](current: T, incoming: T) -> T:
     """Keep a current value. Use the incoming value only when current is empty."""
     if current is None or current == "":
@@ -714,7 +731,7 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
     if status is FindingStatus.VERIFIED:
         return SecurityFinding.verified(title, **kwargs)  # type: ignore[arg-type]
     if status is FindingStatus.HUMAN_ACCEPTED:
-        return SecurityFinding.verified(title, **kwargs).human_accept()  # type: ignore[arg-type]
+        return _human_accepted_from_stored(title, kwargs)
     if status is FindingStatus.REJECTED:
         return SecurityFinding.rejected(title, **kwargs)  # type: ignore[arg-type]
     finding = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]

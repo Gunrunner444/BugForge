@@ -123,7 +123,10 @@ Reproduction evidence alone cannot verify. A duplicate of that evidence
 cannot verify.
 
 `REPRODUCED` can be human-accepted. `VERIFIED` requires the independent
-observation. A later contradiction stays attached and does not downgrade
+observation. Reloading a human-accepted row uses `verified()` when an
+independent observation is stored, and `reproduce()` when the only success
+record is the reproduction. A stored `verified` row still has to satisfy
+`verified()`. A later contradiction stays attached and does not downgrade
 `potential`, `reproduced`, `verified`, or `human_accepted`. The explanation
 says the static result is kept and the stored lifecycle state stays.
 

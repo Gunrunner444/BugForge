@@ -356,6 +356,27 @@ async def test_failed_transition_rolls_back_with_the_session(
 
 
 @pytest.mark.asyncio
+async def test_human_accepted_reproduction_reloads_without_verification(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    project = Project(name="accepted-repro", repository_path=str(tmp_path))
+    db_session.add(project)
+    await db_session.flush()
+    service = FindingLifecycleService(SecurityFindingRepository(db_session))
+    accepted = (
+        _finding(_static("accepted"), key="accepted-repro").reproduce([_repro()]).human_accept()
+    )
+    rows = await service.persist_static_scan([accepted], project_id=project.id, analysis_id=None)
+    restored = to_domain(rows[0])
+    assert restored.status is FindingStatus.HUMAN_ACCEPTED
+    assert restored.human_review_state is HumanReviewState.ACCEPTED
+    assert any(positive_reproduction(item) for item in restored.evidence.items)
+    assert all(item.kind is not EvidenceKind.HTTP_RESPONSE for item in restored.evidence.items)
+    assert restored.finding_key == "accepted-repro"
+    assert restored.source_location == accepted.source_location
+
+
+@pytest.mark.asyncio
 async def test_rescan_preserves_each_lifecycle_state(db_session: AsyncSession, tmp_path: Path) -> None:
     project = Project(name="states", repository_path=str(tmp_path))
     db_session.add(project)
