@@ -21,6 +21,7 @@ _CLIENT_IDENTITY_KEYS = frozenset(
         "finding_key",
         "observation_signature",
         "observed_target",
+        "project_id",
         "server_observation_id",
     }
 )

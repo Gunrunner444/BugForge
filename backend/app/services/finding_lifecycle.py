@@ -10,6 +10,7 @@ persisted row. They do not assign ``FindingStatus`` directly.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -122,6 +123,9 @@ class FindingLifecycleService:
         collected: list[Evidence] = []
         for collector in collectors:
             collected.extend(collector.collect(source))
+        project = str(row.project_id or "")
+        if finding.project_id != project:
+            finding = replace(finding, project_id=project)
         target_id = semantic_target_identity(finding)
         stamped: list[Evidence] = []
         for item in collected:
@@ -135,6 +139,7 @@ class FindingLifecycleService:
                     observed_target=target_id,
                     finding_id=attribution.finding_id,
                     finding_key=attribution.finding_key,
+                    project_id=project,
                 )
             )
         return await self._apply(

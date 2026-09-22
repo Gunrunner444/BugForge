@@ -7,7 +7,12 @@ from typing import Any
 
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import SecurityFinding
-from app.domain.lifecycle_policy import can_corroborate, positive_reproduction
+from app.domain.lifecycle_policy import (
+    _RESEARCH_OBSERVATION_KINDS,
+    can_corroborate,
+    positive_reproduction,
+)
+from app.domain.trusted_evidence import issue_for_finding
 from app.security_agent.correlation import finding_fingerprint
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import HypothesisStatus, ReproductionOutcome
@@ -34,20 +39,34 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
     else:
         finding = existing
     if evidence:
+        stamped = _stamp_research_evidence(finding, evidence)
         merged = (
-            finding.evidence.extend(evidence)
+            finding.evidence.extend(stamped)
             if finding.evidence
-            else EvidenceBundle.from_items(evidence)
+            else EvidenceBundle.from_items(stamped)
         )
         finding = replace(finding, evidence=merged)
-    if can_corroborate(finding.evidence) and finding.status.value == "potential":
+    if (
+        can_corroborate(
+            finding.evidence,
+            finding_id=str(finding.id),
+            finding_key=finding.finding_key,
+            project_id=finding.project_id,
+        )
+        and finding.status.value == "potential"
+    ):
         finding = finding.corroborate()
         if hypothesis.status is HypothesisStatus.OPEN:
             hypothesis.status = HypothesisStatus.SUPPORTED
     elif (
         hypothesis.status is HypothesisStatus.REQUIRES_REPRODUCTION
         and finding.status.value == "potential"
-        and can_corroborate(finding.evidence)
+        and can_corroborate(
+            finding.evidence,
+            finding_id=str(finding.id),
+            finding_key=finding.finding_key,
+            project_id=finding.project_id,
+        )
     ):
         finding = finding.corroborate()
     if existing is None:
@@ -115,6 +134,19 @@ def _existing(session: Any, hypothesis: ResearchHypothesis) -> SecurityFinding |
 
 def _replace_finding(session: Any, finding: SecurityFinding) -> None:
     session.findings = [item if item.id != finding.id else finding for item in session.findings]
+
+
+def _stamp_research_evidence(finding: SecurityFinding, items: list[Evidence]) -> list[Evidence]:
+    """Runtime research records become server observations. Static records stay static."""
+    stamped: list[Evidence] = []
+    for item in items:
+        if item.kind not in _RESEARCH_OBSERVATION_KINDS:
+            stamped.append(item)
+            continue
+        stamped.append(
+            issue_for_finding(finding, item, f"research-{item.kind.value}-{item.summary}")
+        )
+    return stamped
 
 
 def _evidence_from_graph(session: Any, hypothesis: ResearchHypothesis) -> list[Evidence]:

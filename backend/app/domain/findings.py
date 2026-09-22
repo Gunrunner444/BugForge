@@ -93,6 +93,7 @@ class SecurityFinding:
     analyzer: str | None = None
     observation_refs: tuple[str, ...] = ()
     finding_key: str = ""
+    project_id: str = ""
     flow_summary: str = ""
     flow_source: str = ""
     flow_sink: str = ""
@@ -150,9 +151,7 @@ class SecurityFinding:
             if evidence is not None
             else self.evidence
         )
-        if not independent_verification_items(
-            merged.items, target_id=semantic_target_identity(self)
-        ):
+        if not independent_verification_items(merged.items, **_verification_binding(self)):
             raise ValueError(
                 "Verification requires an independent observation. "
                 "The reproduction record alone cannot verify a finding. "
@@ -174,7 +173,12 @@ class SecurityFinding:
             raise ValueError("Rejected findings cannot be corroborated")
         if self.status in _VERIFIED_STATUSES or self.status is FindingStatus.REPRODUCED:
             raise ValueError("Finding is already beyond corroboration")
-        if not can_corroborate(self.evidence):
+        if not can_corroborate(
+            self.evidence,
+            finding_id=str(self.id),
+            finding_key=self.finding_key,
+            project_id=self.project_id,
+        ):
             raise ValueError(
                 "Corroboration requires two independent non-AI observations. "
                 "One static record, a duplicate of that record, or AI text is not enough."
@@ -293,10 +297,13 @@ class SecurityFinding:
         **kwargs: Any,
     ) -> SecurityFinding:
         bundle = _as_bundle(evidence)
+        kwargs = dict(kwargs)
+        if "id" not in kwargs:
+            adopted = _adopted_finding_id(bundle)
+            if adopted is not None:
+                kwargs["id"] = adopted
         probe = cls.potential(title, evidence=bundle, **kwargs)
-        if not independent_verification_items(
-            bundle.items, target_id=semantic_target_identity(probe)
-        ):
+        if not independent_verification_items(bundle.items, **_verification_binding(probe)):
             raise ValueError(
                 "Verification requires a server-issued independent observation "
                 "for this semantic target."
@@ -328,10 +335,36 @@ def _as_bundle(evidence: EvidenceBundle | Sequence[Evidence] | None) -> Evidence
     return EvidenceBundle.from_items(evidence)
 
 
+def _verification_binding(finding: SecurityFinding) -> dict[str, str]:
+    return {
+        "target_id": semantic_target_identity(finding),
+        "finding_id": str(finding.id),
+        "finding_key": finding.finding_key,
+        "project_id": finding.project_id,
+    }
+
+
+def _adopted_finding_id(bundle: EvidenceBundle) -> UUID | None:
+    """Use the signed finding id when ``verified()`` is built from that finding."""
+    from app.domain.trusted_evidence import is_trusted_observation
+
+    found: set[str] = set()
+    for item in bundle.items:
+        if not is_trusted_observation(item):
+            continue
+        value = str(item.metadata.get("finding_id") or "")
+        if value:
+            found.add(value)
+    if len(found) != 1:
+        return None
+    try:
+        return UUID(next(iter(found)))
+    except ValueError:
+        return None
+
+
 def _trusted_for(finding: SecurityFinding) -> tuple[Evidence, ...]:
-    return independent_verification_items(
-        finding.evidence.items, target_id=semantic_target_identity(finding)
-    )
+    return independent_verification_items(finding.evidence.items, **_verification_binding(finding))
 
 
 def _has_positive_reproduction(bundle: EvidenceBundle) -> bool:

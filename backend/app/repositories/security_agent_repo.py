@@ -720,7 +720,11 @@ def _finding_from_row(
             from app.domain.target_identity import semantic_target_identity
 
             if independent_verification_items(
-                bundle.items, target_id=semantic_target_identity(finding)
+                bundle.items,
+                target_id=semantic_target_identity(finding),
+                finding_id=str(finding.id),
+                finding_key=str(finding.finding_key),
+                project_id=str(finding.project_id),
             ):
                 return SecurityFinding.verified(title, evidence=bundle, **common).human_accept()
             return finding.reproduce(bundle).human_accept()
@@ -744,15 +748,37 @@ def _research_evidence(raw: dict[str, Any]) -> Evidence | None:
     metadata = raw.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
+    collected_raw = raw.get("collected_at")
+    collected_at = None
+    if isinstance(collected_raw, str) and collected_raw.strip():
+        try:
+            collected_at = datetime.fromisoformat(collected_raw)
+        except ValueError:
+            collected_at = None
+    artifact = raw.get("artifact_path") if isinstance(raw.get("artifact_path"), str) else None
+    source = str(raw.get("source") or "research")
+    summary = str(raw.get("summary") or "persisted evidence")
+    details = str(raw.get("details") or "")
     try:
-        item = Evidence(
-            kind=kind,
-            source=str(raw.get("source") or "research"),
-            summary=str(raw.get("summary") or "persisted evidence"),
-            details=str(raw.get("details") or ""),
-            artifact_path=raw.get("artifact_path") if isinstance(raw.get("artifact_path"), str) else None,
-            metadata=dict(metadata),
-        )
+        if collected_at is None:
+            item = Evidence(
+                kind=kind,
+                source=source,
+                summary=summary,
+                details=details,
+                artifact_path=artifact,
+                metadata=dict(metadata),
+            )
+        else:
+            item = Evidence(
+                kind=kind,
+                source=source,
+                summary=summary,
+                details=details,
+                artifact_path=artifact,
+                metadata=dict(metadata),
+                collected_at=collected_at,
+            )
     except ValueError:
         return Evidence(
             kind=EvidenceKind.LOG,

@@ -357,10 +357,12 @@ def to_security_response(row: DBSecurityFinding) -> SecurityFindingResponse:
 
 def _json_metadata(metadata: object) -> dict[str, object]:
     """Keep evidence metadata in the existing JSON blob. Non-JSON values are dropped."""
-    if not isinstance(metadata, dict):
+    from collections.abc import Mapping
+
+    if not isinstance(metadata, Mapping):
         return {}
     try:
-        encoded = json.dumps(metadata, sort_keys=True)
+        encoded = json.dumps(dict(metadata), sort_keys=True)
     except (TypeError, ValueError):
         return {}
     loaded = json.loads(encoded)
@@ -480,8 +482,9 @@ def _reconcile_row(
     """
     from app.domain.target_identity import semantic_target_identity
 
-    previous_target = semantic_target_identity(to_domain(row))
-    incoming_target = semantic_target_identity(finding)
+    project = str(row.project_id or "")
+    previous_target = semantic_target_identity(to_domain(row), project_id=project)
+    incoming_target = semantic_target_identity(finding, project_id=project)
     target_changed = previous_target != incoming_target
     previous_status = row.status
     incoming = _to_row(finding, project_id=row.project_id, analysis_id=analysis_id)
@@ -686,7 +689,13 @@ def _human_accepted_from_stored(title: str, kwargs: dict[str, object]) -> Securi
     bundle = kwargs.get("evidence")
     items = bundle.items if isinstance(bundle, EvidenceBundle) else ()
     probe = SecurityFinding.potential(title, **kwargs)  # type: ignore[arg-type]
-    if independent_verification_items(items, target_id=semantic_target_identity(probe)):
+    if independent_verification_items(
+        items,
+        target_id=semantic_target_identity(probe),
+        finding_id=str(probe.id),
+        finding_key=str(probe.finding_key),
+        project_id=str(probe.project_id),
+    ):
         return SecurityFinding.verified(title, **kwargs).human_accept()  # type: ignore[arg-type]
     return probe.reproduce().human_accept()
 
@@ -792,6 +801,8 @@ def to_domain(row: DBSecurityFinding) -> SecurityFinding:
         kwargs["rule_ids"] = tuple(part for part in row.rule_ids.split(",") if part)
     if row.observation_refs:
         kwargs["observation_refs"] = tuple(part for part in row.observation_refs.split(",") if part)
+    if row.project_id is not None:
+        kwargs["project_id"] = str(row.project_id)
     if row.file_path:
         kwargs["source_location"] = SourceLocation(file_path=row.file_path, line=row.line)
     if review:

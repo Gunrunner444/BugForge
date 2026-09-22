@@ -92,21 +92,28 @@ def positive_reproduction(item: Evidence) -> bool:
 
 
 def independent_verification_items(
-    items: Sequence[Evidence], *, target_id: str = ""
+    items: Sequence[Evidence],
+    *,
+    target_id: str = "",
+    finding_id: str = "",
+    finding_key: str = "",
+    project_id: str = "",
 ) -> tuple[Evidence, ...]:
-    """Trusted observations that verify one semantic target.
+    """Trusted observations that verify one finding.
 
     An observation counts only when all of the following hold:
 
     * it is a ``ServerObservation`` whose signature matches the server secret
     * its kind is an observational verification kind
+    * its finding id, finding key, and project id match this finding
     * its ``observed_target`` is the finding's current semantic target
     * its canonical identity is not a positive reproduction record
     * its execution id is not a reproduction execution id
 
-    A new ``Evidence`` UUID is not independence. Unstamped HTTP, browser,
-    scanner, API, replay, fuzzing, or proxy evidence does not verify.
-    Client metadata, including ``attribution=server``, does not verify.
+    A matching semantic target is not enough. A new ``Evidence`` UUID is not
+    independence. Unstamped HTTP, browser, scanner, API, replay, fuzzing, or
+    proxy evidence does not verify. Client metadata, including
+    ``attribution=server``, does not verify.
     """
     reproductions = [item for item in items if positive_reproduction(item)]
     reproduction_ids = {observation_identity(item) for item in reproductions}
@@ -119,7 +126,13 @@ def independent_verification_items(
             continue
         if item.kind not in INDEPENDENT_VERIFICATION_KINDS:
             continue
-        if not target_id or _meta(item, "observed_target") != target_id:
+        if not _bound_to_finding(
+            item,
+            target_id=target_id,
+            finding_id=finding_id,
+            finding_key=finding_key,
+            project_id=project_id,
+        ):
             continue
         if observation_identity(item) in reproduction_ids:
             continue
@@ -130,14 +143,21 @@ def independent_verification_items(
     return tuple(found)
 
 
-def can_corroborate(evidence: EvidenceBundle | Sequence[Evidence]) -> bool:
-    """True when independent non-AI observations support the same finding.
+def can_corroborate(
+    evidence: EvidenceBundle | Sequence[Evidence],
+    *,
+    finding_id: str = "",
+    finding_key: str = "",
+    project_id: str = "",
+) -> bool:
+    """True when authorized non-AI observations support the same finding.
 
     Two distinct static or source observations corroborate. One static record,
-    two copies of that record, and static plus AI text do not. One research
-    observation (HTTP, browser, scanner, API, replay, fuzzing, or proxy) can
-    corroborate. It still cannot verify. An operator action does not create
-    the observation.
+    two copies of that record, static plus AI text, and a contradictory record
+    do not. A runtime observation corroborates only when it is a
+    ``ServerObservation`` bound to this finding. Plain client HTTP evidence
+    and forged attribution do not. A trusted runtime observation still cannot
+    verify.
     """
     items = evidence.items if isinstance(evidence, EvidenceBundle) else evidence
     seen: set[tuple[str, ...]] = set()
@@ -147,9 +167,38 @@ def can_corroborate(evidence: EvidenceBundle | Sequence[Evidence]) -> bool:
             continue
         if item.kind in _CORROBORATING_KINDS:
             seen.add(observation_identity(item))
-        elif item.kind in _RESEARCH_OBSERVATION_KINDS:
+        elif (
+            item.kind in _RESEARCH_OBSERVATION_KINDS
+            and is_trusted_observation(item)
+            and _bound_to_finding(
+                item,
+                target_id=_meta(item, "observed_target"),
+                finding_id=finding_id,
+                finding_key=finding_key,
+                project_id=project_id,
+            )
+        ):
             research = True
     return len(seen) >= 2 or research
+
+
+def _bound_to_finding(
+    item: Evidence,
+    *,
+    target_id: str,
+    finding_id: str,
+    finding_key: str,
+    project_id: str,
+) -> bool:
+    if not target_id or not finding_id:
+        return False
+    if _meta(item, "observed_target") != target_id:
+        return False
+    if _meta(item, "finding_id") != finding_id:
+        return False
+    if _meta(item, "finding_key") != finding_key:
+        return False
+    return _meta(item, "project_id") == project_id
 
 
 def _meta(item: Evidence, key: str) -> str:

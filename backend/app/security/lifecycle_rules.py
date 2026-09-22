@@ -30,5 +30,9 @@ __all__ = [
 def independent_verification_items(finding: SecurityFinding) -> tuple[Evidence, ...]:
     """Verification observations on a finding. See the domain policy."""
     return _independent_items(
-        finding.evidence.items, target_id=semantic_target_identity(finding)
+        finding.evidence.items,
+        target_id=semantic_target_identity(finding),
+        finding_id=str(finding.id),
+        finding_key=finding.finding_key,
+        project_id=finding.project_id,
     )

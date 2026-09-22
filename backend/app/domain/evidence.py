@@ -199,10 +199,13 @@ def observation_identity(item: Evidence) -> tuple[str, ...]:
     """Canonical observation identity. Object UUIDs are not part of it.
 
     Trust is a server signature, not this tuple. Deduplication uses the
-    normalized payload: kind, source, summary, details, artifact, execution,
-    outcome, and evidence-type fields such as HTTP method, URL, and status.
-    A client-supplied observation id is ignored, so it cannot mint a trusted
-    identity or split an exact duplicate into a new observation.
+    canonical event: kind, normalized summary, details digest, artifact,
+    execution, outcome, finding binding, and evidence-type fields such as
+    HTTP method, URL, and status. The summary is whitespace-normalized and
+    is not an authorization signal. A client-supplied observation id is
+    ignored, so it cannot mint a trusted identity or split an exact duplicate
+    into a new observation. A new server observation id for the same canonical
+    event still collapses.
     """
     digest = hashlib.sha256(item.details.encode("utf-8")).hexdigest()[:16]
     return (
@@ -215,6 +218,9 @@ def observation_identity(item: Evidence) -> tuple[str, ...]:
         _meta_text(item, "contradicts") or _meta_text(item, "reached"),
         _meta_text(item, "execution_id"),
         _meta_text(item, "outcome"),
+        _meta_text(item, "finding_id"),
+        _meta_text(item, "finding_key"),
+        _meta_text(item, "project_id"),
         *_type_identity(item),
     )
 
@@ -252,6 +258,9 @@ def _type_identity(item: Evidence) -> tuple[str, ...]:
         return (
             _norm_meta(item, "rule") or _norm_meta(item, "sink"),
             _norm_meta(item, "field_path"),
+            _norm_meta(item, "sink_occurrence"),
+            _norm_meta(item, "scope_id"),
+            _norm_meta(item, "argument_index"),
         )
     return ()
 

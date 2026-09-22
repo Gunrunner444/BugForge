@@ -189,16 +189,21 @@ async def test_rescan_preserves_human_review_and_terminal_status(
     proof = _runtime(key="keep-key", line=3)
     observed = _http_observation(key="keep-key", line=3)
 
-    accepted_base = _static_finding(key="keep-key", line=3).reproduce([proof])
+    project_key = str(project.id)
+    accepted_base = replace(
+        _static_finding(key="keep-key", line=3), project_id=project_key
+    ).reproduce([proof])
     accepted = accepted_base.verify(
         [issue_for_finding(accepted_base, observed, "verify-keep-key")]
     ).human_accept()
-    verified_base = _static_finding(key="verified-key", line=4)
+    verified_base = replace(_static_finding(key="verified-key", line=4), project_id=project_key)
     verified = verified_base.verify(
         [issue_for_finding(verified_base, _http_observation(key="verified-key", line=4), "verify-verified-key")]
     )
-    reproduced = _static_finding(key="reproduced-key", line=5).reproduce([proof])
-    rejected = _static_finding(key="rejected-key", line=6).reject()
+    reproduced = replace(_static_finding(key="reproduced-key", line=5), project_id=project_key).reproduce(
+        [proof]
+    )
+    rejected = replace(_static_finding(key="rejected-key", line=6), project_id=project_key).reject()
 
     await repo.bulk_create(
         [accepted, verified, reproduced, rejected],

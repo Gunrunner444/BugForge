@@ -77,7 +77,7 @@ class TaintFlowRule(SecurityRule):
         ]
         if not sinks:
             return []
-        sources = _visible_sources(graph, vocab_sources(vocab, frameworks))
+        sources = _sources_for_graph(vocab, frameworks, graph)
         source_pats = tuple(p for src in sources for p in src.patterns)
         externals = _externals(project, graph.file_path)
         taint_state = analyze_taint(graph, sources, externals=externals or None)
@@ -196,49 +196,190 @@ _IMPORT_GATED_SOURCES = {
 }
 
 
+# Bare names that are sources only for these catalog entries. Rust ``Query``
+# and other language sources stay ungated.
+_GATED_SOURCE_IDS = frozenset({"fastapi.http", "nest.http", "js.nest"})
+
+
+def _sources_for_graph(
+    vocab: LanguageSecurityVocab,
+    frameworks: Sequence[FrameworkInfo],
+    graph: SyntaxGraph,
+) -> tuple[SourceDefinition, ...]:
+    """Project frameworks plus imports this file actually binds.
+
+    A FastAPI or NestJS manifest is not required when the file imports the
+    name. A manifest does not make an unbound ``Query`` a source.
+    """
+    selected = list(vocab_sources(vocab, frameworks))
+    seen = {source.source_id for source in selected}
+    for extras in vocab.extra_sources_by_framework.values():
+        for source in extras:
+            if source.source_id in seen:
+                continue
+            if _bound_patterns(graph, source):
+                selected.append(source)
+                seen.add(source.source_id)
+    return _visible_sources(graph, tuple(selected))
+
+
 def _visible_sources(
     graph: SyntaxGraph, sources: tuple[SourceDefinition, ...]
 ) -> tuple[SourceDefinition, ...]:
-    """Bare framework names count only when this file imports that framework."""
+    """Rewrite gated framework sources to the names this file binds."""
     visible: list[SourceDefinition] = []
     for source in sources:
-        patterns = tuple(
-            pattern for pattern in source.patterns if _source_pattern_allowed(graph, pattern)
-        )
-        if not patterns:
+        if source.source_id not in _GATED_SOURCE_IDS:
+            visible.append(source)
             continue
-        if patterns != source.patterns:
-            source = replace(source, patterns=patterns)
+        unique = _bound_patterns(graph, source)
+        if not unique:
+            continue
+        if unique != source.patterns:
+            source = replace(source, patterns=unique)
         visible.append(source)
     return tuple(visible)
 
 
-def _source_pattern_allowed(graph: SyntaxGraph, pattern: str) -> bool:
-    required = _IMPORT_GATED_SOURCES.get(pattern)
-    if required is None:
-        return True
+def _bound_patterns(graph: SyntaxGraph, source: SourceDefinition) -> tuple[str, ...]:
+    names: list[str] = []
+    for pattern in source.patterns:
+        required = _IMPORT_GATED_SOURCES.get(pattern)
+        if required is None or source.source_id not in _GATED_SOURCE_IDS:
+            names.append(pattern)
+            continue
+        names.extend(_bound_framework_names(graph, pattern, required))
+    return tuple(dict.fromkeys(names))
+
+
+def _bound_framework_names(
+    graph: SyntaxGraph, pattern: str, frameworks: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Local names bound to a framework import, excluding a shadowing function.
+
+    ``from fastapi import Query as Q`` binds ``Q``. ``import fastapi as fa``
+    binds ``fa.Query``. A module-level ``def Query`` hides the from-import.
+    Re-exports through an unknown local module are not inferred.
+    """
+    names: list[str] = []
     for item in graph.imports:
         module = item.module or ""
-        if any(token in module for token in required):
+        if not _module_matches(module, frameworks):
+            continue
+        if item.is_from_import:
+            imported = item.name or ""
+            if imported != pattern:
+                continue
+            bound = item.alias or imported
+            if not bound or bound == "*" or _name_shadowed(graph, bound):
+                continue
+            names.append(bound)
+            continue
+        root = item.alias or module.split(".", 1)[0]
+        if not root or root == "*" or _name_shadowed(graph, root):
+            continue
+        names.append(f"{root}.{pattern}")
+    return tuple(dict.fromkeys(names))
+
+
+def _module_matches(module: str, tokens: tuple[str, ...]) -> bool:
+    parts = [part for part in module.replace("\\", "/").replace(".", "/").split("/") if part]
+    for token in tokens:
+        if token in parts or f"@{token}" in parts:
             return True
     return False
 
 
+def _name_shadowed(graph: SyntaxGraph, name: str) -> bool:
+    for entity in graph.entities:
+        if entity.name != name or entity.parent:
+            continue
+        if entity.entity_type in {"function", "async_function"}:
+            return True
+    return False
+
+
+_SHELL_PROGRAMS = frozenset(
+    {"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh", "cmd.exe"}
+)
+
+
 def _safe_command_argv(call: CallSite) -> bool:
-    """True for a list-form command whose program is not a shell wrapper.
+    """True only for a list argv whose program is a fixed non-shell literal.
 
     ``subprocess.run(["git", user])`` is not shell injection.
-    ``shell=True`` and ``["sh", "-c", user]`` stay dangerous.
+    ``subprocess.run([user])``, ``shell=True``, and ``["/bin/sh", "-c", user]``
+    stay dangerous. The decision uses the argument nodes, not a substring of
+    the whole call.
     """
-    text = call.argument_text or ""
-    compact = "".join(text.split()).lower().replace('"', "'")
-    if "shell=true" in compact:
+    if _shell_keyword(call):
         return False
-    first = call.arguments[0].text if call.arguments else text
-    if not first.lstrip().startswith("["):
+    if not call.arguments:
         return False
-    wrappers = ("['sh','-c'", "['bash','-c'", "['cmd','/c'", "['powershell','-c'")
-    return not any(token in compact for token in wrappers)
+    elements = _list_items(call.arguments[0].text)
+    if not elements:
+        return False
+    program = _literal_string(elements[0])
+    if program is None:
+        return False
+    base = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return base not in _SHELL_PROGRAMS
+
+
+def _shell_keyword(call: CallSite) -> bool:
+    for argument in call.arguments:
+        compact = "".join(argument.text.split()).lower()
+        if compact in {"shell=true", "shell=1"}:
+            return True
+    return False
+
+
+def _list_items(text: str) -> list[str] | None:
+    raw = text.strip()
+    if len(raw) < 2 or raw[0] != "[" or raw[-1] != "]":
+        return None
+    return _split_commas(raw[1:-1])
+
+
+def _split_commas(body: str) -> list[str]:
+    items: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    depth = 0
+    for char in body:
+        if quote:
+            buf.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            buf.append(char)
+            continue
+        if char in "([{":
+            depth += 1
+            buf.append(char)
+            continue
+        if char in ")]}":
+            depth = max(0, depth - 1)
+            buf.append(char)
+            continue
+        if char == "," and depth == 0:
+            items.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(char)
+    tail = "".join(buf).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _literal_string(token: str) -> str | None:
+    text = token.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return None
 
 
 def _externals(project: object | None, file_path: str) -> dict[str, ExternalCallee]:
@@ -516,6 +657,7 @@ def _observation(
     if str(graph.parser_tier) in {"profile_fallback", "detection_only"}:
         metadata.setdefault("analysis_incomplete", "parser_fallback")
     metadata.setdefault("sink_occurrence", _sink_occurrence(graph, call))
+    metadata.setdefault("call_identity", _call_structure(graph, call))
     if span is not None:
         metadata.update(
             {
