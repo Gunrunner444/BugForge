@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from app.ai.external_controller import ExternalControllerProvider
 from app.ai.provider import CompletionRequest, LLMProvider
 from app.domain.findings import SecurityFinding
 from app.security_agent.budget import SessionBudget
@@ -21,7 +22,12 @@ from app.security_agent.correlation import correlate_all, finding_fingerprint
 from app.security_agent.correlation import prioritize as rank_hypotheses
 from app.security_agent.evidence_graph import EvidenceGraph
 from app.security_agent.executors import ToolContext, bind_engine_tools
-from app.security_agent.injection import channel, contains_injection_attempt, untrusted_observation
+from app.security_agent.injection import (
+    channel,
+    contains_injection_attempt,
+    strip_instruction_attempts,
+    untrusted_observation,
+)
 from app.security_agent.privilege import PrivilegeSnapshot, capture_privileges
 from app.security_agent.promotion import apply_reproduction, promote_hypothesis
 from app.security_agent.schemas import (
@@ -37,6 +43,7 @@ from app.security_agent.states import (
     EvidenceGraphKind,
     HypothesisStatus,
     ReproductionOutcome,
+    ResearchController,
     ResearchMode,
     ResearchState,
     TerminationReason,
@@ -209,6 +216,7 @@ class ResearchSession:
     replay_mode: bool = False
     operator_identity: str = ""
     research_project_id: str = ""
+    controller: ResearchController = ResearchController.INTERNAL_LLM
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -217,6 +225,16 @@ class ResearchSession:
             "program_handle": self.program_handle,
             "target": self.target,
             "mode": self.mode.value,
+            "controller": self.controller.value,
+            "ai_controller": (
+                "cursor" if self.controller is ResearchController.CURSOR else "bugforge_llm"
+            ),
+            "ai_execution": (
+                "none"
+                if self.controller is ResearchController.CURSOR
+                else self.provider.provider_name
+            ),
+            "provider": self.provider.provider_name,
             "state": self.state.value,
             "termination_reason": self.termination_reason.value
             if self.termination_reason
@@ -268,6 +286,17 @@ class SecurityResearchAgent:
         session.graph.project_id = session.project_id
         self.tools = tools or bind_engine_tools(_tool_context(session), default_registry())
         self.planner = planner or self._llm_planner
+        if (
+            session.controller is ResearchController.CURSOR
+            or session.provider.provider_name == "cursor_external"
+        ):
+            session.controller = ResearchController.CURSOR
+            if not isinstance(session.provider, ExternalControllerProvider):
+                session.provider = ExternalControllerProvider(
+                    model_name=session.model_name or "cursor-selected-model"
+                )
+            session.model_name = session.provider.model_name
+            self.planner = self._refuse_internal_planner
         self.context = ContextManager()
         self._refresh_privilege()
 
@@ -411,6 +440,7 @@ class SecurityResearchAgent:
             return await self._step_locked()
 
     async def _step_locked(self) -> AgentDecision:
+        self._refuse_if_cursor_controlled()
         if self.session.stopped:
             return AgentDecision(kind="stopped")
         if self.session.paused:
@@ -424,6 +454,76 @@ class SecurityResearchAgent:
             self._timeline("session_state", decision="BUDGET_EXHAUSTED", result=str(exc))
             return AgentDecision(kind="budget_exhausted", note=str(exc))
         decision = await self.planner(self.session)
+        return await self._apply_decision(decision)
+
+    def _refuse_if_cursor_controlled(self) -> None:
+        if self.session.controller is not ResearchController.CURSOR:
+            return
+        self._timeline(
+            "blocked",
+            decision="cursor_mode_refuses_internal_planner",
+            authorization="blocked",
+        )
+        raise RestrictedActivityError("cursor_mode_refuses_internal_planner")
+
+    async def _refuse_internal_planner(self, session: ResearchSession) -> AgentDecision:
+        del session
+        raise RestrictedActivityError("cursor_mode_refuses_internal_planner")
+
+    async def apply_external_decision(self, raw: dict[str, Any]) -> AgentDecision:
+        """Apply a Cursor decision. The payload is untrusted planner output.
+
+        This path never calls ``provider.complete``. Forbidden kinds are
+        rejected by ``PlannerOutput`` before any state change.
+        """
+
+        if self.session.controller is not ResearchController.CURSOR:
+            raise RestrictedActivityError("external_decision_requires_cursor_controller")
+        if not isinstance(self.session.provider, ExternalControllerProvider):
+            raise RestrictedActivityError("cursor_session_provider_mismatch")
+        async with self.session.step_lock:
+            if self.session.stopped:
+                return AgentDecision(kind="stopped")
+            if self.session.paused:
+                return AgentDecision(kind="paused")
+            try:
+                self.session.budget.consume("iteration")
+            except SafetyLimitExceededError as exc:
+                self.session.state = ResearchState.BUDGET_EXHAUSTED
+                self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
+                self.session.error = str(exc)
+                self._timeline("session_state", decision="BUDGET_EXHAUSTED", result=str(exc))
+                return AgentDecision(kind="budget_exhausted", note=str(exc))
+            try:
+                payload = PlannerOutput.model_validate(raw)
+            except ValidationError as exc:
+                self._timeline("external_decision", decision=f"rejected_malformed:{exc}")
+                raise RestrictedActivityError("rejected_external_decision") from exc
+            self._timeline(
+                "external_decision",
+                decision=payload.kind,
+                result="cursor_external",
+            )
+            try:
+                if payload.kind == "reproduce":
+                    note = strip_instruction_attempts(payload.reason or payload.note)
+                    decision = AgentDecision(
+                        kind="tool",
+                        tool=ToolCallRequest(
+                            tool="reproduce",
+                            arguments=dict(payload.arguments or {}),
+                            reason=note,
+                        ),
+                        note=note,
+                    )
+                else:
+                    decision = self._decision_from_planner(payload, thinking=None)
+            except ValueError as exc:
+                self._timeline("external_decision", decision=f"rejected_malformed:{exc}")
+                raise RestrictedActivityError("rejected_external_decision") from exc
+            return await self._apply_decision(decision)
+
+    async def _apply_decision(self, decision: AgentDecision) -> AgentDecision:
         if decision.thinking:
             self._timeline("thinking", decision="thinking discarded as non-evidence")
         if decision.kind in _FORBIDDEN_AI_ACTIONS:
@@ -745,10 +845,14 @@ class SecurityResearchAgent:
             and bool(arguments.get("active", True))
             and spec.approval_kind == "send_poc_request"
         )
+        content = arguments.get("content")
+        payload_bytes = len(content.encode("utf-8")) if isinstance(content, str) else 0
         decision = self.session.engine.authorize(
             target,
+            method=str(arguments.get("method") or "GET"),
             tool=tool,
             active=spec.requires_active_testing,
+            payload_bytes=payload_bytes,
             require_live_scan_approval=live_scan,
             require_poc_approval=poc and self.session.mode is ResearchMode.LIVE_HACKERONE,
             high_risk=high_risk and self.session.mode is ResearchMode.LIVE_HACKERONE,
@@ -939,26 +1043,34 @@ class SecurityResearchAgent:
         if payload.kind in _FORBIDDEN_AI_ACTIONS:
             raise RestrictedActivityError(payload.kind)
         self._timeline("model_decision", decision=payload.kind)
+        return self._decision_from_planner(payload, thinking=response.thinking)
+
+    def _decision_from_planner(
+        self, payload: PlannerOutput, *, thinking: str | None
+    ) -> AgentDecision:
+        if payload.kind in _FORBIDDEN_AI_ACTIONS:
+            raise RestrictedActivityError(payload.kind)
+        reason = strip_instruction_attempts(payload.reason or payload.note or "")
         if payload.kind == "tool" and payload.tool:
             tool = ToolCallRequest(
                 tool=payload.tool,
                 arguments=dict(payload.arguments or {}),
-                reason=payload.reason or payload.note,
+                reason=reason,
             )
-            return AgentDecision(
-                kind="tool", tool=tool, thinking=response.thinking, note=tool.reason
-            )
+            return AgentDecision(kind="tool", tool=tool, thinking=thinking, note=reason)
         if payload.kind == "hypothesis":
             hyp = ResearchHypothesis(
-                title=str(payload.title or "Untitled hypothesis"),
-                vulnerability_class=str(payload.vulnerability_class or "unknown"),
-                target=str(payload.target or session.target),
-                reason=str(payload.reason or payload.note or ""),
+                title=strip_instruction_attempts(str(payload.title or "Untitled hypothesis")),
+                vulnerability_class=strip_instruction_attempts(
+                    str(payload.vulnerability_class or "unknown")
+                ),
+                target=str(payload.target or self.session.target),
+                reason=reason,
                 confidence=str(payload.confidence or "low"),
                 severity=str(payload.severity or "medium"),
-                impact=str(payload.impact or ""),
+                impact=strip_instruction_attempts(str(payload.impact or "")),
             )
-            return AgentDecision(kind="hypothesis", hypothesis=hyp, thinking=response.thinking)
+            return AgentDecision(kind="hypothesis", hypothesis=hyp, thinking=thinking)
         if payload.kind == "update_hypothesis" and payload.hypothesis_id:
             status = HypothesisStatus(payload.status or HypothesisStatus.OPEN.value)
             hyp = self.update_hypothesis(
@@ -966,26 +1078,24 @@ class SecurityResearchAgent:
                 status=status,
                 evidence_ids=tuple(payload.evidence_ids),
             )
-            return AgentDecision(
-                kind="update_hypothesis", hypothesis=hyp, thinking=response.thinking
-            )
+            if reason:
+                hyp.reason = reason
+            return AgentDecision(kind="update_hypothesis", hypothesis=hyp, thinking=thinking)
         if payload.kind == "plan":
             steps = tuple(
                 ResearchPlanStep(
                     order=int(item.get("order") or index),
-                    action=str(item.get("action") or ""),
+                    action=strip_instruction_attempts(str(item.get("action") or "")),
                     tool=item.get("tool"),
                     target=str(item.get("target") or ""),
-                    note=str(item.get("note") or ""),
+                    note=strip_instruction_attempts(str(item.get("note") or "")),
                 )
                 for index, item in enumerate(payload.plan_steps or [])
             )
             return AgentDecision(
-                kind="plan", plan=ResearchPlan(steps=steps), thinking=response.thinking
+                kind="plan", plan=ResearchPlan(steps=steps), thinking=thinking
             )
-        return AgentDecision(
-            kind=payload.kind, note=payload.reason or payload.note, thinking=response.thinking
-        )
+        return AgentDecision(kind=payload.kind, note=reason, thinking=thinking)
 
     def _record_hypothesis(self, hypothesis: ResearchHypothesis, *, update: bool = False) -> None:
         if hypothesis.status is HypothesisStatus.VERIFIED:

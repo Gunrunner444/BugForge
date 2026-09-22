@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import get_provider
+from app.ai.external_controller import ExternalControllerProvider, cursor_model_label
+from app.ai.provider import LLMProvider
+from app.core.config import settings
+from app.cursor_control.analysis import analyze_session_repository
+from app.cursor_control.status import gdk_connectivity, git_identity
 from app.database import get_db
 from app.models.project import Project
 from app.repositories.hackerone_repo import HackerOneRepository
@@ -24,9 +30,14 @@ from app.security_agent.privilege import program_scope_from_hackerone
 from app.security_agent.project import SecurityResearchProject
 from app.security_agent.replay import SessionReplay
 from app.security_agent.repo_lock import resolve_repo_root
-from app.security_agent.schemas import ToolCallRequest
+from app.security_agent.schemas import PlannerOutput, ToolCallRequest
 from app.security_agent.secrets import secrets_for
-from app.security_agent.states import RESUME_BLOCKED_STATES, ResearchMode, ResearchProjectState
+from app.security_agent.states import (
+    RESUME_BLOCKED_STATES,
+    ResearchController,
+    ResearchMode,
+    ResearchProjectState,
+)
 from app.security_agent.workbench import (
     dashboard as workbench_dashboard,
 )
@@ -57,6 +68,7 @@ _ORCHESTRATORS: dict[str, AdvancedResearchOrchestrator] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
 _PROJECTS: dict[str, SecurityResearchProject] = {}
 _LIVE_DISABLED = frozenset({"zap_scan", "nuclei_scan", "fuzz"})
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 class CreateAgentSessionRequest(BaseModel):
@@ -66,6 +78,34 @@ class CreateAgentSessionRequest(BaseModel):
     program_handle: str = ""
     thinking: bool = True
     repo_root: str | None = None
+    controller: str = "internal_llm"
+    cursor_model: str | None = None
+
+
+class ExternalDecisionRequest(BaseModel):
+    kind: str
+    tool: str | None = None
+    arguments: dict[str, object] = {}
+    reason: str = ""
+    title: str | None = None
+    vulnerability_class: str | None = None
+    target: str | None = None
+    confidence: str | None = None
+    severity: str | None = None
+    impact: str | None = None
+    hypothesis_id: str | None = None
+    status: str | None = None
+    evidence_ids: list[str] = []
+    plan_steps: list[dict[str, object]] = []
+    note: str = ""
+
+
+class AnalyzeRepositoryRequest(BaseModel):
+    max_files: int = 200
+
+
+class ControlRequest(BaseModel):
+    reason: str = "operator"
 
 
 class ToolActionRequest(BaseModel):
@@ -117,6 +157,15 @@ class HandoffRequest(BaseModel):
     finding_id: str
 
 
+def _controller_from(value: str) -> ResearchController:
+    cleaned = (value or "").strip().lower()
+    if cleaned in {"", "internal_llm", "internal"}:
+        return ResearchController.INTERNAL_LLM
+    if cleaned in {"cursor", "cursor_external", "external_ai"}:
+        return ResearchController.CURSOR
+    raise ValueError("controller must be internal_llm or cursor")
+
+
 def _lock_for(session_id: str) -> asyncio.Lock:
     lock = _LOCKS.get(session_id)
     if lock is None:
@@ -144,6 +193,12 @@ async def create_session(
         mode = ResearchMode(payload.mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="mode must be lab or live_hackerone") from exc
+    try:
+        controller = _controller_from(payload.controller)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if controller is ResearchController.CURSOR and mode is not ResearchMode.LAB:
+        raise HTTPException(status_code=400, detail="cursor control sessions are lab-only")
     project: Project | None = None
     if _is_uuid(payload.project_id):
         project = await db.get(Project, UUID(payload.project_id))
@@ -195,19 +250,28 @@ async def create_session(
             allow_active_testing=True,
             limits=SafetyLimits.lab(),
         )
+    provider: LLMProvider
+    if controller is ResearchController.CURSOR:
+        provider = ExternalControllerProvider(model_name=cursor_model_label(payload.cursor_model))
+        thinking = False
+    else:
+        provider = get_provider()
+        thinking = payload.thinking
     research = ResearchSession(
         project_id=payload.project_id,
         target=payload.target,
         mode=mode,
         engine=engine,
-        provider=get_provider(),
+        provider=provider,
         program_handle=payload.program_handle,
-        thinking_enabled=payload.thinking,
+        thinking_enabled=thinking,
         repo_root=repo_root,
         disabled_tools=disabled,
         identities=IdentityPair(),
         memory=ResearchMemory(project_id=payload.project_id),
         operator_identity=session.identity,
+        controller=controller,
+        model_name=provider.model_name,
     )
     agent = SecurityResearchAgent(research)
     agent.tools.restore_disabled(sorted(disabled))
@@ -235,6 +299,11 @@ async def step_session(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     agent = await _require(session_id, db, operator=session)
+    if agent.session.controller is ResearchController.CURSOR:
+        raise HTTPException(
+            status_code=409,
+            detail="cursor_mode_refuses_internal_planner",
+        )
     orch = _orchestrator_for(agent)
     async with _lock_for(session_id):
         try:
@@ -391,6 +460,130 @@ async def resume_session(
         agent.resume(operator=session.identity)
     except RestrictedActivityError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await SecurityAgentRepository(db).save_session(agent.session)
+    await db.commit()
+    return agent.session.snapshot()
+
+
+@router.get("/status")
+async def research_status(
+    session: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Session inventory for the local operator. Does not call a language model."""
+
+    visible = []
+    for agent in _SESSIONS.values():
+        owner = agent.session.operator_identity
+        if owner and owner != session.identity:
+            continue
+        snap = agent.session.snapshot()
+        visible.append(
+            {
+                "id": snap["id"],
+                "project_id": snap["project_id"],
+                "target": snap["target"],
+                "mode": snap["mode"],
+                "state": snap["state"],
+                "controller": snap["controller"],
+                "ai_controller": snap["ai_controller"],
+                "ai_execution": snap["ai_execution"],
+                "provider": snap["provider"],
+                "model": snap["model"],
+            }
+        )
+    return {
+        "version": settings.version,
+        "git": git_identity(_REPO_ROOT),
+        "configured_legacy_ai_provider": settings.ai_provider,
+        "cursor_mode_calls_llm": False,
+        "ai_execution_in_cursor_mode": "none",
+        "sessions": visible,
+        "gdk": gdk_connectivity(),
+    }
+
+
+@router.post("/sessions/{session_id}/decision")
+async def external_decision(
+    session_id: str,
+    payload: ExternalDecisionRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Accept one Cursor decision. Never invokes the internal planner."""
+
+    agent = await _require(session_id, db, operator=session)
+    if agent.session.controller is not ResearchController.CURSOR:
+        raise HTTPException(
+            status_code=409, detail="external_decision_requires_cursor_controller"
+        )
+    try:
+        parsed = PlannerOutput.model_validate(payload.model_dump())
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="rejected_external_decision") from exc
+    async with _lock_for(session_id):
+        try:
+            decision = await agent.apply_external_decision(parsed.model_dump())
+        except RestrictedActivityError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except SafetyLimitExceededError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except ApprovalRequiredError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        await SecurityAgentRepository(db).save_session(agent.session)
+        await db.commit()
+    tool_result = None
+    if agent.session.tool_call_records:
+        tool_result = agent.session.tool_call_records[-1].snapshot()
+    return {
+        "decision": decision.kind,
+        "session": agent.session.snapshot(),
+        "tool_result": tool_result,
+        "llm_invoked": False,
+    }
+
+
+@router.post("/sessions/{session_id}/analyze")
+async def analyze_repository(
+    session_id: str,
+    payload: AnalyzeRepositoryRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    if agent.session.controller is not ResearchController.CURSOR:
+        raise HTTPException(status_code=409, detail="cursor_analysis_requires_cursor_controller")
+    try:
+        report = analyze_session_repository(agent, max_files=payload.max_files)
+    except RestrictedActivityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await SecurityAgentRepository(db).save_session(agent.session)
+    await db.commit()
+    return report
+
+
+@router.post("/sessions/{session_id}/pause")
+async def pause_cursor_session(
+    session_id: str,
+    payload: ControlRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    agent.pause(payload.reason)
+    await SecurityAgentRepository(db).save_session(agent.session)
+    await db.commit()
+    return agent.session.snapshot()
+
+
+@router.post("/sessions/{session_id}/stop")
+async def stop_cursor_session(
+    session_id: str,
+    payload: ControlRequest,
+    session: OperatorSession = Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    agent = await _require(session_id, db, operator=session)
+    agent.stop(payload.reason)
     await SecurityAgentRepository(db).save_session(agent.session)
     await db.commit()
     return agent.session.snapshot()
@@ -664,9 +857,22 @@ async def session_evidence(
     session_id: str,
     session: OperatorSession = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
+    evidence_id: str | None = Query(default=None),
 ) -> dict[str, object]:
     agent = await _require(session_id, db, operator=session)
-    return evidence_explorer(_orchestrator_for(agent))
+    if evidence_id:
+        node = agent.session.graph.inspect(
+            evidence_id,
+            session_id=agent.session.id,
+            project_id=agent.session.project_id,
+        )
+        if node is None:
+            raise HTTPException(status_code=404, detail="Unknown evidence")
+        return {"evidence": node, "session_id": agent.session.id}
+    explorer = evidence_explorer(_orchestrator_for(agent))
+    explorer["session_id"] = agent.session.id
+    explorer["graph"] = agent.session.graph.snapshot()
+    return explorer
 
 
 @router.get("/sessions/{session_id}/graph")

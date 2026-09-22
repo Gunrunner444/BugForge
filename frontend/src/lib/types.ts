@@ -735,6 +735,7 @@ export interface SecurityFinding {
   parser_completeness?: string;
   evidence_summary?: string;
   related_group?: string;
+  human_review_state?: string;
 }
 
 export interface SecurityStatus {

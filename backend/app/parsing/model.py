@@ -127,7 +127,11 @@ class SemanticNode:
 
 @dataclass(frozen=True)
 class CallArgument:
-    """One actual argument at a call site, in source order."""
+    """One actual argument at a call site.
+
+    ``index`` is the positional index. Keyword arguments keep ``index`` at
+    ``-1`` and set ``keyword`` so they do not shift later positional indexes.
+    """
 
     index: int
     text: str
@@ -136,6 +140,7 @@ class CallArgument:
     accesses: tuple[str, ...] = ()
     callees: tuple[str, ...] = ()
     dynamic: bool = False
+    keyword: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,11 +163,12 @@ class CallSite:
     callee_identity: str = ""
 
     def argument_at(self, index: int) -> CallArgument | None:
-        for argument in self.arguments:
+        positional = [argument for argument in self.arguments if not argument.keyword]
+        for argument in positional:
             if argument.index == index:
                 return argument
-        if 0 <= index < len(self.arguments):
-            return self.arguments[index]
+        if 0 <= index < len(positional):
+            return positional[index]
         return None
 
 

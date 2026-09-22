@@ -770,7 +770,12 @@ async def test_promotion_requires_reproduction_evidence_and_cannot_verify() -> N
         hyp,
         outcome=ReproductionOutcome.REPRODUCED,
         evidence=[
-            Evidence(kind=EvidenceKind.REPRODUCTION, source="lab", summary="owner=anyone leaked")
+            Evidence(
+                kind=EvidenceKind.REPRODUCTION,
+                source="lab",
+                summary="owner=anyone leaked",
+                metadata={"outcome": "reproduced", "reproduced": "true"},
+            )
         ],
     )
     assert reproduced is not None

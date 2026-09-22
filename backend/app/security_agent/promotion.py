@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import SecurityFinding
-from app.security_agent.correlation import finding_fingerprint, independent_provenances
+from app.domain.lifecycle_policy import (
+    _RESEARCH_OBSERVATION_KINDS,
+    can_corroborate,
+    positive_reproduction,
+)
+from app.domain.target_identity import semantic_target_identity
+from app.domain.trusted_evidence import issue_for_finding
+from app.security_agent.correlation import finding_fingerprint
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import HypothesisStatus, ReproductionOutcome
 from app.security_testing.errors import RestrictedActivityError
@@ -19,7 +27,6 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
     The agent never calls verify.
     """
     existing = _existing(session, hypothesis)
-    independent = independent_provenances(hypothesis, session.graph)
     evidence = _evidence_from_graph(session, hypothesis)
     if existing is None:
         finding = SecurityFinding.from_hypothesis(
@@ -32,32 +39,40 @@ def promote_hypothesis(session: Any, hypothesis: ResearchHypothesis) -> Security
         )
     else:
         finding = existing
+    project_id = str(getattr(session, "project_id", "") or "")
+    if project_id and finding.project_id != project_id:
+        finding = replace(finding, project_id=project_id)
     if evidence:
+        stamped = _stamp_research_evidence(finding, evidence)
         merged = (
-            finding.evidence.extend(evidence)
+            finding.evidence.extend(stamped)
             if finding.evidence
-            else EvidenceBundle.from_items(evidence)
+            else EvidenceBundle.from_items(stamped)
         )
-        finding = SecurityFinding(
-            title=finding.title,
-            status=finding.status,
-            description=finding.description,
-            vulnerability_class=finding.vulnerability_class,
-            target=finding.target,
-            endpoint=finding.endpoint,
-            hypothesis=finding.hypothesis,
-            evidence=merged,
-            impact=finding.impact,
-            confidence=finding.confidence,
-            id=finding.id,
+        finding = replace(finding, evidence=merged)
+    if (
+        can_corroborate(
+            finding.evidence,
+            target_id=semantic_target_identity(finding),
+            finding_id=str(finding.id),
+            finding_key=finding.finding_key,
+            project_id=finding.project_id,
         )
-    if len(independent) >= 1 and finding.status.value == "potential":
+        and finding.status.value == "potential"
+    ):
         finding = finding.corroborate()
         if hypothesis.status is HypothesisStatus.OPEN:
             hypothesis.status = HypothesisStatus.SUPPORTED
-    if (
+    elif (
         hypothesis.status is HypothesisStatus.REQUIRES_REPRODUCTION
         and finding.status.value == "potential"
+        and can_corroborate(
+            finding.evidence,
+            target_id=semantic_target_identity(finding),
+            finding_id=str(finding.id),
+            finding_key=finding.finding_key,
+            project_id=finding.project_id,
+        )
     ):
         finding = finding.corroborate()
     if existing is None:
@@ -78,10 +93,11 @@ def apply_reproduction(
     if finding is None:
         return None
     if outcome is ReproductionOutcome.REPRODUCED:
-        if evidence:
-            finding = finding.reproduce(evidence)
+        positive = [item for item in (evidence or []) if positive_reproduction(item)]
+        if positive:
+            finding = finding.reproduce(positive)
         else:
-            # Reproduction without observational evidence cannot advance.
+            # Reproduction without a successful reproduction record cannot advance.
             hypothesis.status = HypothesisStatus.REQUIRES_REPRODUCTION
             return finding
         # AI still cannot set VERIFIED. Reproduced findings wait for BugForge verify().
@@ -124,6 +140,19 @@ def _existing(session: Any, hypothesis: ResearchHypothesis) -> SecurityFinding |
 
 def _replace_finding(session: Any, finding: SecurityFinding) -> None:
     session.findings = [item if item.id != finding.id else finding for item in session.findings]
+
+
+def _stamp_research_evidence(finding: SecurityFinding, items: list[Evidence]) -> list[Evidence]:
+    """Runtime research records become server observations. Static records stay static."""
+    stamped: list[Evidence] = []
+    for item in items:
+        if item.kind not in _RESEARCH_OBSERVATION_KINDS:
+            stamped.append(item)
+            continue
+        stamped.append(
+            issue_for_finding(finding, item, f"research-{item.kind.value}-{item.summary}")
+        )
+    return stamped
 
 
 def _evidence_from_graph(session: Any, hypothesis: ResearchHypothesis) -> list[Evidence]:

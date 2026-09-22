@@ -61,7 +61,8 @@ export default function SecurityFindingsPanel({ projectId }: Props) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        {total} potential/corroborated security finding{total === 1 ? "" : "s"}. Static analysis never marks these verified.
+        {total} security finding{total === 1 ? "" : "s"}. Potential, corroborated, and reproduced
+        results are not verified. AI text and generated tests are not verification.
       </p>
       {findings.map((finding) => (
         <button
@@ -74,11 +75,16 @@ export default function SecurityFindingsPanel({ projectId }: Props) {
             <span className={`text-xs px-2 py-0.5 rounded border ${STATUS_STYLES[finding.status] ?? STATUS_STYLES.potential}`}>
               {finding.status === "verified" ? "VERIFIED" : finding.status === "corroborated" ? "CORROBORATED" : finding.status.toUpperCase()}
             </span>
-            {(finding.status === "potential" || finding.status === "corroborated") && (
+            {(finding.status === "potential" ||
+              finding.status === "corroborated" ||
+              finding.status === "reproduced") && (
               <span className="text-xs text-slate-500">Not verified</span>
             )}
             <span className="text-xs px-2 py-0.5 rounded border bg-slate-50 text-slate-600">SECURITY</span>
             <span className="text-xs text-slate-500">{finding.evidence_tier}</span>
+            {finding.human_review_state && finding.human_review_state !== "unreviewed" && (
+              <span className="text-xs text-slate-500">Review: {finding.human_review_state}</span>
+            )}
             <span className="text-sm font-medium text-slate-800 truncate">{finding.title}</span>
           </div>
           <p className="text-xs text-slate-500 mt-1">

@@ -41,6 +41,12 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 18 | Stable finding identity, explanations, and duplicate suppression | ✅ Implemented |
 | Phase 19 | Go, Java, and Kotlin local interprocedural imports | ✅ Implemented |
 | Phase 20 | Adversarial semantic checks and shadowed-builtin handling | ✅ Implemented |
+| Phase 21 | Evidence correlation and finding lifecycle integration | ✅ Implemented |
+| Phase 22 | Production security lifecycle and evidence integrity | ✅ Implemented |
+| Phase 23 | Verification authority and evidence provenance | ✅ Implemented |
+| Phase 24 | Security coverage, precision, and verification trust | ✅ Implemented |
+| Phase 25 | Verification binding and adversarial detection | ✅ Implemented |
+| Phase 26 | Polyglot security coverage and semantic target binding | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -72,7 +78,13 @@ Lua, and Elixir remain detection-only. See
 [docs/phase17-incremental-analysis.md](docs/phase17-incremental-analysis.md), and
 [docs/phase18-finding-intelligence.md](docs/phase18-finding-intelligence.md), and
 [docs/phase19-polyglot-interprocedural.md](docs/phase19-polyglot-interprocedural.md), and
-[docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md).
+[docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md), and
+[docs/phase21-evidence-lifecycle.md](docs/phase21-evidence-lifecycle.md), and
+[docs/phase22-production-security-lifecycle.md](docs/phase22-production-security-lifecycle.md), and
+[docs/phase23-verification-authority.md](docs/phase23-verification-authority.md), and
+[docs/phase24-security-coverage-precision.md](docs/phase24-security-coverage-precision.md), and
+[docs/phase25-verification-binding-adversarial.md](docs/phase25-verification-binding-adversarial.md), and
+[docs/phase26-polyglot-security-coverage.md](docs/phase26-polyglot-security-coverage.md).
 
 Phase 2 adds:
 
@@ -105,6 +117,11 @@ Playwright) report `UNAVAILABLE` or ingest-only results — they are not
 stubs pretending to have scanned. Live HackerOne sessions default to dry-run
 with scanners and fuzzing disabled.
 
+Cursor-controlled mode is a separate controller. The Cursor model plans the
+research. BugForge does not call its own language model in that mode, and
+ScopeGuard, SafetyController, RateLimiter, and human approval stay in force.
+See [docs/cursor-control.md](docs/cursor-control.md).
+
 Details: [docs/architecture.md](docs/architecture.md),
 [docs/security-testing.md](docs/security-testing.md),
 [docs/scope-model.md](docs/scope-model.md),
@@ -112,6 +129,7 @@ Details: [docs/architecture.md](docs/architecture.md),
 [docs/hackerone.md](docs/hackerone.md),
 [docs/reporting.md](docs/reporting.md),
 [docs/security-agent.md](docs/security-agent.md),
+[docs/cursor-control.md](docs/cursor-control.md),
 [docs/agent-tools.md](docs/agent-tools.md),
 [docs/agent-safety.md](docs/agent-safety.md),
 [docs/research-workbench.md](docs/research-workbench.md),

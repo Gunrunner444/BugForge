@@ -1,8 +1,12 @@
 # Language capability and test matrix
 
-This matrix records what BugForge **actually implements and tests** after Phase
-12. A checked cell means a dedicated assertion exists. Parser backend is taken
-from runtime diagnostics, not README claims.
+This matrix records what BugForge **actually implements and tests**. Parser
+backend is taken from runtime diagnostics, not README claims. Security-family
+status (`tested`, `existing-suite`, `limited`, `unsupported`) lives in
+`backend/app/security/coverage.py` and is the source of truth. Phase 26
+fixtures cover JavaScript, TypeScript, Go, Java, Kotlin, PHP, C#, Ruby, and
+Rust. A `tested` cell means a dedicated security fixture, not only a parser
+test. Cross-file taint remains Python and JavaScript/TypeScript only.
 
 Parser backend:
 
@@ -41,12 +45,12 @@ stay intra-file. R, Scala, Dart, Lua, and Elixir stay detection-only.
 | C | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | unsupported | unsupported | unsupported | unsupported | unsupported | yes | yes | yes |
 | C++ | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | unsupported | unsupported | unsupported | unsupported | unsupported | yes | yes | yes |
 | Go | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | `template.HTML` only | indicator json | unsupported | yes | yes | yes | yes |
-| Rust | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | Html::from/new | indicator | unsupported | yes | yes | yes | yes |
-| Java | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | HTML context | yes | yes | redirect (not XSS) | yes | yes | yes |
+| Rust | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | `reqwest::get` | `Html::from_string_unchecked` only | indicator plus `bincode::deserialize` | unsupported | `Redirect::to` | yes | yes | yes |
+| Java | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | HTML context only | tainted `ObjectInputStream` argument | yes | redirect (not XSS) | yes | yes | yes |
 | PHP | yes | yes | Tree-sitter | yes | yes | yes | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | HTML context | yes | yes | yes | yes | yes | yes |
 | Kotlin | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | yes | yes | unsupported | yes | yes | yes | yes |
 | Swift | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | unsupported | yes | yes | unsupported | yes | yes | yes |
-| C# | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | yes | `Html.Raw` | yes | yes | yes | yes | yes | yes |
+| C# | yes | yes | Tree-sitter | yes | yes | block | yes | flow-sensitive | yes | yes | yes | yes | yes | `GetAsync` / `WebRequest.Create` | `Html.Raw` | local `Deserialize` is a gap | unsupported | yes | yes | yes | yes |
 | Shell | yes | yes | Tree-sitter (bash) | yes | yes | yes | yes | flow-sensitive | yes | yes | unsupported | eval/bash | files vs source | yes | unsupported | unsupported | eval | unsupported | unsupported | yes | yes |
 
 `unsupported` means the vocabulary is empty and tests assert the category is

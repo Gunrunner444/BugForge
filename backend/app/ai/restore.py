@@ -41,6 +41,10 @@ def restore_provider(
     temperature = float(config.get("temperature") or 0.1)
     context_limit = config.get("context_limit")
     base_url = _safe_base_url(str(config.get("base_url") or ""))
+    if provider_id == "cursor_external":
+        from app.ai.external_controller import ExternalControllerProvider
+
+        return ExternalControllerProvider(model_name=model or "cursor-selected-model")
     if provider_id == "mock":
         return MockLLMProvider(model_name=model or "mock-v1")
     settings = get_settings()

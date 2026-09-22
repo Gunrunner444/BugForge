@@ -22,6 +22,7 @@ from app.adapters.hackerone.provider import HackerOneProvider
 from app.api.v1.endpoints.hackerone import reset_hackerone_provider
 from app.domain.evidence import Evidence, EvidenceKind
 from app.domain.findings import SecurityFinding
+from app.domain.trusted_evidence import issue_for_finding
 from app.security_testing.errors import RestrictedActivityError
 from app.security_testing.operator_auth import OperatorSession
 
@@ -293,11 +294,19 @@ def _verified_finding(
         observed_behavior="HTTP 200 with another user's object",
         expected_behavior="HTTP 403",
         evidence=[
-            Evidence(
-                kind=EvidenceKind.REPRODUCTION,
-                source="researcher",
-                summary="Reproduced IDOR",
-                details="status 200 for /users/3",
+            issue_for_finding(
+                SecurityFinding.potential(
+                    "IDOR on user object",
+                    vulnerability_class=vulnerability_class,
+                    target=target,
+                ),
+                Evidence(
+                    kind=EvidenceKind.HTTP_RESPONSE,
+                    source="researcher",
+                    summary="Reproduced IDOR",
+                    details="status 200 for /users/3",
+                ),
+                "exec-h1",
             )
         ],
     )
@@ -578,6 +587,7 @@ def test_credentials_repr_hides_token() -> None:
 def test_secret_redaction_blocks_draft_validation() -> None:
     provider, _ = _provider()
     provider.sync_scope("demo")
+    shell = SecurityFinding.potential("Leak", target="https://demo.example/")
     finding = SecurityFinding.verified(
         title="Leak",
         description="Authorization: Bearer super-secret-token",
@@ -585,7 +595,16 @@ def test_secret_redaction_blocks_draft_validation() -> None:
         impact="session token stolen",
         reproduction="see token",
         evidence=[
-            Evidence(kind=EvidenceKind.REPRODUCTION, source="researcher", summary="reproduced")
+            issue_for_finding(
+                shell,
+                Evidence(
+                    kind=EvidenceKind.HTTP_RESPONSE,
+                    source="researcher",
+                    summary="reproduced",
+                    details="token reflected",
+                ),
+                "exec-leak",
+            )
         ],
     )
     draft = provider.draft_from_finding(

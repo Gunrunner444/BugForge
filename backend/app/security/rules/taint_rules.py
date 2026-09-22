@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
@@ -12,6 +13,7 @@ from app.security.definitions import (
     PathIssueKind,
     SinkCertainty,
     SinkDefinition,
+    SourceDefinition,
 )
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 from app.security.taint import (
@@ -21,6 +23,7 @@ from app.security.taint import (
     analyze_taint,
     applicable_sanitizer_kinds,
     argument_is_constant,
+    builtin_call_shadowed,
     call_matches_sink,
     call_taint_reason,
     field_path_from_reason,
@@ -74,7 +77,7 @@ class TaintFlowRule(SecurityRule):
         ]
         if not sinks:
             return []
-        sources = vocab_sources(vocab, frameworks)
+        sources = _sources_for_graph(vocab, frameworks, graph)
         source_pats = tuple(p for src in sources for p in src.patterns)
         externals = _externals(project, graph.file_path)
         taint_state = analyze_taint(graph, sources, externals=externals or None)
@@ -92,7 +95,12 @@ class TaintFlowRule(SecurityRule):
             matched = next((sink for sink in sinks if call_matches_sink(call, sink)), None)
             if matched is None:
                 continue
-            if _module_function_shadows_call(graph, call):
+            if builtin_call_shadowed(graph, call):
+                continue
+            if (
+                matched.vulnerability_class is VulnerabilityClass.COMMAND_INJECTION
+                and _safe_command_argv(call)
+            ):
                 continue
             if matched.required_context and matched.required_context not in graph.semantic_context:
                 if matched.required_context != graph.file_context:
@@ -112,6 +120,7 @@ class TaintFlowRule(SecurityRule):
                 argument_indexes=indexes or None,
                 sanitizers=vocab.sanitizers,
                 transparent_callees=_sql_text_wrappers(self.vulnerability_class),
+                graph=graph,
             )
             if not taint and not call.dynamic:
                 continue
@@ -179,21 +188,200 @@ class TaintFlowRule(SecurityRule):
         return observations
 
 
-def _module_function_shadows_call(graph: SyntaxGraph, call: CallSite) -> bool:
-    """A module-level function hides a same-named builtin for bare calls.
+_IMPORT_GATED_SOURCES = {
+    "Query": ("fastapi", "nestjs"),
+    "Path": ("fastapi",),
+    "Body": ("fastapi", "nestjs"),
+    "Param": ("nestjs",),
+    "Headers": ("nestjs",),
+}
 
-    ``obj.eval`` stays a sink match. Nested functions are not treated as a
-    module-wide shadow.
+
+# Bare names that are sources only for these catalog entries. Rust ``Query``
+# and other language sources stay ungated.
+_GATED_SOURCE_IDS = frozenset({"fastapi.http", "nest.http", "js.nest"})
+
+
+def _sources_for_graph(
+    vocab: LanguageSecurityVocab,
+    frameworks: Sequence[FrameworkInfo],
+    graph: SyntaxGraph,
+) -> tuple[SourceDefinition, ...]:
+    """Project frameworks plus imports this file actually binds.
+
+    A FastAPI or NestJS manifest is not required when the file imports the
+    name. A manifest does not make an unbound ``Query`` a source.
     """
-    qualified = call.qualified or call.name
-    if qualified != call.name or "." in qualified:
+    selected = list(vocab_sources(vocab, frameworks))
+    seen = {source.source_id for source in selected}
+    for extras in vocab.extra_sources_by_framework.values():
+        for source in extras:
+            if source.source_id in seen:
+                continue
+            if _bound_patterns(graph, source):
+                selected.append(source)
+                seen.add(source.source_id)
+    return _visible_sources(graph, tuple(selected))
+
+
+def _visible_sources(
+    graph: SyntaxGraph, sources: tuple[SourceDefinition, ...]
+) -> tuple[SourceDefinition, ...]:
+    """Rewrite gated framework sources to the names this file binds."""
+    visible: list[SourceDefinition] = []
+    for source in sources:
+        if source.source_id not in _GATED_SOURCE_IDS:
+            visible.append(source)
+            continue
+        unique = _bound_patterns(graph, source)
+        if not unique:
+            continue
+        if unique != source.patterns:
+            source = replace(source, patterns=unique)
+        visible.append(source)
+    return tuple(visible)
+
+
+def _bound_patterns(graph: SyntaxGraph, source: SourceDefinition) -> tuple[str, ...]:
+    names: list[str] = []
+    for pattern in source.patterns:
+        required = _IMPORT_GATED_SOURCES.get(pattern)
+        if required is None or source.source_id not in _GATED_SOURCE_IDS:
+            names.append(pattern)
+            continue
+        names.extend(_bound_framework_names(graph, pattern, required))
+    return tuple(dict.fromkeys(names))
+
+
+def _bound_framework_names(
+    graph: SyntaxGraph, pattern: str, frameworks: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Local names bound to a framework import, excluding a shadowing function.
+
+    ``from fastapi import Query as Q`` binds ``Q``. ``import fastapi as fa``
+    binds ``fa.Query``. A module-level ``def Query`` hides the from-import.
+    Re-exports through an unknown local module are not inferred.
+    """
+    names: list[str] = []
+    for item in graph.imports:
+        module = item.module or ""
+        if not _module_matches(module, frameworks):
+            continue
+        if item.is_from_import:
+            imported = item.name or ""
+            if imported != pattern:
+                continue
+            bound = item.alias or imported
+            if not bound or bound == "*":
+                continue
+            names.append(bound)
+            continue
+        root = item.alias or module.split(".", 1)[0]
+        if not root or root == "*":
+            continue
+        names.append(f"{root}.{pattern}")
+    return tuple(dict.fromkeys(names))
+
+
+def _module_matches(module: str, tokens: tuple[str, ...]) -> bool:
+    parts = [part for part in module.replace("\\", "/").replace(".", "/").split("/") if part]
+    for token in tokens:
+        if token in parts or f"@{token}" in parts:
+            return True
+    return False
+
+
+_SHELL_PROGRAMS = frozenset(
+    {"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh", "cmd.exe"}
+)
+
+
+def _safe_command_argv(call: CallSite) -> bool:
+    """True only when the program is a fixed non-shell literal and shell is off.
+
+    ``subprocess.run(["git", user])`` and ``exec.Command("git", user)`` are not
+    shell injection. ``subprocess.run([user])``, ``shell=True``, and
+    ``["/bin/sh", "-c", user]`` stay dangerous. Keyword ``shell`` is read from
+    the argument node, not from a substring of the file.
+    """
+    if _shell_keyword(call):
         return False
-    return any(
-        entity.name == call.name
-        and entity.entity_type in {"function", "async_function"}
-        and not entity.parent
-        for entity in graph.entities
-    )
+    positional = [argument for argument in call.arguments if not argument.keyword]
+    if not positional:
+        return False
+    elements = _list_items(positional[0].text)
+    if elements is not None:
+        # subprocess.run(["git", user]) — the list's first item is the program.
+        program = _literal_string(elements[0]) if elements else None
+    elif len(positional) >= 2:
+        # exec.Command("git", user) — a later argument is argv, not the program.
+        program = _literal_string(positional[0].text)
+    else:
+        # eval "$q" and system(user) pass one command string. That string is
+        # not a fixed executable name.
+        return False
+    if program is None:
+        return False
+    base = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return base not in _SHELL_PROGRAMS
+
+
+def _shell_keyword(call: CallSite) -> bool:
+    for argument in call.arguments:
+        compact = "".join(argument.text.split()).lower()
+        if argument.keyword == "shell" and compact in {"true", "1"}:
+            return True
+        if not argument.keyword and compact in {"shell=true", "shell=1"}:
+            return True
+    return False
+
+
+def _list_items(text: str) -> list[str] | None:
+    raw = text.strip()
+    if len(raw) < 2 or raw[0] != "[" or raw[-1] != "]":
+        return None
+    return _split_commas(raw[1:-1])
+
+
+def _split_commas(body: str) -> list[str]:
+    items: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    depth = 0
+    for char in body:
+        if quote:
+            buf.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            buf.append(char)
+            continue
+        if char in "([{":
+            depth += 1
+            buf.append(char)
+            continue
+        if char in ")]}":
+            depth = max(0, depth - 1)
+            buf.append(char)
+            continue
+        if char == "," and depth == 0:
+            items.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(char)
+    tail = "".join(buf).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _literal_string(token: str) -> str | None:
+    text = token.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return None
 
 
 def _externals(project: object | None, file_path: str) -> dict[str, ExternalCallee]:
@@ -251,6 +439,7 @@ def _cross_file_observations(
                 argument_indexes=(index,),
                 sanitizers=vocab.sanitizers,
                 transparent_callees=_sql_text_wrappers(rule.vulnerability_class),
+                graph=graph,
             )
             if not taint:
                 continue
@@ -344,6 +533,60 @@ def _caller_symbol(call: CallSite) -> str:
     return scope.rsplit(":", 1)[-1]
 
 
+def _sink_occurrence(graph: SyntaxGraph, call: CallSite) -> str:
+    """Ordinal among same-scope calls with the same callee and argument shape.
+
+    Identity does not use the source line or a parser byte offset. Unrelated
+    same-named calls with different argument text do not shift this index.
+    Inserting another identical snippet before this call does shift it; removing
+    that snippet restores the previous ordinal.
+    """
+    structure = _call_structure(graph, call)
+    call_byte = call.span.start_byte if call.span is not None else call.line * 10_000
+    earlier = 0
+    for other in graph.calls:
+        if other is call:
+            continue
+        if other.scope_id != call.scope_id:
+            continue
+        if _call_structure(graph, other) != structure:
+            continue
+        other_byte = other.span.start_byte if other.span is not None else other.line * 10_000
+        if (other_byte, other.line) < (call_byte, call.line):
+            earlier += 1
+    return str(earlier)
+
+
+def _call_structure(graph: SyntaxGraph, call: CallSite) -> str:
+    """Callee plus whitespace-insensitive argument shape.
+
+    Line numbers and parser byte offsets are not part of the shape. Inserting
+    another call with the same shape earlier in the scope still changes the
+    occurrence ordinal. Renaming a callee or changing an argument token does too.
+    """
+    pieces = [call.qualified or call.name]
+    if call.arguments:
+        pieces.extend(_argument_shape(argument) for argument in call.arguments)
+    elif call.argument_text.strip():
+        pieces.append(_compact(call.argument_text))
+    elif 0 < call.line <= len(graph.lines):
+        pieces.append(_compact(graph.lines[call.line - 1]))
+    return "\x1f".join(pieces)
+
+
+def _argument_shape(argument: object) -> str:
+    text = _compact(str(getattr(argument, "text", "") or ""))
+    callees = ",".join(getattr(argument, "callees", ()) or ())
+    accesses = ",".join(getattr(argument, "accesses", ()) or ())
+    idents = ",".join(getattr(argument, "idents", ()) or ())
+    kind = "lit" if getattr(argument, "is_literal", False) else "expr"
+    return "\x1e".join((kind, callees, accesses, idents, text))
+
+
+def _compact(text: str) -> str:
+    return "".join(text.split())
+
+
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:
     text = call.argument_text
     if call.arguments:
@@ -414,6 +657,10 @@ def _observation(
             break
     if extra:
         metadata.update(extra)
+    if str(graph.parser_tier) in {"profile_fallback", "detection_only"}:
+        metadata.setdefault("analysis_incomplete", "parser_fallback")
+    metadata.setdefault("sink_occurrence", _sink_occurrence(graph, call))
+    metadata.setdefault("call_identity", _call_structure(graph, call))
     if span is not None:
         metadata.update(
             {

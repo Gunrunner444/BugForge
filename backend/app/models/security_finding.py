@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -26,6 +26,9 @@ class DBSecurityFinding(Base):
     analysis_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("analyses.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # analysis_id is the latest scan that observed this finding. Reconcile
+    # reuses the row and points it at the newer analysis; older analyses are
+    # not a historical finding store.
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="potential", index=True)
     vulnerability_class: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
@@ -48,6 +51,7 @@ class DBSecurityFinding(Base):
     observation_refs: Mapped[str] = mapped_column(Text, nullable=False, default="")
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     intelligence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    finding_key: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     asset: Mapped[str | None] = mapped_column(Text, nullable=True)
     target: Mapped[str | None] = mapped_column(Text, nullable=True)
     endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -60,6 +64,14 @@ class DBSecurityFinding(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "finding_key",
+            name="uq_security_findings_project_finding_key",
+        ),
     )
 
     project: Mapped[Project | None] = relationship("Project", back_populates="security_findings")

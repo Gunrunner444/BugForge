@@ -23,5 +23,15 @@ the static observation stays. The explanation says the results disagree.
 Unrelated files and vulnerability classes are not merged. Identical evidence
 is not stored twice. Evidence order does not depend on input order.
 
+`correlate_finding` is a pure matching helper. Phase 22 calls it from
+`FindingLifecycleService` on the production security API and analysis
+paths. Matching order is: trusted server finding identity, a server
+execution id already stored on that finding, exact normalized location plus
+vulnerability identity, then sink or source when those facts are present.
+An untrusted `finding_key` is not enough by itself. Pathless runtime
+evidence matches only with a server stamp. Ambiguous peers stay unattached.
+Correlation still never calls `verify`. A public JSON body cannot mark a
+finding verified.
+
 `SecurityFinding.verify` is unchanged. AI-only evidence still cannot verify.
 Human acceptance still requires a reproduced or verified finding.

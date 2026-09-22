@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.ai.provider import CompletionRequest, LLMProvider
 from app.ai.structured import StructuredParseError, extract_json_object
-from app.domain.findings import FindingStatus, SecurityFinding
+from app.domain.findings import SecurityFinding
 from app.security.context import SecurityContextBuilder
 from app.security.engine import SecurityAnalysisEngine, SecurityScanResult
 from app.security.findings import attach_ai_hypothesis
@@ -104,11 +104,6 @@ class SecurityAnalysisAgent:
                 analysis=analysis,
                 impact=impact,
             )
-            if updated.status is FindingStatus.VERIFIED:
-                # Defensive: AI path cannot verify.
-                from dataclasses import replace
-
-                updated = replace(updated, status=FindingStatus.POTENTIAL)
             enriched.append(updated)
 
         result.findings = enriched

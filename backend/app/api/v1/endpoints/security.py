@@ -20,9 +20,18 @@ from app.schemas.security import (
     PaginatedSecurityFindingsResponse,
     RunSecurityAnalysisRequest,
     SecurityAnalyzerInfo,
+    SecurityFindingResponse,
+    SecurityLifecycleRequest,
     SecurityStatusResponse,
 )
 from app.security.rules.catalog import builtin_security_rules
+from app.security_testing.operator_auth import OperatorSession, require_operator
+from app.services.finding_lifecycle import (
+    FindingLifecycleService,
+    FindingNotFoundError,
+    FindingProjectMismatchError,
+    LifecycleTransition,
+)
 
 router = APIRouter(prefix="/security", tags=["Security"])
 
@@ -93,9 +102,10 @@ async def run_project_security_analysis(
     use_ai = request.use_ai if request is not None else False
     agent = SecurityAnalysisAgent()
     result = await agent.analyze(Path(project.repository_path), use_ai=use_ai)
-    repo = SecurityFindingRepository(db)
-    await repo.bulk_create(result.findings, project_id=project.id, analysis_id=None)
+    service = FindingLifecycleService(SecurityFindingRepository(db))
+    await service.persist_static_scan(result.findings, project_id=project.id, analysis_id=None)
     await db.commit()
+    repo = SecurityFindingRepository(db)
     items, total = await repo.list_for_project(project.id)
     return PaginatedSecurityFindingsResponse(
         items=[to_security_response(item) for item in items],
@@ -103,3 +113,44 @@ async def run_project_security_analysis(
         offset=0,
         limit=total,
     )
+
+
+@router.post(
+    "/projects/{project_id}/findings/{finding_id}/transition",
+    response_model=SecurityFindingResponse,
+)
+async def transition_security_finding(
+    project_id: UUID,
+    finding_id: UUID,
+    body: SecurityLifecycleRequest,
+    db: AsyncSession = Depends(get_db),
+    _operator: OperatorSession = Depends(require_operator),
+) -> SecurityFindingResponse:
+    """Apply a domain transition to evidence the server already stored.
+
+    Collection happens first. This route only names the operation. It does
+    not accept ``status``, ``evidence``, ``finding_key``, ``finding_id``,
+    ``execution_id``, ``verified``, or ``reproduced``. A refused transition
+    still commits evidence the service retained, then returns 409.
+    """
+    repo = SecurityFindingRepository(db)
+    service = FindingLifecycleService(repo)
+    try:
+        updated = await service.attach_evidence(
+            finding_id,
+            [],
+            project_id=project_id,
+            transition=LifecycleTransition(body.operation),
+        )
+    except (FindingNotFoundError, FindingProjectMismatchError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        ) from exc
+    except ValueError as exc:
+        await db.commit()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await db.commit()
+    row = await repo.get(updated.id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+    return to_security_response(row)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,10 @@ def test_from_hypothesis_never_verified() -> None:
 
 
 def test_corroborate_is_not_verified() -> None:
-    finding = SecurityFinding.potential("Maybe").corroborate()
+    finding = replace(
+        SecurityFinding.potential("Maybe"),
+        status=FindingStatus.CORROBORATED,
+        evidence_tier=EvidenceTier.CORROBORATED,
+    )
     assert finding.status is FindingStatus.CORROBORATED
     assert finding.is_verified is False

@@ -10,7 +10,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from app.domain.evidence import Evidence, EvidenceKind, EvidenceProvenance
+from app.domain.evidence import (
+    Evidence,
+    EvidenceKind,
+    EvidenceProvenance,
+    evidence_contradicts,
+    observation_identity,
+)
 from app.domain.findings import SecurityFinding
 
 _RUNTIME_KINDS = frozenset(
@@ -20,6 +26,11 @@ _RUNTIME_KINDS = frozenset(
         EvidenceKind.API_TEST,
         EvidenceKind.REPLAY,
         EvidenceKind.HTTP_RESPONSE,
+        EvidenceKind.HTTP_REQUEST,
+        EvidenceKind.BROWSER,
+        EvidenceKind.SCANNER,
+        EvidenceKind.FUZZING,
+        EvidenceKind.PROXY,
         EvidenceKind.LOG,
     }
 )
@@ -89,18 +100,21 @@ def explain_confidence(finding: SecurityFinding) -> ConfidenceExplanation:
 def correlate_finding(
     finding: SecurityFinding,
     evidence: Sequence[Evidence],
+    *,
+    peers: Sequence[SecurityFinding] = (),
 ) -> SecurityFinding:
     """Attach same-issue evidence. Status is unchanged.
 
-    Unrelated files, lines, or vulnerability classes are left off. Duplicate
-    items are not repeated. A contradiction is kept beside the static result.
+    Trusted server attribution may match without a source file. Otherwise the
+    evidence needs one normalized location and vulnerability identity, and it
+    must not be claimed by a peer. Duplicate items are not repeated.
     """
     accepted: list[Evidence] = []
-    seen = {_evidence_key(item) for item in finding.evidence.items}
+    seen = {evidence_identity(item) for item in finding.evidence.items}
     for item in sorted(evidence, key=_evidence_sort):
-        if not _same_issue(finding, item):
+        if not _same_issue(finding, item, peers):
             continue
-        key = _evidence_key(item)
+        key = evidence_identity(item)
         if key in seen:
             continue
         seen.add(key)
@@ -112,20 +126,99 @@ def correlate_finding(
     return replace(finding, evidence=merged, status=finding.status)
 
 
-def _same_issue(finding: SecurityFinding, evidence: Evidence) -> bool:
+def _same_issue(
+    finding: SecurityFinding,
+    evidence: Evidence,
+    peers: Sequence[SecurityFinding] = (),
+) -> bool:
     loc = finding.source_location
     path = evidence.artifact_path or _meta_str(evidence, "file_path")
-    if not path or loc is None or not loc.file_path:
+    if path and loc is not None and loc.file_path and not _same_path(loc.file_path, path):
         return False
-    if not _same_path(loc.file_path, path):
+    parsed = _coerce_line(evidence.metadata.get("line"))
+    if parsed is not None and loc is not None and loc.line is not None and parsed != loc.line:
         return False
-    line = evidence.metadata.get("line")
-    if line is not None and loc.line is not None and int(line) != loc.line:
+    sink = _meta_str(evidence, "sink")
+    recorded_sink = _finding_sink(finding)
+    if sink and recorded_sink and sink != recorded_sink:
+        return False
+    if _server_attributed(evidence):
+        # Unstamped client keys are ignored above. Only a server stamp can
+        # name the finding, and a stamp for a different finding does not
+        # fall through to location matching.
+        return _trusted_identity(finding, evidence)
+    if not path or loc is None or not loc.file_path or not _same_path(loc.file_path, path):
         return False
     vuln = _meta_str(evidence, "vulnerability_class")
     if vuln and finding.vulnerability_class and vuln != finding.vulnerability_class:
         return False
-    return True
+    source = _meta_str(evidence, "taint_source") or _meta_str(evidence, "flow_source")
+    if source:
+        recorded_source = finding.flow_source or _finding_source(finding)
+        if recorded_source and source != recorded_source:
+            return False
+    if parsed is None or loc.line is None or parsed != loc.line:
+        return False
+    return not any(_competes_for_line(finding, peer, parsed) for peer in peers)
+
+
+def _server_attributed(evidence: Evidence) -> bool:
+    return _meta_str(evidence, "attribution") == "server"
+
+
+def _trusted_identity(finding: SecurityFinding, evidence: Evidence) -> bool:
+    """Exact server finding key, or a server execution already stored on the finding."""
+    identity = _meta_str(evidence, "finding_key")
+    if identity and finding.finding_key and identity == finding.finding_key:
+        return True
+    execution = _meta_str(evidence, "execution_id")
+    if not execution:
+        return False
+    return any(_meta_str(item, "execution_id") == execution for item in finding.evidence.items)
+
+
+def _coerce_line(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+            return int(text)
+    return None
+
+
+def _finding_sink(finding: SecurityFinding) -> str:
+    if finding.flow_sink:
+        return finding.flow_sink
+    for item in finding.evidence.items:
+        sink = _meta_str(item, "sink")
+        if sink:
+            return sink
+    return ""
+
+
+def _finding_source(finding: SecurityFinding) -> str:
+    if finding.flow_source:
+        return finding.flow_source
+    for item in finding.evidence.items:
+        source = _meta_str(item, "taint_source") or _meta_str(item, "flow_source")
+        if source:
+            return source
+    return ""
+
+
+def _competes_for_line(finding: SecurityFinding, peer: SecurityFinding, line: int) -> bool:
+    loc = peer.source_location
+    own = finding.source_location
+    if loc is None or own is None or peer is finding:
+        return False
+    if peer.vulnerability_class != finding.vulnerability_class:
+        return False
+    if not _same_path(own.file_path, loc.file_path):
+        return False
+    return loc.line == line
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -138,15 +231,9 @@ def _same_path(left: str, right: str) -> bool:
     )
 
 
-def _evidence_key(item: Evidence) -> tuple[str, str, str, str, str, str]:
-    return (
-        item.kind.value,
-        item.source,
-        item.summary,
-        item.artifact_path or "",
-        _meta_str(item, "line"),
-        _meta_str(item, "contradicts") or _meta_str(item, "reached"),
-    )
+def evidence_identity(item: Evidence) -> tuple[str, ...]:
+    """Stable evidence identity. Object ids are excluded because reload mints new ones."""
+    return observation_identity(item)
 
 
 def _evidence_sort(item: Evidence) -> tuple[str, str, str, str]:
@@ -159,9 +246,7 @@ def _meta_str(item: Evidence, key: str) -> str:
 
 
 def _contradicts(item: Evidence) -> bool:
-    flag = _meta_str(item, "contradicts").lower()
-    reached = _meta_str(item, "reached").lower()
-    return flag in {"1", "true", "yes"} or reached in {"0", "false", "no", "not_reached"}
+    return evidence_contradicts(item)
 
 
 def _runtime_label(finding: SecurityFinding) -> str:
@@ -200,7 +285,10 @@ def _because(
     if runtime == "supports":
         parts.append("a test or reproduction names the same location")
     elif runtime == "contradicts":
-        parts.append("a test says this path was not reached; the static result is kept")
+        parts.append(
+            "the static result is kept; stored lifecycle state stays; "
+            "a later observation says this path was not reached"
+        )
     elif runtime == "ai_only":
         parts.append("AI text is attached and is not verification")
     else:

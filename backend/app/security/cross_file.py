@@ -53,12 +53,14 @@ from app.security.taint import (
     _scope_for_entity,
     _use_byte,
     call_matches_sink,
+    calls_contained_in,
     field_flow_allowed,
     field_limit_facts,
     field_root,
     fragment_matches_source,
     is_field_path,
     proven_alias_mirrors,
+    receiver_argument_offset,
     sanitizer_intervened,
 )
 
@@ -191,7 +193,7 @@ def build_project(
     )
     project.diagnostics.extend(target_diag)
     summaries: dict[tuple[str, str], _Summary] = {}
-    edges = 0
+    charged: set[tuple[str, str, str, str]] = set()
     depth_limited = False
     changed = False
 
@@ -221,21 +223,11 @@ def build_project(
                         )
                     )
                     break
-                if edges >= limits.max_edges:
-                    project.incomplete = True
-                    project.diagnostics.append(
-                        FlowDiagnostic(
-                            kind="cross_file_incomplete",
-                            message="cross-file taint stopped at configured edge limit",
-                            file_path=path,
-                        )
-                    )
-                    break
                 scope_id = _scope_for_entity(graph, entity)
                 if scope_id is None:
                     continue
                 summary_name = entity.qualified_name or entity.name
-                summary, used_edges, limited, capped = _summarize(
+                summary, _used_edges, limited, capped = _summarize(
                     graph,
                     summary_name,
                     scope_id,
@@ -245,9 +237,9 @@ def build_project(
                     partial=partial,
                     max_depth=limits.max_import_depth,
                     decorators=tuple(entity.decorators),
-                    edge_budget=limits.max_edges - edges,
+                    edge_budget=limits.max_edges,
+                    charged=charged,
                 )
-                edges += used_edges
                 if limited:
                     depth_limited = True
                 if capped:
@@ -1262,6 +1254,7 @@ def _summarize(
     max_depth: int,
     decorators: tuple[str, ...] = (),
     edge_budget: int = 10**9,
+    charged: set[tuple[str, str, str, str]] | None = None,
 ) -> tuple[_Summary, int, bool, bool]:
     vocab = vocab_for(graph.language)
     source_pats = tuple(p for src in vocab.sources for p in src.patterns) if vocab else ()
@@ -1274,6 +1267,7 @@ def _summarize(
     limited = False
     capped = False
     hops = 0
+    charged_edges = charged if charged is not None else set()
     blocked_fields, _, _ = field_limit_facts(graph)
     alias_info = proven_alias_mirrors(graph)
 
@@ -1339,7 +1333,10 @@ def _summarize(
             at,
             resolve,
             max_depth,
-            edge_budget - edges,
+            edge_budget,
+            charged_edges,
+            graph.file_path,
+            function_name,
         )
         edges += added
         hops = max(hops, hop)
@@ -1368,9 +1365,13 @@ def _summarize(
         ident_tokens |= _field_tokens(ret.accesses, at, byte)
         opaque = False
         from_calls: set[str] = set()
-        for call in graph.calls:
-            if call.scope_id != scope_id or call.line != ret.line:
-                continue
+        for call in calls_contained_in(
+            graph.calls,
+            scope_id=scope_id,
+            line=ret.line,
+            span=ret.span,
+            outermost=True,
+        ):
             if _call_is_transparent(call, source_pats, sanitizers):
                 continue
             summary = resolve(call)
@@ -1382,11 +1383,15 @@ def _summarize(
                     limited = True
                     opaque = True
                     continue
-                if edges >= edge_budget:
+                status = _charge_cross_file(
+                    charged_edges, edge_budget, graph.file_path, function_name, summary
+                )
+                if status == "capped":
                     capped = True
                     opaque = True
                     continue
-                edges += 1
+                if status == "new":
+                    edges += 1
                 hops = max(hops, summary.hops + 1)
             if summary.return_effects:
                 from_calls |= _instantiate(summary.return_effects, call, at, byte, source_pats)
@@ -1417,10 +1422,14 @@ def _summarize(
                 limited = True
                 continue
             if cross:
-                if edges >= edge_budget:
+                status = _charge_cross_file(
+                    charged_edges, edge_budget, graph.file_path, function_name, summary
+                )
+                if status == "capped":
                     capped = True
                     continue
-                edges += 1
+                if status == "new":
+                    edges += 1
                 hops = max(hops, summary.hops + 1)
             for index, vuln, sink_name, line in summary.param_sinks:
                 for token in _call_arg_tokens(
@@ -1512,6 +1521,9 @@ def _binding_tokens(
     resolve: Callable[[CallSite], _Summary | None],
     max_depth: int,
     edge_budget: int,
+    charged: set[tuple[str, str, str, str]],
+    caller_file: str,
+    caller_name: str,
 ) -> tuple[frozenset[str], int, int, bool, bool]:
     if (
         _empty_rhs(binding)
@@ -1541,11 +1553,22 @@ def _binding_tokens(
     ident_tokens |= _field_tokens(binding.rhs_accesses, at, byte)
     opaque = False
     from_calls: set[str] = set()
-    for call in graph.calls:
-        if call.scope_id != scope_id or call.line != binding.line:
-            continue
-        if call.name not in binding.rhs_callees and call.qualified not in binding.rhs_callees:
-            continue
+    names = set(binding.rhs_callees)
+    contained = calls_contained_in(
+        graph.calls,
+        scope_id=scope_id,
+        line=binding.line,
+        span=binding.span,
+        names=names,
+    )
+    for call in calls_contained_in(
+        graph.calls,
+        scope_id=scope_id,
+        line=binding.line,
+        span=binding.span,
+        names=names,
+        outermost=True,
+    ):
         if _call_is_transparent(call, source_pats, sanitizers):
             continue
         summary = resolve(call)
@@ -1557,27 +1580,23 @@ def _binding_tokens(
             opaque = True
             continue
         if summary.file_path != graph.file_path:
-            if edges >= edge_budget:
+            status = _charge_cross_file(
+                charged, edge_budget, caller_file, caller_name, summary
+            )
+            if status == "capped":
                 capped = True
                 opaque = True
                 continue
-            edges += 1
+            if status == "new":
+                edges += 1
             hops = max(hops, summary.hops + 1)
         if summary.return_effects:
             from_calls |= _instantiate(summary.return_effects, call, at, byte, source_pats)
         else:
             opaque = True
     if binding.rhs_callees and not opaque:
-        seen = {
-            call.qualified
-            for call in graph.calls
-            if call.scope_id == scope_id and call.line == binding.line
-        }
-        seen.update(
-            call.name
-            for call in graph.calls
-            if call.scope_id == scope_id and call.line == binding.line
-        )
+        seen = {call.qualified for call in contained}
+        seen.update(call.name for call in contained)
         for callee in binding.rhs_callees:
             if _callee_is_source(callee, source_pats) or _preserves_taint(callee):
                 continue
@@ -1840,17 +1859,28 @@ def _externals_from(
 
 
 def _receiver_offset(summary: _Summary | None, *, instance: bool) -> int:
-    if summary is None or not summary.parameters:
+    if summary is None:
         return 0
-    decorators = " ".join(summary.decorators)
-    if "staticmethod" in decorators:
-        return 0
-    first = summary.parameters[0]
-    if "classmethod" in decorators and first in {"cls", "self"}:
-        return 1
-    if first in {"self", "cls"}:
-        return 1 if instance else 0
-    return 0
+    return receiver_argument_offset(summary.parameters, summary.decorators, instance=instance)
+
+
+def _charge_cross_file(
+    charged: set[tuple[str, str, str, str]],
+    max_edges: int,
+    caller_file: str,
+    caller_name: str,
+    summary: _Summary,
+) -> str:
+    """Charge one caller/callee relationship at most once across rounds."""
+    if summary.file_path == caller_file:
+        return "local"
+    key = (caller_file, caller_name, summary.file_path, summary.function_name)
+    if key in charged:
+        return "paid"
+    if len(charged) >= max_edges:
+        return "capped"
+    charged.add(key)
+    return "new"
 
 
 def _shift_effect(effect: str, offset: int) -> str | None:

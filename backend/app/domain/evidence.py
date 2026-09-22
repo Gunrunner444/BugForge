@@ -7,6 +7,7 @@ records. Verification requires observational or executable provenance.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -123,14 +124,13 @@ class Evidence:
             raise ValueError("Evidence summary must be non-empty")
         if not self.source.strip():
             raise ValueError("Evidence source must be non-empty")
-        derived = _KIND_TO_PROVENANCE.get(self.kind, EvidenceProvenance.SOURCE_OBSERVATION)
-        if self.kind is EvidenceKind.AI_ANALYSIS:
-            object.__setattr__(self, "provenance", EvidenceProvenance.AI_HYPOTHESIS)
-            return
-        if self.provenance is EvidenceProvenance.AI_HYPOTHESIS:
-            raise ValueError("AI hypothesis provenance cannot be attached to non-AI evidence kinds")
-        if self.provenance is EvidenceProvenance.REPLAY:
-            return
+        derived = _KIND_TO_PROVENANCE.get(self.kind)
+        if derived is None:
+            raise ValueError(f"Unsupported evidence kind {self.kind!r}")
+        if self.provenance is not None and self.provenance is not derived:
+            raise ValueError(
+                f"Provenance {self.provenance.value} is incompatible with kind {self.kind.value}"
+            )
         object.__setattr__(self, "provenance", derived)
 
     @property
@@ -193,3 +193,93 @@ class EvidenceBundle:
     @classmethod
     def from_items(cls, items: Iterable[Evidence]) -> EvidenceBundle:
         return cls(items=tuple(items))
+
+
+def observation_identity(item: Evidence) -> tuple[str, ...]:
+    """Canonical observation identity. Object UUIDs are not part of it.
+
+    Trust is a server signature, not this tuple. Deduplication uses the
+    canonical event: kind, normalized summary, details digest, artifact,
+    execution, outcome, finding binding, and evidence-type fields such as
+    HTTP method, URL, and status. The summary is whitespace-normalized and
+    is not an authorization signal. A client-supplied observation id is
+    ignored, so it cannot mint a trusted identity or split an exact duplicate
+    into a new observation. A new server observation id for the same canonical
+    event still collapses.
+    """
+    digest = hashlib.sha256(item.details.encode("utf-8")).hexdigest()[:16]
+    return (
+        item.kind.value,
+        item.source.strip(),
+        " ".join(item.summary.split()),
+        digest,
+        (item.artifact_path or "").replace("\\", "/"),
+        _meta_text(item, "line"),
+        _meta_text(item, "contradicts") or _meta_text(item, "reached"),
+        _meta_text(item, "execution_id"),
+        _meta_text(item, "outcome"),
+        _meta_text(item, "finding_id"),
+        _meta_text(item, "finding_key"),
+        _meta_text(item, "project_id"),
+        *_type_identity(item),
+    )
+
+
+def _type_identity(item: Evidence) -> tuple[str, ...]:
+    kind = item.kind
+    if kind in {
+        EvidenceKind.HTTP_REQUEST,
+        EvidenceKind.HTTP_RESPONSE,
+        EvidenceKind.PROXY,
+        EvidenceKind.API_TEST,
+    }:
+        return (
+            _norm_meta(item, "method"),
+            _norm_meta(item, "url") or _norm_meta(item, "route"),
+            _norm_meta(item, "status") or _norm_meta(item, "status_code"),
+        )
+    if kind is EvidenceKind.SCANNER:
+        return (
+            _norm_meta(item, "check_id") or _norm_meta(item, "rule_id"),
+            _norm_meta(item, "target"),
+            _norm_meta(item, "result_id"),
+        )
+    if kind is EvidenceKind.BROWSER:
+        return (
+            _norm_meta(item, "route") or _norm_meta(item, "url"),
+            _norm_meta(item, "event"),
+            _norm_meta(item, "session_id"),
+        )
+    if kind is EvidenceKind.FUZZING:
+        return (_norm_meta(item, "target"), _norm_meta(item, "result_id"))
+    if kind is EvidenceKind.REPRODUCTION:
+        return (
+            _norm_meta(item, "result_id"),
+            _norm_meta(item, "reproduced"),
+            _norm_meta(item, "observed_target"),
+        )
+    if kind in {EvidenceKind.STATIC_ANALYSIS, EvidenceKind.SOURCE_CODE}:
+        return (
+            _norm_meta(item, "rule") or _norm_meta(item, "sink"),
+            _norm_meta(item, "field_path"),
+            _norm_meta(item, "sink_occurrence"),
+            _norm_meta(item, "scope_id"),
+            _norm_meta(item, "argument_index"),
+        )
+    return ()
+
+
+def _norm_meta(item: Evidence, key: str) -> str:
+    return " ".join(_meta_text(item, key).split()).lower()
+
+
+def evidence_contradicts(item: Evidence) -> bool:
+    """True when the record says the suspected path was not reached."""
+    flag = _meta_text(item, "contradicts").lower()
+    reached = _meta_text(item, "reached").lower()
+    return flag in {"1", "true", "yes"} or reached in {"0", "false", "no", "not_reached"}
+
+
+def _meta_text(item: Evidence, key: str) -> str:
+    value = item.metadata.get(key)
+    return "" if value is None else str(value)

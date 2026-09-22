@@ -45,7 +45,7 @@ def test_real_request_attributes_are_sources() -> None:
 
 def test_explicit_route_parameters_are_sources_and_plain_functions_are_not() -> None:
     routed = _scan(FIXTURE / "route_param")
-    assert _lines(routed, EVAL, "app.py") == [3]
+    assert _lines(routed, EVAL, "app.py") == [8]
     obs = routed.observations[0]
     assert obs.metadata["route"] == "/item/{id}"
     assert obs.metadata["route_method"] == "GET"
@@ -56,7 +56,7 @@ def test_explicit_route_parameters_are_sources_and_plain_functions_are_not() -> 
     )
 
     flask = _scan(FIXTURE / "flask_route")
-    assert _lines(flask, EVAL, "app.py") == [3]
+    assert _lines(flask, EVAL, "app.py") == [8]
     assert flask.observations[0].metadata["route"] == "/item/<int:id>"
     assert flask.observations[0].metadata["route_method"] == "GET"
 
@@ -93,7 +93,7 @@ def test_unknown_framework_and_non_route_calls_stay_unresolved() -> None:
     assert bare.observations == []
     assert bare.graphs["app.js"].routes == ()
     express = _scan(FIXTURE / "express_route")
-    assert _lines(express, EVAL, "app.js") == [2]
+    assert _lines(express, EVAL, "app.js") == [4]
     assert express.graphs["app.js"].routes[0].path == "/search"
     assert express.graphs["app.js"].routes[0].method == "GET"
     callback = _scan(FIXTURE / "express_callback")

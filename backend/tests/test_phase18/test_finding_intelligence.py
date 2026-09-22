@@ -198,6 +198,7 @@ def test_api_response_keeps_old_fields_and_adds_flow() -> None:
         rule_ids="sec.taint.eval",
         observation_refs="sec.taint.eval:app.py:3",
         created_at=datetime.now(UTC),
+        finding_key="abc123",
         intelligence_json=json.dumps(
             {
                 "finding_key": "abc123",

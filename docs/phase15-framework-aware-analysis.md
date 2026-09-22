@@ -11,23 +11,33 @@ Existing attribute sources stay in place: `request.args`, `request.GET`,
 `req.query`, `req.body`, and `req.params`. A variable that is merely named
 `request` is not a source.
 
-A path parameter is a source only when a decorator declares it:
+A path parameter is a source only when a decorator declares a real HTTP route:
 
 ```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
 @app.get("/item/{id}")
 def item(id: str):
     eval(id)
 ```
 
-`@app.route("/item/<int:id>", methods=["GET"])` is the same idea. The path
-must be a string literal starting with `/`. `@cache.get("user")` is not a
-route. A function with the same signature and no decorator is not a route.
-The decorator is not called.
+`@app.route("/item/<int:id>", methods=["GET"])` is the same idea after
+`app = Flask(__name__)`. The path must be a string literal starting with `/`,
+and the receiver must be bound to a known framework constructor for that
+language (`Flask`, `FastAPI`, or `express()`). A variable that is merely named
+`app` is not enough. `@cache.get("/not-a-real-route/{id}")` is not a route,
+`app = SomeOtherObject(); @app.get("/x")` is not a route, and neither is
+`@cache.get("user")`. A function with the same signature and no decorator is
+not a route. The decorator is not called.
 
 JavaScript and TypeScript record `app.get("/search", handler)` as route
-metadata. A bare `get("/search", handler)` is not a route. Callback
-parameters are not inferred from the path, so `function (id) { eval(id) }`
-stays unresolved even when it is passed to `app.get`.
+metadata only after `const app = express()`. A bare `get("/search", handler)`
+is not a route, and `cache.get("/not-a-route", handler)` is not a route.
+Callback parameters are not inferred from the path, so
+`function (id) { eval(id) }` stays unresolved even when it is passed to
+`app.get`. Express constructors do not make Python `@app.get` a route.
 
 ## Sinks
 

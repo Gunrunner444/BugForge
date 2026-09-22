@@ -282,24 +282,43 @@ An AI hypothesis never becomes a verified finding by itself.
 | `ai_hypothesis` | `ai_analysis` | **No** |
 | `static_analysis` | `static_analysis` | **No** |
 | `source_observation` | `source_code`, generated tests | **No** |
-| `execution` | test failures, logs | Yes |
-| `reproduction` | reproduction engine | Yes |
-| `browser_observation` | browser / screenshot | Yes |
-| `http_observation` | proxy / HTTP | Yes |
-| `scanner_observation` | scanner | Yes |
-| `api_test` | API test | Yes |
-| `fuzzing_result` | fuzzer | Yes |
+| `execution` | test failures, logs | **No** |
+| `reproduction` | reproduction engine | **No** |
+| `browser_observation` | browser / screenshot | Only as a signed server observation |
+| `http_observation` | proxy / HTTP | Only as a signed server observation |
+| `scanner_observation` | scanner | Only as a signed server observation |
+| `api_test` | API test | Only as a signed server observation |
+| `fuzzing_result` | fuzzer | Only as a signed server observation |
 
-AI text is forced to `ai_hypothesis` even if a caller tries to label it as
-execution. Evidence records are frozen so provenance cannot be rewritten.
+AI text is forced to `ai_hypothesis`. Provenance is derived from kind.
+A caller-supplied provenance that disagrees with the kind is rejected.
+Evidence records are frozen so provenance cannot be rewritten.
+
+Phase 24 narrows verification further. A matching provenance is not enough.
+`SecurityFinding.verify()` accepts only a `ServerObservation` issued by
+`issue_server_observation`: the observation id and HMAC are generated with
+the server secret, and `observed_target` must equal the finding's semantic
+target. Reproduction provenance does not verify.
+
+Phase 25 binds that observation to the exact finding id, finding key,
+project id, and semantic target. A valid signature for a different finding
+or project does not verify. Signed metadata is a read-only mapping, and the
+HMAC covers the identity fields used by the lifecycle. Phase 26 requires the
+finding's current semantic target for runtime corroboration, static stamps,
+and reproduction. A historical record stays stored and does not prove a
+changed target. See
+[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md),
+[phase25-verification-binding-adversarial.md](phase25-verification-binding-adversarial.md),
+and
+[phase26-polyglot-security-coverage.md](phase26-polyglot-security-coverage.md).
 
 `SecurityFinding` is frozen. Status is not a mutable field. Use constructors
 and transitions:
 
 - `potential` / `from_hypothesis` → `potential`
 - `corroborate()` → `corroborated` (independent static observations; **not** verified)
-- `verify(evidence)` / `verified(evidence)` → `verified` only when the bundle
-  contains at least one verifying provenance
+- `verify(evidence)` / `verified(evidence)` → `verified` only for a
+  server-issued observation of this semantic target
 - `reject` → `rejected`
 - `with_review` → human review state without changing verification
 
@@ -381,6 +400,42 @@ and config snippets, then applies chunking, deduplication, and a character
 budget. Whole repositories are never sent to the model.
 
 The AI agent may attach a hypothesis. It cannot create a verified finding.
+
+Finding lifecycle (Phase 22 production path):
+
+```
+Repository → static semantic analysis → potential / corroborated finding
+  → FindingLifecycleService.persist_static_scan
+  → evidence collection with server attribution
+  → FindingLifecycleService correlation and domain transition
+  → reproduced / verified → human review
+```
+
+The security analyze API and `AnalysisService` both persist the initial
+static finding through `FindingLifecycleService`. Later evidence and every
+status change go through that same service. Statuses are `potential`,
+`corroborated`, `reproduced`, `verified`, `human_accepted`, and `rejected`.
+Correlation attaches matching evidence only. A successful reproduction record requires an explicit positive outcome.
+`SecurityFinding.verify()` requires a server-issued HTTP, browser, scanner,
+API, replay, fuzzing, or proxy observation whose identity and execution id
+are not the reproduction record and whose finding id, finding key, project
+id, and `observed_target` match this finding. Unstamped client evidence
+cannot verify or corroborate a production finding, even when it copies
+`finding_key`, `finding_id`, `execution_id`, or `attribution=server`.
+Corroboration is two distinct static or source observations, or one trusted
+runtime observation bound to that finding. A material sink, source, field,
+argument, file, project, or sink-occurrence change keeps the old evidence
+and returns the finding to the new scan's potential or corroborated status.
+Formatting and line-only movement keep the target. Static scan ingress
+accepts only those two statuses. AI text, static analysis, a failed test,
+and a generated test that was never executed cannot reproduce or verify.
+The operator transition endpoint names the operation. It does not accept a
+client `status` or evidence body. PostgreSQL lifecycle saves take
+`SELECT FOR UPDATE` and merge evidence from the locked row. See
+[phase23-verification-authority.md](phase23-verification-authority.md),
+[phase24-security-coverage-precision.md](phase24-security-coverage-precision.md),
+and
+[phase25-verification-binding-adversarial.md](phase25-verification-binding-adversarial.md).
 
 ## Configuration
 

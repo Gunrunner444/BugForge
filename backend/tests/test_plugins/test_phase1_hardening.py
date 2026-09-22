@@ -28,6 +28,7 @@ from app.domain.evidence import (
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
 from app.domain.language import LanguageCapability
 from app.domain.source import LanguageParseResult
+from app.domain.trusted_evidence import issue_for_finding
 from app.plugins import AdapterNotFoundError, AdapterRegistry, DuplicateAdapterError
 from app.plugins.errors import (
     ActiveTestingNotPermittedError,
@@ -316,6 +317,17 @@ def _repro_evidence() -> Evidence:
         kind=EvidenceKind.REPRODUCTION,
         source="reproduction_engine",
         summary="Reproduced on two runs",
+        metadata={"outcome": "reproduced", "reproduced": "true", "execution_id": "repro-1"},
+    )
+
+
+def _http_evidence() -> Evidence:
+    return Evidence(
+        kind=EvidenceKind.HTTP_RESPONSE,
+        source="lab-http",
+        summary="response showed the payload",
+        details="uid=0",
+        metadata={"execution_id": "verify-1"},
     )
 
 
@@ -333,14 +345,19 @@ def test_rejected_finding() -> None:
 
 
 def test_valid_verified_finding() -> None:
-    finding = SecurityFinding.verified("Confirmed XSS", evidence=[_repro_evidence()])
+    with pytest.raises(ValueError, match="independent|server-issued"):
+        SecurityFinding.verified("Confirmed XSS", evidence=[_repro_evidence()])
+    shell = SecurityFinding.potential("Confirmed XSS")
+    finding = SecurityFinding.verified(
+        "Confirmed XSS", evidence=[issue_for_finding(shell, _http_evidence(), "verify-1")]
+    )
     assert finding.status is FindingStatus.VERIFIED
     assert finding.is_verified is True
     assert finding.evidence.verifying_items()
 
 
 def test_invalid_verified_finding_without_evidence() -> None:
-    with pytest.raises(ValueError, match="requires evidence"):
+    with pytest.raises(ValueError, match="independent|server-issued"):
         SecurityFinding.verified("RCE", evidence=EvidenceBundle())
 
 
@@ -392,13 +409,15 @@ def test_verify_transition_requires_independent_evidence() -> None:
     finding = SecurityFinding.from_hypothesis("Guess", "model said so")
     with pytest.raises(ValueError, match="independent"):
         finding.verify([Evidence.from_ai("still just a guess")])
-    verified = finding.verify([_repro_evidence()])
+    with pytest.raises(ValueError, match="independent"):
+        finding.verify([_repro_evidence()])
+    verified = finding.verify([issue_for_finding(finding, _http_evidence(), "verify-1")])
     assert verified.status is FindingStatus.VERIFIED
     assert finding.status is FindingStatus.POTENTIAL
 
 
 def test_reproduce_and_human_accept_transitions() -> None:
-    finding = SecurityFinding.potential("Possible IDOR").corroborate()
+    finding = SecurityFinding.potential("Possible IDOR")
     with pytest.raises(ValueError, match="requires"):
         finding.reproduce()
     reproduced = finding.reproduce([_repro_evidence()])
@@ -700,7 +719,10 @@ def test_local_report_separates_statuses_and_review() -> None:
 
     findings = [
         SecurityFinding.potential("Maybe"),
-        SecurityFinding.verified("Yes", evidence=[_repro_evidence()]).with_review(
+        SecurityFinding.verified(
+            "Yes",
+            evidence=[issue_for_finding(SecurityFinding.potential("Yes"), _http_evidence(), "verify-1")],
+        ).with_review(
             HumanReviewState.ACCEPTED
         ),
         SecurityFinding.rejected("No"),
