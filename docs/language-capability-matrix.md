@@ -86,6 +86,9 @@ when the bundled grammar loads (`FULL_AST`, backend `tree_sitter`). If that
 parser cannot load, the file is `PROFILE_FALLBACK` and Solidity security rules
 do not run. The capability matrix uses `YES`, `LIMITED`, `UNSUPPORTED`, and
 `UNAVAILABLE_AT_RUNTIME`. Same-file call/state order is `LIMITED` data flow.
-Compiler storage layout is not claimed. External Foundry, Slither, Echidna,
-Medusa, Halmos, and Wake capabilities follow the installed binary. See
-[phase27-multi-engine-solidity.md](phase27-multi-engine-solidity.md).
+Compiler storage layout is not claimed. Selectors are emitted only when every
+parameter type canonicalizes, including same-file structs whose fields are
+known. A parse error does not receive a guessed selector. External Foundry,
+Slither, Echidna, Medusa, Halmos, and Wake capabilities follow the installed
+binary and stay `UNAVAILABLE_AT_RUNTIME` when it is absent. See
+[phase28-solidity-deep-analysis.md](phase28-solidity-deep-analysis.md).

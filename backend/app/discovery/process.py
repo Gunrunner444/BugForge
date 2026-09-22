@@ -57,8 +57,11 @@ def run_command(
     timeout: float = 30,
     stdin: str = "",
 ) -> tuple[int, str, str, bool]:
-    if not argv or tool_path(argv[0]) is None and not Path(argv[0]).is_file():
-        return 127, "", f"{argv[0] if argv else 'command'} is not installed", False
+    if not argv or "/" in argv[0] or argv[0].startswith("."):
+        name = argv[0] if argv else "command"
+        return 127, "", f"refusing path-qualified command {name}", False
+    if tool_path(argv[0]) is None:
+        return 127, "", f"{argv[0]} is not installed", False
     executable = tool_path(argv[0]) or argv[0]
     try:
         completed = subprocess.run(

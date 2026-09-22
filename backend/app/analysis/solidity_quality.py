@@ -111,10 +111,17 @@ class DeprecatedConstructQualityRule(_SolidityQuality):
     MESSAGE = "Deprecated Solidity construct"
 
 
+class EmptyUncheckedQualityRule(_SolidityQuality):
+    RULE_ID = "sol_quality_empty_unchecked"
+    KIND = "sol_unchecked_empty"
+    MESSAGE = "Unchecked block contains no arithmetic"
+
+
 SOLIDITY_QUALITY_RULES: tuple[CodeQualityRule, ...] = (
     EmptyHandlerQualityRule(),
     ShadowingQualityRuleSolidity(),
     UnsafePragmaQualityRule(),
     AssemblyQualityRule(),
     DeprecatedConstructQualityRule(),
+    EmptyUncheckedQualityRule(),
 )

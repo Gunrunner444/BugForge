@@ -31,16 +31,9 @@ from app.parsing.model import (
     SyntaxGraph,
 )
 from app.parsing.profiles import profile_for
+from app.parsing.solidity_types import canonical_solidity_type, is_dynamic_type
 from app.parsing.span import span_from_ts_node
 
-_PRIMITIVE = {
-    "address": "address",
-    "bool": "bool",
-    "string": "string",
-    "bytes": "bytes",
-    "uint": "uint256",
-    "int": "int256",
-}
 _LOW_LEVEL = frozenset({"call", "delegatecall", "staticcall", "transfer", "send"})
 
 
@@ -119,6 +112,7 @@ class _Builder:
         self._scopes: list[Scope] = [self.graph.scopes[0]]
         self._node_index = 0
         self._floor: tuple[int, int, int] | None = None
+        self._structs: dict[str, str] = {}
 
     def consume(self, root: object) -> None:
         for child in _children(root):
@@ -153,7 +147,8 @@ class _Builder:
         version = _child_text(self, node, "solidity_version")
         match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", version or text)
         if match:
-            self._floor = (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+            found = (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+            self._floor = found if self._floor is None else min(self._floor, found)
         self._event("sol_pragma", node, text)
         if ">=" in text and "<" not in text:
             self._event("sol_pragma_unbounded", node, text)
@@ -285,11 +280,16 @@ class _Builder:
         self._scopes.append(
             Scope(scope_id, ScopeKind.FUNCTION, name, parent_id=parent_scope, span=span)
         )
+        types = [self._type_of(param.annotation or "") for param in params]
         selector = ""
-        if name not in {"constructor", "fallback", "receive"} and params:
-            types = [_canonical_type(param.annotation or "") for param in params]
-            if all(types):
+        selector_status = "not_applicable"
+        errored = bool(getattr(node, "has_error", False))
+        if name not in {"constructor", "fallback", "receive"}:
+            if not errored and all(types):
                 selector = function_selector(f"{name}({','.join(types)})")
+                selector_status = "canonical"
+            else:
+                selector_status = "unresolved"
         self._entities.append(
             ParsedEntity(
                 entity_type="function",
@@ -321,9 +321,12 @@ class _Builder:
                 f"modifiers={','.join(modifiers)}",
                 f"override={str(override).lower()}",
                 f"selector={selector}",
-                f"payable={str(mutability == 'payable' or 'payable' in self._text(node)).lower()}",
+                f"selector_status={selector_status}",
+                f"params={','.join(types)}",
+                f"payable={str(mutability == 'payable').lower()}",
             ]
         )
+        param_types = {param.name: self._type_of(param.annotation or "") for param in params}
         self._event("sol_function", node, self._text(node), extra=extra)
         if override:
             self._event("sol_override", node, name, extra=f"contract={contract}")
@@ -343,6 +346,7 @@ class _Builder:
                 scope_id,
                 state,
                 direct[index + 1 : index + 3] if direct else [],
+                param_types,
             )
 
     def _statement(
@@ -353,22 +357,27 @@ class _Builder:
         scope_id: str,
         state: dict[str, str],
         following: list[object],
+        param_types: dict[str, str],
     ) -> None:
         text = self._text(statement)
         prefix = f"contract={contract}|function={function}"
         for node in _descendants(statement):
             kind = _type(node)
             if kind == "call_expression":
-                self._call(node, function, scope_id, prefix, text, following)
+                self._call(node, function, scope_id, prefix, text, following, param_types)
             elif kind in {"assignment_expression", "augmented_assignment_expression"}:
                 self._write(node, state, prefix)
             elif kind == "unchecked":
                 if re.search(r"[+\-*/]", text):
                     self._event("sol_unchecked", statement, text, extra=prefix)
+                else:
+                    self._event("sol_unchecked_empty", statement, text, extra=prefix)
             elif kind == "type_cast_expression":
                 cast = self._text(node)
                 if re.match(r"u?int(8|16|32|64|128)\s*\(", cast):
-                    self._event("sol_downcast", node, cast, extra=prefix)
+                    self._event("sol_downcast", node, cast, extra=prefix + _cast_guard(text))
+                if re.match(r"uint(256)?\s*\(", cast) and _signed_argument(cast, param_types):
+                    self._event("sol_sign_cast", node, cast, extra=prefix)
             elif kind == "for_statement":
                 self._event("sol_loop", node, self._text(node), extra=prefix)
             elif kind == "assembly_statement":
@@ -377,10 +386,34 @@ class _Builder:
                 self._event("sol_ecrecover", node, "ecrecover", extra=prefix)
             elif kind == "member_expression" and self._text(node) == "tx.origin":
                 self._event("sol_tx_origin", node, "tx.origin", extra=prefix)
+        for name in state:
+            if _reads_state(text, name):
+                self._event("sol_state_read", statement, text, extra=f"{prefix}|name={name}")
+        if re.search(r"\brequire\s*\(|\bif\s*\(", text) and re.search(
+            r"msg\.sender\s*==|==\s*msg\.sender|\bhasRole\s*\(", text
+        ):
+            self._event("sol_auth_guard", statement, text, extra=prefix)
+        if re.search(r"\brequire\s*\(", text):
+            self._event("sol_require", statement, text, extra=prefix)
+        if re.search(r"\bassert\s*\(", text):
+            self._event("sol_assert", statement, text, extra=prefix)
+        if re.search(r"\brevert\b", text):
+            self._event("sol_revert", statement, text, extra=prefix)
         if re.search(r"\w+\s*/\s*\w+\s*\*\s*\w+", text):
             self._event("sol_div_mul", statement, text, extra=prefix)
         if re.search(r"\b(throw|suicide)\b", text):
             self._event("sol_deprecated", statement, text, extra=prefix)
+        if re.search(r"\b(selfdestruct|suicide)\s*\(", text):
+            self._event("sol_selfdestruct", statement, text, extra=prefix)
+        if "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" in text.lower():
+            self._event("sol_eip1967", statement, text, extra=prefix)
+        if re.search(r"block\.(timestamp|prevrandao)|blockhash\s*\(", text):
+            deadline = bool(re.search(r"\b(require|if)\b", text) and re.search(r"[<>]", text))
+            sensitive = "keccak" in text or bool(
+                re.search(r"random|lottery|winner|raffle|seed", function, re.IGNORECASE)
+            )
+            if sensitive and not (deadline and "keccak" not in text):
+                self._event("sol_randomness", statement, text, extra=prefix)
 
     def _call(
         self,
@@ -390,17 +423,14 @@ class _Builder:
         prefix: str,
         statement: str,
         following: list[object],
+        param_types: dict[str, str],
     ) -> None:
         text = self._text(node)
         head = re.split(r"[\(\{]", text, maxsplit=1)[0].strip()
         member = head.split(".")[-1].strip() if "." in head else ""
         target = head[: -len(member)].rstrip(".") if member else head
-        checked = "require(" in statement or any(
-            "require(" in self._text(item)
-            or "if (" in self._text(item)
-            or "if(" in self._text(item)
-            for item in following
-        )
+        following_text = [self._text(item) for item in following]
+        checked, success = _call_is_checked(statement, text, following_text)
         span = span_from_ts_node(node)
         self._calls.append(
             CallSite(
@@ -413,13 +443,24 @@ class _Builder:
                 scope_id=scope_id,
             )
         )
-        extra = f"{prefix}|member={member}|target={target}|checked={str(checked).lower()}"
-        if member in _LOW_LEVEL:
+        extra = (
+            f"{prefix}|member={member}|target={target}|checked={str(checked).lower()}"
+            f"|success={success}"
+        )
+        if member in _LOW_LEVEL or member == "safeTransferFrom":
             self._event("sol_external_call", node, text, extra=extra + f"|kind={member}")
         if member in {"transfer", "transferFrom"} and "," in text:
             self._event("sol_erc20", node, text, extra=extra)
         if member == "delegatecall":
             self._event("sol_delegatecall", node, text, extra=extra)
+        if member == "safeTransferFrom":
+            self._event("sol_token_callback", node, text, extra=extra)
+        if member == "encodePacked":
+            packed = _packed_args(text, param_types)
+            if "keccak" in statement or "ecrecover" in statement:
+                self._event("sol_encode_packed", node, text, extra=f"{prefix}|{packed}")
+        if not member:
+            self._event("sol_direct_call", node, text, extra=f"{prefix}|name={target}")
 
     def _write(self, node: object, state: dict[str, str], prefix: str) -> None:
         text = self._text(node)
@@ -442,6 +483,20 @@ class _Builder:
         mutability = (
             "immutable" if "immutable" in text else "constant" if "constant" in text else "storage"
         )
+        type_text = text
+        for word in (
+            "public",
+            "private",
+            "internal",
+            "external",
+            "immutable",
+            "constant",
+            "override",
+        ):
+            type_text = re.sub(rf"\b{word}\b", "", type_text)
+        if name:
+            type_text = re.sub(rf"\b{re.escape(name)}\b", "", type_text, count=1)
+        type_text = type_text.replace(";", "").strip()
         if name:
             self._symbols.append(
                 Symbol(
@@ -456,7 +511,9 @@ class _Builder:
                 "sol_state",
                 node,
                 text,
-                extra=f"contract={contract}|name={name}|mutability={mutability}",
+                extra=(
+                    f"contract={contract}|name={name}|mutability={mutability}|type={type_text}"
+                ),
             )
         return name, mutability
 
@@ -478,7 +535,39 @@ class _Builder:
                 node_id=self._add_node(kind, name, node),
             )
         )
+        if kind == "struct":
+            signature = self._struct_signature(node)
+            if signature:
+                self._structs[name] = signature
         self._event(f"sol_{kind}", node, name, extra=f"contract={parent or ''}")
+
+    def _type_of(self, annotation: str) -> str:
+        compact = re.sub(r"\s+", "", annotation)
+        compact = re.sub(r"\b(memory|calldata|storage|indexed|payable)\b", "", compact)
+        array = re.fullmatch(r"(.+)\[(\d*)\]", compact)
+        if array:
+            base = self._type_of(array.group(1))
+            if not base:
+                return ""
+            return f"{base}[{array.group(2)}]"
+        canon = canonical_solidity_type(annotation)
+        if canon:
+            return canon
+        return self._structs.get(compact, "")
+
+    def _struct_signature(self, node: object) -> str:
+        members: list[str] = []
+        for child in _descendants(node):
+            if _type(child) != "struct_member":
+                continue
+            type_name = _child_text(self, child, "type_name")
+            canon = self._type_of(type_name)
+            if not canon:
+                return ""
+            members.append(canon)
+        if not members:
+            return ""
+        return "(" + ",".join(members) + ")"
 
     def _event(self, kind: str, node: object, text: str, extra: str = "") -> None:
         span = span_from_ts_node(node)
@@ -564,14 +653,90 @@ def _parent_is_return(param: object, function: object) -> bool:
 
 
 def _canonical_type(annotation: str) -> str:
-    text = (
-        annotation.strip().replace(" memory", "").replace(" calldata", "").replace(" storage", "")
-    )
-    if not text or " " in text or text.endswith("]"):
-        mapped = _PRIMITIVE.get(text)
-        return mapped or ""
-    if text in _PRIMITIVE:
-        return _PRIMITIVE[text]
-    if re.fullmatch(r"u?int\d+", text) or re.fullmatch(r"bytes\d+", text):
-        return text
-    return ""
+    return canonical_solidity_type(annotation)
+
+
+def _reads_state(text: str, name: str) -> bool:
+    if not re.search(rf"\b{re.escape(name)}\b", text):
+        return False
+    if re.search(rf"\b{re.escape(name)}\b\s*(\[[^\]]*\])?\s*(\+=|-=|\*=|/=)", text):
+        return True
+    parts = re.split(r"(?<![<>=!+\-*/])=(?!=)", text, maxsplit=1)
+    if len(parts) == 1:
+        return True
+    return bool(re.search(rf"\b{re.escape(name)}\b", parts[1]))
+
+
+def _call_is_checked(statement: str, call_text: str, following: list[str]) -> tuple[bool, str]:
+    """A call is checked only when its success value is actually tested."""
+    require_at = statement.find("require")
+    call_at = statement.find(call_text)
+    if require_at != -1 and call_at != -1 and require_at < call_at:
+        return True, ""
+    match = re.search(r"\(\s*bool\s+([A-Za-z_]\w*)|bool\s+([A-Za-z_]\w*)\s*=", statement)
+    name = ""
+    if match:
+        name = match.group(1) or match.group(2) or ""
+    if not name:
+        return False, ""
+    for text in following:
+        if text.strip().startswith("emit"):
+            continue
+        if re.search(r"\b(require|assert|if)\b", text) and re.search(rf"\b{name}\b", text):
+            return True, name
+    return False, name
+
+
+def _packed_args(call_text: str, param_types: dict[str, str]) -> str:
+    inner = call_text[call_text.find("(") + 1 : call_text.rfind(")")]
+    args = [part.strip() for part in _split_args(inner)]
+    dynamic = 0
+    static = 0
+    unknown = 0
+    for arg in args:
+        ident = arg.split(".")[-1].strip()
+        known = param_types.get(ident, "")
+        if known:
+            if is_dynamic_type(known):
+                dynamic += 1
+            else:
+                static += 1
+            continue
+        if re.fullmatch(r"0x[0-9a-fA-F]+|\d+|true|false|\"[^\"]*\"", arg):
+            static += 1
+        elif arg.startswith("string(") or arg.startswith("bytes(") or arg.endswith("]"):
+            dynamic += 1
+        else:
+            unknown += 1
+    return f"args={len(args)}|dynamic={dynamic}|static={static}|unknown={unknown}"
+
+
+def _split_args(text: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index])
+            start = index + 1
+    if text[start:].strip():
+        parts.append(text[start:])
+    return parts
+
+
+def _signed_argument(cast: str, param_types: dict[str, str]) -> bool:
+    inner = cast[cast.find("(") + 1 : cast.rfind(")")]
+    ident = inner.strip().split(".")[-1]
+    typed = param_types.get(ident, "")
+    if typed.startswith("int"):
+        return True
+    return bool(re.match(r"-\d", inner.strip()))
+
+
+def _cast_guard(statement: str) -> str:
+    guarded = "type(" in statement and ".max" in statement
+    return "|guarded=" + ("true" if guarded else "false")

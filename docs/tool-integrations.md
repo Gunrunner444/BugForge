@@ -79,10 +79,13 @@ Fuzzer limits are the stricter of `FuzzLimits` and `SafetyController`
 
 Discovery engines are registered on the plugin catalog and selected by
 `DiscoveryScheduler`. A missing binary returns `UNAVAILABLE` and `executed=false`.
-Slither and Echidna/Medusa are AGPL executables and are not vendored. Foundry
-is MIT/Apache. Wake is ISC and optional. Halmos is used only after a target is
-marked difficult to reach. `forge test` never adds `--fork-url`. Tool text is
-redacted and is not a verification decision.
+Licenses, for executables BugForge does not vendor: Slither AGPL, Echidna AGPL,
+Medusa AGPL, Halmos AGPL, Wake ISC, Foundry MIT/Apache. Halmos runs only after
+a target is marked difficult to reach. Foundry modes are `forge build`,
+`forge test`, `forge test --fuzz-runs`, `forge test` for an invariant name,
+and `forge coverage`. None of those commands receive `--fork-url`. A missing
+binary returns `UNAVAILABLE` and `executed=false`. Tool text is redacted and
+is not a verification decision.
 
 ## Manual evidence
 

@@ -1,5 +1,9 @@
 # Phase 27 — multi-engine discovery and Solidity
 
+Phase 28 hardens this loop and the Solidity rules. See
+[phase28-solidity-deep-analysis.md](phase28-solidity-deep-analysis.md).
+The status words below are unchanged.
+
 BugForge can turn a static location into a bounded research target, choose
 engines that are actually available, and store their output on the existing
 evidence graph. An engine result is not a verified finding.

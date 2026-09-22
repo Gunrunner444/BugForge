@@ -45,7 +45,16 @@ def solidity_security_rules() -> list[SecurityRule]:
         UnboundedLoopRule(),
         Erc20ReturnRule(),
         CallbackReentrancyRule(),
+        CrossFunctionReentrancyRule(),
         UpgradeAuthRule(),
+        EncodePackedRule(),
+        RandomnessRule(),
+        SignatureDomainRule(),
+        SelfdestructRule(),
+        SignedCastRule(),
+        StaleOracleRule(),
+        DonationInflationRule(),
+        FeeOnTransferRule(),
     ]
 
 
@@ -135,6 +144,7 @@ class UncheckedCallRule(_SolidityRule):
                 "call",
                 "delegatecall",
                 "staticcall",
+                "send",
             }:
                 if fields.get("checked") != "true":
                     found.append(
@@ -204,7 +214,7 @@ class MissingAuthorizationRule(_SolidityRule):
                 continue
             if fields.get("mutability") in {"view", "pure"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or "msg.sender" in event.text:
+            if _has_auth(fields.get("modifiers", "")) or _function_has_guard(graph, event):
                 continue
             found.append(
                 self._obs(
@@ -380,7 +390,9 @@ class UnboundedLoopRule(_SolidityRule):
                 continue
             if re.search(r"<\s*\d+", event.text):
                 continue
-            if not re.search(r"\.(call|transfer|send|delegatecall)\s*\(", event.text):
+            external = re.search(r"\.(call|transfer|send|delegatecall|safeTransferFrom)\s*[\(\{]", event.text)
+            stored = re.search(r"\b\w+\s*\[[^\]]+\]\s*(\+=|-=|=)", event.text)
+            if not external and not stored:
                 continue
             found.append(
                 self._obs(
@@ -415,6 +427,231 @@ class Erc20ReturnRule(_SolidityRule):
         return found
 
 
+class CrossFunctionReentrancyRule(_SolidityRule):
+    rule_id = "sol.cross_function_reentrancy"
+    vulnerability_class = VulnerabilityClass.REENTRANCY
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        writers = {
+            _fields(event.extra).get("function", "")
+            for event in graph.events
+            if event.kind == "sol_state_write"
+        }
+        found: list[SecurityObservation] = []
+        for function in _functions(graph):
+            if "nonreentrant" in _fields(function.extra).get("modifiers", "").lower():
+                continue
+            body = _inside(graph, function)
+            external = [
+                event
+                for event in body
+                if event.kind == "sol_external_call"
+                and _fields(event.extra).get("kind") in {"call", "delegatecall", "send", "transfer"}
+            ]
+            if not external or function.span is None:
+                continue
+            for call in body:
+                if call.kind != "sol_direct_call" or call.span is None:
+                    continue
+                callee = _fields(call.extra).get("name", "")
+                if callee not in writers or callee == _function_name(function):
+                    continue
+                external_span = external[0].span
+                if external_span is None or call.span.start_byte <= external_span.start_byte:
+                    continue
+                found.append(
+                    self._obs(
+                        graph,
+                        function,
+                        "Cross-function reentrancy",
+                        f"External call happens before {callee}, which writes state.",
+                    )
+                )
+                break
+        return found
+
+
+class EncodePackedRule(_SolidityRule):
+    rule_id = "sol.encode_packed"
+    vulnerability_class = VulnerabilityClass.SIGNATURE_FLAW
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for event in graph.events:
+            if event.kind != "sol_encode_packed":
+                continue
+            fields = _fields(event.extra)
+            dynamic = int(fields.get("dynamic") or "0")
+            unknown = int(fields.get("unknown") or "0")
+            if dynamic >= 2 or (dynamic >= 1 and unknown >= 1):
+                found.append(
+                    self._obs(
+                        graph,
+                        event,
+                        "Ambiguous abi.encodePacked",
+                        "Packed encoding concatenates more than one dynamic value.",
+                    )
+                )
+        return found
+
+
+class RandomnessRule(_SolidityRule):
+    rule_id = "sol.insecure_randomness"
+    vulnerability_class = VulnerabilityClass.WEAK_CRYPTOGRAPHY
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        return [
+            self._obs(
+                graph,
+                event,
+                "Predictable randomness",
+                "Block data is used as a randomness source. A deadline comparison is not this pattern.",
+            )
+            for event in graph.events
+            if event.kind == "sol_randomness"
+        ]
+
+
+class SignatureDomainRule(_SolidityRule):
+    rule_id = "sol.signature_domain"
+    vulnerability_class = VulnerabilityClass.SIGNATURE_FLAW
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for event in graph.events:
+            if event.kind != "sol_ecrecover":
+                continue
+            function = _enclosing_function(graph, event)
+            if function is None:
+                continue
+            if not re.search(r"\bnonce", function.text, re.IGNORECASE):
+                continue
+            if re.search(
+                r"DOMAIN_SEPARATOR|domainSeparator|chainid|chainId|address\(this\)|typehash|typeHash",
+                function.text,
+            ):
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    event,
+                    "Signature missing domain separation",
+                    "ecrecover is nonce-bound but not bound to a domain, chain, or this contract.",
+                )
+            )
+        return found
+
+
+class SelfdestructRule(_SolidityRule):
+    rule_id = "sol.selfdestruct"
+    vulnerability_class = VulnerabilityClass.DENIAL_OF_SERVICE
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        floor = next(
+            (item for item in graph.semantic_context if item.startswith("compiler_floor=")),
+            "compiler_floor=unknown",
+        )
+        return [
+            self._obs(
+                graph,
+                event,
+                "selfdestruct is version-sensitive",
+                f"{floor}. selfdestruct does not have the same effect on every EVM version.",
+            )
+            for event in graph.events
+            if event.kind == "sol_selfdestruct"
+        ]
+
+
+class SignedCastRule(_SolidityRule):
+    rule_id = "sol.signed_cast"
+    vulnerability_class = VulnerabilityClass.UNSAFE_ARITHMETIC
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for event in graph.events:
+            if event.kind != "sol_sign_cast":
+                continue
+            function = _enclosing_function(graph, event)
+            if function and "type(" in function.text and ".max" in function.text:
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    event,
+                    "Signed to unsigned conversion",
+                    "A signed value is cast to an unsigned type without a visible bound.",
+                )
+            )
+        return found
+
+
+class StaleOracleRule(_SolidityRule):
+    rule_id = "sol.stale_oracle"
+    vulnerability_class = VulnerabilityClass.UNSAFE_EXTERNAL_CALL
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for function in _functions(graph):
+            if not re.search(r"latestRoundData|latestAnswer", function.text):
+                continue
+            if re.search(r"updatedAt|answeredInRound", function.text):
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    function,
+                    "Unchecked oracle freshness",
+                    "An oracle answer is used without an updatedAt or round check.",
+                )
+            )
+        return found
+
+
+class DonationInflationRule(_SolidityRule):
+    rule_id = "sol.donation_inflation"
+    vulnerability_class = VulnerabilityClass.UNSAFE_ARITHMETIC
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for function in _functions(graph):
+            if "balanceOf(address(this))" not in function.text.replace(" ", ""):
+                continue
+            if "totalSupply" not in function.text or "/" not in function.text:
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    function,
+                    "Donation or inflation indicator",
+                    "Shares are derived from this contract's token balance and total supply.",
+                )
+            )
+        return found
+
+
+class FeeOnTransferRule(_SolidityRule):
+    rule_id = "sol.fee_on_transfer"
+    vulnerability_class = VulnerabilityClass.UNSAFE_EXTERNAL_CALL
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for function in _functions(graph):
+            if "balanceOf" not in function.text or ".transfer" not in function.text:
+                continue
+            if function.text.count("balanceOf") >= 2 or "balanceAfter" in function.text:
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    function,
+                    "Fee-on-transfer indicator",
+                    "A transfer is paired with one balanceOf read and no measured balance delta.",
+                )
+            )
+        return found
+
+
 class UpgradeAuthRule(_SolidityRule):
     rule_id = "sol.upgrade_auth"
     vulnerability_class = VulnerabilityClass.UNSAFE_PROXY
@@ -428,14 +665,14 @@ class UpgradeAuthRule(_SolidityRule):
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or "msg.sender" in event.text:
+            if _has_auth(fields.get("modifiers", "")) or _function_has_guard(graph, event):
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Upgradeable function without auth",
-                    f"{name} can be called without an authorization modifier.",
+                    f"{name} can be called without an authorization check.",
                 )
             )
         return found
@@ -456,15 +693,57 @@ def _reentrancy(
         if "nonreentrant" in modifiers:
             continue
         body_events = _inside(graph, function)
-        calls = [event.line for event in body_events if event.kind == "sol_external_call"]
-        writes = [event.line for event in body_events if event.kind == "sol_state_write"]
-        if calls and writes and max(writes) > min(calls):
-            title = "Callback reentrancy" if hooks_only else "State update after external call"
-            found.append(
-                rule._obs(
-                    graph, function, title, "An external call happens before a later state write."
+        calls = [
+            event
+            for event in body_events
+            if event.kind == "sol_external_call"
+            and _fields(event.extra).get("kind")
+            in {"call", "delegatecall", "transfer", "send", "safeTransferFrom"}
+            and event.span is not None
+        ]
+        writes = [
+            event
+            for event in body_events
+            if event.kind == "sol_state_write" and event.span is not None
+        ]
+        reads = [
+            event
+            for event in body_events
+            if event.kind == "sol_state_read" and event.span is not None
+        ]
+        for call in calls:
+            for write in writes:
+                assert call.span is not None and write.span is not None
+                if write.span.start_byte <= call.span.start_byte:
+                    continue
+                variable = _fields(write.extra).get("name", "")
+                read_before = any(
+                    _fields(read.extra).get("name") == variable
+                    and read.span is not None
+                    and read.span.start_byte < call.span.start_byte
+                    for read in reads
                 )
-            )
+                written_before = any(
+                    _fields(prior.extra).get("name") == variable
+                    and prior.span is not None
+                    and prior.span.start_byte < call.span.start_byte
+                    for prior in writes
+                )
+                used_in_call = bool(variable and variable in call.text)
+                if written_before and not read_before and not used_in_call:
+                    continue
+                if not read_before and not used_in_call and written_before:
+                    continue
+                title = "Callback reentrancy" if hooks_only else "State update after external call"
+                found.append(
+                    rule._obs(
+                        graph,
+                        function,
+                        title,
+                        f"{variable or 'state'} is written after an external call.",
+                    )
+                )
+                break
     return found
 
 
@@ -528,10 +807,27 @@ def _fields(extra: str) -> dict[str, str]:
 
 
 def _has_auth(modifiers: str) -> bool:
-    names = {item.strip().lower() for item in modifiers.split(",") if item.strip()}
+    names = set()
+    for item in modifiers.split(","):
+        token = re.split(r"[\(\s]", item.strip(), maxsplit=1)[0].lower()
+        if token:
+            names.add(token)
     return bool(
-        names & {"onlyowner", "onlyrole", "onlyadmin", "authorized", "requiresauth", "auth"}
+        names
+        & {
+            "onlyowner",
+            "onlyrole",
+            "onlyadmin",
+            "authorized",
+            "requiresauth",
+            "requiresrole",
+            "auth",
+        }
     )
+
+
+def _function_has_guard(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
+    return any(event.kind == "sol_auth_guard" for event in _inside(graph, function))
 
 
 def _checked(graph: SyntaxGraph) -> bool | None:

@@ -30,6 +30,17 @@ class Seed:
     language: str = ""
     target: str = ""
 
+    def snapshot(self) -> dict[str, str]:
+        return {
+            "seed_id": self.seed_id,
+            "source": self.source.value,
+            "reason": self.reason,
+            "content_sha256": self.content_sha256,
+            "preview": self.preview,
+            "language": self.language,
+            "target": self.target,
+        }
+
 
 @dataclass
 class DiscoveryCorpus:
@@ -45,8 +56,15 @@ class DiscoveryCorpus:
         target: str = "",
         seed_id: str = "",
     ) -> Seed:
+        digest = sha256(content.encode("utf-8")).hexdigest()
+        for existing in self.seeds:
+            if (
+                existing.content_sha256 == digest
+                and existing.source is source
+                and existing.target == target
+            ):
+                return existing
         redacted = redact_text(content)
-        digest = sha256(redacted.encode("utf-8")).hexdigest()
         ident = seed_id or f"seed_{len(self.seeds) + 1:03d}"
         seed = Seed(
             seed_id=ident,
@@ -62,3 +80,23 @@ class DiscoveryCorpus:
 
     def by_source(self, source: SeedSource) -> tuple[Seed, ...]:
         return tuple(seed for seed in self.seeds if seed.source is source)
+
+    def snapshot(self) -> dict[str, list[dict[str, str]]]:
+        return {"seeds": [seed.snapshot() for seed in self.seeds]}
+
+    @classmethod
+    def from_snapshot(cls, payload: dict[str, list[dict[str, str]]] | None) -> DiscoveryCorpus:
+        corpus = cls()
+        for raw in () if not payload else payload.get("seeds", []):
+            corpus.seeds.append(
+                Seed(
+                    seed_id=raw["seed_id"],
+                    source=SeedSource(raw["source"]),
+                    reason=raw.get("reason", ""),
+                    content_sha256=raw["content_sha256"],
+                    preview=raw.get("preview", ""),
+                    language=raw.get("language", ""),
+                    target=raw.get("target", ""),
+                )
+            )
+        return corpus

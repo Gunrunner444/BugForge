@@ -52,6 +52,7 @@ class DynamicResult:
     provenance: str = ""
     timestamp: str = ""
     oracle_explanation: str = ""
+    oracle_kind: str = ""
     findings: tuple[DynamicFinding, ...] = ()
     metadata: dict[str, str] = field(default_factory=dict)
 

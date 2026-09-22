@@ -32,4 +32,7 @@ class ResultStatus(StrEnum):
     NOT_IMPLEMENTED = "not_implemented"
     EXECUTED = "executed"
     INGESTED = "ingested"
+    INTERESTING = "interesting"
     FAILED = "failed"
+    TIMEOUT = "timeout"
+    TOOL_FAILURE = "tool_failure"

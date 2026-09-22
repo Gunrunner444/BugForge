@@ -17,6 +17,12 @@ class OracleKind(StrEnum):
     STATE_DELTA = "state_delta"
     DIFFERENTIAL = "differential"
     METAMORPHIC = "metamorphic"
+    EXPECTED_REVERT = "expected_revert"
+    UNEXPECTED_REVERT = "unexpected_revert"
+    PANIC = "panic"
+    OUT_OF_GAS = "out_of_gas"
+    TOOL_FAILURE = "tool_failure"
+    FUZZER_CRASH = "fuzzer_crash"
 
 
 @dataclass(frozen=True)
@@ -88,4 +94,38 @@ def evaluate_oracle(
                 "Two executions that should agree produced different outputs.",
             )
         return OracleVerdict(kind, False, "No differential or metamorphic mismatch was shown.")
+    if kind is OracleKind.EXPECTED_REVERT:
+        return OracleVerdict(
+            kind,
+            False,
+            "An expected revert is correct behavior, not a vulnerability.",
+        )
+    if kind is OracleKind.UNEXPECTED_REVERT:
+        if actual.strip():
+            return OracleVerdict(
+                kind, True, "Execution reverted although the call was expected to succeed."
+            )
+        return OracleVerdict(kind, False, "No unexpected revert was observed.")
+    if kind is OracleKind.PANIC:
+        if actual.strip():
+            return OracleVerdict(kind, True, f"Solidity panic: {actual.strip()[:180]}")
+        return OracleVerdict(kind, False, "No panic code was observed.")
+    if kind is OracleKind.OUT_OF_GAS:
+        if actual.strip():
+            return OracleVerdict(
+                kind,
+                True,
+                "Out of gas was observed. That is evidence of a gas boundary, not a confirmed bug.",
+            )
+        return OracleVerdict(kind, False, "Execution did not run out of gas.")
+    if kind is OracleKind.TOOL_FAILURE:
+        return OracleVerdict(
+            kind,
+            False,
+            "The tool or compiler failed. That is not a contract vulnerability.",
+        )
+    if kind is OracleKind.FUZZER_CRASH:
+        if crashed or actual.strip():
+            return OracleVerdict(kind, True, "The fuzzer reported a crashing input.")
+        return OracleVerdict(kind, False, "The fuzzer did not report a crash.")
     return OracleVerdict(kind, False, "Oracle kind was not recognized.")

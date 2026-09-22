@@ -90,21 +90,36 @@ class DiscoveryEngine(ABC):
         return blocked if blocked is not None else self._analyze_target(request)
 
     def start_campaign(self, request: AnalysisRequest) -> DynamicResult:
-        needed = EngineCapability.FUZZING
-        if EngineCapability.SYMBOLIC_EXECUTION in self.capabilities() and request.difficult:
-            needed = EngineCapability.SYMBOLIC_EXECUTION
-        elif (
-            EngineCapability.PROPERTY_TESTING in self.capabilities()
-            and EngineCapability.FUZZING not in self.capabilities()
-        ):
-            needed = EngineCapability.PROPERTY_TESTING
-        elif (
-            EngineCapability.TEST_EXECUTION in self.capabilities()
-            and EngineCapability.FUZZING not in self.capabilities()
-        ):
-            needed = EngineCapability.TEST_EXECUTION
+        needed = self._campaign_capability(request)
         blocked = self._guard(request, needed, "start_campaign")
         return blocked if blocked is not None else self._start_campaign(request)
+
+    def _campaign_capability(self, request: AnalysisRequest) -> EngineCapability:
+        caps = self.capabilities()
+        mode = request.extra.get("mode", "")
+        if mode == "build" and EngineCapability.BUILD in caps:
+            return EngineCapability.BUILD
+        if mode == "invariant" and EngineCapability.INVARIANT_TESTING in caps:
+            return EngineCapability.INVARIANT_TESTING
+        if mode == "fuzz" and EngineCapability.FUZZING in caps:
+            return EngineCapability.FUZZING
+        if mode == "coverage" and EngineCapability.COVERAGE_FEEDBACK in caps:
+            return EngineCapability.COVERAGE_FEEDBACK
+        if EngineCapability.SYMBOLIC_EXECUTION in caps and (
+            request.difficult or mode == "symbolic"
+        ):
+            return EngineCapability.SYMBOLIC_EXECUTION
+        if EngineCapability.TEST_EXECUTION in caps:
+            return EngineCapability.TEST_EXECUTION
+        if EngineCapability.PROPERTY_TESTING in caps:
+            return EngineCapability.PROPERTY_TESTING
+        if EngineCapability.INVARIANT_TESTING in caps:
+            return EngineCapability.INVARIANT_TESTING
+        if EngineCapability.FUZZING in caps:
+            return EngineCapability.FUZZING
+        if EngineCapability.SYMBOLIC_EXECUTION in caps:
+            return EngineCapability.SYMBOLIC_EXECUTION
+        return EngineCapability.FUZZING
 
     def collect_results(self, request: AnalysisRequest) -> DynamicResult:
         blocked = self._guard(request, EngineCapability.RESULTS_INGESTION, "collect_results")

@@ -26,6 +26,7 @@ class SchedulerFeedback:
     crashes: int = 0
     assertion_failures: int = 0
     rounds: int = 0
+    transitions: list[str] = field(default_factory=list)
 
 
 # Preferred order. Later engines run only when budget and preconditions allow.
@@ -97,7 +98,15 @@ class DiscoveryScheduler:
         if result.coverage.get("new") == "true":
             self.feedback.new_coverage = True
             self.feedback.stagnating = False
-        elif result.executed and not result.coverage.get("new"):
+            if result.minimized_input:
+                self.corpus.add(
+                    result.minimized_input,
+                    source=SeedSource.COVERAGE,
+                    reason="coverage-increasing input",
+                    language=request.language,
+                    target=request.target,
+                )
+        elif result.executed and result.coverage.get("new") == "false":
             self.feedback.stagnating = True
         if result.crash:
             self.feedback.crashes += 1
@@ -119,8 +128,11 @@ class DiscoveryScheduler:
                 language=request.language,
                 target=request.target,
             )
-        if self.feedback.rounds >= self.max_rounds and not self.feedback.new_coverage:
-            self.feedback.stagnating = True
+        if (
+            self.feedback.rounds >= self.max_rounds
+            and self.feedback.stagnating
+            and not self.feedback.new_coverage
+        ):
             self.feedback.difficult = True
 
     def target_from_static(
@@ -158,6 +170,22 @@ class DiscoveryScheduler:
                 f"does not support {request.language}",
                 "",
             )
+        if engine.engine_id == "wake" and request.extra.get("include_wake") != "true":
+            return ScheduleDecision(
+                engine.engine_id,
+                "skip",
+                "Wake stays optional unless this round asks for it",
+                EngineCapability.STATIC_ANALYSIS.value,
+            )
+        if engine.engine_id in {"echidna", "medusa"} and not (
+            request.function or request.contract or request.has_harness
+        ):
+            return ScheduleDecision(
+                engine.engine_id,
+                "skip",
+                "property and coverage fuzzing wait for a contract or harness target",
+                EngineCapability.PROPERTY_TESTING.value,
+            )
         if engine.engine_id == "halmos" and not (request.difficult or self.feedback.difficult):
             return ScheduleDecision(
                 engine.engine_id,
@@ -185,6 +213,92 @@ class DiscoveryScheduler:
             )
         capability = next(iter(engine.capabilities()), EngineCapability.PLANNING_ONLY)
         return ScheduleDecision(engine.engine_id, "run", "selected", capability.value)
+
+
+    def plan_followup(self, request: AnalysisRequest) -> list[ScheduleDecision]:
+        """Choose the next complementary engine from what the last round learned."""
+        by_id = {engine.engine_id: engine for engine in self.engines}
+        decisions: list[ScheduleDecision] = []
+        halmos_already = any(item.startswith("halmos:run") for item in self.feedback.transitions)
+        if self.feedback.difficult and "halmos" in by_id and not halmos_already:
+            decision = self._decide(by_id["halmos"], request)
+            if decision.action == "skip" and self.feedback.difficult:
+                decision = ScheduleDecision(
+                    "halmos",
+                    "run" if by_id["halmos"].availability() is EngineAvailability.AVAILABLE else "skip",
+                    "coverage stalled, so symbolic execution is justified",
+                    EngineCapability.SYMBOLIC_EXECUTION.value,
+                )
+            decisions.append(decision)
+        if self.corpus.by_source(SeedSource.SYMBOLIC_EXECUTION) and "foundry" in by_id:
+            decisions.append(
+                ScheduleDecision(
+                    "foundry",
+                    "run" if by_id["foundry"].availability() is EngineAvailability.AVAILABLE else "skip",
+                    "symbolic counterexample becomes a fuzz seed",
+                    EngineCapability.FUZZING.value,
+                )
+            )
+        elif self.feedback.stagnating and request.function and "medusa" in by_id:
+            decisions.append(
+                self._decide(
+                    by_id["medusa"],
+                    AnalysisRequest(
+                        repo_root=request.repo_root,
+                        language=request.language,
+                        target=request.target,
+                        files=request.files,
+                        contract=request.contract,
+                        function=request.function,
+                        source_file=request.source_file,
+                        difficult=request.difficult,
+                        framework=request.framework,
+                        has_harness=True,
+                        corpus=self.corpus,
+                        extra={**request.extra, "mode": "fuzz"},
+                    ),
+                )
+            )
+        for decision in decisions:
+            self.feedback.transitions.append(
+                f"{decision.engine_id}:{decision.action}:{decision.reason}"
+            )
+        return decisions
+
+    def run_followup(self, request: AnalysisRequest) -> list[DynamicResult]:
+        results: list[DynamicResult] = []
+        by_id = {engine.engine_id: engine for engine in self.engines}
+        for decision in self.plan_followup(request):
+            if decision.action != "run":
+                continue
+            engine = by_id[decision.engine_id]
+            extra = dict(request.extra)
+            if decision.engine_id == "foundry" and self.corpus.by_source(SeedSource.SYMBOLIC_EXECUTION):
+                extra["mode"] = "fuzz"
+            elif decision.engine_id == "medusa":
+                extra["mode"] = "fuzz"
+            targeted = AnalysisRequest(
+                repo_root=request.repo_root,
+                language=request.language,
+                target=request.target,
+                files=request.files,
+                contract=request.contract,
+                function=request.function,
+                source_file=request.source_file,
+                difficult=True if decision.engine_id == "halmos" else request.difficult,
+                framework=request.framework,
+                has_harness=request.has_harness,
+                match_test=request.match_test or request.function,
+                corpus=self.corpus,
+                extra=extra,
+            )
+            if EngineCapability.STATIC_ANALYSIS in engine.capabilities() and decision.engine_id != "halmos":
+                result = engine.analyze_target(targeted)
+            else:
+                result = engine.start_campaign(targeted)
+            results.append(result)
+            self.note_result(result, targeted)
+        return results
 
 
 def campaign_stopped(results: list[DynamicResult], *, limit: int) -> bool:

@@ -151,3 +151,8 @@ callee graphs are not exported as summaries. Same-file taint that stops at
   those vulnerability classes.
 * AI context is advisory and cannot verify, approve, change scope, or submit
   HackerOne reports.
+* Solidity uses the same `SyntaxGraph`, not a second taint engine. Its
+  security rules are structural and version-aware. They stay potential until
+  the verification authority accepts independent evidence. Tuple types that
+  Tree-sitter cannot parse do not get a selector. Cross-file inheritance is
+  linked only when the base name is unique.

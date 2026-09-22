@@ -619,7 +619,7 @@ def test_evidence_chain_and_invariants(tmp_path: Path) -> None:
     source = "pragma solidity ^0.8.20; contract T { uint totalSupply; address owner; function initialize() external {} }"
     syntax = parse_source("solidity", tmp_path / "T.sol", source)
     names = {item.name for item in suggest_invariants(syntax)}
-    assert "supply_conservation" in names
+    assert "supply_conservation" not in names
     assert "initialize_once" in names
     assert all(
         item.valid is False and item.status == "candidate" for item in suggest_invariants(syntax)

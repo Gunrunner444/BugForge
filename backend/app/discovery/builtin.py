@@ -20,7 +20,12 @@ class BugforgeStaticEngine(DiscoveryEngine):
 
     @property
     def supported_languages(self) -> frozenset[str]:
-        return frozenset({"solidity", "python", "go", "java", "javascript", "typescript"})
+        from app.plugins import get_plugin_catalog
+
+        return frozenset(
+            adapter.language_id
+            for adapter in get_plugin_catalog().languages.security_analyzers()
+        )
 
     def capabilities(self) -> frozenset[EngineCapability]:
         return frozenset({EngineCapability.STATIC_ANALYSIS, EngineCapability.RESULTS_INGESTION})
@@ -34,10 +39,7 @@ class BugforgeStaticEngine(DiscoveryEngine):
     def _analyze_target(self, request: AnalysisRequest) -> DynamicResult:
         from app.security.engine import SecurityAnalysisEngine
 
-        files = [request.repo_root / path for path in request.files]
-        files = [path for path in files if path.is_file()]
-        if not files:
-            files = list(request.repo_root.rglob("*.sol"))[:40]
+        files = _files_for_request(request)
         result = SecurityAnalysisEngine().analyze_repository(request.repo_root, files)
         findings = tuple(
             DynamicFinding(
@@ -72,3 +74,50 @@ class BugforgeStaticEngine(DiscoveryEngine):
 
 def foundry_project(root: Path) -> bool:
     return (root / "foundry.toml").is_file()
+
+
+def _files_for_request(request: AnalysisRequest) -> list[Path]:
+    """Collect files for the requested language. A Python request never scans Solidity."""
+    from app.plugins import get_plugin_catalog
+    from app.plugins.errors import AdapterNotFoundError
+
+    explicit = [request.repo_root / path for path in request.files]
+    explicit = [path for path in explicit if path.is_file()]
+    if explicit:
+        if not request.language:
+            return explicit
+        return [path for path in explicit if _matches_language(path, request.language)]
+    languages = get_plugin_catalog().languages
+    suffixes: set[str] = set()
+    if request.language:
+        try:
+            adapter = languages.get(request.language)
+        except (KeyError, AdapterNotFoundError):
+            return []
+        suffixes.update(item.lower() for item in adapter.file_extensions)
+        return _walk(request.repo_root, suffixes)
+    for adapter in languages.security_analyzers():
+        suffixes.update(item.lower() for item in adapter.file_extensions)
+    return _walk(request.repo_root, suffixes)
+
+
+def _matches_language(path: Path, language: str) -> bool:
+    from app.plugins import get_plugin_catalog
+    from app.plugins.errors import AdapterNotFoundError
+
+    try:
+        adapter = get_plugin_catalog().languages.get(language)
+    except (KeyError, AdapterNotFoundError):
+        return False
+    return path.suffix.lower() in {item.lower() for item in adapter.file_extensions}
+
+
+def _walk(root: Path, extensions: set[str]) -> list[Path]:
+    if not extensions or not root.exists():
+        return []
+    found = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in extensions and ".git" not in path.parts
+    ]
+    return found[:40]
