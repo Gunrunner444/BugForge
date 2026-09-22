@@ -1,23 +1,30 @@
-"""Attach trusted evidence to persisted findings and apply domain transitions.
+"""Production security-finding lifecycle.
 
-Correlation answers whether evidence belongs to a finding. Verification is a
-separate domain transition. This service never assigns ``FindingStatus``
-directly and never treats model text as independent evidence.
+Static scans enter through :meth:`FindingLifecycleService.persist_static_scan`.
+Later evidence and every status change enter through
+:meth:`record_collected_evidence` or :meth:`attach_evidence`. Those methods
+correlate, optionally call a domain transition, and merge the result onto the
+persisted row. They do not assign ``FindingStatus`` directly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from app.domain.evidence import Evidence
-from app.domain.findings import SecurityFinding
-from app.repositories.security_finding_repo import SecurityFindingRepository, to_domain
-from app.security.evidence_correlation import (
-    correlate_finding,
-    evidence_contradicts,
+from app.adapters.evidence.attribution import (
+    ServerAttribution,
+    stamp_server_attribution,
+    strip_client_attribution,
 )
+from app.adapters.evidence.base import EvidenceCollector
+from app.domain.evidence import Evidence, EvidenceSource
+from app.domain.findings import SecurityFinding
+from app.models.security_finding import DBSecurityFinding
+from app.repositories.security_finding_repo import SecurityFindingRepository, to_domain
+from app.security.evidence_correlation import correlate_finding
+from app.security.lifecycle_rules import independent_verification_items, positive_reproduction
 
 
 class LifecycleTransition(StrEnum):
@@ -33,9 +40,25 @@ class FindingNotFoundError(LookupError):
     """No persisted security finding matches the requested id."""
 
 
+class FindingProjectMismatchError(LookupError):
+    """The finding exists, but it does not belong to the supplied project."""
+
+
 class FindingLifecycleService:
     def __init__(self, repo: SecurityFindingRepository) -> None:
         self._repo = repo
+
+    async def persist_static_scan(
+        self,
+        findings: list[SecurityFinding],
+        *,
+        project_id: UUID | None,
+        analysis_id: UUID | None,
+    ) -> list[DBSecurityFinding]:
+        """Persist potential or corroborated scan output. This is not verification."""
+        return await self._repo.bulk_create(
+            findings, project_id=project_id, analysis_id=analysis_id
+        )
 
     async def attach_evidence(
         self,
@@ -45,30 +68,114 @@ class FindingLifecycleService:
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
         transition: LifecycleTransition = LifecycleTransition.NONE,
+        trusted_server_stamp: bool = False,
     ) -> SecurityFinding:
-        """Correlate matching evidence, optionally transition, then persist.
+        """Correlate evidence that a server workflow already built.
 
-        ``transition`` must be requested explicitly. Correlation alone never
-        corroborates, reproduces, verifies, accepts, or rejects a finding.
+        Client-forged ``attribution=server`` stamps are removed unless
+        ``trusted_server_stamp`` is set by :meth:`record_collected_evidence`.
         """
-        finding = await self._repo.get_domain(finding_id)
-        if finding is None:
+        row, finding = await self._load_for_update(finding_id, project_id=project_id)
+        prepared = [
+            item if trusted_server_stamp else strip_client_attribution(item) for item in evidence
+        ]
+        return await self._apply(
+            row,
+            finding,
+            prepared,
+            project_id=row.project_id,
+            analysis_id=analysis_id,
+            transition=transition,
+        )
+
+    async def record_collected_evidence(
+        self,
+        finding_id: UUID,
+        source: EvidenceSource,
+        collectors: Sequence[EvidenceCollector],
+        *,
+        execution_id: str | None = None,
+        project_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        transition: LifecycleTransition = LifecycleTransition.NONE,
+    ) -> SecurityFinding:
+        """Collect evidence for one loaded finding and stamp its identity.
+
+        The execution id is created here when the caller does not already have
+        one. Collector output does not keep a client-supplied finding key.
+        """
+        row, finding = await self._load_for_update(finding_id, project_id=project_id)
+        attribution = ServerAttribution.from_finding(finding, execution_id or uuid4().hex)
+        extra = dict(source.extra)
+        extra["attribution"] = attribution
+        source.extra = extra
+        collected: list[Evidence] = []
+        for collector in collectors:
+            collected.extend(collector.collect(source))
+        stamped: list[Evidence] = []
+        for item in collected:
+            attributed = stamp_server_attribution(strip_client_attribution(item), attribution)
+            if attributed is not None:
+                stamped.append(attributed)
+        return await self._apply(
+            row,
+            finding,
+            stamped,
+            project_id=row.project_id,
+            analysis_id=analysis_id,
+            transition=transition,
+        )
+
+    async def _load_for_update(
+        self, finding_id: UUID, *, project_id: UUID | None
+    ) -> tuple[DBSecurityFinding, SecurityFinding]:
+        row = await self._repo.get_for_update(finding_id)
+        if row is None:
             raise FindingNotFoundError(str(finding_id))
+        if project_id is not None and row.project_id != project_id:
+            raise FindingProjectMismatchError(str(finding_id))
+        return row, to_domain(row)
+
+    async def _apply(
+        self,
+        row: DBSecurityFinding,
+        finding: SecurityFinding,
+        evidence: Sequence[Evidence],
+        *,
+        project_id: UUID | None,
+        analysis_id: UUID | None,
+        transition: LifecycleTransition,
+    ) -> SecurityFinding:
         peers = await self._peers(finding, project_id=project_id)
         updated = correlate_finding(finding, evidence, peers=peers)
         if transition is not LifecycleTransition.NONE:
-            updated = apply_lifecycle_transition(updated, transition)
-        persisted = await self._repo.save_domain(
+            try:
+                updated = apply_lifecycle_transition(updated, transition)
+            except ValueError:
+                # Keep attributed evidence, including contradictions and failed
+                # attempts. The status change is refused by the domain rule.
+                await self._repo.save_lifecycle(
+                    updated, project_id=project_id, analysis_id=analysis_id
+                )
+                raise
+        persisted = await self._repo.save_lifecycle(
             updated, project_id=project_id, analysis_id=analysis_id
         )
+        del row
         return to_domain(persisted)
 
     async def _peers(
         self, finding: SecurityFinding, *, project_id: UUID | None
     ) -> tuple[SecurityFinding, ...]:
-        if project_id is None:
+        loc = finding.source_location
+        if project_id is None or loc is None or not loc.file_path:
             return ()
-        rows, _total = await self._repo.list_for_project(project_id)
+        rows = await self._repo.competing_findings(
+            project_id,
+            file_path=loc.file_path,
+            line=loc.line,
+            vulnerability_class=finding.vulnerability_class,
+        )
         return tuple(to_domain(row) for row in rows if row.id != finding.id)
 
 
@@ -79,26 +186,22 @@ def apply_lifecycle_transition(
     if transition is LifecycleTransition.CORROBORATE:
         return finding.corroborate()
     if transition is LifecycleTransition.REPRODUCE:
-        _require_supporting_runtime(finding, action="reproduce")
+        if not any(positive_reproduction(item) for item in finding.evidence.items):
+            raise ValueError(
+                "Reproduction requires a successful reproduction record. "
+                "Failed tests, logs, screenshots, generated tests, AI text, "
+                "and contradictory results are not reproduction."
+            )
         return finding.reproduce()
     if transition is LifecycleTransition.VERIFY:
-        _require_supporting_runtime(finding, action="verify")
+        if not independent_verification_items(finding):
+            raise ValueError(
+                "Verification requires an independent observation. "
+                "The reproduction record alone cannot be reused as verification."
+            )
         return finding.verify()
     if transition is LifecycleTransition.HUMAN_ACCEPT:
         return finding.human_accept()
     if transition is LifecycleTransition.REJECT:
         return finding.reject()
     return finding
-
-
-def _require_supporting_runtime(finding: SecurityFinding, *, action: str) -> None:
-    supporting = [
-        item
-        for item in finding.evidence.items
-        if item.contributes_to_verification and not evidence_contradicts(item)
-    ]
-    if not supporting:
-        raise ValueError(
-            f"Cannot {action} a finding without supporting independent evidence. "
-            "Contradictory, AI, static, and generated-test artifacts are not enough."
-        )

@@ -15,20 +15,27 @@ Repository
   → human review
 ```
 
-`FindingLifecycleService` is the orchestration path. It loads a persisted
-finding, correlates trusted `Evidence` onto that exact finding, optionally
-calls a domain method, and saves the complete object.
+`FindingLifecycleService` is the production path. The security analyze API
+and `AnalysisService` persist the initial static finding through
+`persist_static_scan`. Later evidence uses `record_collected_evidence` or
+`attach_evidence`, which correlate, optionally call a domain method, and
+merge the complete finding. Phase 22 is the integration of that service;
+this document's correlation order is tightened there.
 
 ## Correlation is not verification
 
 `correlate_finding` answers: does this evidence belong to this finding?
 
-It prefers, in order:
+Phase 22 prefers, in order:
 
-1. exact `finding_key`
-2. exact file plus vulnerability class plus line
-3. exact sink/source when those are present
-4. otherwise reject as ambiguous
+1. trusted server finding identity stamped from the loaded finding
+2. a server execution id already stored on that finding
+3. exact normalized file, line, and vulnerability identity
+4. exact sink or source when those facts are present
+5. otherwise reject as ambiguous
+
+An untrusted client `finding_key` does not match by itself. Runtime evidence
+without a source path matches only through the server stamp.
 
 It does not attach evidence merely because the file, class, sink name, or
 project matches. Competing findings on the same line leave the evidence

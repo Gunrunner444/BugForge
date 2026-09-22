@@ -7,10 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.findings import SecurityFinding
+from app.domain.evidence import EvidenceBundle
+from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding
+from app.domain.security import EvidenceTier
 from app.models.security_finding import DBSecurityFinding
 from app.repositories.finding_identity import intelligence_with_column_key
 from app.schemas.security import SecurityFindingResponse
+from app.security.evidence_correlation import evidence_identity
 
 
 class SecurityFindingRepository:
@@ -54,22 +57,14 @@ class SecurityFindingRepository:
         project_id: UUID | None,
         analysis_id: UUID | None = None,
     ) -> DBSecurityFinding:
-        """Persist a complete domain finding after an explicit lifecycle update.
+        """Persist lifecycle state through the same merge as ``save_lifecycle``.
 
-        Unlike scan reconciliation this writes status, evidence, and review
-        state from the domain object. ``analysis_id`` is left unchanged unless
-        a new analysis is supplied.
+        There is no overwrite path that can drop evidence or downgrade status.
+        ``analysis_id`` is left unchanged unless a new analysis is supplied.
         """
-        row = await self.get(finding.id)
-        if row is None and project_id is not None and finding.finding_key:
-            row = await self.get_by_key(project_id, finding.finding_key)
-        keep_analysis = row.analysis_id if row is not None and analysis_id is None else analysis_id
-        incoming = _to_row(finding, project_id=project_id, analysis_id=keep_analysis)
-        if row is None:
-            return await self._add_row(incoming, finding, project_id=project_id)
-        _overwrite_row(row, incoming, replace_analysis=analysis_id is not None)
-        await self._session.flush()
-        return row
+        return await self.save_lifecycle(
+            finding, project_id=project_id, analysis_id=analysis_id
+        )
 
     async def list_for_project(
         self, project_id: UUID, *, offset: int = 0, limit: int = 100
@@ -97,6 +92,62 @@ class SecurityFindingRepository:
 
     async def get(self, finding_id: UUID) -> DBSecurityFinding | None:
         return await self._session.get(DBSecurityFinding, finding_id)
+
+    async def get_for_update(self, finding_id: UUID) -> DBSecurityFinding | None:
+        """Lock the finding row on PostgreSQL. SQLite has no row lock."""
+        stmt = select(DBSecurityFinding).where(DBSecurityFinding.id == finding_id)
+        connection = await self._session.connection()
+        if connection.dialect.name == "postgresql":
+            stmt = stmt.with_for_update()
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
+    async def competing_findings(
+        self,
+        project_id: UUID,
+        *,
+        file_path: str,
+        line: int | None,
+        vulnerability_class: str | None,
+    ) -> list[DBSecurityFinding]:
+        """Every finding that could compete for evidence at this location.
+
+        This is not the paginated project listing. A competitor past the first
+        page still participates.
+        """
+        stmt = select(DBSecurityFinding).where(DBSecurityFinding.project_id == project_id)
+        if vulnerability_class:
+            stmt = stmt.where(DBSecurityFinding.vulnerability_class == vulnerability_class)
+        if line is not None:
+            stmt = stmt.where(DBSecurityFinding.line == line)
+        result = await self._session.execute(stmt)
+        return [
+            row
+            for row in result.scalars().all()
+            if row.file_path and _same_stored_path(row.file_path, file_path)
+        ]
+
+    async def save_lifecycle(
+        self,
+        finding: SecurityFinding,
+        *,
+        project_id: UUID | None,
+        analysis_id: UUID | None = None,
+    ) -> DBSecurityFinding:
+        """Merge evidence onto the locked row. Do not last-write-wins evidence away."""
+        row = await self.get_for_update(finding.id)
+        if row is None and project_id is not None and finding.finding_key:
+            row = await self.get_by_key(project_id, finding.finding_key)
+        if row is None:
+            created = _to_row(finding, project_id=project_id, analysis_id=analysis_id)
+            return await self._add_row(created, finding, project_id=project_id)
+        current = to_domain(row)
+        merged = merge_lifecycle_state(current, finding)
+        kept_analysis = row.analysis_id if analysis_id is None else analysis_id
+        incoming = _to_row(merged, project_id=row.project_id, analysis_id=kept_analysis)
+        _overwrite_row(row, incoming, replace_analysis=analysis_id is not None)
+        await self._session.flush()
+        return row
 
     async def get_by_key(self, project_id: UUID, finding_key: str) -> DBSecurityFinding | None:
         result = await self._session.execute(
@@ -449,6 +500,88 @@ def _parse_evidence_list(raw: str) -> list[dict[str, object]]:
     if not isinstance(loaded, list):
         return []
     return [item for item in loaded if isinstance(item, dict)]
+
+
+def merge_lifecycle_state(current: SecurityFinding, incoming: SecurityFinding) -> SecurityFinding:
+    """Union evidence and keep the stronger lifecycle state.
+
+    A stale writer that still holds ``POTENTIAL`` cannot erase reproduction
+    evidence or a verified status saved by an earlier writer.
+    """
+    from dataclasses import replace
+
+    seen: set[tuple[str, ...]] = set()
+    items = []
+    for item in (*current.evidence.items, *incoming.evidence.items):
+        key = evidence_identity(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(item)
+    status = _prefer_status(current.status, incoming.status)
+    review = incoming.human_review_state
+    if (
+        current.human_review_state is not HumanReviewState.UNREVIEWED
+        and incoming.human_review_state is HumanReviewState.UNREVIEWED
+    ):
+        review = current.human_review_state
+    if status is FindingStatus.HUMAN_ACCEPTED:
+        review = HumanReviewState.ACCEPTED
+    return replace(
+        incoming,
+        id=current.id,
+        finding_key=current.finding_key or incoming.finding_key,
+        evidence=EvidenceBundle.from_items(items),
+        status=status,
+        human_review_state=review,
+        evidence_tier=_tier_for(status, current=current, incoming=incoming),
+        created_at=current.created_at,
+    )
+
+
+_STATUS_RANK = {
+    FindingStatus.POTENTIAL: 0,
+    FindingStatus.CORROBORATED: 1,
+    FindingStatus.REPRODUCED: 2,
+    FindingStatus.VERIFIED: 3,
+    FindingStatus.HUMAN_ACCEPTED: 4,
+}
+
+
+def _prefer_status(current: FindingStatus, incoming: FindingStatus) -> FindingStatus:
+    if current is FindingStatus.REJECTED:
+        return FindingStatus.REJECTED
+    if incoming is FindingStatus.REJECTED:
+        return FindingStatus.REJECTED
+    if _STATUS_RANK[incoming] >= _STATUS_RANK[current]:
+        return incoming
+    return current
+
+
+def _tier_for(
+    status: FindingStatus, *, current: SecurityFinding, incoming: SecurityFinding
+) -> EvidenceTier:
+    if status is FindingStatus.REJECTED:
+        return current.evidence_tier
+    if status is incoming.status:
+        return incoming.evidence_tier
+    if status in {FindingStatus.VERIFIED, FindingStatus.HUMAN_ACCEPTED}:
+        return EvidenceTier.VERIFIED
+    if status is FindingStatus.REPRODUCED:
+        return EvidenceTier.REPRODUCED
+    if status is FindingStatus.CORROBORATED:
+        return EvidenceTier.CORROBORATED
+    return current.evidence_tier
+
+
+def _same_stored_path(left: str, right: str) -> bool:
+    norm_left = left.replace("\\", "/").lstrip("./")
+    norm_right = right.replace("\\", "/").lstrip("./")
+    return (
+        norm_left == norm_right
+        or norm_left.endswith("/" + norm_right)
+        or norm_right.endswith("/" + norm_left)
+    )
 
 
 def to_domain(row: DBSecurityFinding) -> SecurityFinding:

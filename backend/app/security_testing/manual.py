@@ -25,8 +25,15 @@ class ManualObservation:
 
 class ManualEvidenceCollector:
     def collect(
-        self, notes: list[ManualObservation], *, source: str = "researcher"
+        self,
+        notes: list[ManualObservation],
+        *,
+        source: str = "researcher",
+        attribution: object | None = None,
     ) -> EvidenceBundle:
+        from app.adapters.evidence.attribution import ServerAttribution, attribution_metadata
+
+        server = attribution_metadata(attribution) if isinstance(attribution, ServerAttribution) else {}
         items: list[Evidence] = []
         for note in notes:
             items.append(
@@ -49,17 +56,9 @@ class ManualEvidenceCollector:
                         )
                     ),
                     artifact_path=note.screenshot_path,
+                    metadata=dict(server),
                 )
             )
-            if note.reproduction_notes:
-                items.append(
-                    Evidence(
-                        kind=EvidenceKind.REPRODUCTION,
-                        source=source,
-                        summary=redact_text(note.reproduction_notes)[:200] or "Reproduction notes",
-                        details=redact_text(note.reproduction_notes),
-                    )
-                )
             if note.screenshot_path:
                 items.append(
                     Evidence(
@@ -67,6 +66,7 @@ class ManualEvidenceCollector:
                         source=source,
                         summary="Researcher screenshot",
                         artifact_path=note.screenshot_path,
+                        metadata=dict(server),
                     )
                 )
             if note.request is not None:
@@ -77,6 +77,7 @@ class ManualEvidenceCollector:
                         source=source,
                         summary=f"{redacted.method} {redacted.url}",
                         details=redacted.request_body or "",
+                        metadata=dict(server),
                     )
                 )
                 if redacted.response_status is not None:
@@ -86,6 +87,7 @@ class ManualEvidenceCollector:
                             source=source,
                             summary=f"status {redacted.response_status}",
                             details=(redacted.response_body or "")[:2000],
+                            metadata=dict(server),
                         )
                     )
         return EvidenceBundle.from_items(items)

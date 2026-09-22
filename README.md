@@ -42,6 +42,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 19 | Go, Java, and Kotlin local interprocedural imports | ✅ Implemented |
 | Phase 20 | Adversarial semantic checks and shadowed-builtin handling | ✅ Implemented |
 | Phase 21 | Evidence correlation and finding lifecycle integration | ✅ Implemented |
+| Phase 22 | Production security lifecycle and evidence integrity | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -73,7 +74,9 @@ Lua, and Elixir remain detection-only. See
 [docs/phase17-incremental-analysis.md](docs/phase17-incremental-analysis.md), and
 [docs/phase18-finding-intelligence.md](docs/phase18-finding-intelligence.md), and
 [docs/phase19-polyglot-interprocedural.md](docs/phase19-polyglot-interprocedural.md), and
-[docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md).
+[docs/phase20-adversarial-validation.md](docs/phase20-adversarial-validation.md), and
+[docs/phase21-evidence-lifecycle.md](docs/phase21-evidence-lifecycle.md), and
+[docs/phase22-production-security-lifecycle.md](docs/phase22-production-security-lifecycle.md).
 
 Phase 2 adds:
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +43,15 @@ class SecurityFindingResponse(BaseModel):
     parser_completeness: str = ""
     evidence_summary: str = ""
     related_group: str = ""
+    human_review_state: str = "unreviewed"
+
+
+class SecurityLifecycleRequest(BaseModel):
+    """Operator transition. Extra fields such as ``status`` are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["corroborate", "reproduce", "verify", "human_accept", "reject"]
 
 
 class PaginatedSecurityFindingsResponse(BaseModel):

@@ -11,11 +11,11 @@ Findings from the security engine now carry:
 - `parser_completeness` and `analysis_incomplete`
 - `evidence_summary`, which states that the result is static and not verified
 
-`finding_key` does not include the line number or a parser byte offset. Inserting blank lines above a sink keeps the key. Two different sink texts, fields, or callee sinks stay separate findings. Two observations of the same sink text, source, and occurrence still collapse into one finding. Distinct identical call sites stay separate by `sink_occurrence`, the ordinal of the same callee and argument structure in that scope. A harmless `eval("constant")` does not change the key of a later tainted `eval(...)`. Inserting another identical finding before existing ones does shift later ordinals. Distinct vulnerabilities are not merged just because they share a file.
+`finding_key` does not include the line number or a parser byte offset. Inserting blank lines above a sink keeps the key. Whitespace-only changes inside the same argument text keep the key. Two different sink texts, fields, or callee sinks stay separate findings. Two observations of the same sink text, source, and occurrence still collapse into one finding. Distinct identical call sites stay separate by `sink_occurrence`, the ordinal of the same callee and whitespace-insensitive argument shape in that scope. A harmless `eval("constant")` does not change the key of a later tainted `eval(...)`. Inserting another identical finding before existing ones does shift later ordinals. Nested scopes stay distinct. Unresolved aliases are different callees. Distinct vulnerabilities are not merged just because they share a file.
 
 The dedicated `security_findings.finding_key` column is authoritative. A NULL column is not reconstructed from `intelligence_json`. The API adds these fields on `SecurityFindingResponse`. Older fields stay. A later scan of the same project reuses that row. `CORROBORATED`, `VERIFIED`, `HUMAN_ACCEPTED`, `REPRODUCED`, and `REJECTED` status, human review state, and verification evidence survive a rescan; only static location and flow fields are refreshed. `analysis_id` is the latest scan that observed the row.
 
-The findings panel shows the flow, field, files, parser completeness, incomplete analysis, evidence summary, and confidence. Potential and corroborated results are labeled “Not verified”. A verified badge is shown only when the stored status is verified.
+The findings panel shows the flow, field, files, parser completeness, incomplete analysis, evidence summary, confidence, and human review state. Potential, corroborated, and reproduced results are labeled “Not verified”. A verified badge is shown only when the stored status is verified.
 
 ## Limits
 

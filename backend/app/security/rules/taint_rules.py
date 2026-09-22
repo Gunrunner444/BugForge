@@ -353,14 +353,33 @@ def _sink_occurrence(graph: SyntaxGraph, call: CallSite) -> str:
 
 
 def _call_structure(graph: SyntaxGraph, call: CallSite) -> str:
+    """Callee plus whitespace-insensitive argument shape.
+
+    Line numbers and parser byte offsets are not part of the shape. Inserting
+    another call with the same shape earlier in the scope still changes the
+    occurrence ordinal. Renaming a callee or changing an argument token does too.
+    """
     pieces = [call.qualified or call.name]
     if call.arguments:
-        pieces.extend(" ".join(argument.text.split()) for argument in call.arguments)
+        pieces.extend(_argument_shape(argument) for argument in call.arguments)
     elif call.argument_text.strip():
-        pieces.append(" ".join(call.argument_text.split()))
+        pieces.append(_compact(call.argument_text))
     elif 0 < call.line <= len(graph.lines):
-        pieces.append(" ".join(graph.lines[call.line - 1].split()))
+        pieces.append(_compact(graph.lines[call.line - 1]))
     return "\x1f".join(pieces)
+
+
+def _argument_shape(argument: object) -> str:
+    text = _compact(str(getattr(argument, "text", "") or ""))
+    callees = ",".join(getattr(argument, "callees", ()) or ())
+    accesses = ",".join(getattr(argument, "accesses", ()) or ())
+    idents = ",".join(getattr(argument, "idents", ()) or ())
+    kind = "lit" if getattr(argument, "is_literal", False) else "expr"
+    return "\x1e".join((kind, callees, accesses, idents, text))
+
+
+def _compact(text: str) -> str:
+    return "".join(text.split())
 
 
 def _path_kind(call: CallSite, taint: str | None) -> PathIssueKind:

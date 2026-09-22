@@ -1,11 +1,15 @@
 """Stable finding identity and explanations for static observations.
 
 Identity ignores line numbers and parser byte offsets. ``sink_occurrence`` is
-the ordinal of identical callee+argument structure in the same scope, so a
-harmless ``eval("constant")`` does not shift ``eval(request.args.get("q"))``.
+the ordinal of identical callee and whitespace-insensitive argument shape in
+the same scope. The key also compacts the evidence snippet by removing
+whitespace, so formatting changes do not churn identity. Spaces inside
+string literals are not distinguished by that compaction. A harmless
+``eval("constant")`` does not shift ``eval(request.args.get("q"))``.
 Inserting another identical finding before an existing one does change later
-ordinals; removing it restores them. Explanations use only metadata the
-observation already recorded. Missing relationships are omitted.
+ordinals; removing it restores them. Renaming a callee or changing an
+argument token does. Explanations use only metadata the observation already
+recorded. Missing relationships are omitted.
 """
 
 from __future__ import annotations
@@ -98,7 +102,7 @@ def _identity_parts(obs: SecurityObservation) -> tuple[str, ...]:
         _field_label(obs),
         str(obs.metadata.get("argument_index") or obs.argument_index or ""),
         _source_family(obs),
-        " ".join(obs.evidence_text.split()),
+        "".join(obs.evidence_text.split()),
         str(obs.metadata.get("sink_occurrence") or ""),
     )
 

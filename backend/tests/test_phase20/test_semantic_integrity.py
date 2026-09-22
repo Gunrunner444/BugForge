@@ -444,7 +444,8 @@ def test_evidence_attaches_only_to_the_matching_finding() -> None:
     assert [item.summary for item in attached.evidence.items if item.kind is not EvidenceKind.STATIC_ANALYSIS] == [
         "reached line 3"
     ]
-    assert any(item.summary == "identity match" for item in other.evidence.items)
+    # A client finding key does not override a conflicting line.
+    assert all(item.summary != "identity match" for item in other.evidence.items)
     assert all(item.summary != "reached line 3" for item in other.evidence.items)
     assert all("no line" not in item.summary for item in attached.evidence.items + other.evidence.items)
     assert all("bad line" not in item.summary for item in attached.evidence.items + other.evidence.items)
@@ -459,7 +460,11 @@ def test_ai_evidence_and_contradictions_do_not_verify() -> None:
         source="ai_provider",
         summary="looks exploitable",
         artifact_path="app.py",
-        metadata={"finding_key": "key-one", "vulnerability_class": "dynamic_execution"},
+        metadata={
+            "finding_key": "key-one",
+            "line": "3",
+            "vulnerability_class": "dynamic_execution",
+        },
     )
     contradiction = Evidence(
         kind=EvidenceKind.TEST_FAILURE,

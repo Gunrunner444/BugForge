@@ -209,11 +209,12 @@ class AnalysisService:
         if security_findings:
             from app.models.analysis import Analysis
             from app.repositories.security_finding_repo import SecurityFindingRepository
+            from app.services.finding_lifecycle import FindingLifecycleService
 
             analysis = await session.get(Analysis, analysis_id)
             project_id = analysis.project_id if analysis is not None else None
-            sec_repo = SecurityFindingRepository(session)
-            await sec_repo.bulk_create(
+            service = FindingLifecycleService(SecurityFindingRepository(session))
+            await service.persist_static_scan(
                 security_findings, project_id=project_id, analysis_id=analysis_id
             )
 

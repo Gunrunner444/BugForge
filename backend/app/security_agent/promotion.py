@@ -7,6 +7,7 @@ from typing import Any
 
 from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
 from app.domain.findings import SecurityFinding
+from app.security.lifecycle_rules import positive_reproduction
 from app.security_agent.correlation import finding_fingerprint, independent_provenances
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import HypothesisStatus, ReproductionOutcome
@@ -67,10 +68,11 @@ def apply_reproduction(
     if finding is None:
         return None
     if outcome is ReproductionOutcome.REPRODUCED:
-        if evidence:
-            finding = finding.reproduce(evidence)
+        positive = [item for item in (evidence or []) if positive_reproduction(item)]
+        if positive:
+            finding = finding.reproduce(positive)
         else:
-            # Reproduction without observational evidence cannot advance.
+            # Reproduction without a successful reproduction record cannot advance.
             hypothesis.status = HypothesisStatus.REQUIRES_REPRODUCTION
             return finding
         # AI still cannot set VERIFIED. Reproduced findings wait for BugForge verify().

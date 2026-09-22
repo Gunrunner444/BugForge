@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.mock_provider import MockLLMProvider
-from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind
+from app.adapters.evidence.base import EvidenceCollector
+from app.domain.evidence import Evidence, EvidenceBundle, EvidenceKind, EvidenceSource
 from app.domain.findings import FindingStatus, HumanReviewState, SecurityFinding, SourceLocation
 from app.models.analysis import Analysis
 from app.models.project import Project
@@ -89,6 +90,25 @@ def _static_finding(
     if status is FindingStatus.CORROBORATED:
         return finding.corroborate()
     return finding
+
+
+class _Carry(EvidenceCollector):
+    """Emit one already-built evidence item so the service can stamp it."""
+
+    def __init__(self, item: Evidence) -> None:
+        self._item = item
+
+    @property
+    def collector_id(self) -> str:
+        return "phase21_carry"
+
+    @property
+    def kinds(self) -> frozenset[EvidenceKind]:
+        return frozenset({self._item.kind})
+
+    def collect(self, source: EvidenceSource) -> tuple[Evidence, ...]:
+        del source
+        return (self._item,)
 
 
 def _runtime(
@@ -555,8 +575,14 @@ async def test_lifecycle_negative_paths(db_session: AsyncSession, tmp_path: Path
         reached="false",
         contradicts="true",
     )
-    contradicted = await service.attach_evidence(
-        finding_id, [contradiction], project_id=project.id
+    # A competing twin makes a client key ambiguous. The service stamp is the
+    # trusted identity that still attaches this contradiction to one finding.
+    contradicted = await service.record_collected_evidence(
+        finding_id,
+        EvidenceSource(),
+        [_Carry(contradiction)],
+        project_id=project.id,
+        execution_id="contradiction-1",
     )
     assert contradicted.status is FindingStatus.POTENTIAL
     assert any(item.summary == "not reached" for item in contradicted.evidence.items)
@@ -568,9 +594,19 @@ async def test_lifecycle_negative_paths(db_session: AsyncSession, tmp_path: Path
             transition=LifecycleTransition.VERIFY,
         )
 
-    proof = _runtime(key="neg-key", line=3)
-    await service.attach_evidence(
-        finding_id, [proof], project_id=project.id, transition=LifecycleTransition.VERIFY
+    proof = _runtime(
+        key="neg-key",
+        line=3,
+        kind=EvidenceKind.HTTP_RESPONSE,
+        summary="response reflected payload",
+    )
+    await service.record_collected_evidence(
+        finding_id,
+        EvidenceSource(),
+        [_Carry(proof)],
+        project_id=project.id,
+        execution_id="verify-http-1",
+        transition=LifecycleTransition.VERIFY,
     )
     later = await service.attach_evidence(
         finding_id, [contradiction], project_id=project.id

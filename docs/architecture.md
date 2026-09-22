@@ -382,20 +382,27 @@ budget. Whole repositories are never sent to the model.
 
 The AI agent may attach a hypothesis. It cannot create a verified finding.
 
-Finding lifecycle (Phase 21):
+Finding lifecycle (Phase 22 production path):
 
 ```
 Repository → static semantic analysis → potential / corroborated finding
-  → stable finding_key + persistence → trusted evidence → correlation
-  → reproduce / verify domain transition → human review
+  → FindingLifecycleService.persist_static_scan
+  → evidence collection with server attribution
+  → FindingLifecycleService correlation and domain transition
+  → reproduced / verified → human review
 ```
 
-Statuses are `potential`, `corroborated`, `reproduced`, `verified`,
-`human_accepted`, and `rejected`. Correlation attaches matching evidence
-only. It does not equal verification. Only `SecurityFinding.verify()` with
-independent observational or executable evidence can mark a finding
-`VERIFIED`. AI text, static analysis, and a generated test that was never
-executed cannot. See [phase21-evidence-lifecycle.md](phase21-evidence-lifecycle.md).
+The security analyze API and `AnalysisService` both persist the initial
+static finding through `FindingLifecycleService`. Later evidence and every
+status change go through that same service. Statuses are `potential`,
+`corroborated`, `reproduced`, `verified`, `human_accepted`, and `rejected`.
+Correlation attaches matching evidence only. A successful reproduction
+record is required before `REPRODUCED`. Verification requires a separate
+HTTP, browser, scanner, API, replay, fuzzing, or proxy observation.
+AI text, static analysis, a failed test, and a generated test that was
+never executed cannot reproduce or verify. The operator transition endpoint
+names the operation. It does not accept a client `status`. See
+[phase22-production-security-lifecycle.md](phase22-production-security-lifecycle.md).
 
 ## Configuration
 
