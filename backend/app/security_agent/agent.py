@@ -567,7 +567,8 @@ class SecurityResearchAgent:
 
     async def _execute_tool(self, request: ToolCallRequest, *, reason: str) -> dict[str, Any]:
         fingerprint = f"{request.tool}:{json.dumps(request.arguments, sort_keys=True, default=str)}"
-        self._check_duplicate(fingerprint)
+        if request.tool != "exploratory_test":
+            self._check_duplicate(fingerprint)
         if request.tool in self.session.disabled_tools:
             raise RestrictedActivityError(f"disabled_tool:{request.tool}")
         parsed = self.tools.validate(request)

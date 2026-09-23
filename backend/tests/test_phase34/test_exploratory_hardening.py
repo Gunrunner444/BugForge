@@ -251,7 +251,12 @@ async def test_missing_pytest_does_not_execute_or_use_the_network(tmp_path: Path
 def test_foundry_command_and_cheatcodes_are_server_owned() -> None:
     profile = profile_for("solidity", "foundry", forge_available=True)
     assert profile is not None
-    assert profile.container_command()[:4] == ["forge", "test", "--root", "/bugforge-repo"]
+    assert profile.container_command()[:4] == [
+        "forge",
+        "test",
+        "--root",
+        "/bugforge-output/project",
+    ]
     command = " ".join(profile.container_command())
     assert "--fork-url" not in command
     assert profile.network == "none"

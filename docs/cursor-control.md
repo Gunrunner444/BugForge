@@ -29,7 +29,8 @@ BugForge. `llm_invoked` stays false. Exploratory tests are requested as the
 arguments, Foundry flags, network access, scope changes, approvals, budget
 increases, or verification. Yul and compiler analysis are deterministic
 BugForge passes. They do not call a model, and compiler output cannot mark a
-finding verified.
+finding verified. A target manifest does not grant live smart-contract testing
+unless that asset and mode are explicit. Cursor cannot flip that switch.
 `live_hackerone` stays on the existing operator path and is not started by
 the MCP tools.
 

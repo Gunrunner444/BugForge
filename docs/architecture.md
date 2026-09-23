@@ -18,8 +18,11 @@ HackerOne. Phase 33 adds a bounded Solidity project graph and a lab-only
 exploratory test tool. Generated tests run only through Docker with the
 network disabled. They do not replace predefined tests, and they do not
 verify findings. Phase 34 adds a bounded Yul walk and an optional solc
-standard-JSON overlay. Compiler facts stay beside the parser and do not verify
-a finding. A missing compiler invents nothing. Live HackerOne defaults: dry-run, no active testing, no fuzzing,
+standard-JSON overlay. Phase 35 compiles a repository source bundle instead of
+one synthetic file, keeps display paths relative, and clears the compiler
+model at the end of the scan. Host `solc` stays off unless
+`solidity_host_compiler` is set. Compiler facts stay beside the parser and do
+not verify a finding. A missing compiler invents nothing. Live HackerOne defaults: dry-run, no active testing, no fuzzing,
 scanners disabled. Rate limiting is per-process.
 
 ## Layering

@@ -17,7 +17,10 @@ from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 
+from app.parsing.solidity_version import SolidityLanguageFacts, solidity_language_facts
+
 _MAX_IR_CHARS = 65_536
+_MAX_COMPILER_OUTPUT = 1_000_000
 _OUTPUT_CONFIG = "storageLayout,ir,evm.methodIdentifiers,ast"
 
 _COMPILER_CACHE: ContextVar[dict[str, CompilerSemantics] | None] = ContextVar(
@@ -166,20 +169,34 @@ def compiler_semantics_for_scan(source: str, *, snapshot: str = "") -> CompilerS
             "Compiler is present but BugForge has no safe standard-JSON runner "
             "for it. No storage layout was invented.",
         )
+    elif not _host_compiler_enabled():
+        result = CompilerSemantics(
+            "UNAVAILABLE",
+            status.tool,
+            "Host compiler execution is disabled. No compiler facts were fabricated.",
+        )
     else:
         result = compiler_semantics(source, runner=_run_solc_standard_json)
     result.pragma_version = pragma_solidity_version(source)
-    result.language = language_semantics(result.pragma_version, result.compiler_version)
+    result.language = _language_dict(solidity_language_facts(source, result.compiler_version))
     if cache is not None:
         cache[key] = result
     return result
 
 
-def _run_solc_standard_json(source: str) -> str:
+def _host_compiler_enabled() -> bool:
+    from app.core.config import get_settings
+
+    return bool(get_settings().solidity_host_compiler)
+
+
+def run_solc_standard_json(payload: str) -> str:
+    """Developer-only host solc. The default research path does not call this."""
     import os
     import subprocess
 
-    payload = json.dumps(_standard_json_input(source))
+    if not _host_compiler_enabled():
+        raise OSError("host compiler execution is disabled")
     completed = subprocess.run(
         ["solc", "--standard-json"],
         input=payload,
@@ -188,10 +205,25 @@ def _run_solc_standard_json(source: str) -> str:
         timeout=20,
         check=False,
         env={"PATH": os.environ.get("PATH", "")},
+        preexec_fn=_limit_compiler_process,
     )
-    if not completed.stdout:
+    stdout = completed.stdout or ""
+    if len(stdout) > _MAX_COMPILER_OUTPUT:
+        raise ValueError("compiler output exceeded the bound")
+    if not stdout:
         raise ValueError((completed.stderr or "solc produced no JSON")[:400])
-    return completed.stdout
+    return stdout
+
+
+def _limit_compiler_process() -> None:
+    import resource
+
+    limit = 512 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
+def _run_solc_standard_json(source: str) -> str:
+    return run_solc_standard_json(json.dumps(_standard_json_input(source)))
 
 
 def _standard_json_input(source: str) -> dict[str, object]:
@@ -222,7 +254,7 @@ def compiler_semantics(
     pragma = pragma_solidity_version(source)
     if status.status != "AVAILABLE":
         result = CompilerSemantics("UNAVAILABLE", "", status.detail, pragma_version=pragma)
-        result.language = language_semantics(pragma, "")
+        result.language = language_semantics(source, "")
         return result
     if runner is None:
         result = CompilerSemantics(
@@ -232,7 +264,7 @@ def compiler_semantics(
             "graph with compiler output unless a standard-JSON result is supplied.",
             pragma_version=pragma,
         )
-        result.language = language_semantics(pragma, "")
+        result.language = language_semantics(source, "")
         return result
     try:
         raw = runner(source)
@@ -240,12 +272,12 @@ def compiler_semantics(
         result = CompilerSemantics(
             "FAILED", status.tool, f"compiler invocation failed: {exc}", pragma_version=pragma
         )
-        result.language = language_semantics(pragma, "")
+        result.language = language_semantics(source, "")
         return result
     parsed = interpret_standard_json(raw, tool=status.tool)
     parsed.pragma_version = pragma
     version = parsed.compiler_version if parsed.status == "AVAILABLE" else ""
-    parsed.language = language_semantics(pragma, version)
+    parsed.language = language_semantics(source, version)
     return parsed
 
 
@@ -271,22 +303,20 @@ def pragma_solidity_version(source: str) -> str:
 
 
 def language_semantics(pragma: str, compiler_version: str) -> dict[str, str]:
-    """Arithmetic and selfdestruct notes from a reliable version only.
+    """Arithmetic and selfdestruct notes from the canonical version helper.
 
-    A comment is not a version. A range pragma is used only when every
-    version it allows shares the same arithmetic rule. Otherwise the result
-    stays unknown.
+    A comment is not a version. A range is known only when every version it
+    allows shares the same rule. Otherwise the result stays unknown.
     """
-    compiler = _exact_version(compiler_version)
-    if compiler is not None:
-        return _semantics_for(compiler, "compiler")
-    exact = _exact_version(pragma)
-    if exact is not None:
-        return _semantics_for(exact, "pragma")
-    bounded = _caret_version(pragma)
-    if bounded is not None:
-        return _semantics_for(bounded, "pragma")
-    return {"arithmetic": "unknown", "selfdestruct": "unknown", "source": ""}
+    return _language_dict(solidity_language_facts(pragma, compiler_version))
+
+
+def _language_dict(facts: SolidityLanguageFacts) -> dict[str, str]:
+    return {
+        "arithmetic": facts.arithmetic,
+        "selfdestruct": facts.selfdestruct,
+        "source": facts.source,
+    }
 
 
 def reconcile_semantics(
@@ -385,7 +415,12 @@ def _parse_standard_json(raw: str, tool: str) -> CompilerSemantics:
                 evm = contract.get("evm")
                 if isinstance(evm, dict):
                     _collect_ir(ir_parts, evm.get("legacyAssembly"))
-                    _collect_selectors(selectors, str(contract_name), evm.get("methodIdentifiers"))
+                    _collect_selectors(
+                        selectors,
+                        str(file_name),
+                        str(contract_name),
+                        evm.get("methodIdentifiers"),
+                    )
                 _collect_storage(
                     storage,
                     layouts,
@@ -472,13 +507,22 @@ def _collect_ir(parts: list[str], value: object) -> None:
         parts.append(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def _collect_selectors(selectors: list[dict[str, str]], contract: str, value: object) -> None:
+def _collect_selectors(
+    selectors: list[dict[str, str]], source: str, contract: str, value: object
+) -> None:
     if not isinstance(value, dict):
         return
     for name, selector in value.items():
         if not name or not isinstance(selector, str):
             continue
-        selectors.append({"contract": contract, "name": str(name), "selector": selector})
+        selectors.append(
+            {
+                "contract": contract,
+                "name": str(name),
+                "selector": selector,
+                "source": source,
+            }
+        )
 
 
 def _compare(
@@ -493,7 +537,7 @@ def _compare(
     right = compiler.get(field_name, "")
     if not left or not right or left == right:
         return
-    if field_name == "source" and (left in right or right in left):
+    if field_name == "source" and left.replace("\\", "/") == right.replace("\\", "/"):
         return
     found.append(_disagreement(category, key[0], key[1], left, right))
 
@@ -508,25 +552,3 @@ def _disagreement(
 
 def _normalize_selector(value: str) -> str:
     return value.lower().removeprefix("0x")
-
-
-def _exact_version(text: str) -> tuple[int, int, int] | None:
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
-    if match is None:
-        return None
-    if re.search(r"[\^<>=]", text):
-        return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-
-def _caret_version(text: str) -> tuple[int, int, int] | None:
-    match = re.fullmatch(r"\^(\d+)\.(\d+)\.(\d+)", text.strip())
-    if match is None:
-        return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-
-def _semantics_for(version: tuple[int, int, int], source: str) -> dict[str, str]:
-    arithmetic = "checked" if version >= (0, 8, 0) else "wrapping"
-    selfdestruct = "deprecated" if version >= (0, 8, 18) else "present"
-    return {"arithmetic": arithmetic, "selfdestruct": selfdestruct, "source": source}

@@ -39,6 +39,7 @@ class ExploratoryClassification(StrEnum):
     ERROR = "ERROR"
     DUPLICATE = "DUPLICATE"
     UNSUPPORTED = "UNSUPPORTED"
+    COMPILATION_FAILED = "COMPILATION_FAILED"
 
 
 class RepeatBehavior(StrEnum):
@@ -207,6 +208,7 @@ class ExploratoryRecord:
     verified: bool = False
     follow_up: str = ""
     created_at: str = ""
+    replayable: bool = True
 
 
 @dataclass
@@ -222,6 +224,7 @@ class _StoredAttempt:
     confidence: str
     rationale: str
     follow_up: str
+    replayable: bool = True
 
 
 class ExploratoryEngine:
@@ -330,6 +333,10 @@ class ExploratoryEngine:
             attempt.repository_snapshot != context.snapshot_hash
             or attempt.repository_commit != context.commit_sha
         ):
+            return None
+        if not stored.replayable:
+            return None
+        if hashlib.sha256(stored.test_code.encode("utf-8")).hexdigest() != attempt.test_hash:
             return None
         return ExploratoryTestCandidate(
             target=stored.target_file or stored.target_symbol,
@@ -498,11 +505,12 @@ class ExploratoryEngine:
             )
         problem = _validate_code(candidate.language, candidate.test_code)
         if problem:
-            classification = (
-                ExploratoryClassification.BLOCKED
-                if problem.startswith("BLOCKED")
-                else ExploratoryClassification.INVALID
-            )
+            if problem.startswith("BLOCKED"):
+                classification = ExploratoryClassification.BLOCKED
+            elif problem.startswith("UNSUPPORTED"):
+                classification = ExploratoryClassification.UNSUPPORTED
+            else:
+                classification = ExploratoryClassification.INVALID
             return self._result(candidate, context, "", profile, classification, problem)
         return None
 
@@ -525,7 +533,10 @@ class ExploratoryEngine:
         scratch = Path(tempfile.mkdtemp(prefix="bugforge-explore-"))
         output = scratch / "output"
         output.mkdir()
-        (output / profile.test_name).write_text(candidate.test_code, encoding="utf-8")
+        if profile.framework == "foundry":
+            prepare_foundry_workspace(Path(context.repo_path), output, candidate.test_code)
+        else:
+            (output / profile.test_name).write_text(candidate.test_code, encoding="utf-8")
         repo = str(Path(context.repo_path).resolve())
         config = ExecutionConfig(
             command=profile.container_command(),
@@ -604,6 +615,7 @@ class ExploratoryEngine:
             candidate.confidence,
             candidate.rationale,
             candidate.follow_up,
+            redact_text(candidate.test_code) == candidate.test_code,
         )
         self._by_hash.setdefault(identity, attempt.attempt_id)
         self.records.append(_record_from(attempt, candidate))
@@ -660,6 +672,15 @@ class ExploratoryEngine:
                 "meaningful": attempt.meaningful,
                 "sandbox": True,
                 "repeat": attempt.repeat,
+                "network": profile.network,
+                "timeout_seconds": profile.timeout_seconds,
+                "memory_mb": profile.memory_mb,
+                "cpu": profile.cpu,
+                "image": _executor_image(self.executor),
+                "foundry_version": "",
+                "compiler_version": "",
+                "toolchain_failure": attempt.classification
+                == ExploratoryClassification.COMPILATION_FAILED.value,
             },
         )
         if attempt.meaningful:
@@ -727,8 +748,12 @@ class ExploratoryEngine:
             "session": context.session_id,
             "snapshot": context.snapshot_hash,
             "target_file": candidate.target_file,
+            "compiler_version": "",
+            "foundry_version": "",
+            "image": _executor_image(self.executor),
             "target_symbol": candidate.target_symbol,
             "test_code": candidate.test_code,
+            "test_hash": hashlib.sha256(candidate.test_code.encode("utf-8")).hexdigest(),
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -787,6 +812,17 @@ class ExploratoryEngine:
         return shutil.which("forge") is not None
 
 
+def _executor_image(executor: TestExecutor | None) -> str:
+    """Configured sandbox image name. Unknown stays empty. Secrets are not read."""
+    image = getattr(executor, "_image", "")
+    if not isinstance(image, str):
+        return ""
+    cleaned = image.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", cleaned):
+        return ""
+    return cleaned
+
+
 def docker_executor_for_exploratory(available: bool, image: str = "") -> TestExecutor | None:
     """Bind Docker when it is available. Never bind the host executor."""
     if not available:
@@ -797,6 +833,49 @@ def docker_executor_for_exploratory(available: bool, image: str = "") -> TestExe
     if cleaned and not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", cleaned):
         return None
     return DockerTestExecutor(image=cleaned) if cleaned else DockerTestExecutor()
+
+
+def prepare_foundry_workspace(repo: Path, output: Path, test_code: str) -> Path:
+    """Copy a bounded source snapshot into a disposable Foundry root and write the test there.
+
+    The source repository is not modified. The generated test is not committed.
+    """
+    project = output / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    root = repo.resolve() if repo.exists() else repo
+    copied = 0
+    total = 0
+    if root.is_dir():
+        for path in sorted(root.rglob("*")):
+            if copied >= 40 or total >= 200_000:
+                break
+            if any(
+                part in {".git", "out", "cache", "broadcast", "node_modules", "bugforge-output"}
+                for part in path.parts
+            ):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix != ".sol" and path.name not in {"foundry.toml", "remappings.txt"}:
+                continue
+            try:
+                relative = path.resolve().relative_to(root)
+            except ValueError:
+                continue
+            data = path.read_bytes()
+            if total + len(data) > 200_000:
+                break
+            destination = project / relative
+            if not destination.resolve().is_relative_to(project.resolve()):
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+            copied += 1
+            total += len(data)
+    test_path = project / "test" / "Exploratory.t.sol"
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text(test_code, encoding="utf-8")
+    return project
 
 
 def profile_for(
@@ -820,16 +899,16 @@ def profile_for(
                 "forge",
                 "test",
                 "--root",
-                "/bugforge-repo",
+                "/bugforge-output/project",
                 "--match-path",
-                "{test}",
+                "test/Exploratory.t.sol",
                 "--offline",
                 "--out",
                 "/bugforge-output/out",
                 "--cache-path",
                 "/bugforge-output/cache",
             ),
-            test_name="Exploratory.t.sol",
+            test_name="project/test/Exploratory.t.sol",
         )
     return None
 
@@ -846,32 +925,85 @@ def profile_availability(
     return "UNSUPPORTED"
 
 
+_BLOCKED_CHEATS = (
+    (r"\b(?:tryFfi|ffi)\s*\(", "BLOCKED ffi"),
+    (r"\bvm\s*\.\s*(?:ffi|tryFfi)\b", "BLOCKED ffi"),
+    (r"--fork-url|--fork-block-number|--fork-chain-id", "BLOCKED network fork"),
+    (
+        r"\bvm\s*\.\s*(?:createSelectFork|createFork|selectFork|activeFork|rollFork|transact)\b",
+        "BLOCKED network fork",
+    ),
+    (r"\bvm\s*\.\s*(?:rpc|rpcUrl|rpcUrls)\b", "BLOCKED arbitrary RPC"),
+    (
+        r"\bvm\s*\.\s*(?:getEnv|setEnv|envAddress|envBool|envBytes32|envBytes|envInt|envOr|"
+        r"envString|envUint|envExists|envAddressOr|envBoolOr|envBytes32Or|envBytesOr|"
+        r"envIntOr|envStringOr|envUintOr)\b",
+        "BLOCKED environment-secret access",
+    ),
+    (
+        r"\bvm\s*\.\s*(?:readFile|readFileBinary|readLine|readLink|readDir|writeFile|"
+        r"writeFileBinary|writeLine|copyFile|removeFile|removeDir|createDir|fsMetadata|"
+        r"projectRoot|getCode|getDeployedCode|exists|isFile|isDir|closeFile|writeJson|"
+        r"parseJson|keyExistsJson|serializeJson)\b",
+        "BLOCKED filesystem",
+    ),
+    (r"\b(?:vm\s*\.\s*)?process\s*\(", "BLOCKED process"),
+    (r"\bvm\s*\.\s*prompt\s*\(", "BLOCKED process"),
+    (
+        r"(?m)^\s*//\s*forge-config:.*\b(?:fork|ffi|fs_permissions|rpc_endpoints)\b",
+        "BLOCKED forge-config",
+    ),
+)
+_ALLOWED_CHEATS = frozenset(
+    {
+        "prank",
+        "startPrank",
+        "stopPrank",
+        "hoax",
+        "deal",
+        "warp",
+        "roll",
+        "store",
+        "load",
+        "etch",
+        "label",
+        "assume",
+        "expectRevert",
+        "expectEmit",
+        "expectCall",
+        "mockCall",
+        "clearMockedCalls",
+        "pauseGasMetering",
+        "resumeGasMetering",
+        "addr",
+        "sign",
+        "assertEq",
+        "assertTrue",
+        "assertFalse",
+        "assertGt",
+        "assertGe",
+        "assertLt",
+        "assertLe",
+        "assertApproxEqAbs",
+        "assertApproxEqRel",
+    }
+)
+
+
 def validate_solidity_test(code: str) -> str | None:
-    """Return a BLOCKED or invalid reason, or None when the test is acceptable."""
+    """Return a BLOCKED, UNSUPPORTED, or invalid reason, or None when acceptable.
+
+    An unrecognized cheatcode is unsupported. That is not a claim that the test is safe.
+    """
     if "function test" not in code:
         return "Solidity exploratory test needs a function whose name starts with test"
-    blocked = (
-        (r"\bffi\s*\(", "BLOCKED ffi"),
-        (r"\bvm\s*\.\s*ffi\b", "BLOCKED ffi"),
-        (r"--fork-url", "BLOCKED network fork"),
-        (
-            r"\bvm\s*\.\s*(?:createSelectFork|createFork|selectFork|activeFork)\b",
-            "BLOCKED network fork",
-        ),
-        (r"\bvm\s*\.\s*rpc\b", "BLOCKED arbitrary RPC"),
-        (r"\bvm\s*\.\s*(?:getEnv|setEnv|env\w*)\b", "BLOCKED environment-secret access"),
-        (
-            r"\bvm\s*\.\s*(?:readFile|readLine|readDir|writeFile|writeLine|copyFile|"
-            r"removeFile|removeDir|createDir|fsMetadata|readLink|projectRoot|"
-            r"getCode|getDeployedCode|exists|isFile|isDir)\b",
-            "BLOCKED filesystem",
-        ),
-        (r"\bprocess\s*\(", "BLOCKED process"),
-        (r"(?m)^\s*//\s*forge-config:.*\b(?:fork|ffi|fs_permissions)\b", "BLOCKED network fork"),
-    )
-    for pattern, reason in blocked:
+    for pattern, reason in _BLOCKED_CHEATS:
         if re.search(pattern, code):
             return reason
+    for match in re.finditer(r"\bvm\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", code):
+        name = match.group(1)
+        if name not in _ALLOWED_CHEATS:
+            return f"UNSUPPORTED unreviewed cheatcode vm.{name}"
     if re.search(r"(?m)^\s*pragma\s+solidity", code) is None:
         return "Solidity exploratory test must declare a pragma"
     return None
@@ -899,6 +1031,16 @@ def _minimal_environment(language: str) -> dict[str, str]:
     return {}
 
 
+_COMPILE_MARKERS = (
+    "Compiler run failed",
+    "SolcError",
+    "ParserError",
+    "DeclarationError",
+    "TypeError:",
+    "Error (",
+)
+
+
 def _classify_execution(result: ExecutionResult) -> ExploratoryClassification:
     if result.timed_out:
         return ExploratoryClassification.TIMEOUT
@@ -906,6 +1048,9 @@ def _classify_execution(result: ExecutionResult) -> ExploratoryClassification:
         return ExploratoryClassification.ERROR
     if result.exit_code == 0:
         return ExploratoryClassification.PASSED
+    blob = f"{result.stdout}\n{result.stderr}"
+    if any(marker in blob for marker in _COMPILE_MARKERS):
+        return ExploratoryClassification.COMPILATION_FAILED
     return ExploratoryClassification.FAILED
 
 
@@ -994,7 +1139,10 @@ def _record_from(
         target_symbol=candidate.target_symbol,
         language=candidate.language,
         framework=candidate.framework,
-        test_code=redact_text(candidate.test_code),
+        test_code=candidate.test_code
+        if redact_text(candidate.test_code) == candidate.test_code
+        else "",
+        replayable=redact_text(candidate.test_code) == candidate.test_code,
         rationale=redact_text(candidate.rationale)[:2000],
         expected_behavior=redact_text(candidate.expected_behavior)[:2000],
         oracle=candidate.oracle,
@@ -1056,6 +1204,7 @@ def _stored_from_record(record: ExploratoryRecord) -> _StoredAttempt:
         record.confidence,
         record.rationale,
         record.follow_up,
+        record.replayable,
     )
 
 

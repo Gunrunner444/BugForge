@@ -213,28 +213,28 @@ def apply_compiler_layout(
         model.ambiguities.append(
             "Compiler layout entries without a contract were not matched by label."
         )
-    file_name = source_path.replace("\\", "/").rsplit("/", 1)[-1]
+    wanted = _normalize_source(source_path)
     for variable in model.variables:
         if variable.uncertain or variable.slot is None:
             continue
         matches = list(grouped.get((variable.contract, variable.name), []))
         if not matches and variable.origin != variable.contract:
             matches = list(grouped.get((variable.origin, variable.name), []))
-        if file_name and len(matches) > 1:
-            sourced = [
-                item
-                for item in matches
-                if not item.get("source") or file_name in str(item.get("source")).replace("\\", "/")
-            ]
-            if len(sourced) == 1:
-                matches = sourced
-        if len(matches) > 1:
+        chosen = _layouts_for_source(matches, wanted)
+        if chosen is None:
+            model.ambiguities.append(
+                f"Compiler source identity does not match `{wanted or variable.contract}` "
+                f"for `{variable.contract}.{variable.name}`."
+            )
+            continue
+        if len(chosen) > 1:
             model.ambiguities.append(
                 f"Ambiguous compiler identity for `{variable.contract}.{variable.name}`."
             )
             continue
-        if len(matches) != 1:
+        if len(chosen) != 1:
             continue
+        matches = chosen
         model.compiler_matches += 1
         _record_compiler_difference(model, variable, matches[0])
     if compiler.status == "AVAILABLE":
@@ -242,6 +242,25 @@ def apply_compiler_layout(
             reconcile_semantics(_parser_layout_facts(model), compiler.layouts)
         )
     return model
+
+
+def _normalize_source(path: str) -> str:
+    text = path.replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def _layouts_for_source(matches: list[dict[str, str]], wanted: str) -> list[dict[str, str]] | None:
+    """Exact source identity. ``None`` means the compiler named a different file."""
+    sourced = [item for item in matches if _normalize_source(str(item.get("source", "")))]
+    unsourced = [item for item in matches if item not in sourced]
+    exact = [item for item in sourced if _normalize_source(str(item.get("source", ""))) == wanted]
+    if exact:
+        return exact
+    if sourced:
+        return None
+    return unsourced
 
 
 def compare_storage_layouts(

@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     # Operator attests that the image already contains pytest. BugForge does not pip install.
     security_agent_exploratory_pytest_ready: bool = False
     security_agent_exploratory_python_image: str = ""
+    # Developer-only. The default research path does not execute host solc.
+    solidity_host_compiler: bool = False
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

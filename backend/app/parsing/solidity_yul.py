@@ -115,6 +115,21 @@ class YulModel:
     incomplete: bool = False
     limit_reason: str = ""
     nodes: int = 0
+    compiler_ir: str = "unavailable"
+    compiler_status: str = ""
+
+
+@dataclass
+class _SuccessScope:
+    """Call-success bindings for one Yul block. A branch gets its own copy."""
+
+    bindings: dict[str, int] = field(default_factory=dict)
+    checked: set[int] = field(default_factory=set)
+    owned: set[int] = field(default_factory=set)
+    rests: dict[int, str] = field(default_factory=dict)
+
+    def child(self) -> _SuccessScope:
+        return _SuccessScope(dict(self.bindings), set(self.checked), set(), self.rests)
 
 
 def analyze_yul(graph: SyntaxGraph) -> YulModel:
@@ -136,7 +151,16 @@ def analyze_yul(graph: SyntaxGraph) -> YulModel:
                 break
             if re.search(r"\bassembly\b", block):
                 _trace(model, "nested assembly", False)
-            _walk_block(block, constants, model, branch=False, flow=_Flow(), seen=seen_hostile)
+            _walk_block(
+                block,
+                constants,
+                model,
+                branch=False,
+                flow=_Flow(),
+                seen=seen_hostile,
+                scope=_SuccessScope(),
+            )
+    _note_compiler(model)
     return model
 
 
@@ -148,13 +172,14 @@ def _walk_block(
     branch: bool,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> None:
     env: dict[str, YulExpression] = {}
     index = 0
     while index < len(block) and not model.incomplete:
         if model.nodes >= _MAX_NODES:
             _limit(model)
-            return
+            break
         skipped = _skip_string_or_comment(block, index)
         if skipped is not None:
             index = skipped
@@ -162,7 +187,7 @@ def _walk_block(
         while index < len(block) and block[index].isspace():
             index += 1
         if index >= len(block):
-            return
+            break
         skipped = _skip_string_or_comment(block, index)
         if skipped is not None:
             index = skipped
@@ -170,17 +195,17 @@ def _walk_block(
         if block.startswith("if", index) and _boundary(block, index):
             model.branches.append(YulBranch("if", "condition"))
             model.nodes += 1
-            index = _consume_if(block, index, constants, model, flow, seen)
+            index = _consume_if(block, index, constants, model, flow, seen, scope)
             continue
         if block.startswith("switch", index) and _boundary(block, index):
             model.branches.append(YulBranch("switch", "condition"))
             model.nodes += 1
-            index = _consume_switch(block, index, constants, model, flow, seen)
+            index = _consume_switch(block, index, constants, model, flow, seen, scope)
             continue
         if block.startswith("else", index) and _boundary(block, index):
             model.branches.append(YulBranch("else", "condition"))
             model.nodes += 1
-            index = _consume_braced(block, index, constants, model, flow, seen)
+            index = _consume_braced(block, index, constants, model, flow, seen, scope)
             continue
         if _at_return(block, index):
             kind = "stop" if block.startswith("stop", index) else "return"
@@ -195,6 +220,7 @@ def _walk_block(
             assert matched is not None
             name = matched.group(1)
             expr_at = index + matched.end()
+            _overwrite_success(name, scope, model, seen)
             if _starts_op(block, expr_at) and not _starts_with(block, expr_at, "sload"):
                 index = _bind_op(
                     block,
@@ -207,6 +233,7 @@ def _walk_block(
                     branch=branch,
                     flow=flow,
                     seen=seen,
+                    scope=scope,
                 )
                 continue
             expression, end = _read_expr(block, expr_at)
@@ -227,9 +254,10 @@ def _walk_block(
             index = end
             continue
         if _starts_op(block, index):
-            index = _bare_op(block, index, env, constants, model, branch, flow, seen)
+            index = _bare_op(block, index, env, constants, model, branch, flow, seen, scope)
             continue
         index += 1
+    _finalize_success(model, scope, seen)
 
 
 def _bind_op(
@@ -244,6 +272,7 @@ def _bind_op(
     branch: bool,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> int:
     op_match = re.match(rf"({_OPS})\s*\(", block[expr_at:])
     if op_match is None:
@@ -256,7 +285,19 @@ def _bind_op(
         return len(block)
     args = _split_args(block[open_at + 1 : close])
     success = name if is_let else ""
-    _record_op(model, env, constants, op, args, success, branch, flow, block[close + 1 :], seen)
+    _record_op(
+        model,
+        env,
+        constants,
+        op,
+        args,
+        success,
+        branch,
+        flow,
+        block[close + 1 :],
+        seen,
+        scope,
+    )
     if is_let and op in _TRANSFERS:
         env[name] = YulExpression(op, "call", "unknown", "")
     return close + 1
@@ -271,6 +312,7 @@ def _bare_op(
     branch: bool,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> int:
     op_match = re.match(rf"({_OPS})\s*\(", block[index:])
     if op_match is None:
@@ -282,7 +324,7 @@ def _bare_op(
         _unbalanced(model, "call")
         return len(block)
     args = _split_args(block[open_at + 1 : close])
-    _record_op(model, env, constants, op, args, "", branch, flow, block[close + 1 :], seen)
+    _record_op(model, env, constants, op, args, "", branch, flow, block[close + 1 :], seen, scope)
     return close + 1
 
 
@@ -293,15 +335,19 @@ def _consume_if(
     model: YulModel,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> int:
-    end = _consume_braced(block, index, constants, model, flow, seen)
+    brace = block.find("{", index)
+    if brace >= 0:
+        _note_condition(block[index:brace], scope)
+    end = _consume_braced(block, index, constants, model, flow, seen, scope)
     cursor = end
     while cursor < len(block) and block[cursor].isspace():
         cursor += 1
     if cursor < len(block) and block.startswith("else", cursor) and _boundary(block, cursor):
         model.branches.append(YulBranch("else", "condition"))
         model.nodes += 1
-        return _consume_braced(block, cursor, constants, model, flow, seen)
+        return _consume_braced(block, cursor, constants, model, flow, seen, scope)
     return end
 
 
@@ -312,6 +358,7 @@ def _consume_braced(
     model: YulModel,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> int:
     brace = block.find("{", index)
     if brace < 0:
@@ -321,7 +368,15 @@ def _consume_braced(
         _unbalanced(model, "branch")
         return len(block)
     child = _Flow(flow.stores, flow.external)
-    _walk_block(block[brace + 1 : end], constants, model, branch=True, flow=child, seen=seen)
+    _walk_block(
+        block[brace + 1 : end],
+        constants,
+        model,
+        branch=True,
+        flow=child,
+        seen=seen,
+        scope=scope.child(),
+    )
     return end + 1
 
 
@@ -332,6 +387,7 @@ def _consume_switch(
     model: YulModel,
     flow: _Flow,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> int:
     cursor = index + len("switch")
     while cursor < len(block):
@@ -342,6 +398,7 @@ def _consume_switch(
         if block.startswith(("case", "default"), cursor) and _boundary(block, cursor):
             break
         cursor += 1
+    _note_condition(block[index:cursor], scope)
     while cursor < len(block) and not model.incomplete:
         skipped = _skip_string_or_comment(block, cursor)
         if skipped is not None:
@@ -352,7 +409,7 @@ def _consume_switch(
         if cursor >= len(block):
             return cursor
         if block.startswith(("case", "default"), cursor) and _boundary(block, cursor):
-            cursor = _consume_braced(block, cursor, constants, model, flow, seen)
+            cursor = _consume_braced(block, cursor, constants, model, flow, seen, scope)
             continue
         return cursor
     return cursor
@@ -369,6 +426,7 @@ def _record_op(
     flow: _Flow,
     rest: str,
     seen: set[str],
+    scope: _SuccessScope,
 ) -> None:
     model.nodes += 1
     if op == "sload" and args:
@@ -396,8 +454,16 @@ def _record_op(
     target = args[1].strip() if len(args) > 1 else ""
     origin = env.get(target)
     target_from = origin.text if origin is not None else target
-    ignored = _success_ignored(success, rest)
-    model.calls.append(YulCall(op, target, target_from, success, branch, ignored))
+    model.calls.append(YulCall(op, target, target_from, success, branch, not success))
+    index = len(model.calls) - 1
+    scope.rests[index] = rest
+    if success:
+        scope.bindings[success] = index
+        scope.owned.add(index)
+    else:
+        _hostile(model, seen, f"ignored {op} success")
+        if re.search(r"\breturndatacopy\s*\(", rest):
+            _hostile(model, seen, "return-data confusion")
     if origin is not None and origin.kind == "load":
         known = origin.slot_class == "known"
         _trace(model, f"{op}.target <- {target}", known)
@@ -413,19 +479,82 @@ def _record_op(
             _hostile(model, seen, "delegatecall to a caller-derived value")
         elif op == "call":
             _hostile(model, seen, "arbitrary call")
-    if ignored:
-        _hostile(model, seen, f"ignored {op} success")
-        if re.search(r"\breturndatacopy\s*\(", rest):
-            _hostile(model, seen, "return-data confusion")
     if flow.stores:
         _trace(model, "call after storage write", False)
     flow.external = True
 
 
-def _success_ignored(success: str, rest: str) -> bool:
-    if not success:
-        return True
-    return re.search(rf"\b{re.escape(success)}\b", rest) is None
+def _overwrite_success(name: str, scope: _SuccessScope, model: YulModel, seen: set[str]) -> None:
+    if name not in scope.bindings:
+        return
+    index = scope.bindings.pop(name)
+    scope.owned.discard(index)
+    if index not in scope.checked:
+        _mark_ignored(model, index, scope.rests.get(index, ""), seen)
+
+
+def _finalize_success(model: YulModel, scope: _SuccessScope, seen: set[str]) -> None:
+    for index in list(scope.owned):
+        if index not in scope.checked:
+            _mark_ignored(model, index, scope.rests.get(index, ""), seen)
+
+
+def _mark_ignored(model: YulModel, index: int, rest: str, seen: set[str]) -> None:
+    if index < 0 or index >= len(model.calls):
+        return
+    call = model.calls[index]
+    if call.success_ignored or call.op not in _TRANSFERS:
+        return
+    model.calls[index] = YulCall(
+        call.op,
+        call.target,
+        call.target_from,
+        call.success,
+        call.branch_dependent,
+        True,
+    )
+    _hostile(model, seen, f"ignored {call.op} success")
+    if re.search(r"\breturndatacopy\s*\(", rest):
+        _hostile(model, seen, "return-data confusion")
+
+
+def _note_condition(condition: str, scope: _SuccessScope) -> None:
+    cleaned = _strip_comments(condition)
+    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', " ", cleaned)
+    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", " ", cleaned)
+    for name, index in scope.bindings.items():
+        if re.search(rf"\b{re.escape(name)}\b", cleaned):
+            scope.checked.add(index)
+
+
+def _note_compiler(model: YulModel) -> None:
+    """Record compiler IR availability. This does not interpret the IR."""
+    from app.parsing.solidity_project import current_compiler_project
+
+    project = current_compiler_project()
+    if project is None:
+        model.compiler_ir = "unavailable"
+        return
+    model.compiler_status = project.status
+    if project.ir_truncated:
+        model.compiler_ir = "truncated"
+    elif project.ir_available:
+        model.compiler_ir = "available"
+    else:
+        model.compiler_ir = "unavailable"
+    if project.status != "AVAILABLE" or not project.complete:
+        return
+    slots = {
+        str(item.get("slot", "")): f"{item.get('contract', '')}.{item.get('label', '')}"
+        for item in project.layouts
+        if item.get("slot") and item.get("label")
+    }
+    for load in model.loads:
+        if load.slot.slot_class != "known":
+            continue
+        label = slots.get(load.slot.text.strip())
+        if label:
+            _trace(model, f"sload matches compiler layout {label}", True)
 
 
 def _classify(

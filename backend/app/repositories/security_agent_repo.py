@@ -814,6 +814,19 @@ def _research_evidence(raw: dict[str, Any]) -> Evidence | None:
     return restore_server_observation(item)
 
 
+def _exact_replayable(record: Any) -> bool:
+    from app.security_testing.secrets import redact_text
+
+    code = str(getattr(record, "test_code", ""))
+    return bool(getattr(record, "replayable", True)) and redact_text(code) == code and code != ""
+
+
+def _exact_test_code(record: Any) -> str:
+    if not _exact_replayable(record):
+        return ""
+    return str(record.test_code)
+
+
 def _exploratory_row(session_id: str, record: Any) -> DBResearchExploratoryAttempt:
     created = getattr(record, "created_at", "")
     when = datetime.now(UTC)
@@ -834,7 +847,8 @@ def _exploratory_row(session_id: str, record: Any) -> DBResearchExploratoryAttem
         target_symbol=str(record.target_symbol)[:255],
         language=str(record.language)[:32],
         framework=str(record.framework)[:32],
-        test_code=redact_text(str(record.test_code)),
+        test_code=_exact_test_code(record),
+        replayable=_exact_replayable(record),
         rationale=redact_text(str(record.rationale))[:4000],
         expected_behavior=redact_text(str(record.expected_behavior))[:4000],
         oracle=str(record.oracle)[:40],
@@ -897,6 +911,7 @@ def _exploratory_record(row: DBResearchExploratoryAttempt) -> Any:
         verified=False,
         follow_up=row.follow_up or "",
         created_at=created,
+        replayable=bool(row.replayable),
     )
 
 

@@ -413,6 +413,7 @@ class DBResearchExploratoryAttempt(Base):
     repeat_classification: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     follow_up: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    replayable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
