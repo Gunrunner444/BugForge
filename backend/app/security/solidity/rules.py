@@ -17,12 +17,15 @@ from app.parsing.solidity_cfg import (
     placeholder_is_guarded,
     write_reachable_after,
 )
+from app.parsing.solidity_defi import DefiIssue, analyze_defi
 from app.parsing.solidity_flow import (
     oracle_freshness_protects,
     signature_domain_gap,
     signature_replay_gap,
 )
+from app.parsing.solidity_guards import initializer_is_protected, reentrancy_guard_holds
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
+from app.parsing.solidity_modifiers import resolve_modifier
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -68,6 +71,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         DonationInflationRule(),
         FeeOnTransferRule(),
         AssemblySensitiveRule(),
+        *_defi_rules(),
     ]
 
 
@@ -346,7 +350,9 @@ class InitializerRule(_SolidityRule):
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
-            if _initializer_protected(graph, fields.get("modifiers", "")):
+            if _initializer_protected(
+                graph, fields.get("contract", ""), fields.get("modifiers", "")
+            ):
                 continue
             found.append(
                 self._obs(
@@ -654,19 +660,12 @@ class DonationInflationRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.UNSAFE_ARITHMETIC
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
-        found: list[SecurityObservation] = []
-        for function in _functions(graph):
-            if not any(_share_price(part) for part in function.text.split(";")):
-                continue
-            found.append(
-                self._obs(
-                    graph,
-                    function,
-                    "Donation or inflation indicator",
-                    "Shares are derived from this contract's token balance and total supply.",
-                )
-            )
-        return found
+        return _defi_observations(
+            self,
+            graph,
+            "sol.donation_inflation",
+            "Donation or inflation indicator",
+        )
 
 
 class FeeOnTransferRule(_SolidityRule):
@@ -674,23 +673,12 @@ class FeeOnTransferRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.UNSAFE_EXTERNAL_CALL
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
-        found: list[SecurityObservation] = []
-        for function in _functions(graph):
-            if not _erc20_transfer(function.text):
-                continue
-            if function.text.count("balanceOf") >= 2 or "balanceAfter" in function.text:
-                continue
-            if "balanceOf" not in function.text:
-                continue
-            found.append(
-                self._obs(
-                    graph,
-                    function,
-                    "Fee-on-transfer indicator",
-                    "A transfer is paired with one balanceOf read and no measured balance delta.",
-                )
-            )
-        return found
+        return _defi_observations(
+            self,
+            graph,
+            "sol.fee_on_transfer",
+            "Fee-on-transfer indicator",
+        )
 
 
 class UpgradeAuthRule(_SolidityRule):
@@ -927,11 +915,11 @@ def _operation_is_guarded(function_text: str, operation: SyntaxEvent) -> bool:
 
 def _authorized_text(graph: SyntaxGraph, function: SyntaxEvent) -> str:
     text = function.text
-    bodies = _modifier_bodies(graph)
+    contract = _fields(function.extra).get("contract", "")
     injections: list[str] = []
     for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
-        body = bodies.get(name, "")
-        if body and placeholder_is_guarded(body):
+        resolution = resolve_modifier(graph, contract, name)
+        if resolution.status == "resolved" and placeholder_is_guarded(resolution.body):
             injections.append("require(msg.sender == owner);")
     if injections:
         brace = text.find("{")
@@ -958,17 +946,6 @@ def _modifier_names(modifiers: str) -> list[str]:
     return names
 
 
-def _modifier_bodies(graph: SyntaxGraph) -> dict[str, str]:
-    found: dict[str, list[str]] = {}
-    for event in graph.events:
-        if event.kind != "sol_modifier":
-            continue
-        name = _fields(event.extra).get("name", "")
-        if name:
-            found.setdefault(name, []).append(event.text)
-    return {name: bodies[0] for name, bodies in found.items() if len(bodies) == 1 and bodies[0]}
-
-
 def _guard_helpers(graph: SyntaxGraph) -> dict[str, str]:
     grouped: dict[str, list[str]] = {}
     for function in _functions(graph):
@@ -991,34 +968,37 @@ def _guard_helpers(graph: SyntaxGraph) -> dict[str, str]:
     return helpers
 
 
-def _initializer_protected(graph: SyntaxGraph, modifiers: str) -> bool:
-    bodies = _modifier_bodies(graph)
+def _initializer_protected(graph: SyntaxGraph, contract: str, modifiers: str) -> bool:
+    helpers = _init_helpers(graph, contract)
     for name in _modifier_names(modifiers):
         if "initial" not in name.lower():
             continue
-        body = bodies.get(name, "")
-        if "_;" not in body:
+        resolution = resolve_modifier(graph, contract, name)
+        if resolution.status != "resolved":
             continue
-        before = body.split("_;", 1)[0]
-        sets_flag = bool(re.search(r"initialized\s*=\s*true|version\s*=", before))
-        checks_flag = "require" in before and bool(re.search(r"initialized|version", before))
-        if sets_flag or checks_flag:
+        if initializer_is_protected(resolution.body, helpers):
             return True
     return False
 
 
-def _reentrancy_locked(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
-    bodies = _modifier_bodies(graph)
-    for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
-        body = bodies.get(name, "")
-        if "_;" not in body:
+def _init_helpers(graph: SyntaxGraph, contract: str) -> dict[str, str]:
+    grouped: dict[str, list[str]] = {}
+    for function in _functions(graph):
+        if _fields(function.extra).get("contract") != contract:
             continue
-        before = body.split("_;", 1)[0]
-        if re.search(r"require\s*\(", before) and re.search(
-            r"locked|_status|entered|reentrancy", before, re.I
-        ):
-            return True
-        if re.search(r"\b(locked|_status)\b\s*=", before):
+        name = _function_name(function)
+        if name:
+            grouped.setdefault(name, []).append(function.text)
+    return {name: bodies[0] for name, bodies in grouped.items() if len(bodies) == 1}
+
+
+def _reentrancy_locked(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
+    contract = _fields(function.extra).get("contract", "")
+    for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
+        resolution = resolve_modifier(graph, contract, name)
+        if resolution.status != "resolved":
+            continue
+        if reentrancy_guard_holds(resolution.body):
             return True
     return False
 
@@ -1085,15 +1065,75 @@ def _shared_identifiers(left: str, right: str) -> set[str]:
     return {word for word in words & other if word not in skip}
 
 
-def _share_price(statement: str) -> bool:
-    compact = re.sub(r"\s+", "", statement)
-    return "balanceOf(address(this))" in compact and "totalSupply" in compact and "/" in compact
+def _defi_rules() -> list[SecurityRule]:
+    return [
+        _DefiRule("sol.erc4626", "ERC-4626 accounting", VulnerabilityClass.BUSINESS_LOGIC),
+        _DefiRule(
+            "sol.rounding_direction",
+            "Directional rounding",
+            VulnerabilityClass.UNSAFE_ARITHMETIC,
+        ),
+        _DefiRule("sol.slippage", "Slippage bound", VulnerabilityClass.BUSINESS_LOGIC),
+        _DefiRule(
+            "sol.oracle_accounting",
+            "Oracle valuation",
+            VulnerabilityClass.UNSAFE_EXTERNAL_CALL,
+        ),
+        _DefiRule("sol.lending", "Lending accounting", VulnerabilityClass.BUSINESS_LOGIC),
+        _DefiRule("sol.amm", "AMM reserve accounting", VulnerabilityClass.BUSINESS_LOGIC),
+        _DefiRule("sol.approval", "Approval or permit", VulnerabilityClass.SIGNATURE_FLAW),
+        _DefiRule(
+            "sol.defi_reentrancy",
+            "Token callback reentrancy",
+            VulnerabilityClass.REENTRANCY,
+        ),
+    ]
 
 
-def _erc20_transfer(text: str) -> bool:
-    if re.search(r"\.transferFrom\s*\(", text):
-        return True
-    return bool(re.search(r"\.transfer\s*\([^;\n]*,", text))
+class _DefiRule(_SolidityRule):
+    def __init__(self, rule_id: str, title: str, vulnerability_class: VulnerabilityClass) -> None:
+        self.rule_id = rule_id
+        self.title = title
+        self.vulnerability_class = vulnerability_class
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        return _defi_observations(self, graph, self.rule_id, self.title)
+
+
+def _defi_observations(
+    rule: _SolidityRule,
+    graph: SyntaxGraph,
+    rule_id: str,
+    title: str,
+) -> list[SecurityObservation]:
+    model = analyze_defi(graph)
+    functions = {_function_name(event): event for event in _functions(graph)}
+    found: list[SecurityObservation] = []
+    seen: set[tuple[str, str]] = set()
+    for issue in model.issues:
+        if issue.rule_id != rule_id:
+            continue
+        key = (issue.function, issue.summary)
+        if key in seen:
+            continue
+        seen.add(key)
+        event = functions.get(issue.function)
+        if event is None:
+            continue
+        found.append(_issue_observation(rule, graph, event, title, issue))
+    return found
+
+
+def _issue_observation(
+    rule: _SolidityRule,
+    graph: SyntaxGraph,
+    event: SyntaxEvent,
+    title: str,
+    issue: DefiIssue,
+) -> SecurityObservation:
+    observation = rule._obs(graph, event, title, issue.summary)
+    observation.metadata["status"] = "potential"
+    return observation
 
 
 def _checked(graph: SyntaxGraph) -> bool | None:

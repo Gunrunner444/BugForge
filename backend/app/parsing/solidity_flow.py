@@ -143,7 +143,13 @@ def digest_contains_any(
 
 
 def signature_replay_gap(function_text: str) -> str | None:
-    """A reason ecrecover may be replayable, or None when a nonce is signed and consumed."""
+    """A reason ecrecover may be replayable, or None when a nonce is signed and consumed.
+
+    Consumption means the same nonce that reaches the digest is incremented or
+    decremented on a path shared with ``ecrecover``. Assigning a constant, or
+    writing a different nonce index, does not consume the signed value. The
+    result is potential evidence, not a proof of signature security.
+    """
     if "ecrecover" not in function_text:
         return None
     unknown = False
@@ -153,12 +159,69 @@ def signature_replay_gap(function_text: str) -> str | None:
             unknown = True
             continue
         if included is True:
-            if _nonce_written(function_text, name):
+            if _nonce_consumed_for_digest(function_text, name):
                 return None
             return f"{name} reaches the ecrecover digest but is not consumed"
     if unknown:
         return "nonce flow into ecrecover could not be established"
     return "ecrecover digest does not include a nonce from this function"
+
+
+def signature_nonce_order(function_text: str) -> str:
+    """Order of nonce consumption, digest construction, and ecrecover.
+
+    ``digest-verify-consume`` increments after verification.
+    ``consume-digest-verify`` increments first and signs the updated nonce.
+    ``consume-unrelated-verify`` increments a nonce that never reaches ecrecover.
+    ``digest-not-consumed`` signs a nonce that is not incremented.
+    """
+    if "ecrecover" not in function_text:
+        return "absent"
+    flow = analyze_flow(function_text)
+    if not flow.known or flow.cfg is None:
+        return "unknown"
+    live = flow.cfg.reachable_from(flow.cfg.entry)
+    consume_at: int | None = None
+    digest_at: int | None = None
+    verify_at: int | None = None
+    for node in flow.cfg.nodes:
+        if node.node_id not in live:
+            continue
+        if consume_at is None and _statement_consumes_nonce(node.text):
+            consume_at = node.node_id
+        if digest_at is None and _statement_builds_nonce_digest(node.text):
+            digest_at = node.node_id
+        if (
+            verify_at is None
+            and "ecrecover" in node.text
+            and node.kind in {"stmt", "return", "require"}
+        ):
+            verify_at = node.node_id
+    included_nonce = digest_contains(function_text, "nonce")
+    included_nonces = digest_contains(function_text, "nonces")
+    if included_nonce is True or included_nonces is True:
+        included: bool | None = True
+    elif included_nonce is None or included_nonces is None:
+        included = None
+    else:
+        included = False
+    if (
+        included is True
+        and consume_at is not None
+        and digest_at is not None
+        and verify_at is not None
+    ):
+        if consume_at < digest_at <= verify_at:
+            return "consume-digest-verify"
+        if digest_at <= verify_at < consume_at:
+            return "digest-verify-consume"
+    if included is True:
+        return "digest-not-consumed"
+    if included is False and consume_at is not None and verify_at is not None:
+        return "consume-unrelated-verify"
+    if included is False:
+        return "not-in-digest"
+    return "unknown"
 
 
 def signature_domain_gap(function_text: str) -> str | None:
@@ -173,47 +236,53 @@ def signature_domain_gap(function_text: str) -> str | None:
 
 
 def oracle_freshness_protects(function_text: str) -> bool | None:
-    """True when a timestamp from the oracle call dominates use of its answer."""
+    """True when freshness from the same oracle observation dominates its answer.
+
+    Each ``latestRoundData`` or ``latestAnswer`` call is one observation.
+    ``updatedAt`` from call 1 does not protect ``answer`` from call 2.
+    """
     flow = analyze_flow(function_text)
     if not flow.known or flow.cfg is None:
         return None
     if "latestRoundData" not in function_text and "latestAnswer" not in function_text:
         return None
-    answers: set[str] = set()
-    fresh: set[str] = set()
-    defined: list[tuple[str, str]] = []
-    for node in flow.cfg.nodes:
-        for name, expr in _assignments(node.text):
-            defined.append((name, expr))
-    for name, expr in defined:
-        if expr == "latestRoundData.answer":
-            answers.add(name)
-        if expr in {"latestRoundData.updatedAt", "latestRoundData.answeredInRound"}:
-            fresh.add(name)
-    if "latestAnswer" in function_text and "latestRoundData" not in function_text:
+    tagged = _tagged_oracle_assignments(flow.cfg)
+    observations: dict[str, dict[str, set[str]]] = {}
+    defining: dict[str, set[int]] = {}
+    for node_id, name, expr in tagged:
+        parsed = _oracle_expr(expr)
+        if parsed is None:
+            continue
+        observation, component = parsed
+        slot = observations.setdefault(observation, {"answers": set(), "fresh": set()})
+        if component == "answer":
+            slot["answers"].add(name)
+            defining.setdefault(name, set()).add(node_id)
+        if component in {"updatedAt", "answeredInRound"}:
+            slot["fresh"].add(name)
+    if not observations:
         return False
-    if not answers:
-        return False
-    uses = [
-        node.node_id
-        for node in flow.cfg.nodes
-        if node.kind in {"stmt", "return", "require", "if"}
-        and any(re.search(rf"\b{re.escape(name)}\b", node.text) for name in answers)
-        and not any(expr.startswith("latestRoundData") for _name, expr in _assignments(node.text))
-    ]
-    if not uses:
-        return True
-    if not fresh:
-        return False
-    checks = [
-        node.node_id
-        for node in flow.cfg.nodes
-        if node.kind in {"require", "if"}
-        and any(re.search(rf"\b{re.escape(name)}\b", node.text) for name in fresh)
-    ]
-    if not checks:
-        return False
-    return all(any(flow.cfg.dominates(check, use) for check in checks) for use in uses)
+    saw_use = False
+    for slot in observations.values():
+        uses = _oracle_uses(flow, slot["answers"], defining)
+        if not uses:
+            continue
+        saw_use = True
+        if not slot["fresh"]:
+            return False
+        checks = [
+            node.node_id
+            for node in flow.cfg.nodes
+            if node.kind in {"require", "if"}
+            and any(re.search(rf"\b{re.escape(fresh)}\b", node.text) for fresh in slot["fresh"])
+        ]
+        if not checks:
+            return False
+        if not all(any(flow.cfg.dominates(check, use) for check in checks) for use in uses):
+            return False
+    if not saw_use:
+        return any(bool(slot["answers"]) for slot in observations.values())
+    return True
 
 
 def _arg_contains(flow: FunctionFlow, node: object, marker: str) -> bool | None:
@@ -437,13 +506,129 @@ def _split_top(text: str) -> list[str]:
     return parts
 
 
-def _nonce_written(function_text: str, name: str) -> bool:
-    return bool(
-        re.search(
-            rf"\b{name}\b\s*(?:\[[^\]]+\])?\s*(?:\+\+|--|\+=|-=|=(?!=))",
-            function_text,
-        )
-    )
+def _nonce_consumed_for_digest(function_text: str, name: str) -> bool:
+    flow = analyze_flow(function_text)
+    if not flow.known or flow.cfg is None:
+        return False
+    live = flow.cfg.reachable_from(flow.cfg.entry)
+    verifies = [
+        node
+        for node in flow.cfg.nodes
+        if node.node_id in live
+        and "ecrecover" in node.text
+        and node.kind in {"stmt", "return", "require"}
+    ]
+    writes = [
+        node
+        for node in flow.cfg.nodes
+        if node.node_id in live
+        and _is_nonce_consume(node.text, name)
+        and _nonce_index_compatible(flow, node.text, name)
+    ]
+    if not writes or not verifies:
+        return False
+    for write in writes:
+        for verify in verifies:
+            if write.node_id == verify.node_id:
+                return True
+            reachable = flow.cfg.reachable_from(write.node_id)
+            if verify.node_id in reachable:
+                return True
+            if write.node_id in flow.cfg.reachable_from(verify.node_id):
+                return True
+    return False
+
+
+def _statement_consumes_nonce(text: str) -> bool:
+    return _is_nonce_consume(text, "nonce") or _is_nonce_consume(text, "nonces")
+
+
+def _statement_builds_nonce_digest(text: str) -> bool:
+    if "keccak256" not in text and "sha256" not in text:
+        return False
+    return bool(re.search(r"\bnonce\b|\bnonces\b", text))
+
+
+def _is_nonce_consume(text: str, name: str) -> bool:
+    indexed = rf"\b{name}\b\s*(?:\[[^\]]+\])?"
+    if re.search(rf"{indexed}\s*(\+\+|--)", text):
+        return True
+    if re.search(rf"(\+\+|--)\s*{name}\b", text):
+        return True
+    if re.search(rf"{indexed}\s*(\+=|-=)", text):
+        return True
+    return bool(re.search(rf"{indexed}\s*=\s*{name}\b[^;]*[+\-]", text))
+
+
+def _nonce_indexes(text: str, name: str) -> set[str]:
+    return {item.strip() for item in re.findall(rf"\b{name}\s*\[([^\]]+)\]", text)}
+
+
+def _nonce_index_compatible(flow: FunctionFlow, write_text: str, name: str) -> bool:
+    if flow.cfg is None:
+        return False
+    write_indexes = _nonce_indexes(write_text, name)
+    digest_indexes: set[str] = set()
+    for node in flow.cfg.nodes:
+        if "keccak256" in node.text or "sha256" in node.text or "ecrecover" in node.text:
+            digest_indexes |= _nonce_indexes(node.text, name)
+    if not write_indexes or not digest_indexes:
+        return True
+    if not write_indexes.isdisjoint(digest_indexes):
+        return True
+    combined = write_indexes | digest_indexes
+    if all(re.fullmatch(r"[A-Za-z_]\w*", item) for item in combined):
+        return False
+    return True
+
+
+_ORACLE_COMPONENT = re.compile(
+    r"(oracle\d+)\.(roundId|answer|startedAt|updatedAt|answeredInRound)\Z"
+)
+
+
+def _oracle_expr(expr: str) -> tuple[str, str] | None:
+    match = _ORACLE_COMPONENT.fullmatch(expr.strip())
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _tagged_oracle_assignments(cfg: FunctionCfg) -> list[tuple[int, str, str]]:
+    counter = 0
+    found: list[tuple[int, str, str]] = []
+    for node in cfg.nodes:
+        raw = _assignments(node.text)
+        if not any(
+            expr.startswith("latestRoundData.") or "latestAnswer" in expr for _, expr in raw
+        ):
+            continue
+        counter += 1
+        observation = f"oracle{counter}"
+        for name, expr in raw:
+            if expr.startswith("latestRoundData."):
+                tagged = observation + expr[len("latestRoundData") :]
+            elif "latestAnswer" in expr:
+                tagged = f"{observation}.answer"
+            else:
+                continue
+            found.append((node.node_id, name, tagged))
+    return found
+
+
+def _oracle_uses(flow: FunctionFlow, names: set[str], defining: dict[str, set[int]]) -> list[int]:
+    if flow.cfg is None or not names:
+        return []
+    defined_at = {node_id for name in names for node_id in defining.get(name, set())}
+    uses: list[int] = []
+    for node in flow.cfg.nodes:
+        if node.kind not in {"stmt", "return", "require", "if"}:
+            continue
+        if node.node_id in defined_at:
+            continue
+        if any(re.search(rf"\b{re.escape(name)}\b", node.text) for name in names):
+            uses.append(node.node_id)
+    return uses
 
 
 def _remember(flow: FunctionFlow, function_text: str, source: str, target: str, kind: str) -> None:

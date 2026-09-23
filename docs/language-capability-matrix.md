@@ -98,7 +98,11 @@ dynamic only when a component is dynamic. `solc` and `forge` are optional. When
 they are absent, compiler storage layout is `UNAVAILABLE` and is not invented.
 External Foundry, Slither, Echidna, Medusa, Halmos, and Wake capabilities follow
 the installed binary and stay `UNAVAILABLE_AT_RUNTIME` when it is absent.
-Static Solidity findings stay potential evidence.
+A DeFi layer classifies token calls, share/asset conversions, ERC-4626-style
+flows, rounding direction, slippage bounds, oracle valuations, lending and AMM
+relationships, permit binding, and token-callback ordering. That layer is
+`LIMITED`: it is not a model of every protocol, and it does not treat a method
+name or a modifier name as proof. Static Solidity findings stay potential evidence.
 
 Vyper is detection-only. BugForge does not claim a native Vyper AST. Slither
 may analyze Vyper when the `slither` executable is installed; that external
@@ -109,4 +113,6 @@ clang/AFL harness. Those bridges report `LIMITED` or `UNAVAILABLE_AT_RUNTIME`.
 They do not mark a finding verified. See
 [phase28-solidity-deep-analysis.md](phase28-solidity-deep-analysis.md),
 [phase29-cfg-runtime-and-ci.md](phase29-cfg-runtime-and-ci.md), and
-[phase30-solidity-semantic-reinforcement.md](phase30-solidity-semantic-reinforcement.md).
+[phase30-solidity-semantic-reinforcement.md](phase30-solidity-semantic-reinforcement.md)
+and
+[phase31-solidity-defi-semantic-analysis.md](phase31-solidity-defi-semantic-analysis.md).

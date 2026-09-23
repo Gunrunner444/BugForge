@@ -464,26 +464,55 @@ def test_type_canonicalization_and_imported_selectors(tmp_path: Path) -> None:
 
 
 def test_compiler_overlay_does_not_invent_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    status = solidity_compiler_status()
-    assert status.status == "UNAVAILABLE"
-    assert compiler_semantics("contract C {}").status == "UNAVAILABLE"
+    """Compiler paths are monkeypatched so the suite does not depend on solc or forge."""
+    from app.parsing.solidity_compiler import SolidityCompilerStatus
 
-    def available() -> object:
-        from app.parsing.solidity_compiler import SolidityCompilerStatus
+    def unavailable() -> SolidityCompilerStatus:
+        return SolidityCompilerStatus("UNAVAILABLE", "", "compiler absent in this test")
 
+    monkeypatch.setattr("app.parsing.solidity_compiler.solidity_compiler_status", unavailable)
+    assert solidity_compiler_status().status == "UNAVAILABLE"
+    absent = compiler_semantics("contract C {}")
+    assert absent.status == "UNAVAILABLE"
+    assert absent.storage == []
+    ignored = compiler_semantics("contract C {}", runner=lambda _source: '{"version":"0.8.20"}')
+    assert ignored.status == "UNAVAILABLE"
+    assert ignored.storage == []
+
+    def available() -> SolidityCompilerStatus:
         return SolidityCompilerStatus("AVAILABLE", "solc", "test double")
 
     monkeypatch.setattr("app.parsing.solidity_compiler.solidity_compiler_status", available)
     present = compiler_semantics("contract C {}")
     assert present.status == "AVAILABLE"
     assert present.storage == []
+
+    def explode(_source: str) -> str:
+        raise OSError("compiler invocation failed")
+
+    invocation = compiler_semantics("contract C {}", runner=explode)
+    assert invocation.status == "FAILED"
+    assert invocation.storage == []
+    malformed = compiler_semantics("contract C {}", runner=lambda _source: "not-json")
+    assert malformed.status == "FAILED"
+    assert malformed.storage == []
+    errors = compiler_semantics(
+        "contract C {}",
+        runner=lambda _source: '{"errors":[{"severity":"error","message":"parse error"}]}',
+    )
+    assert errors.status == "FAILED"
+    assert errors.storage == []
     payload = """
     {"contracts":{"C.sol":{"C":{"storageLayout":{"storage":[{"label":"owner","slot":"0"}]}}}},
      "version":"0.8.20"}
     """
     parsed = compiler_semantics("contract C {}", runner=lambda _source: payload)
+    assert parsed.status == "AVAILABLE"
     assert parsed.storage == [{"label": "owner", "slot": "0"}]
     assert parsed.compiler_version == "0.8.20"
-    failed = compiler_semantics("contract C {}", runner=lambda _source: "not-json")
-    assert failed.status == "FAILED"
-    assert failed.storage == []
+    version_only = compiler_semantics(
+        "contract C {}", runner=lambda _source: '{"version":"0.8.26"}'
+    )
+    assert version_only.status == "AVAILABLE"
+    assert version_only.compiler_version == "0.8.26"
+    assert version_only.storage == []
