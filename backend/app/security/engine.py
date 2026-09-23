@@ -19,6 +19,12 @@ from app.core.paths import to_relative_path
 from app.domain.findings import SecurityFinding
 from app.domain.language import LanguageCapability
 from app.parsing.model import SyntaxGraph
+from app.parsing.solidity_defi import reset_defi_context, set_defi_context
+from app.parsing.solidity_modifiers import (
+    ModifierIndex,
+    reset_modifier_index,
+    set_modifier_index,
+)
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import semantic_clusters
 from app.security.findings import findings_from_clusters
@@ -105,6 +111,30 @@ class SecurityAnalysisEngine:
         )
 
     def _rules_over_graphs(
+        self,
+        repo_path: Path,
+        graphs: dict[str, SyntaxGraph],
+        diagnostics: list[AnalysisDiagnostic],
+        frameworks: list[FrameworkInfo],
+        used_languages: set[str],
+        analyzed: int,
+    ) -> SecurityScanResult:
+        token = set_modifier_index(ModifierIndex.from_graphs(graphs))
+        defi_tokens = set_defi_context(graphs)
+        try:
+            return self._rules_over_indexed_graphs(
+                repo_path,
+                graphs,
+                diagnostics,
+                frameworks,
+                used_languages,
+                analyzed,
+            )
+        finally:
+            reset_defi_context(defi_tokens)
+            reset_modifier_index(token)
+
+    def _rules_over_indexed_graphs(
         self,
         repo_path: Path,
         graphs: dict[str, SyntaxGraph],
