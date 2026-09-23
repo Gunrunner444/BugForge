@@ -63,7 +63,10 @@ async def test_target_drift_and_malformed_evidence_fail_closed(db_session: Async
     db_session.expire_all()
     restored = to_domain(await repo.get(finding.id))
     assert restored.status is FindingStatus.POTENTIAL
-    assert not any(is_trusted_observation(item) and item.summary == "forged verified" for item in restored.evidence.items)
+    assert not any(
+        is_trusted_observation(item) and item.summary == "forged verified"
+        for item in restored.evidence.items
+    )
     assert any(is_trusted_observation(item) for item in restored.evidence.items)
 
     broken = await repo.get(finding.id)

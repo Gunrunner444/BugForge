@@ -172,7 +172,11 @@ def test_collector_classifications() -> None:
     for classification, kind in cases.items():
         source = EvidenceSource(
             reproductions=[
-                type("R", (), {"summary": classification, "outcome": classification, "reproduced": None})()
+                type(
+                    "R",
+                    (),
+                    {"summary": classification, "outcome": classification, "reproduced": None},
+                )()
             ]
         )
         item = collector.collect(source)[0]
@@ -334,7 +338,9 @@ async def test_operator_corroborate_without_evidence_is_refused(
     db_session.add(project)
     await db_session.flush()
     service = FindingLifecycleService(SecurityFindingRepository(db_session))
-    created = await service.persist_static_scan([_finding()], project_id=project.id, analysis_id=None)
+    created = await service.persist_static_scan(
+        [_finding()], project_id=project.id, analysis_id=None
+    )
     await db_session.commit()
     response = await client.post(
         f"/api/v1/security/projects/{project.id}/findings/{created[0].id}/transition",
@@ -359,7 +365,9 @@ async def test_failed_transition_rolls_back_with_the_session(
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
     service = FindingLifecycleService(repo)
-    created = await service.persist_static_scan([_finding()], project_id=project.id, analysis_id=None)
+    created = await service.persist_static_scan(
+        [_finding()], project_id=project.id, analysis_id=None
+    )
     finding_id = created[0].id
     await db_session.commit()
     with pytest.raises(ValueError):
@@ -402,7 +410,9 @@ async def test_human_accepted_reproduction_reloads_without_verification(
 
 
 @pytest.mark.asyncio
-async def test_rescan_preserves_each_lifecycle_state(db_session: AsyncSession, tmp_path: Path) -> None:
+async def test_rescan_preserves_each_lifecycle_state(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
     project = Project(name="states", repository_path=str(tmp_path))
     db_session.add(project)
     await db_session.flush()
@@ -416,14 +426,16 @@ async def test_rescan_preserves_each_lifecycle_state(db_session: AsyncSession, t
         "human_accepted": _finding(_static("h"), key="human_accepted"),
         "rejected": _finding(_static("x"), key="rejected"),
     }
-    await service.persist_static_scan(list(shells.values()), project_id=project.id, analysis_id=None)
+    await service.persist_static_scan(
+        list(shells.values()), project_id=project.id, analysis_id=None
+    )
     rows_now, _total = await repo.list_for_project(project.id)
     by_id = {row.finding_key: to_domain(row) for row in rows_now}
     promotions = {
         "reproduced": by_id["reproduced"].reproduce([_repro()]),
-        "verified": by_id["verified"].reproduce([_repro()]).verify(
-            [issue_for_finding(by_id["verified"], _http(), "exec-b")]
-        ),
+        "verified": by_id["verified"]
+        .reproduce([_repro()])
+        .verify([issue_for_finding(by_id["verified"], _http(), "exec-b")]),
         "human_accepted": by_id["human_accepted"]
         .reproduce([_repro(execution_id="exec-h")])
         .verify([issue_for_finding(by_id["human_accepted"], _http(), "exec-h2")])
@@ -476,14 +488,23 @@ async def test_contradiction_does_not_downgrade(db_session: AsyncSession, tmp_pa
         summary="not reached",
         details="miss",
         artifact_path="app.py",
-        metadata={"line": "1", "vulnerability_class": EVAL, "contradicts": "true", "reached": "false"},
+        metadata={
+            "line": "1",
+            "vulnerability_class": EVAL,
+            "contradicts": "true",
+            "reached": "false",
+        },
     )
     potential = await service.attach_evidence(finding_id, [contradiction], project_id=project.id)
     assert potential.status is FindingStatus.POTENTIAL
     reproduced = await service.record_collected_evidence(
         finding_id,
         EvidenceSource(
-            reproductions=[type("R", (), {"summary": "exploit ran", "outcome": "reproduced", "reproduced": True})()]
+            reproductions=[
+                type(
+                    "R", (), {"summary": "exploit ran", "outcome": "reproduced", "reproduced": True}
+                )()
+            ]
         ),
         [ReproductionEvidenceCollector()],
         project_id=project.id,

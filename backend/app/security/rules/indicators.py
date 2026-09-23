@@ -136,7 +136,11 @@ class HardcodedSecretRule(SecurityRule):
                 if 0 < binding.line <= len(graph.lines)
                 else binding.rhs
             )
-            if _CHECKSUM_NAME.search(binding.name) and not _PEM.search(line) and not _AWS_KEY.search(line):
+            if (
+                _CHECKSUM_NAME.search(binding.name)
+                and not _PEM.search(line)
+                and not _AWS_KEY.search(line)
+            ):
                 continue
             if _PEM.search(line):
                 observations.append(
@@ -157,25 +161,17 @@ class HardcodedSecretRule(SecurityRule):
                     self._obs(graph, binding.line, "Hard-coded connection string", line)
                 )
             elif _BEARER.search(binding.rhs):
-                observations.append(
-                    self._obs(graph, binding.line, "Hard-coded bearer token", line)
-                )
+                observations.append(self._obs(graph, binding.line, "Hard-coded bearer token", line))
         for i, line in enumerate(graph.lines, start=1):
             if line.strip().startswith(("#", "//", "/*", "*", "--")):
                 continue
             if any(obs.line == i for obs in observations):
                 continue
-            if (
-                _CHECKSUM_NAME.search(line)
-                and not _PEM.search(line)
-                and not _AWS_KEY.search(line)
-            ):
+            if _CHECKSUM_NAME.search(line) and not _PEM.search(line) and not _AWS_KEY.search(line):
                 continue
             assigned = _SECRET_ASSIGN.search(line)
             if assigned and not _placeholder_value(assigned.group(2)):
-                observations.append(
-                    self._obs(graph, i, f"Hard-coded {assigned.group(1)}", line)
-                )
+                observations.append(self._obs(graph, i, f"Hard-coded {assigned.group(1)}", line))
                 continue
             if _CONN.search(line):
                 observations.append(self._obs(graph, i, "Hard-coded connection string", line))
@@ -185,9 +181,7 @@ class HardcodedSecretRule(SecurityRule):
                 continue
             if _PEM.search(line) or _AWS_KEY.search(line):
                 kind = (
-                    "PEM private key in source"
-                    if _PEM.search(line)
-                    else "AWS-style access key id"
+                    "PEM private key in source" if _PEM.search(line) else "AWS-style access key id"
                 )
                 observations.append(self._obs(graph, i, kind, line))
         return observations

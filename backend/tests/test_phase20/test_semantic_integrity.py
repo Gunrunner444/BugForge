@@ -30,9 +30,7 @@ def _write(root: Path, name: str, source: str) -> None:
 
 def _scan(root: Path):
     files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".js", ".ts"}
+        path for path in root.rglob("*") if path.is_file() and path.suffix in {".py", ".js", ".ts"}
     ]
     return SecurityAnalysisEngine().analyze_repository(root, files)
 
@@ -441,14 +439,20 @@ def test_evidence_attaches_only_to_the_matching_finding() -> None:
     )
     attached = correlate_finding(first, [exact, wrong, missing, malformed], peers=(second,))
     other = correlate_finding(second, [exact, missing, identified], peers=(first,))
-    assert [item.summary for item in attached.evidence.items if item.kind is not EvidenceKind.STATIC_ANALYSIS] == [
-        "reached line 3"
-    ]
+    assert [
+        item.summary
+        for item in attached.evidence.items
+        if item.kind is not EvidenceKind.STATIC_ANALYSIS
+    ] == ["reached line 3"]
     # A client finding key does not override a conflicting line.
     assert all(item.summary != "identity match" for item in other.evidence.items)
     assert all(item.summary != "reached line 3" for item in other.evidence.items)
-    assert all("no line" not in item.summary for item in attached.evidence.items + other.evidence.items)
-    assert all("bad line" not in item.summary for item in attached.evidence.items + other.evidence.items)
+    assert all(
+        "no line" not in item.summary for item in attached.evidence.items + other.evidence.items
+    )
+    assert all(
+        "bad line" not in item.summary for item in attached.evidence.items + other.evidence.items
+    )
     assert attached.status is FindingStatus.POTENTIAL
     assert other.status is FindingStatus.POTENTIAL
 
@@ -560,9 +564,7 @@ def test_ai_hypothesis_does_not_downgrade_verified_findings() -> None:
         "Potential dynamic execution",
         vulnerability_class="dynamic_execution",
     )
-    verified = shell.verify(
-        EvidenceBundle.from_items([issue_for_finding(shell, proof, "exec-v")])
-    )
+    verified = shell.verify(EvidenceBundle.from_items([issue_for_finding(shell, proof, "exec-v")]))
     updated = attach_ai_hypothesis(verified, hypothesis="maybe", analysis="model text")
     assert updated.status is FindingStatus.VERIFIED
     assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in updated.evidence.items)

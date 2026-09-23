@@ -62,7 +62,9 @@ class FindingLifecycleService:
         analysis_id: UUID | None,
     ) -> list[DBSecurityFinding]:
         """Persist potential or corroborated scan output. This is not verification."""
-        illegal = [item.status.value for item in findings if item.status not in _STATIC_SCAN_STATUSES]
+        illegal = [
+            item.status.value for item in findings if item.status not in _STATIC_SCAN_STATUSES
+        ]
         if illegal:
             raise ValueError(
                 "Static scan ingress accepts potential or corroborated findings only. "

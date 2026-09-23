@@ -131,7 +131,9 @@ def test_observation_identity_distinguishes_runtime_events() -> None:
     left = _http()
     assert observation_identity(left) == observation_identity(replace(left, id=uuid4()))
     assert observation_identity(left) != observation_identity(replace(left, details="other"))
-    assert observation_identity(left) != observation_identity(_http(url="https://app.example/other"))
+    assert observation_identity(left) != observation_identity(
+        _http(url="https://app.example/other")
+    )
     assert observation_identity(left) != observation_identity(_http(status="500"))
     assert observation_identity(_http(execution_id="a")) != observation_identity(
         _http(execution_id="b")
@@ -325,7 +327,9 @@ async def test_research_evidence_round_trip(db_session: AsyncSession) -> None:
     consistent = SecurityFinding.potential(
         "steady", evidence=[_repro(outcome="consistently_reproduced")]
     ).reproduce()
-    accepted_repro = SecurityFinding.potential("accepted repro", evidence=[_repro()]).reproduce().human_accept()
+    accepted_repro = (
+        SecurityFinding.potential("accepted repro", evidence=[_repro()]).reproduce().human_accept()
+    )
     shell = SecurityFinding.potential("accepted http")
     accepted_http = SecurityFinding.verified(
         "accepted http",

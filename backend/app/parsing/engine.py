@@ -64,7 +64,9 @@ class SyntaxParserRegistry:
         return sorted(self._parsers)
 
 
-def _profile_parser(profile: LanguageProfile, *, reason: str = "native parser unavailable") -> ParserFn:
+def _profile_parser(
+    profile: LanguageProfile, *, reason: str = "native parser unavailable"
+) -> ParserFn:
     def parse(file_path: Path, source: str) -> SyntaxGraph:
         graph = parse_with_profile(profile, file_path, source)
         graph.parser_backend = "profile"
@@ -90,7 +92,9 @@ def _treesitter_or_profile(language_id: str, profile: LanguageProfile) -> Parser
 
     def parse(file_path: Path, source: str) -> SyntaxGraph:
         native = treesitter_available(language_id) or (
-            language_id == "typescript" and str(file_path).endswith(".tsx") and treesitter_available("tsx")
+            language_id == "typescript"
+            and str(file_path).endswith(".tsx")
+            and treesitter_available("tsx")
         )
         if native:
             graph = parse_treesitter_graph(language_id, file_path, source)
@@ -209,8 +213,6 @@ def installed_parser_report(language_id: str) -> dict[str, str | bool]:
         "native_available": native,
         "parser_backend": backend,
         "parser_tier": str(tier),
-        "status": (
-            ParserStatus.NATIVE_AVAILABLE if native else ParserStatus.NATIVE_UNAVAILABLE
-        ),
+        "status": (ParserStatus.NATIVE_AVAILABLE if native else ParserStatus.NATIVE_UNAVAILABLE),
         "reason": reason,
     }

@@ -180,7 +180,9 @@ async def test_api_scan_collector_and_operator_transition(client, engine, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_project_ownership_and_missing_finding(db_session: AsyncSession, tmp_path: Path) -> None:
+async def test_project_ownership_and_missing_finding(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
     first = Project(name="a", repository_path=str(tmp_path))
     second = Project(name="b", repository_path=str(tmp_path))
     db_session.add_all([first, second])
@@ -208,7 +210,9 @@ async def test_project_ownership_and_missing_finding(db_session: AsyncSession, t
 
 
 @pytest.mark.asyncio
-async def test_reproduction_and_verification_rules(db_session: AsyncSession, tmp_path: Path) -> None:
+async def test_reproduction_and_verification_rules(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
     project = Project(name="rules", repository_path=str(tmp_path))
     db_session.add(project)
     await db_session.flush()
@@ -273,7 +277,12 @@ async def test_reproduction_and_verification_rules(db_session: AsyncSession, tmp
         summary="not reached",
         details="miss",
         artifact_path="app.py",
-        metadata={"line": "1", "vulnerability_class": EVAL, "reached": "false", "contradicts": "true"},
+        metadata={
+            "line": "1",
+            "vulnerability_class": EVAL,
+            "reached": "false",
+            "contradicts": "true",
+        },
     )
     with pytest.raises(ValueError):
         await service.attach_evidence(
@@ -286,7 +295,9 @@ async def test_reproduction_and_verification_rules(db_session: AsyncSession, tmp
     reproduced = await attempt(
         EvidenceSource(
             reproductions=[
-                type("R", (), {"summary": "exploit ran", "reproduced": True, "outcome": "reproduced"})()
+                type(
+                    "R", (), {"summary": "exploit ran", "reproduced": True, "outcome": "reproduced"}
+                )()
             ]
         ),
         [ReproductionEvidenceCollector()],
@@ -310,9 +321,7 @@ async def test_reproduction_and_verification_rules(db_session: AsyncSession, tmp
         transition=LifecycleTransition.VERIFY,
     )
     assert verified.status is FindingStatus.VERIFIED
-    later = await service.attach_evidence(
-        finding_id, [contradiction], project_id=project.id
-    )
+    later = await service.attach_evidence(finding_id, [contradiction], project_id=project.id)
     assert later.status is FindingStatus.VERIFIED
     assert any(item.summary == "not reached" for item in later.evidence.items)
 
@@ -341,9 +350,13 @@ async def test_ambiguous_peer_outside_first_page(db_session: AsyncSession, tmp_p
     assert total == 102
     assert all(row.finding_key != "competitor" for row in rows)
     service = FindingLifecycleService(repo)
-    stored = next(row for row in await repo.competing_findings(
-        project.id, file_path="app.py", line=1, vulnerability_class=EVAL
-    ) if row.finding_key == "target")
+    stored = next(
+        row
+        for row in await repo.competing_findings(
+            project.id, file_path="app.py", line=1, vulnerability_class=EVAL
+        )
+        if row.finding_key == "target"
+    )
     ambiguous = Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
         source="lab-http",
@@ -362,13 +375,20 @@ async def test_concurrent_evidence_merges(db_session: AsyncSession, tmp_path: Pa
     db_session.add(project)
     await db_session.flush()
     repo = SecurityFindingRepository(db_session)
-    created = await repo.bulk_create([_static(key="merge")], project_id=project.id, analysis_id=None)
+    created = await repo.bulk_create(
+        [_static(key="merge")], project_id=project.id, analysis_id=None
+    )
     base = to_domain(created[0])
     repro = Evidence(
         kind=EvidenceKind.REPRODUCTION,
         source="reproduction_engine",
         summary="exploit ran",
-        metadata={"reproduced": "true", "outcome": "reproduced", "attribution": "server", "finding_key": "merge"},
+        metadata={
+            "reproduced": "true",
+            "outcome": "reproduced",
+            "attribution": "server",
+            "finding_key": "merge",
+        },
     )
     http = Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
@@ -437,7 +457,9 @@ def test_untrusted_pathless_key_is_not_enough() -> None:
 
 
 def test_migration_022_does_not_import_live_helpers() -> None:
-    path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "022_phase20_finding_key.py"
+    path = (
+        Path(__file__).resolve().parents[2] / "alembic" / "versions" / "022_phase20_finding_key.py"
+    )
     source = path.read_text(encoding="utf-8")
     assert "app.repositories" not in source
     assert "finding_identity" not in source
@@ -474,7 +496,9 @@ def test_migration_022_does_not_import_live_helpers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wrong_location_duplicate_and_rescan(db_session: AsyncSession, tmp_path: Path) -> None:
+async def test_wrong_location_duplicate_and_rescan(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
     project = Project(name="rescan", repository_path=str(tmp_path))
     db_session.add(project)
     await db_session.flush()
@@ -525,7 +549,9 @@ async def test_wrong_location_duplicate_and_rescan(db_session: AsyncSession, tmp
         project_id=project.id,
         execution_id="same-exec",
     )
-    reproductions = [item for item in second.evidence.items if item.kind is EvidenceKind.REPRODUCTION]
+    reproductions = [
+        item for item in second.evidence.items if item.kind is EvidenceKind.REPRODUCTION
+    ]
     assert len(reproductions) == 1
     distinct = await service.record_collected_evidence(
         finding_id,
@@ -542,7 +568,9 @@ async def test_wrong_location_duplicate_and_rescan(db_session: AsyncSession, tmp
         execution_id="http-beta",
         transition=LifecycleTransition.VERIFY,
     )
-    bodies = [item.details for item in distinct.evidence.items if item.kind is EvidenceKind.HTTP_RESPONSE]
+    bodies = [
+        item.details for item in distinct.evidence.items if item.kind is EvidenceKind.HTTP_RESPONSE
+    ]
     assert bodies.count("alpha") == 1
     assert bodies.count("beta") == 1
     assert distinct.status is FindingStatus.VERIFIED

@@ -311,7 +311,9 @@ class BugForgeApi:
                 "or ~/.local/share/bugforge/operator.env outside the repository."
             )
         headers = {"X-BugForge-Operator-Token": self._token}
-        with httpx.Client(transport=self._transport, timeout=60.0, follow_redirects=False) as client:
+        with httpx.Client(
+            transport=self._transport, timeout=60.0, follow_redirects=False
+        ) as client:
             response = client.request(
                 method,
                 f"{self.base_url}{path}",

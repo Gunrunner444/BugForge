@@ -14,9 +14,7 @@ from tests.language_support import analyze_source
 
 
 def _lines(result, vuln: VulnerabilityClass) -> list[int]:
-    return sorted(
-        obs.line for obs in result.observations if obs.vulnerability_class is vuln
-    )
+    return sorted(obs.line for obs in result.observations if obs.vulnerability_class is vuln)
 
 
 def test_earlier_safe_eval_does_not_see_later_taint(tmp_path: Path) -> None:

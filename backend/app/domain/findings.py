@@ -123,8 +123,7 @@ class SecurityFinding:
                 "The reproduction record alone cannot verify a finding."
             )
         if self.status is FindingStatus.HUMAN_ACCEPTED and not (
-            _has_target_reproduction(self)
-            or _trusted_for(self)
+            _has_target_reproduction(self) or _trusted_for(self)
         ):
             raise ValueError(
                 "Human acceptance requires a successful reproduction "
@@ -378,7 +377,9 @@ def _has_target_reproduction(finding: SecurityFinding) -> bool:
     return any(reproduction_for_target(item, target) for item in finding.evidence.items)
 
 
-def _stamp_reproductions(items: tuple[Evidence, ...] | list[Evidence], target_id: str) -> list[Evidence]:
+def _stamp_reproductions(
+    items: tuple[Evidence, ...] | list[Evidence], target_id: str
+) -> list[Evidence]:
     """Bind new successful reproductions to the finding's current target.
 
     Records that already name a target are left unchanged, including when that

@@ -48,17 +48,13 @@ def _write(root: Path, name: str, source: str) -> None:
 
 def _scan(root: Path):
     files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".js", ".ts"}
+        path for path in root.rglob("*") if path.is_file() and path.suffix in {".py", ".js", ".ts"}
     ]
     return SecurityAnalysisEngine().analyze_repository(root, files)
 
 
 def _eval_findings(result):
-    return [
-        item for item in result.findings if item.vulnerability_class == EVAL
-    ]
+    return [item for item in result.findings if item.vulnerability_class == EVAL]
 
 
 def _static_finding(
@@ -113,7 +109,9 @@ class _Carry(EvidenceCollector):
         return (self._item,)
 
 
-def _http_observation(*, key: str, line: int, summary: str = "response reflected payload") -> Evidence:
+def _http_observation(
+    *, key: str, line: int, summary: str = "response reflected payload"
+) -> Evidence:
     return Evidence(
         kind=EvidenceKind.HTTP_RESPONSE,
         source="lab-http",
@@ -198,11 +196,15 @@ async def test_rescan_preserves_human_review_and_terminal_status(
     ).human_accept()
     verified_base = replace(_static_finding(key="verified-key", line=4), project_id=project_key)
     verified = verified_base.verify(
-        [issue_for_finding(verified_base, _http_observation(key="verified-key", line=4), "verify-verified-key")]
+        [
+            issue_for_finding(
+                verified_base, _http_observation(key="verified-key", line=4), "verify-verified-key"
+            )
+        ]
     )
-    reproduced = replace(_static_finding(key="reproduced-key", line=5), project_id=project_key).reproduce(
-        [proof]
-    )
+    reproduced = replace(
+        _static_finding(key="reproduced-key", line=5), project_id=project_key
+    ).reproduce([proof])
     rejected = replace(_static_finding(key="rejected-key", line=6), project_id=project_key).reject()
 
     await repo.bulk_create(
@@ -242,7 +244,9 @@ def test_migration_strips_duplicate_json_keys() -> None:
     first_id = uuid4()
     second_id = uuid4()
     third_id = uuid4()
-    intel = json.dumps({"finding_key": "dup-key", "flow_sink": "eval", "human_review_state": "accepted"})
+    intel = json.dumps(
+        {"finding_key": "dup-key", "flow_sink": "eval", "human_review_state": "accepted"}
+    )
     other = json.dumps({"finding_key": "other-key", "flow_sink": "exec"})
     rows = canonicalize_finding_key_rows(
         [
@@ -418,8 +422,7 @@ async def test_unique_constraint_reconciles_raced_insert(
     )
     verified = race_base.verify(
         [issue_for_finding(race_base, proof, "verify-race-key")]
-    ).human_accept(
-    )
+    ).human_accept()
     await repo.bulk_create([verified], project_id=project.id, analysis_id=None)
 
     async def miss(_project_id, _findings):
@@ -648,9 +651,7 @@ async def test_lifecycle_negative_paths(db_session: AsyncSession, tmp_path: Path
         execution_id="verify-http-1",
         transition=LifecycleTransition.VERIFY,
     )
-    later = await service.attach_evidence(
-        finding_id, [contradiction], project_id=project.id
-    )
+    later = await service.attach_evidence(finding_id, [contradiction], project_id=project.id)
     assert later.status is FindingStatus.VERIFIED
     assert any(item.summary == "not reached" for item in later.evidence.items)
 
@@ -771,7 +772,9 @@ def test_correlation_rules_reject_ambiguous_and_wrong_identity() -> None:
     )
     assert all(item.summary != "shared line" for item in peers.evidence.items)
     duplicate = correlate_finding(exact, [_runtime(key="k1", line=3)])
-    reproductions = [item for item in duplicate.evidence.items if item.kind is EvidenceKind.REPRODUCTION]
+    reproductions = [
+        item for item in duplicate.evidence.items if item.kind is EvidenceKind.REPRODUCTION
+    ]
     assert len(reproductions) == 1
     ai = Evidence(
         kind=EvidenceKind.AI_ANALYSIS,

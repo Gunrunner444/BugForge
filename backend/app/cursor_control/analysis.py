@@ -130,7 +130,9 @@ def _source_files(root: Path, *, limit: int) -> list[Path]:
     if not root.is_dir():
         return found
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS and not name.startswith("."))
+        dirnames[:] = sorted(
+            name for name in dirnames if name not in _SKIP_DIRS and not name.startswith(".")
+        )
         for name in sorted(filenames):
             if name.startswith("."):
                 continue

@@ -513,9 +513,7 @@ async def external_decision(
 
     agent = await _require(session_id, db, operator=session)
     if agent.session.controller is not ResearchController.CURSOR:
-        raise HTTPException(
-            status_code=409, detail="external_decision_requires_cursor_controller"
-        )
+        raise HTTPException(status_code=409, detail="external_decision_requires_cursor_controller")
     try:
         parsed = PlannerOutput.model_validate(payload.model_dump())
     except ValidationError as exc:

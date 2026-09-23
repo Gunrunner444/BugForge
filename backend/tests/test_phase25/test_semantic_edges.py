@@ -110,7 +110,12 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         _files(f"import os\ndef wrap(v):\n    return v\ndef f():\n    os.system(wrap({Q}))\n"),
         "gap",
     ),
-    ("cmd-field", CMD, _files("import os\ndef f():\n    os.system(request.args['cmd'])\n"), "finding"),
+    (
+        "cmd-field",
+        CMD,
+        _files("import os\ndef f():\n    os.system(request.args['cmd'])\n"),
+        "finding",
+    ),
     ("cmd-const", CMD, _files("import os\ndef f():\n    os.system('ls')\n"), "clean"),
     (
         "cmd-san",
@@ -147,7 +152,12 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         ),
         "gap",
     ),
-    ("cmd-partial", CMD, _files("import os\ndef f(\n    os.system(request.args.get('q'))\n"), "gap"),
+    (
+        "cmd-partial",
+        CMD,
+        _files("import os\ndef f(\n    os.system(request.args.get('q'))\n"),
+        "gap",
+    ),
     ("path-direct", PATH, _files(f"def f():\n    open({Q})\n"), "finding"),
     ("path-alias", PATH, _files(f"def f():\n    n = {Q}\n    open(n)\n"), "finding"),
     (
@@ -164,7 +174,12 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         _files(f"import os\ndef f():\n    open(os.path.realpath({Q}))\n"),
         "finding",
     ),
-    ("path-shadow", PATH, _files(f"def open(p):\n    return p\ndef f():\n    open({Q})\n"), "finding"),
+    (
+        "path-shadow",
+        PATH,
+        _files(f"def open(p):\n    return p\ndef f():\n    open({Q})\n"),
+        "finding",
+    ),
     ("path-arg", PATH, _files(f"def f():\n    open('README.md', {Q})\n"), "finding"),
     (
         "path-cross",
@@ -178,12 +193,19 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
     (
         "path-ambig",
         PATH,
-        _files(f"def helper(v):\n    open(v)\ndef helper(v):\n    return v\ndef f():\n    helper({Q})\n"),
+        _files(
+            f"def helper(v):\n    open(v)\ndef helper(v):\n    return v\ndef f():\n    helper({Q})\n"
+        ),
         "gap",
     ),
     ("path-partial", PATH, _files("def f(\n    open(request.args.get('q'))\n"), "gap"),
     ("ssrf-direct", SSRF, _files(f"import requests\ndef f():\n    requests.get({Q})\n"), "finding"),
-    ("ssrf-alias", SSRF, _files(f"import requests\ndef f():\n    u = {Q}\n    requests.get(u)\n"), "finding"),
+    (
+        "ssrf-alias",
+        SSRF,
+        _files(f"import requests\ndef f():\n    u = {Q}\n    requests.get(u)\n"),
+        "finding",
+    ),
     (
         "ssrf-wrap",
         SSRF,
@@ -270,7 +292,12 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         _files("from flask import Markup\ndef f():\n    return Markup(request.args['name'])\n"),
         "finding",
     ),
-    ("xss-const", XSS, _files("from flask import Markup\ndef f():\n    return Markup('ok')\n"), "clean"),
+    (
+        "xss-const",
+        XSS,
+        _files("from flask import Markup\ndef f():\n    return Markup('ok')\n"),
+        "clean",
+    ),
     (
         "xss-san",
         XSS,
@@ -316,11 +343,18 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         "gap",
     ),
     ("deser-direct", DESER, _files(f"import pickle\ndef f():\n    pickle.loads({Q})\n"), "finding"),
-    ("deser-alias", DESER, _files(f"import pickle\ndef f():\n    b = {Q}\n    pickle.loads(b)\n"), "finding"),
+    (
+        "deser-alias",
+        DESER,
+        _files(f"import pickle\ndef f():\n    b = {Q}\n    pickle.loads(b)\n"),
+        "finding",
+    ),
     (
         "deser-wrap",
         DESER,
-        _files(f"import pickle\ndef wrap(v):\n    return v\ndef f():\n    pickle.loads(wrap({Q}))\n"),
+        _files(
+            f"import pickle\ndef wrap(v):\n    return v\ndef f():\n    pickle.loads(wrap({Q}))\n"
+        ),
         "gap",
     ),
     (
@@ -329,9 +363,19 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
         _files("import pickle\ndef f():\n    pickle.loads(request.args['blob'])\n"),
         "finding",
     ),
-    ("deser-const", DESER, _files("import pickle\ndef f():\n    pickle.loads(b'constant')\n"), "clean"),
+    (
+        "deser-const",
+        DESER,
+        _files("import pickle\ndef f():\n    pickle.loads(b'constant')\n"),
+        "clean",
+    ),
     ("deser-san", DESER, _files(f"import json\ndef f():\n    json.loads({Q})\n"), "clean"),
-    ("deser-shadow", DESER, _files(f"def loads(b):\n    return b\ndef f():\n    loads({Q})\n"), "clean"),
+    (
+        "deser-shadow",
+        DESER,
+        _files(f"def loads(b):\n    return b\ndef f():\n    loads({Q})\n"),
+        "clean",
+    ),
     (
         "deser-arg",
         DESER,
@@ -373,7 +417,12 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
     ("eval-field", EVAL, _files("def f():\n    eval(request.args['code'])\n"), "finding"),
     ("eval-const", EVAL, _files("def f():\n    eval('1')\n"), "clean"),
     ("eval-san", EVAL, _files(f"def f():\n    eval(str({Q}))\n"), "finding"),
-    ("eval-shadow", EVAL, _files(f"def eval(c):\n    return c\ndef f():\n    eval({Q})\n"), "clean"),
+    (
+        "eval-shadow",
+        EVAL,
+        _files(f"def eval(c):\n    return c\ndef f():\n    eval({Q})\n"),
+        "clean",
+    ),
     ("eval-arg", EVAL, _files(f"def f():\n    eval('1', {{'x': {Q}}})\n"), "finding"),
     (
         "eval-cross",
@@ -387,7 +436,9 @@ CASES: list[tuple[str, VulnerabilityClass, tuple[tuple[str, str], ...], str]] = 
     (
         "eval-ambig",
         EVAL,
-        _files(f"def helper(v):\n    eval(v)\ndef helper(v):\n    return v\ndef f():\n    helper({Q})\n"),
+        _files(
+            f"def helper(v):\n    eval(v)\ndef helper(v):\n    return v\ndef f():\n    helper({Q})\n"
+        ),
         "gap",
     ),
     ("eval-partial", EVAL, _files("def f(\n    eval(request.args.get('q'))\n"), "gap"),
@@ -480,7 +531,9 @@ def test_secret_indicator_edges(tmp_path: Path) -> None:
 
     nested = scan("cfg.py", 'config = {"password": "s3cret-production-value"}\n')
     assert any(obs.vulnerability_class is SECRET for obs in nested.observations)
-    assert "s3cret-production-value" not in " ".join(obs.evidence_text for obs in nested.observations)
+    assert "s3cret-production-value" not in " ".join(
+        obs.evidence_text for obs in nested.observations
+    )
     pem = scan(
         "key.py",
         'KEY = """-----BEGIN PRIVATE KEY-----\nMIIEsupersecretmaterial\n-----END PRIVATE KEY-----"""\n',

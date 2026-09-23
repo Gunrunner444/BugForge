@@ -1580,9 +1580,7 @@ def _binding_tokens(
             opaque = True
             continue
         if summary.file_path != graph.file_path:
-            status = _charge_cross_file(
-                charged, edge_budget, caller_file, caller_name, summary
-            )
+            status = _charge_cross_file(charged, edge_budget, caller_file, caller_name, summary)
             if status == "capped":
                 capped = True
                 opaque = True

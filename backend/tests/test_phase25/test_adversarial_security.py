@@ -231,23 +231,57 @@ def test_canonical_identity_ignores_presentation_uuid() -> None:
     assert first.server_observation_id != second.server_observation_id
     assert observation_identity(first) == observation_identity(second)
     assert observation_identity(replace(first, id=uuid4())) == observation_identity(first)
-    assert observation_identity(first) != observation_identity(_issued(finding, _http(url="https://other"), "exec-b"))
-    assert observation_identity(first) != observation_identity(_issued(finding, _http(method="POST"), "exec-b"))
-    assert observation_identity(first) != observation_identity(_issued(finding, _http(status="404"), "exec-b"))
+    assert observation_identity(first) != observation_identity(
+        _issued(finding, _http(url="https://other"), "exec-b")
+    )
+    assert observation_identity(first) != observation_identity(
+        _issued(finding, _http(method="POST"), "exec-b")
+    )
+    assert observation_identity(first) != observation_identity(
+        _issued(finding, _http(status="404"), "exec-b")
+    )
     assert observation_identity(first) != observation_identity(_issued(finding, _http(), "exec-c"))
-    scanner_a = _issued(finding, Evidence(
-        kind=EvidenceKind.SCANNER, source="scanner", summary="hit", metadata={"result_id": "a", "check_id": "c"}
-    ), "exec-s")
-    scanner_b = _issued(finding, Evidence(
-        kind=EvidenceKind.SCANNER, source="scanner", summary="hit", metadata={"result_id": "b", "check_id": "c"}
-    ), "exec-s")
+    scanner_a = _issued(
+        finding,
+        Evidence(
+            kind=EvidenceKind.SCANNER,
+            source="scanner",
+            summary="hit",
+            metadata={"result_id": "a", "check_id": "c"},
+        ),
+        "exec-s",
+    )
+    scanner_b = _issued(
+        finding,
+        Evidence(
+            kind=EvidenceKind.SCANNER,
+            source="scanner",
+            summary="hit",
+            metadata={"result_id": "b", "check_id": "c"},
+        ),
+        "exec-s",
+    )
     assert observation_identity(scanner_a) != observation_identity(scanner_b)
-    browser_a = _issued(finding, Evidence(
-        kind=EvidenceKind.BROWSER, source="browser", summary="page", metadata={"session_id": "s1", "route": "/"}
-    ), "exec-br")
-    browser_b = _issued(finding, Evidence(
-        kind=EvidenceKind.BROWSER, source="browser", summary="page", metadata={"session_id": "s2", "route": "/"}
-    ), "exec-br")
+    browser_a = _issued(
+        finding,
+        Evidence(
+            kind=EvidenceKind.BROWSER,
+            source="browser",
+            summary="page",
+            metadata={"session_id": "s1", "route": "/"},
+        ),
+        "exec-br",
+    )
+    browser_b = _issued(
+        finding,
+        Evidence(
+            kind=EvidenceKind.BROWSER,
+            source="browser",
+            summary="page",
+            metadata={"session_id": "s2", "route": "/"},
+        ),
+        "exec-br",
+    )
     assert observation_identity(browser_a) != observation_identity(browser_b)
     other = _finding()
     assert observation_identity(_issued(finding, _http(), "exec-b")) != observation_identity(
@@ -257,14 +291,19 @@ def test_canonical_identity_ignores_presentation_uuid() -> None:
 
 @pytest.mark.parametrize(
     ("left_summary", "right_summary"),
-    [("response reflected payload", "response   reflected   payload"), ("GET result", "GET   result")],
+    [
+        ("response reflected payload", "response   reflected   payload"),
+        ("GET result", "GET   result"),
+    ],
 )
 def test_normalized_summary_and_path_stay_stable(left_summary: str, right_summary: str) -> None:
     left = _http()
     right = replace(left, summary=right_summary, id=uuid4(), artifact_path="a\\b")
     left = replace(left, summary=left_summary, artifact_path="a/b")
     assert observation_identity(left) == observation_identity(right)
-    reordered = replace(left, metadata={"status": "200", "url": left.metadata["url"], "method": "GET"})
+    reordered = replace(
+        left, metadata={"status": "200", "url": left.metadata["url"], "method": "GET"}
+    )
     assert observation_identity(left) == observation_identity(reordered)
 
 
@@ -584,16 +623,13 @@ def test_idor_requires_a_constraint_on_the_lookup(tmp_path: Path) -> None:
     named = _scan(
         tmp_path / "named",
         "named.py",
-        "def admin_load(user_id):\n"
-        "    return get_object_or_404(User, id=user_id)\n",
+        "def admin_load(user_id):\n    return get_object_or_404(User, id=user_id)\n",
     )
     assert _has(named, VulnerabilityClass.IDOR)
     marked = _scan(
         tmp_path / "marked",
         "marked.py",
-        "@admin_required\n"
-        "def load(user_id):\n"
-        "    return get_object_or_404(User, id=user_id)\n",
+        "@admin_required\ndef load(user_id):\n    return get_object_or_404(User, id=user_id)\n",
     )
     assert not _has(marked, VulnerabilityClass.IDOR)
     guarded = _scan(
@@ -674,8 +710,7 @@ def test_password_crypto_secret_jwt_csrf(tmp_path: Path) -> None:
     safe_jwt = _scan(
         tmp_path / "jwt2",
         "jwt2.py",
-        "def decode(token, key):\n"
-        "    return jwt.decode(token, key, algorithms=['HS256'])\n",
+        "def decode(token, key):\n    return jwt.decode(token, key, algorithms=['HS256'])\n",
     )
     assert not _has(safe_jwt, VulnerabilityClass.AUTHENTICATION)
 
@@ -685,7 +720,9 @@ def test_password_crypto_secret_jwt_csrf(tmp_path: Path) -> None:
         "WTF_CSRF_ENABLED = False\ncsrf = False\n",
     )
     assert _has(csrf, VulnerabilityClass.MISSING_SECURITY_CONTROL)
-    local = _scan(tmp_path / "localcsrf", "local.py", "def view():\n    csrf = False\n    return csrf\n")
+    local = _scan(
+        tmp_path / "localcsrf", "local.py", "def view():\n    csrf = False\n    return csrf\n"
+    )
     assert not _has(local, VulnerabilityClass.MISSING_SECURITY_CONTROL)
 
 

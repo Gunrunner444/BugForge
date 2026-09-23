@@ -111,9 +111,7 @@ class ReproductionEvidenceCollector(EvidenceCollector):
 
     @property
     def kinds(self) -> frozenset[EvidenceKind]:
-        return frozenset(
-            {EvidenceKind.REPRODUCTION, EvidenceKind.LOG, EvidenceKind.TEST_FAILURE}
-        )
+        return frozenset({EvidenceKind.REPRODUCTION, EvidenceKind.LOG, EvidenceKind.TEST_FAILURE})
 
     def collect(self, source: EvidenceSource) -> Sequence[Evidence]:
         items: list[Evidence] = []

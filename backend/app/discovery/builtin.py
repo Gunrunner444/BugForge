@@ -23,8 +23,7 @@ class BugforgeStaticEngine(DiscoveryEngine):
         from app.plugins import get_plugin_catalog
 
         return frozenset(
-            adapter.language_id
-            for adapter in get_plugin_catalog().languages.security_analyzers()
+            adapter.language_id for adapter in get_plugin_catalog().languages.security_analyzers()
         )
 
     def capabilities(self) -> frozenset[EngineCapability]:

@@ -116,13 +116,9 @@ def test_reproduction_does_not_survive_target_drift() -> None:
 
     fresh = drifted.reproduce([_repro(execution_id="exec-b")])
     assert fresh.status is FindingStatus.REPRODUCED
-    assert reproduction_for_target(
-        fresh.evidence.items[-1], semantic_target_identity(fresh)
-    )
+    assert reproduction_for_target(fresh.evidence.items[-1], semantic_target_identity(fresh))
     assert fresh.human_accept().status is FindingStatus.HUMAN_ACCEPTED
-    assert any(
-        item.metadata.get("observed_target") == old_target for item in fresh.evidence.items
-    )
+    assert any(item.metadata.get("observed_target") == old_target for item in fresh.evidence.items)
 
 
 def test_static_stamp_does_not_corroborate_a_new_target() -> None:
@@ -164,7 +160,11 @@ def test_static_stamp_does_not_corroborate_a_new_target() -> None:
     [
         (lambda finding: replace(finding, flow_sink="exec"),),
         (lambda finding: replace(finding, flow_source="request.form"),),
-        (lambda finding: replace(finding, source_location=SourceLocation(file_path="other.py", line=9)),),
+        (
+            lambda finding: replace(
+                finding, source_location=SourceLocation(file_path="other.py", line=9)
+            ),
+        ),
         (lambda finding: replace(finding, project_id="project-b"),),
         (lambda finding: replace(finding, field_path="user.id"),),
     ],

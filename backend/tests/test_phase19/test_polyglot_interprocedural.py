@@ -192,8 +192,7 @@ def test_kotlin_function_import_and_alias(tmp_path: Path) -> None:
                 "package pkg\nfun run(value: String) {\n    Runtime.getRuntime().exec(value)\n}\n"
             ),
             "App.kt": (
-                "import pkg.run as runCode\nfun item() {\n"
-                '    runCode(call.parameters["q"])\n}\n'
+                'import pkg.run as runCode\nfun item() {\n    runCode(call.parameters["q"])\n}\n'
             ),
         },
     )
