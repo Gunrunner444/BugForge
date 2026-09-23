@@ -102,7 +102,17 @@ A DeFi layer classifies token calls, share/asset conversions, ERC-4626-style
 flows, rounding direction, slippage bounds, oracle valuations, lending and AMM
 relationships, permit binding, and token-callback ordering. That layer is
 `LIMITED`: it is not a model of every protocol, and it does not treat a method
-name or a modifier name as proof. Static Solidity findings stay potential evidence.
+name or a modifier name as proof.
+Storage layout, inheritance order, delegatecall targets, and upgrade
+authorization are also `LIMITED`. The parser assigns slots only when the types
+and the base contracts are known. An ambiguous base or an unknown type leaves
+the slot unknown. A compiler layout, when a real standard-JSON result is
+supplied, is kept beside the parser layout; a disagreement is recorded and is
+not silently resolved. Yul `sload` and `sstore` link to a slot only when the
+argument is a literal or a constant with a literal value. This is not
+compiler-equivalent layout, not EVM symbolic execution, and not a certificate
+that a proxy implements UUPS, EIP-1967, or a diamond. Static Solidity findings
+stay potential evidence.
 
 Vyper is detection-only. BugForge does not claim a native Vyper AST. Slither
 may analyze Vyper when the `slither` executable is installed; that external
@@ -115,4 +125,6 @@ They do not mark a finding verified. See
 [phase29-cfg-runtime-and-ci.md](phase29-cfg-runtime-and-ci.md), and
 [phase30-solidity-semantic-reinforcement.md](phase30-solidity-semantic-reinforcement.md)
 and
-[phase31-solidity-defi-semantic-analysis.md](phase31-solidity-defi-semantic-analysis.md).
+[phase31-solidity-defi-semantic-analysis.md](phase31-solidity-defi-semantic-analysis.md)
+and
+[phase32-solidity-proxy-storage-upgradeability.md](phase32-solidity-proxy-storage-upgradeability.md).

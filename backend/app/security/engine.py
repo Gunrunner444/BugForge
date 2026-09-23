@@ -25,6 +25,8 @@ from app.parsing.solidity_modifiers import (
     reset_modifier_index,
     set_modifier_index,
 )
+from app.parsing.solidity_proxy import reset_proxy_context, set_proxy_context
+from app.parsing.solidity_storage import reset_storage_context, set_storage_context
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import semantic_clusters
 from app.security.findings import findings_from_clusters
@@ -121,6 +123,8 @@ class SecurityAnalysisEngine:
     ) -> SecurityScanResult:
         token = set_modifier_index(ModifierIndex.from_graphs(graphs))
         defi_tokens = set_defi_context(graphs)
+        storage_token = set_storage_context(graphs)
+        proxy_token = set_proxy_context()
         try:
             return self._rules_over_indexed_graphs(
                 repo_path,
@@ -131,6 +135,8 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_proxy_context(proxy_token)
+            reset_storage_context(storage_token)
             reset_defi_context(defi_tokens)
             reset_modifier_index(token)
 

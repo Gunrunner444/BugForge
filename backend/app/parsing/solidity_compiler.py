@@ -27,6 +27,7 @@ class CompilerSemantics:
     tool: str
     detail: str
     storage: list[dict[str, str]] = field(default_factory=list)
+    layouts: list[dict[str, str]] = field(default_factory=list)
     compiler_version: str = ""
 
 
@@ -87,12 +88,13 @@ def _parse_standard_json(raw: str, tool: str) -> CompilerSemantics:
     ):
         return CompilerSemantics("FAILED", tool, "compiler reported an error")
     storage: list[dict[str, str]] = []
+    layouts: list[dict[str, str]] = []
     contracts = payload.get("contracts")
     if isinstance(contracts, dict):
         for file_contracts in contracts.values():
             if not isinstance(file_contracts, dict):
                 continue
-            for contract in file_contracts.values():
+            for contract_name, contract in file_contracts.items():
                 if not isinstance(contract, dict):
                     continue
                 layout = contract.get("storageLayout")
@@ -106,8 +108,20 @@ def _parse_standard_json(raw: str, tool: str) -> CompilerSemantics:
                         continue
                     label = str(slot.get("label") or "")
                     index = str(slot.get("slot") or "")
-                    if label and index:
-                        storage.append({"label": label, "slot": index})
+                    if not label or not index:
+                        continue
+                    storage.append({"label": label, "slot": index})
+                    rich = {
+                        "contract": str(contract_name),
+                        "label": label,
+                        "slot": index,
+                    }
+                    if slot.get("offset") is not None:
+                        rich["offset"] = str(slot.get("offset"))
+                    type_name = slot.get("type")
+                    if isinstance(type_name, str) and type_name:
+                        rich["type"] = type_name
+                    layouts.append(rich)
     version = ""
     if isinstance(payload.get("version"), str):
         version = str(payload["version"])
@@ -120,5 +134,6 @@ def _parse_standard_json(raw: str, tool: str) -> CompilerSemantics:
         tool,
         "Compiler overlay parsed. These facts do not mark any finding verified.",
         storage=storage,
+        layouts=layouts,
         compiler_version=version,
     )
