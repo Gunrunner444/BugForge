@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from app.parsing.model import SyntaxEvent, SyntaxGraph
 from app.parsing.solidity_cfg import _consume_parens, _skip_string_or_comment
+from app.parsing.solidity_compiler import compiler_type_hint
 from app.parsing.solidity_flow import (
     digest_contains,
     digest_contains_any,
@@ -1081,6 +1082,19 @@ def _function_locked(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
     return False
 
 
+def _compiler_type_replaces(parser_type: str, hint: str) -> bool:
+    """Use a compiler storage type only when the parser type is an address.
+
+    A compiler type can tighten an ``address`` storage variable to an interface
+    or show that it is not a token. It does not override a type the parser
+    already resolved, and it is absent when no compiler ran.
+    """
+    if parser_type.lower() not in {"", "address", "address payable"}:
+        return False
+    simple = hint.replace("payable", " ").split(".")[-1].strip()
+    return bool(simple) and simple.lower() not in {"address", ""}
+
+
 def _variable_types(graph: SyntaxGraph, function: SyntaxEvent, contract: str) -> dict[str, str]:
     types = _parameter_types(function.text)
     for event in graph.events:
@@ -1091,7 +1105,12 @@ def _variable_types(graph: SyntaxGraph, function: SyntaxEvent, contract: str) ->
             continue
         name = fields.get("name", "")
         if name:
-            types.setdefault(name, fields.get("type", ""))
+            current = fields.get("type", "")
+            hint = compiler_type_hint(contract, name)
+            if _compiler_type_replaces(current, hint):
+                types[name] = hint
+            else:
+                types.setdefault(name, current)
     for name, type_name in _local_declarations(function.text).items():
         types.setdefault(name, type_name)
     return types

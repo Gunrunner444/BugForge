@@ -48,7 +48,10 @@ A selected model name such as `grok-4.7` is only the Cursor-controlled model
 label. BugForge does not call Grok or xAI and does not store a Grok API key.
 `exploratory_test` is an additional lab-only tool. The model proposes a test;
 BugForge validates it, runs it in Docker with the network off, and records
-evidence. Generated-test failure is not verification.
+evidence. Generated-test failure is not verification. The Docker result uses
+`provenance=sandbox_execution`, which cannot verify a finding or mark code safe.
+Attempts are stored on the session and restored with it. The model still cannot
+supply the command, Docker flags, Foundry flags, or network access.
 
 ## Local lab vs live HackerOne
 
@@ -79,7 +82,10 @@ untrusted structured input (`PlannerOutput`).
 
 Research sessions persist project, target, program, state, model configuration,
 hypotheses, tool calls, approvals, evidence graph nodes/edges, privilege
-snapshots, findings, timestamps, and errors. Secrets are never stored.
+snapshots, findings, timestamps, and errors. Exploratory attempts are stored
+in `research_exploratory_attempts` and restored on reconstruct, including the
+hashes used for dedup, parent checks, replay, and flaky history. Secrets,
+provider credentials, and the process environment are never stored.
 
 `GET /security-agent/sessions/{id}` reconstructs the agent from the database
 after restart and requires the local operator token. Restored privileges are

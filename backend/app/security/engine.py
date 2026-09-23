@@ -19,6 +19,12 @@ from app.core.paths import to_relative_path
 from app.domain.findings import SecurityFinding
 from app.domain.language import LanguageCapability
 from app.parsing.model import SyntaxGraph
+from app.parsing.solidity_compiler import (
+    reset_compiler_cache,
+    reset_compiler_type_hints,
+    set_compiler_cache,
+    set_compiler_type_hints,
+)
 from app.parsing.solidity_cross import reset_project_context, set_project_context
 from app.parsing.solidity_defi import reset_defi_context, set_defi_context
 from app.parsing.solidity_modifiers import (
@@ -127,6 +133,8 @@ class SecurityAnalysisEngine:
         storage_token = set_storage_context(graphs)
         proxy_token = set_proxy_context()
         project_token = set_project_context(graphs)
+        compiler_token = set_compiler_cache()
+        type_token = set_compiler_type_hints()
         try:
             _overlay_compiler_layouts(graphs)
             return self._rules_over_indexed_graphs(
@@ -138,6 +146,8 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_compiler_type_hints(type_token)
+            reset_compiler_cache(compiler_token)
             reset_project_context(project_token)
             reset_proxy_context(proxy_token)
             reset_storage_context(storage_token)
@@ -296,7 +306,13 @@ def _overlay_compiler_layouts(graphs: dict[str, SyntaxGraph]) -> None:
     The compiler is never required. A missing compiler does not invent slots,
     and a compiler slot never replaces the parser slot.
     """
-    from app.parsing.solidity_compiler import compiler_semantics_for_scan
+    import hashlib
+
+    from app.parsing.solidity_compiler import (
+        compiler_semantics_for_scan,
+        reconcile_selectors,
+        record_compiler_type_hints,
+    )
     from app.parsing.solidity_storage import analyze_storage, apply_compiler_layout
 
     for graph in graphs.values():
@@ -306,11 +322,43 @@ def _overlay_compiler_layouts(graphs: dict[str, SyntaxGraph]) -> None:
             source = Path(graph.file_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             source = ""
-        apply_compiler_layout(
+        snapshot = hashlib.sha256(source.encode()).hexdigest()
+        compiler = compiler_semantics_for_scan(source, snapshot=snapshot)
+        record_compiler_type_hints(compiler)
+        model = apply_compiler_layout(
             analyze_storage(graph),
-            compiler_semantics_for_scan(source),
+            compiler,
             source_path=graph.file_path,
         )
+        model.semantic_disagreements.extend(
+            reconcile_selectors(_parser_selectors(graph), compiler.selectors)
+        )
+
+
+def _parser_selectors(graph: SyntaxGraph) -> list[dict[str, str]]:
+    from app.parsing.solidity_links import selector_for_function
+
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in graph.events:
+        if event.kind != "sol_function":
+            continue
+        fields = {
+            key: value
+            for part in event.extra.split("|")
+            if "=" in part
+            for key, value in [part.split("=", 1)]
+        }
+        contract = fields.get("contract", "")
+        name = fields.get("function", "")
+        if not name or (contract, name) in seen:
+            continue
+        seen.add((contract, name))
+        params, selector = selector_for_function(graph, name, {})
+        if not selector:
+            continue
+        rows.append({"contract": contract, "symbol": f"{name}({params})", "selector": selector})
+    return rows
 
 
 def _accepts_project(rule: object) -> bool:

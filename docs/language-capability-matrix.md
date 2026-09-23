@@ -116,7 +116,13 @@ stay potential evidence. Cross-contract and cross-function summaries are also
 `LIMITED`: ambiguous callees stay ambiguous, unresolved calls stay unresolved,
 and a bound leaves the model incomplete rather than safe. Namespaced storage
 is isolated from sequential slots only for the deterministic forms BugForge
-recognizes. Exploratory generated tests are not a Solidity proof.
+recognizes. Phase 34 adds a bounded Yul walk for direct `let` copies, literal
+and constant slots, and simple branches. Computed and unknown slots stay
+unknown. A node limit is incomplete, not safe. Standard JSON from solc can add
+storage, IR, AST availability, and selectors beside the parser. A disagreement
+is kept unresolved. IR is not executed. `solc` and `forge` are optional and are
+not installed in every environment; their absence does not invent compiler
+facts. Exploratory generated tests are not a Solidity proof.
 
 Vyper is detection-only. BugForge does not claim a native Vyper AST. Slither
 may analyze Vyper when the `slither` executable is installed; that external
@@ -131,4 +137,8 @@ They do not mark a finding verified. See
 and
 [phase31-solidity-defi-semantic-analysis.md](phase31-solidity-defi-semantic-analysis.md)
 and
-[phase32-solidity-proxy-storage-upgradeability.md](phase32-solidity-proxy-storage-upgradeability.md).
+[phase32-solidity-proxy-storage-upgradeability.md](phase32-solidity-proxy-storage-upgradeability.md)
+and
+[phase33-solidity-cross-contract-exploratory-testing.md](phase33-solidity-cross-contract-exploratory-testing.md)
+and
+[phase34-solidity-yul-ir-exploratory-hardening.md](phase34-solidity-yul-ir-exploratory-hardening.md).

@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from app.parsing.keccak import keccak256
 from app.parsing.model import SyntaxGraph
 from app.parsing.solidity_cfg import _consume_parens
-from app.parsing.solidity_compiler import CompilerSemantics
+from app.parsing.solidity_compiler import (
+    CompilerSemantics,
+    SemanticDisagreement,
+    reconcile_semantics,
+)
+from app.parsing.solidity_yul import YulModel, analyze_yul
 
 _CTX: ContextVar[_StorageContext | None] = ContextVar("bugforge_storage_context", default=None)
 _ELEM = {
@@ -128,9 +133,12 @@ class StorageModel:
     disagreements: list[LayoutDisagreement] = field(default_factory=list)
     ambiguities: list[str] = field(default_factory=list)
     compiler_status: str = ""
+    compiler_matches: int = 0
     overlaps: list[str] = field(default_factory=list)
     comparisons: list[StorageLayoutComparison] = field(default_factory=list)
     namespaces: list[StorageNamespace] = field(default_factory=list)
+    yul_detail: YulModel | None = None
+    semantic_disagreements: list[SemanticDisagreement] = field(default_factory=list)
 
 
 @dataclass
@@ -227,7 +235,12 @@ def apply_compiler_layout(
             continue
         if len(matches) != 1:
             continue
+        model.compiler_matches += 1
         _record_compiler_difference(model, variable, matches[0])
+    if compiler.status == "AVAILABLE":
+        model.semantic_disagreements.extend(
+            reconcile_semantics(_parser_layout_facts(model), compiler.layouts)
+        )
     return model
 
 
@@ -274,6 +287,20 @@ def compare_storage_layouts(
     )
 
 
+def _parser_layout_facts(model: StorageModel) -> list[dict[str, str]]:
+    return [
+        {
+            "contract": variable.contract,
+            "symbol": variable.name,
+            "slot": "" if variable.slot is None else str(variable.slot),
+            "offset": "" if variable.offset is None else str(variable.offset),
+            "type": variable.type_name,
+            "uncertain": "true" if variable.uncertain or variable.slot is None else "",
+        }
+        for variable in model.variables
+    ]
+
+
 def _analyze(graph: SyntaxGraph, ctx: _StorageContext | None) -> StorageModel:
     model = StorageModel()
     if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
@@ -305,6 +332,7 @@ def _analyze(graph: SyntaxGraph, ctx: _StorageContext | None) -> StorageModel:
             model.variables.extend(placed)
     model.yul = _yul_accesses(graph, local)
     model.namespaces = _namespaces(graph)
+    model.yul_detail = analyze_yul(graph)
     _record_comparisons(graph, model)
     return model
 
