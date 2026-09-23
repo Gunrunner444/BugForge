@@ -353,7 +353,8 @@ def test_foundry_profile_blocks_flags_and_needs_forge() -> None:
     assert "--fork-url" not in profile.container_command()
     command = profile.container_command()
     assert command[:3] == ["forge", "test", "--root"]
-    assert "/bugforge-repo" in command
+    assert "/bugforge-output/project" in command
+    assert "/bugforge-repo" not in command
     assert "--fork-url" not in command
     assert "--match-path" in command
     assert validate_solidity_test(code) is None

@@ -29,6 +29,7 @@ from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call,
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
 from app.parsing.solidity_storage import analyze_storage
+from app.parsing.solidity_version import checked_arithmetic
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -101,12 +102,17 @@ class _SolidityRule(SecurityRule):
         return []
 
     def _obs(
-        self, graph: SyntaxGraph, event: SyntaxEvent, title: str, summary: str
+        self,
+        graph: SyntaxGraph,
+        event: SyntaxEvent,
+        title: str,
+        summary: str,
+        vulnerability_class: VulnerabilityClass | None = None,
     ) -> SecurityObservation:
         fields = _fields(event.extra)
         return SecurityObservation(
             rule_id=self.rule_id,
-            vulnerability_class=self.vulnerability_class,
+            vulnerability_class=vulnerability_class or self.vulnerability_class,
             title=title,
             summary=summary,
             file_path=graph.file_path,
@@ -763,16 +769,23 @@ class CrossContractRule(_SolidityRule):
                 continue
             if item.confidence == "unknown" and item.kind == "authorization":
                 title = "Unresolved cross-contract authorization"
+                kind = VulnerabilityClass.AUTHORIZATION
+            elif item.kind == "authorization":
+                title = "Unresolved cross-contract authorization"
+                kind = VulnerabilityClass.AUTHORIZATION
             elif item.kind == "reentrancy":
                 title = "Cross-contract state dependency"
+                kind = VulnerabilityClass.REENTRANCY
             else:
                 title = "Cross-contract relationship"
+                kind = VulnerabilityClass.MISSING_SECURITY_CONTROL
             found.append(
                 self._obs(
                     graph,
                     anchor,
                     title,
                     item.summary + " This is potential evidence, not a verified vulnerability.",
+                    kind,
                 )
             )
         if model.incomplete and names:
@@ -783,6 +796,7 @@ class CrossContractRule(_SolidityRule):
                     "Incomplete cross-contract model",
                     model.limit_reason
                     or "The project model hit a bound and is incomplete, not safe.",
+                    VulnerabilityClass.MISSING_SECURITY_CONTROL,
                 )
             )
         return found
@@ -812,6 +826,7 @@ class YulStructureRule(_SolidityRule):
                 item,
                 item + " This is potential Yul structure, not a verified vulnerability. "
                 "An incomplete model is not evidence that the assembly is safe.",
+                _yul_class(item),
             )
             for item in detail.hostile
         ]
@@ -1248,9 +1263,24 @@ def _issue_observation(
 
 
 def _checked(graph: SyntaxGraph) -> bool | None:
-    for item in graph.semantic_context:
-        if item == "checked_arithmetic=true":
-            return True
-        if item == "checked_arithmetic=false":
-            return False
-    return None
+    return checked_arithmetic(graph.semantic_context)
+
+
+def _yul_class(item: str) -> VulnerabilityClass:
+    text = item.lower()
+    if "implementation" in text or "admin slot" in text or "beacon" in text:
+        return VulnerabilityClass.UNSAFE_PROXY
+    if "after external" in text:
+        return VulnerabilityClass.REENTRANCY
+    if any(
+        token in text
+        for token in (
+            "ignored",
+            "arbitrary call",
+            "return-data",
+            "dynamic call",
+            "dynamic delegatecall",
+        )
+    ):
+        return VulnerabilityClass.UNSAFE_EXTERNAL_CALL
+    return VulnerabilityClass.DYNAMIC_EXECUTION

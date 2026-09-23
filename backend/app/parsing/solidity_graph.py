@@ -111,8 +111,6 @@ class _Builder:
         self._events: list[SyntaxEvent] = []
         self._scopes: list[Scope] = [self.graph.scopes[0]]
         self._node_index = 0
-        self._floor: tuple[int, int, int] | None = None
-        self._constraints: list[str] = []
         self._structs: dict[str, str] = {}
         self._aliases: dict[str, str] = {}
 
@@ -128,17 +126,25 @@ class _Builder:
                 self._contract(child, kind)
             elif kind in {"struct_declaration", "enum_declaration"}:
                 self._named(child, kind.removesuffix("_declaration"))
+        from app.parsing.solidity_version import solidity_language_facts
+
+        facts = solidity_language_facts(self.graph.source)
         context = ["solidity"]
-        if self._floor is None:
-            context.append("compiler_floor=unknown")
-        else:
-            context.append(f"compiler_floor={self._floor[0]}.{self._floor[1]}.{self._floor[2]}")
+        if facts.floor:
+            context.append(f"compiler_floor={facts.floor}")
             context.append("compiler_floor_is_minimum=true")
-            context.append(
-                "checked_arithmetic=" + ("true" if self._floor >= (0, 8, 0) else "false")
-            )
-        if self._constraints:
-            context.append("pragma_constraints=" + " || ".join(self._constraints)[:300])
+        else:
+            context.append("compiler_floor=unknown")
+        if facts.arithmetic == "checked":
+            context.append("checked_arithmetic=true")
+        elif facts.arithmetic == "wrapping":
+            context.append("checked_arithmetic=false")
+        else:
+            context.append("checked_arithmetic=unknown")
+        if facts.constraints:
+            context.append("pragma_constraints=" + facts.constraints[:300])
+        if facts.selfdestruct != "unknown":
+            context.append(f"selfdestruct={facts.selfdestruct}")
         self.graph.semantic_context = tuple(context)
         self.graph.imports = tuple(self._imports)
         self.graph.entities = tuple(self._entities)
@@ -150,12 +156,6 @@ class _Builder:
 
     def _pragma(self, node: object) -> None:
         text = self._text(node)
-        version = _child_text(self, node, "solidity_version")
-        match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", version or text)
-        if match:
-            found = (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
-            self._floor = found if self._floor is None else min(self._floor, found)
-        self._constraints.append(re.sub(r"\s+", " ", text).strip())
         self._event("sol_pragma", node, text)
         if ">=" in text and "<" not in text:
             self._event("sol_pragma_unbounded", node, text)

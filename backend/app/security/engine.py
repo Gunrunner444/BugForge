@@ -32,6 +32,16 @@ from app.parsing.solidity_modifiers import (
     reset_modifier_index,
     set_modifier_index,
 )
+from app.parsing.solidity_project import (
+    build_compiler_project,
+    current_compiler_project,
+    project_semantics,
+    reset_compiler_project,
+    reset_compiler_project_cache,
+    set_compiler_project,
+    set_compiler_project_cache,
+    slice_semantics,
+)
 from app.parsing.solidity_proxy import reset_proxy_context, set_proxy_context
 from app.parsing.solidity_storage import reset_storage_context, set_storage_context
 from app.security.correlation import ObservationCluster
@@ -135,7 +145,11 @@ class SecurityAnalysisEngine:
         project_token = set_project_context(graphs)
         compiler_token = set_compiler_cache()
         type_token = set_compiler_type_hints()
+        project_cache_token = set_compiler_project_cache()
+        compiler_project_token = set_compiler_project(None)
         try:
+            project = build_compiler_project(repo_path, graphs)
+            set_compiler_project(project)
             _overlay_compiler_layouts(graphs)
             return self._rules_over_indexed_graphs(
                 repo_path,
@@ -146,6 +160,8 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_compiler_project(compiler_project_token)
+            reset_compiler_project_cache(project_cache_token)
             reset_compiler_type_hints(type_token)
             reset_compiler_cache(compiler_token)
             reset_project_context(project_token)
@@ -301,64 +317,41 @@ class SecurityAnalysisEngine:
 
 
 def _overlay_compiler_layouts(graphs: dict[str, SyntaxGraph]) -> None:
-    """Keep parser layouts and record an optional compiler overlay.
+    """Apply the scan project compiler model. A missing source is not compiled.
 
-    The compiler is never required. A missing compiler does not invent slots,
-    and a compiler slot never replaces the parser slot.
+    The public graph path stays repository-relative. Source bytes come from
+    the project bundle, which resolved those paths against the repository
+    root. An unavailable or incomplete compiler does not invent slots, and a
+    compiler slot never replaces the parser slot.
     """
-    import hashlib
-
-    from app.parsing.solidity_compiler import (
-        compiler_semantics_for_scan,
-        reconcile_selectors,
-        record_compiler_type_hints,
-    )
+    from app.parsing.solidity_compiler import reconcile_selectors, record_compiler_type_hints
     from app.parsing.solidity_storage import analyze_storage, apply_compiler_layout
 
+    project = current_compiler_project()
+    if project is None:
+        return
+    semantics = project_semantics(project)
+    if semantics.status == "AVAILABLE":
+        record_compiler_type_hints(semantics)
     for graph in graphs.values():
         if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
             continue
-        try:
-            source = Path(graph.file_path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            source = ""
-        snapshot = hashlib.sha256(source.encode()).hexdigest()
-        compiler = compiler_semantics_for_scan(source, snapshot=snapshot)
-        record_compiler_type_hints(compiler)
+        compiler = slice_semantics(semantics, graph.file_path)
         model = apply_compiler_layout(
             analyze_storage(graph),
             compiler,
             source_path=graph.file_path,
         )
-        model.semantic_disagreements.extend(
-            reconcile_selectors(_parser_selectors(graph), compiler.selectors)
-        )
+        if compiler.status == "AVAILABLE":
+            model.semantic_disagreements.extend(
+                reconcile_selectors(_parser_selectors(graph), compiler.selectors)
+            )
 
 
 def _parser_selectors(graph: SyntaxGraph) -> list[dict[str, str]]:
-    from app.parsing.solidity_links import selector_for_function
+    from app.parsing.solidity_links import overload_selectors
 
-    rows: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for event in graph.events:
-        if event.kind != "sol_function":
-            continue
-        fields = {
-            key: value
-            for part in event.extra.split("|")
-            if "=" in part
-            for key, value in [part.split("=", 1)]
-        }
-        contract = fields.get("contract", "")
-        name = fields.get("function", "")
-        if not name or (contract, name) in seen:
-            continue
-        seen.add((contract, name))
-        params, selector = selector_for_function(graph, name, {})
-        if not selector:
-            continue
-        rows.append({"contract": contract, "symbol": f"{name}({params})", "selector": selector})
-    return rows
+    return overload_selectors(graph)
 
 
 def _accepts_project(rule: object) -> bool:

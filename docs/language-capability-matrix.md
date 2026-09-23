@@ -141,4 +141,10 @@ and
 and
 [phase33-solidity-cross-contract-exploratory-testing.md](phase33-solidity-cross-contract-exploratory-testing.md)
 and
-[phase34-solidity-yul-ir-exploratory-hardening.md](phase34-solidity-yul-ir-exploratory-hardening.md).
+[phase34-solidity-yul-ir-exploratory-hardening.md](phase34-solidity-yul-ir-exploratory-hardening.md)
+and
+[phase35-solidity-compiler-grounded-foundry-bounty-ready.md](phase35-solidity-compiler-grounded-foundry-bounty-ready.md).
+Phase 35 version facts come from one helper. A pragma is known only when every
+version it allows agrees. Compiler IR is availability, not an interpreter.
+Foundry exploratory tests run inside a disposable project when `forge` is
+installed, and are `UNAVAILABLE` when it is not.

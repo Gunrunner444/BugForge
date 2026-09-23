@@ -23,9 +23,11 @@ cannot qualify as live verification. AI hypothesis provenance cannot verify.
 Generated exploratory tests use `provenance=generated_test`, which is also
 non-live. The Docker execution of that test uses `provenance=sandbox_execution`.
 That provenance is not in the live verification set. A sandbox failure is not
-a verified finding, and a sandbox pass is not a safe result. The graph links
-the hypothesis to the test (`motivates`) and the test to the attempt
-(`executes`). Support or contradiction of the hypothesis stays potential.
+a verified finding, and a sandbox pass is not a safe result. A compiler
+failure is recorded as a toolchain failure and does not support a hypothesis.
+The graph links the hypothesis to the test (`motivates`) and the test to the
+attempt (`executes`). Support or contradiction of the hypothesis stays
+potential. Replay of a generated test uses the original bytes or does not run.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

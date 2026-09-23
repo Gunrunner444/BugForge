@@ -95,6 +95,42 @@ def unique_abi_aliases(graphs: dict[str, SyntaxGraph]) -> dict[str, str]:
     return {name: values[0] for name, values in found.items() if len(values) == 1}
 
 
+def overload_selectors(graph: SyntaxGraph) -> list[dict[str, str]]:
+    """One selector per canonical signature. Overloads are not collapsed."""
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entity in graph.entities:
+        if entity.entity_type != "function" or entity.name in {
+            "constructor",
+            "fallback",
+            "receive",
+        }:
+            continue
+        canons: list[str] = []
+        resolved = True
+        for param in entity.parameters:
+            canon = canonical_with_aliases(param.annotation or "", {})
+            if not canon:
+                resolved = False
+                break
+            canons.append(canon)
+        if not resolved:
+            continue
+        signature = f"{entity.name}({','.join(canons)})"
+        contract = entity.parent or ""
+        if (contract, signature) in seen:
+            continue
+        seen.add((contract, signature))
+        rows.append(
+            {
+                "contract": contract,
+                "symbol": signature,
+                "selector": function_selector(signature),
+            }
+        )
+    return rows
+
+
 def selector_for_function(
     graph: SyntaxGraph, function: str, aliases: dict[str, str]
 ) -> tuple[str, str]:
