@@ -3,6 +3,14 @@
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 
+function exploratorySummary(value: unknown): string {
+  if (!value || typeof value !== "object") return "disabled";
+  const body = value as Record<string, unknown>;
+  const last = body.last_attempt as Record<string, unknown> | null | undefined;
+  const classification = last?.classification ? String(last.classification) : "none";
+  return `${String(body.count ?? 0)} run, ${String(body.remaining_tests ?? "n/a")} remaining, last ${classification}`;
+}
+
 export default function ResearchWorkbenchPage() {
   const [projectId, setProjectId] = useState("lab");
   const [target, setTarget] = useState("http://127.0.0.1/health");
@@ -280,6 +288,10 @@ export default function ResearchWorkbenchPage() {
             <div>
               <dt className="text-slate-500">Remaining requests</dt>
               <dd>{String(budget.requests ?? "n/a")}</dd>
+            </div>
+            <div>
+              <dt className="text-slate-500">Exploratory tests</dt>
+              <dd>{exploratorySummary(dashboard.exploratory)}</dd>
             </div>
             <div>
               <dt className="text-slate-500">Approval status</dt>

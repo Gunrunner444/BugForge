@@ -19,6 +19,7 @@ from app.core.paths import to_relative_path
 from app.domain.findings import SecurityFinding
 from app.domain.language import LanguageCapability
 from app.parsing.model import SyntaxGraph
+from app.parsing.solidity_cross import reset_project_context, set_project_context
 from app.parsing.solidity_defi import reset_defi_context, set_defi_context
 from app.parsing.solidity_modifiers import (
     ModifierIndex,
@@ -125,6 +126,7 @@ class SecurityAnalysisEngine:
         defi_tokens = set_defi_context(graphs)
         storage_token = set_storage_context(graphs)
         proxy_token = set_proxy_context()
+        project_token = set_project_context(graphs)
         try:
             _overlay_compiler_layouts(graphs)
             return self._rules_over_indexed_graphs(
@@ -136,6 +138,7 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_project_context(project_token)
             reset_proxy_context(proxy_token)
             reset_storage_context(storage_token)
             reset_defi_context(defi_tokens)

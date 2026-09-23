@@ -23,6 +23,11 @@ flowchart TD
 ```
 
 There is no automatic live-hacking mode. A Cursor session is lab-only.
+Selecting `grok-4.7` or another Cursor model does not add an API client inside
+BugForge. `llm_invoked` stays false. Exploratory tests are requested as the
+`exploratory_test` tool. The model does not supply shell commands, Docker
+arguments, Foundry flags, network access, scope changes, approvals, budget
+increases, or verification.
 `live_hackerone` stays on the existing operator path and is not started by
 the MCP tools.
 

@@ -35,6 +35,7 @@ from app.models.security_agent import (  # noqa: F401
     DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
     DBResearchEvidenceNode,
+    DBResearchExploratoryAttempt,
     DBResearchFinding,
     DBResearchHypothesis,
     DBResearchIdentity,

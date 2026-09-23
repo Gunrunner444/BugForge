@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
@@ -117,6 +118,54 @@ class ApiTestArgs(BaseModel):
     max_tests: int = Field(default=8, ge=1, le=40)
 
 
+class ExploratoryTestArgs(BaseModel):
+    """What to test. BugForge chooses the command, network, and sandbox."""
+
+    model_config = {"extra": "forbid"}
+
+    hypothesis_id: str
+    language: str
+    framework: str
+    target_file: str = ""
+    target_symbol: str
+    test_code: str
+    expected_behavior: str
+    oracle: str
+    reason: str = ""
+    parent_attempt_id: str = ""
+    project_id: str = ""
+    session_id: str = ""
+    confidence: str = "low"
+    follow_up: str = ""
+
+    @field_validator("language", "framework", "oracle")
+    @classmethod
+    def short_token(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned or len(cleaned) > 40 or not re.fullmatch(r"[a-z0-9_-]+", cleaned):
+            raise ValueError("invalid exploratory token")
+        return cleaned
+
+    @field_validator("confidence")
+    @classmethod
+    def confidence_value(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in {"low", "medium", "high"}:
+            raise ValueError("confidence must be low, medium, or high")
+        return cleaned
+
+    @field_validator("follow_up")
+    @classmethod
+    def follow_up_kind(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return ""
+        allowed = {"confirmation", "falsification", "boundary", "negative_control", "alternative"}
+        if cleaned not in allowed:
+            raise ValueError("unknown follow-up kind")
+        return cleaned
+
+
 class HypothesisUpdateArgs(BaseModel):
     hypothesis_id: str
     status: str
@@ -135,6 +184,7 @@ TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "reproduce": ReproduceArgs,
     "proxy_evidence": ProxyEvidenceArgs,
     "api_test": ApiTestArgs,
+    "exploratory_test": ExploratoryTestArgs,
 }
 
 _ALLOWED_PLANNER_KINDS = frozenset(

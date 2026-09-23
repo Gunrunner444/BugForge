@@ -120,6 +120,16 @@ class Settings(BaseSettings):
     security_agent_source_max_lines: int = 200
     security_agent_approval_ttl_hours: int = 24
     security_agent_lab_roots: list[str] = []
+    security_agent_exploratory_enabled: bool = False
+    security_agent_max_exploratory_tests: int = 4
+    security_agent_max_exploratory_iterations: int = 3
+    security_agent_max_exploratory_seconds: float = 60.0
+    security_agent_max_generated_test_bytes: int = 16_384
+    security_agent_max_exploratory_artifact_bytes: int = 65_536
+    security_agent_exploratory_require_docker: bool = True
+    # Operator attests that the image already contains pytest. BugForge does not pip install.
+    security_agent_exploratory_pytest_ready: bool = False
+    security_agent_exploratory_python_image: str = ""
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

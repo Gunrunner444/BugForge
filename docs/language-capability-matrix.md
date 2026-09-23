@@ -112,7 +112,11 @@ not silently resolved. Yul `sload` and `sstore` link to a slot only when the
 argument is a literal or a constant with a literal value. This is not
 compiler-equivalent layout, not EVM symbolic execution, and not a certificate
 that a proxy implements UUPS, EIP-1967, or a diamond. Static Solidity findings
-stay potential evidence.
+stay potential evidence. Cross-contract and cross-function summaries are also
+`LIMITED`: ambiguous callees stay ambiguous, unresolved calls stay unresolved,
+and a bound leaves the model incomplete rather than safe. Namespaced storage
+is isolated from sequential slots only for the deterministic forms BugForge
+recognizes. Exploratory generated tests are not a Solidity proof.
 
 Vyper is detection-only. BugForge does not claim a native Vyper AST. Slither
 may analyze Vyper when the `slither` executable is installed; that external

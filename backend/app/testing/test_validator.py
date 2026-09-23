@@ -12,7 +12,65 @@ from dataclasses import dataclass
 
 # Direct call names that indicate dangerous operations
 _DANGEROUS_NAMES = frozenset(
-    {"exec", "eval", "__import__", "compile", "open", "os", "subprocess", "sys"}
+    {
+        "exec",
+        "eval",
+        "__import__",
+        "compile",
+        "open",
+        "os",
+        "subprocess",
+        "sys",
+        "getattr",
+        "setattr",
+        "delattr",
+        "globals",
+        "locals",
+        "vars",
+        "dir",
+        "breakpoint",
+        "input",
+        "help",
+        "memoryview",
+        "classmethod",
+    }
+)
+
+_DANGEROUS_ATTRS = frozenset(
+    {
+        "system",
+        "popen",
+        "spawn",
+        "execl",
+        "execv",
+        "remove",
+        "unlink",
+        "rmdir",
+        "makedirs",
+        "walk",
+        "getenv",
+        "environ",
+        "connect",
+        "socket",
+        "urlopen",
+        "Process",
+        "Thread",
+        "Popen",
+        "__import__",
+        "__globals__",
+        "__builtins__",
+        "__dict__",
+        "__class__",
+        "__subclasses__",
+        "__bases__",
+        "__mro__",
+        "__code__",
+        "__closure__",
+        "__getattribute__",
+        "__setattr__",
+        "__reduce__",
+        "__reduce_ex__",
+    }
 )
 
 # Modules that must not be imported by generated/reproducer code.
@@ -54,6 +112,26 @@ _DANGEROUS_MODULES = frozenset(
         "ftplib",
         "smtplib",
         "ssl",
+        "builtins",
+        "code",
+        "codeop",
+        "runpy",
+        "webbrowser",
+        "xmlrpc",
+        "socketserver",
+        "multiprocessing",
+        "threading",
+        "ctypes",
+        "mmap",
+        "pty",
+        "fcntl",
+        "sqlite3",
+        "dbm",
+        "nntplib",
+        "poplib",
+        "imaplib",
+        "telnetlib",
+        "paramiko",
     }
 )
 
@@ -134,11 +212,21 @@ def validate_test_code(code: str) -> ValidationResult:
                 name = func.id
             elif isinstance(func, ast.Attribute):
                 name = func.attr
-            if name in _DANGEROUS_NAMES:
+            if name in _DANGEROUS_NAMES or name in _DANGEROUS_ATTRS:
                 return ValidationResult(
                     valid=False,
                     error=f"Generated test uses potentially unsafe name '{name}'; rejecting for safety",
                 )
+        if isinstance(node, ast.Attribute) and node.attr in _DANGEROUS_ATTRS:
+            return ValidationResult(
+                valid=False,
+                error=f"Generated test uses potentially unsafe attribute '{node.attr}'; rejecting for safety",
+            )
+        if isinstance(node, ast.Name) and node.id in _DANGEROUS_ATTRS:
+            return ValidationResult(
+                valid=False,
+                error=f"Generated test uses potentially unsafe name '{node.id}'; rejecting for safety",
+            )
 
     return ValidationResult(valid=True, test_function_names=test_fns)
 

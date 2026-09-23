@@ -51,6 +51,8 @@ class ToolContext:
     zap_binary: str | None = None
     nuclei_binary: str | None = None
     browser: Any = None
+    hypotheses: Callable[[], dict[str, str]] = field(default_factory=lambda: lambda: {})
+    exploratory_records: list[Any] = field(default_factory=list)
 
 
 def bind_engine_tools(ctx: ToolContext, registry: ToolRegistry) -> ToolRegistry:
@@ -64,6 +66,7 @@ def bind_engine_tools(ctx: ToolContext, registry: ToolRegistry) -> ToolRegistry:
     registry.bind_executor("reproduce", _reproduce(ctx))
     registry.bind_executor("proxy_evidence", _proxy_evidence(ctx))
     registry.bind_executor("api_test", _api_test(ctx))
+    registry.bind_executor("exploratory_test", _exploratory_test(ctx))
     _apply_availability(ctx, registry)
     return registry
 
@@ -742,6 +745,103 @@ def _quality_from_state(state: ToolExecutionState) -> ToolResultQuality:
         ToolExecutionState.AUTHORIZED: ToolResultQuality.NO_RESULT,
     }
     return mapping.get(state, ToolResultQuality.FAILED)
+
+
+def _exploratory_test(ctx: ToolContext) -> Executor:
+    async def run(arguments: dict[str, Any]) -> dict[str, Any]:
+        import shutil
+
+        from app.security_testing.exploratory import (
+            ExploratoryContext,
+            ExploratoryTestCandidate,
+            ExploratoryTestPolicy,
+            cached_exploratory_engine,
+            docker_executor_for_exploratory,
+            public_attempt,
+            snapshot_hash,
+        )
+
+        policy = ExploratoryTestPolicy.from_settings()
+        settings = get_settings()
+        docker_ok = shutil.which("docker") is not None
+        engine = cached_exploratory_engine(
+            ctx.session_id,
+            ctx.exploratory_records,
+            policy=policy,
+            executor=docker_executor_for_exploratory(
+                docker_ok, image=settings.security_agent_exploratory_python_image
+            ),
+            docker_available=docker_ok,
+            pytest_ready=bool(settings.security_agent_exploratory_pytest_ready),
+        )
+        candidate = ExploratoryTestCandidate(
+            target=str(arguments.get("target_file") or ctx.repo_root),
+            language=str(arguments.get("language") or ""),
+            framework=str(arguments.get("framework") or ""),
+            target_symbol=str(arguments.get("target_symbol") or ""),
+            hypothesis_id=str(arguments.get("hypothesis_id") or ""),
+            test_code=str(arguments.get("test_code") or ""),
+            rationale=str(arguments.get("reason") or ""),
+            expected_behavior=str(arguments.get("expected_behavior") or ""),
+            oracle=str(arguments.get("oracle") or ""),
+            confidence=str(arguments.get("confidence") or "low"),
+            follow_up=str(arguments.get("follow_up") or ""),
+            parent_attempt_id=str(arguments.get("parent_attempt_id") or ""),
+            target_file=str(arguments.get("target_file") or ""),
+            project_id=str(arguments.get("project_id") or ctx.project_id),
+            session_id=str(arguments.get("session_id") or ctx.session_id),
+        )
+        context = ExploratoryContext(
+            session_id=ctx.session_id,
+            project_id=ctx.project_id,
+            mode=ctx.mode.value,
+            hypotheses=ctx.hypotheses(),
+            repo_path=str(ctx.repo_root),
+            commit_sha=_repo_commit(ctx.repo_root),
+            snapshot_hash=snapshot_hash(str(ctx.repo_root)),
+            graph=ctx.graph,
+        )
+        attempt = await engine.run(candidate, context)
+        payload = public_attempt(attempt)
+        payload["duration_seconds"] = attempt.duration
+        payload["quality"] = _exploratory_quality(attempt.classification)
+        payload["executed"] = attempt.executed
+        payload["verified"] = False
+        payload["llm_invoked"] = False
+        return payload
+
+    return run
+
+
+def _repo_commit(path: Path) -> str:
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if completed.returncode != 0:
+        return "unknown"
+    return completed.stdout.strip()[:64]
+
+
+def _exploratory_quality(classification: str) -> str:
+    if classification in {"BLOCKED", "UNSUPPORTED"}:
+        return ToolResultQuality.BLOCKED.value
+    if classification == "UNAVAILABLE":
+        return ToolResultQuality.UNAVAILABLE.value
+    if classification == "TIMEOUT":
+        return ToolResultQuality.TIMEOUT.value
+    if classification in {"ERROR", "INVALID"}:
+        return ToolResultQuality.FAILED.value
+    return ToolResultQuality.SUCCESS.value
 
 
 def _from_tool_result(tool: str, result: ToolExecutionResult) -> dict[str, Any]:

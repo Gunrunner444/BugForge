@@ -22,7 +22,16 @@ from app.security_agent.states import (
 from app.security_agent.strategies import ResearchStrategy, spec_for, tools_for_strategy
 from app.security_testing.errors import RestrictedActivityError
 
-_NON_LIVE_PROVENANCE = frozenset({"ai_hypothesis", "replay", "tool_request", "scanner_plan"})
+_NON_LIVE_PROVENANCE = frozenset(
+    {
+        "ai_hypothesis",
+        "replay",
+        "tool_request",
+        "scanner_plan",
+        "generated_test",
+        "sandbox_execution",
+    }
+)
 _AUTHZ_CLASSES = frozenset(
     {
         "idor",
@@ -144,6 +153,12 @@ class AdvancedResearchOrchestrator:
         if any(token in klass for token in _AUTHZ_CLASSES):
             if not _has_identity_or_authz_evidence(graph, hyp):
                 missing.append(f"{hyp.id}:class_requirement:authorization_oracle")
+        exploratory = _exploratory_for(graph, hyp.id)
+        if any(item.get("repeat") == "flaky" for item in exploratory):
+            missing.append(f"{hyp.id}:exploratory_flaky")
+        elif exploratory and all(item.get("meaningful") is not True for item in exploratory):
+            if any(item.get("classification") == "FAILED" for item in exploratory):
+                missing.append(f"{hyp.id}:exploratory_follow_up")
         return missing
 
     def classify_hypothesis(self, hyp: Any) -> EvidenceCompleteness:
@@ -229,6 +244,8 @@ class AdvancedResearchOrchestrator:
             if estimate.unit == "fuzz_requests"
             else used.get("browser_actions", 0)
             if estimate.unit == "browser_actions"
+            else used.get("exploratory_tests", 0)
+            if estimate.unit == "exploratory_tests"
             else used.get("tool_calls", 0)
         )
         self.session.budget.plan(estimate.unit, estimate.estimated_units)
@@ -320,6 +337,7 @@ class AdvancedResearchOrchestrator:
             "current_tool": (self.next_action.tool if self.next_action else None),
             "tools_used": list(self.session.tool_history),
             "remaining_budget": self.session.budget.remaining(),
+            "exploratory": _exploratory_dashboard(self.session),
             "budget": self.session.budget.snapshot(),
             "authorization": {
                 "active_testing": engine.active_testing_enabled,
@@ -424,6 +442,48 @@ def _has_identity_or_authz_evidence(graph: Any, hyp: Any) -> bool:
         if extra.get("hypothesis_id") == hyp.id and "authorization" in str(node.kind):
             return True
     return False
+
+
+def _exploratory_for(graph: Any, hypothesis_id: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for node in getattr(graph, "nodes", {}).values():
+        if getattr(node, "kind", "") != "exploratory_attempt":
+            continue
+        extra = node.extra if isinstance(node.extra, dict) else {}
+        if extra.get("hypothesis_id") != hypothesis_id:
+            continue
+        found.append(extra)
+    return found
+
+
+def _exploratory_dashboard(session: ResearchSession) -> dict[str, Any]:
+    attempts = [node for node in session.graph.nodes.values() if node.kind == "exploratory_attempt"]
+    last = attempts[-1] if attempts else None
+    extra = last.extra if last is not None and isinstance(last.extra, dict) else {}
+    from app.core.config import get_settings
+
+    remaining = session.budget.remaining()
+    return {
+        "enabled": bool(get_settings().security_agent_exploratory_enabled),
+        "count": len(attempts),
+        "last_attempt": None
+        if last is None
+        else {
+            "id": last.id,
+            "classification": extra.get("classification", ""),
+            "hypothesis_id": extra.get("hypothesis_id", ""),
+            "reproducibility": extra.get("snapshot", ""),
+            "evidence_id": last.id,
+            "verified": False,
+        },
+        "follow_up_recommended": extra.get("meaningful") is True
+        and extra.get("classification") == "FAILED",
+        "remaining_tests": remaining.get("exploratory_tests"),
+        "remaining_iterations": remaining.get("exploratory_iterations"),
+        "network": "none",
+        "lab_only": True,
+        "verified": False,
+    }
 
 
 def _finding_has_live_verification(finding: Any, session: ResearchSession) -> bool:

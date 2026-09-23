@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -75,6 +75,9 @@ class DBResearchSession(Base):
     )
     identities: Mapped[list[DBResearchIdentity]] = relationship(
         "DBResearchIdentity", back_populates="session", cascade="all, delete-orphan"
+    )
+    exploratory_attempts: Mapped[list[DBResearchExploratoryAttempt]] = relationship(
+        "DBResearchExploratoryAttempt", back_populates="session", cascade="all, delete-orphan"
     )
     research_project: Mapped[DBResearchProject | None] = relationship(
         "DBResearchProject", back_populates="session", uselist=False
@@ -368,4 +371,52 @@ class DBResearchProject(Base):
 
     session: Mapped[DBResearchSession | None] = relationship(
         "DBResearchSession", back_populates="research_project"
+    )
+
+
+class DBResearchExploratoryAttempt(Base):
+    """One exploratory sandbox attempt. Host secrets are not stored."""
+
+    __tablename__ = "research_exploratory_attempts"
+
+    attempt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("security_research_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    hypothesis_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    parent_attempt_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    test_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    target_file: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    target_symbol: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    language: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    framework: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    test_code: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    expected_behavior: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    oracle: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="low")
+    repository_snapshot: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    repository_commit: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    execution_profile: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    command_identity: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    classification: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    stdout_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    stderr_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    artifacts: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    timeout: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    executed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    meaningful: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    follow_up_recommended: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    repeat_classification: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    follow_up: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    session: Mapped[DBResearchSession] = relationship(
+        "DBResearchSession", back_populates="exploratory_attempts"
     )

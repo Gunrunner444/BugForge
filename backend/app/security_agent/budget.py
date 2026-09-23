@@ -19,6 +19,9 @@ class SessionBudget:
     max_scan_seconds: float = 300.0
     max_identical_calls: int = 2
     identical_call_window_seconds: float = 120.0
+    max_exploratory_tests: int = 4
+    max_exploratory_iterations: int = 3
+    max_exploratory_seconds: float = 60.0
     tool_calls: int = 0
     requests: int = 0
     browser_actions: int = 0
@@ -26,6 +29,9 @@ class SessionBudget:
     iterations: int = 0
     tokens: int = 0
     scan_seconds: float = 0.0
+    exploratory_tests: int = 0
+    exploratory_iterations: int = 0
+    exploratory_seconds: float = 0.0
     extra_granted_by: str | None = None
     planned_requests: int = 0
     reserved_requests: int = 0
@@ -35,6 +41,12 @@ class SessionBudget:
     reserved_browser_actions: int = 0
     planned_tool_calls: int = 0
     reserved_tool_calls: int = 0
+    planned_exploratory_tests: int = 0
+    reserved_exploratory_tests: int = 0
+    planned_exploratory_iterations: int = 0
+    reserved_exploratory_iterations: int = 0
+    planned_exploratory_seconds: float = 0.0
+    reserved_exploratory_seconds: float = 0.0
 
     @classmethod
     def from_settings(cls) -> SessionBudget:
@@ -49,6 +61,9 @@ class SessionBudget:
             max_scan_seconds=settings.security_agent_max_scan_seconds,
             max_identical_calls=settings.security_agent_max_identical_tool_calls,
             identical_call_window_seconds=settings.security_agent_identical_call_window_seconds,
+            max_exploratory_tests=settings.security_agent_max_exploratory_tests,
+            max_exploratory_iterations=settings.security_agent_max_exploratory_iterations,
+            max_exploratory_seconds=settings.security_agent_max_exploratory_seconds,
         )
 
     def _bucket(self, unit: str) -> str:
@@ -58,31 +73,49 @@ class SessionBudget:
             return "fuzz_requests"
         if unit in {"browser_actions", "browser"}:
             return "browser_actions"
+        if unit in {"exploratory_tests", "exploratory"}:
+            return "exploratory_tests"
+        if unit in {"exploratory_iterations"}:
+            return "exploratory_iterations"
+        if unit in {"exploratory_seconds"}:
+            return "exploratory_seconds"
         return "tool_calls"
 
-    def plan(self, unit: str, amount: int) -> None:
+    def plan(self, unit: str, amount: int | float) -> None:
         """Record a planner estimate. Does not consume budget."""
         bucket = self._bucket(unit)
         if bucket == "requests":
-            self.planned_requests += max(0, amount)
+            self.planned_requests += max(0, int(amount))
         elif bucket == "fuzz_requests":
-            self.planned_fuzz_requests += max(0, amount)
+            self.planned_fuzz_requests += max(0, int(amount))
         elif bucket == "browser_actions":
-            self.planned_browser_actions += max(0, amount)
+            self.planned_browser_actions += max(0, int(amount))
+        elif bucket == "exploratory_tests":
+            self.planned_exploratory_tests += max(0, int(amount))
+        elif bucket == "exploratory_iterations":
+            self.planned_exploratory_iterations += max(0, int(amount))
+        elif bucket == "exploratory_seconds":
+            self.planned_exploratory_seconds += max(0.0, float(amount))
         else:
-            self.planned_tool_calls += max(0, amount)
+            self.planned_tool_calls += max(0, int(amount))
 
-    def reserve(self, unit: str, amount: int) -> None:
+    def reserve(self, unit: str, amount: int | float) -> None:
         """Reserve estimated units before execution. Same units as consume()."""
         bucket = self._bucket(unit)
         if bucket == "requests":
-            self.reserved_requests = max(0, amount)
+            self.reserved_requests = max(0, int(amount))
         elif bucket == "fuzz_requests":
-            self.reserved_fuzz_requests = max(0, amount)
+            self.reserved_fuzz_requests = max(0, int(amount))
         elif bucket == "browser_actions":
-            self.reserved_browser_actions = max(0, amount)
+            self.reserved_browser_actions = max(0, int(amount))
+        elif bucket == "exploratory_tests":
+            self.reserved_exploratory_tests = max(0, int(amount))
+        elif bucket == "exploratory_iterations":
+            self.reserved_exploratory_iterations = max(0, int(amount))
+        elif bucket == "exploratory_seconds":
+            self.reserved_exploratory_seconds = max(0.0, float(amount))
         else:
-            self.reserved_tool_calls = max(0, amount)
+            self.reserved_tool_calls = max(0, int(amount))
 
     def consume(self, kind: str, *, amount: int = 1) -> None:
         if kind == "tool":
@@ -113,11 +146,26 @@ class SessionBudget:
             self.scan_seconds += float(amount)
             if self.scan_seconds > self.max_scan_seconds:
                 raise SafetyLimitExceededError("scan duration budget exhausted")
+        elif kind == "exploratory":
+            if self.exploratory_seconds >= self.max_exploratory_seconds:
+                raise SafetyLimitExceededError("exploratory time budget exhausted")
+            self.exploratory_tests += amount
+            self.exploratory_iterations += amount
+            if self.exploratory_tests > self.max_exploratory_tests:
+                raise SafetyLimitExceededError("exploratory test budget exhausted")
+            if self.exploratory_iterations > self.max_exploratory_iterations:
+                raise SafetyLimitExceededError("exploratory iteration budget exhausted")
 
     def consume_scan(self, seconds: float) -> None:
         self.scan_seconds += max(0.0, seconds)
         if self.scan_seconds > self.max_scan_seconds:
             raise SafetyLimitExceededError("scan duration budget exhausted")
+
+    def note_exploratory_seconds(self, seconds: float) -> None:
+        """Record sandbox time. The model cannot raise the cap."""
+        self.exploratory_seconds += max(0.0, seconds)
+        if self.exploratory_seconds > self.max_exploratory_seconds:
+            raise SafetyLimitExceededError("exploratory time budget exhausted")
 
     def remaining(self) -> dict[str, int | float]:
         return {
@@ -128,6 +176,9 @@ class SessionBudget:
             "iterations": self.max_iterations - self.iterations,
             "tokens": self.max_tokens - self.tokens,
             "scan_seconds": self.max_scan_seconds - self.scan_seconds,
+            "exploratory_tests": self.max_exploratory_tests - self.exploratory_tests,
+            "exploratory_iterations": self.max_exploratory_iterations - self.exploratory_iterations,
+            "exploratory_seconds": self.max_exploratory_seconds - self.exploratory_seconds,
         }
 
     def reallocate(self, *, source: str, destination: str, amount: int) -> None:
@@ -178,6 +229,15 @@ class SessionBudget:
             self.max_tokens = int(maximum.get("tokens", self.max_tokens))
             self.max_scan_seconds = float(maximum.get("scan_seconds", self.max_scan_seconds))
             self.max_identical_calls = int(maximum.get("identical_calls", self.max_identical_calls))
+            self.max_exploratory_tests = int(
+                maximum.get("exploratory_tests", self.max_exploratory_tests)
+            )
+            self.max_exploratory_iterations = int(
+                maximum.get("exploratory_iterations", self.max_exploratory_iterations)
+            )
+            self.max_exploratory_seconds = float(
+                maximum.get("exploratory_seconds", self.max_exploratory_seconds)
+            )
         if isinstance(used, dict):
             self.tool_calls = int(used.get("tool_calls", 0))
             self.requests = int(used.get("requests", 0))
@@ -186,6 +246,9 @@ class SessionBudget:
             self.iterations = int(used.get("iterations", 0))
             self.tokens = int(used.get("tokens", 0))
             self.scan_seconds = float(used.get("scan_seconds", 0))
+            self.exploratory_tests = int(used.get("exploratory_tests", 0))
+            self.exploratory_iterations = int(used.get("exploratory_iterations", 0))
+            self.exploratory_seconds = float(used.get("exploratory_seconds", 0))
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -198,6 +261,9 @@ class SessionBudget:
                 "tokens": self.max_tokens,
                 "scan_seconds": self.max_scan_seconds,
                 "identical_calls": self.max_identical_calls,
+                "exploratory_tests": self.max_exploratory_tests,
+                "exploratory_iterations": self.max_exploratory_iterations,
+                "exploratory_seconds": self.max_exploratory_seconds,
             },
             "used": {
                 "tool_calls": self.tool_calls,
@@ -207,6 +273,9 @@ class SessionBudget:
                 "iterations": self.iterations,
                 "tokens": self.tokens,
                 "scan_seconds": self.scan_seconds,
+                "exploratory_tests": self.exploratory_tests,
+                "exploratory_iterations": self.exploratory_iterations,
+                "exploratory_seconds": self.exploratory_seconds,
             },
             "remaining": self.remaining(),
             "extra_granted_by": self.extra_granted_by,
@@ -215,12 +284,18 @@ class SessionBudget:
                 "fuzz_requests": self.planned_fuzz_requests,
                 "browser_actions": self.planned_browser_actions,
                 "tool_calls": self.planned_tool_calls,
+                "exploratory_tests": self.planned_exploratory_tests,
+                "exploratory_iterations": self.planned_exploratory_iterations,
+                "exploratory_seconds": self.planned_exploratory_seconds,
             },
             "reserved": {
                 "requests": self.reserved_requests,
                 "fuzz_requests": self.reserved_fuzz_requests,
                 "browser_actions": self.reserved_browser_actions,
                 "tool_calls": self.reserved_tool_calls,
+                "exploratory_tests": self.reserved_exploratory_tests,
+                "exploratory_iterations": self.reserved_exploratory_iterations,
+                "exploratory_seconds": self.reserved_exploratory_seconds,
             },
             "consumed": {
                 "tool_calls": self.tool_calls,
@@ -230,5 +305,8 @@ class SessionBudget:
                 "iterations": self.iterations,
                 "tokens": self.tokens,
                 "scan_seconds": self.scan_seconds,
+                "exploratory_tests": self.exploratory_tests,
+                "exploratory_iterations": self.exploratory_iterations,
+                "exploratory_seconds": self.exploratory_seconds,
             },
         }

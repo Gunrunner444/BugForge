@@ -60,9 +60,11 @@ class EvidenceProvenance(StrEnum):
     SCREENSHOT = "screenshot"
     LOG = "log"
     REPLAY = "replay"
+    # Generated exploratory code inside Docker. Not live verification.
+    SANDBOX_EXECUTION = "sandbox_execution"
 
 
-# Provenance that can back a verified finding. AI text is never included.
+# Provenance that can back a verified finding. AI text and sandbox runs are excluded.
 VERIFICATION_PROVENANCE: frozenset[EvidenceProvenance] = frozenset(
     {
         EvidenceProvenance.EXECUTION,

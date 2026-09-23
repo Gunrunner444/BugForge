@@ -217,6 +217,7 @@ class ResearchSession:
     operator_identity: str = ""
     research_project_id: str = ""
     controller: ResearchController = ResearchController.INTERNAL_LLM
+    exploratory_attempts: list[Any] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -315,6 +316,9 @@ class SecurityResearchAgent:
         self.session.termination_reason = TerminationReason.USER_STOPPED
         self._timeline("stop", decision=f"STOP:{reason}")
         self._timeline("human_override", decision=f"STOP:{reason}")
+        from app.security_testing.exploratory import release_exploratory_engine
+
+        release_exploratory_engine(self.session.id)
 
     def reject_action(self, reason: str) -> None:
         self._timeline("human_override", decision=f"REJECT_ACTION:{reason}")
@@ -709,6 +713,12 @@ class SecurityResearchAgent:
         if result.get("scan_seconds"):
             try:
                 self.session.budget.consume_scan(float(result["scan_seconds"]))
+            except SafetyLimitExceededError:
+                self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
+                self.session.state = ResearchState.BUDGET_EXHAUSTED
+        if result.get("duration_seconds") and request.tool == "exploratory_test":
+            try:
+                self.session.budget.note_exploratory_seconds(float(result["duration_seconds"]))
             except SafetyLimitExceededError:
                 self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
                 self.session.state = ResearchState.BUDGET_EXHAUSTED
@@ -1188,6 +1198,8 @@ def _tool_context(session: ResearchSession) -> ToolContext:
         nuclei_runner=session.nuclei_runner,
         zap_binary=session.zap_binary,
         nuclei_binary=session.nuclei_binary,
+        hypotheses=lambda: {item.id: item.target for item in session.hypotheses},
+        exploratory_records=session.exploratory_attempts,
     )
 
 

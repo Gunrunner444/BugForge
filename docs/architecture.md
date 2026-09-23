@@ -14,7 +14,10 @@ research identities, replay, and export. Phase 9 is the researcher workbench
 and Phase 8 hardening (secret references, authorization oracles, replay
 restoration). The agent cannot decide scope,
 verify findings, approve reports, increase total budget, or submit to
-HackerOne. Live HackerOne defaults: dry-run, no active testing, no fuzzing,
+HackerOne. Phase 33 adds a bounded Solidity project graph and a lab-only
+exploratory test tool. Generated tests run only through Docker with the
+network disabled. They do not replace predefined tests, and they do not
+verify findings. Live HackerOne defaults: dry-run, no active testing, no fuzzing,
 scanners disabled. Rate limiting is per-process.
 
 ## Layering

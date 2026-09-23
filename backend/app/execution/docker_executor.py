@@ -36,6 +36,40 @@ from app.execution.base import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_PYTHON_IMAGE = "python:3.12-slim"
+_MAX_ARTIFACT_NAME = 128
+_MAX_ARTIFACT_BYTES = 65_536
+
+
+def collect_output_artifacts(output_dir: str) -> dict[str, str]:
+    """Read regular files that stay inside the output directory.
+
+    Symlinks are not followed. A path that resolves outside the output root
+    is ignored. This is the host-side boundary for container-writable mounts.
+    """
+    root = Path(output_dir).resolve()
+    if not root.is_dir():
+        return {}
+    artifacts: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if len(path.name) > _MAX_ARTIFACT_NAME:
+            continue
+        try:
+            resolved = path.resolve()
+            relative = resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if len(relative.as_posix()) > _MAX_ARTIFACT_NAME:
+            continue
+        try:
+            data = resolved.read_bytes()
+        except OSError:
+            continue
+        if len(data) > _MAX_ARTIFACT_BYTES:
+            data = data[:_MAX_ARTIFACT_BYTES]
+        artifacts[relative.as_posix()] = data.decode("utf-8", errors="replace")
+    return artifacts
 
 
 class DockerTestExecutor(TestExecutor):
@@ -100,19 +134,7 @@ class DockerTestExecutor(TestExecutor):
 
         duration = time.monotonic() - start
 
-        # Collect artifacts from the host-side output_dir (populated via bind mount)
-        artifacts: dict[str, str] = {}
-        if config.output_dir:
-            output_path = Path(config.output_dir)
-            if output_path.is_dir():
-                for artifact in output_path.iterdir():
-                    if artifact.is_file():
-                        try:
-                            artifacts[artifact.name] = artifact.read_text(
-                                encoding="utf-8", errors="replace"
-                            )
-                        except OSError:
-                            pass
+        artifacts = collect_output_artifacts(config.output_dir) if config.output_dir else {}
 
         return ExecutionResult(
             exit_code=proc.returncode or 0,

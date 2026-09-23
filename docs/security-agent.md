@@ -44,6 +44,11 @@ Session states include `CREATED`, `RECON`, `ANALYZING`, `HYPOTHESIS_CREATED`,
 Anthropic, local, or MLX providers for that session. `POST .../step` is
 rejected. Cursor submits decisions to `POST .../decision`, and BugForge
 still authorizes every tool. See [cursor-control.md](cursor-control.md).
+A selected model name such as `grok-4.7` is only the Cursor-controlled model
+label. BugForge does not call Grok or xAI and does not store a Grok API key.
+`exploratory_test` is an additional lab-only tool. The model proposes a test;
+BugForge validates it, runs it in Docker with the network off, and records
+evidence. Generated-test failure is not verification.
 
 ## Local lab vs live HackerOne
 
