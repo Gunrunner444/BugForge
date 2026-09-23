@@ -19,6 +19,9 @@ class SessionBudget:
     max_scan_seconds: float = 300.0
     max_identical_calls: int = 2
     identical_call_window_seconds: float = 120.0
+    max_exploratory_tests: int = 4
+    max_exploratory_iterations: int = 3
+    max_exploratory_seconds: float = 60.0
     tool_calls: int = 0
     requests: int = 0
     browser_actions: int = 0
@@ -26,6 +29,9 @@ class SessionBudget:
     iterations: int = 0
     tokens: int = 0
     scan_seconds: float = 0.0
+    exploratory_tests: int = 0
+    exploratory_iterations: int = 0
+    exploratory_seconds: float = 0.0
     extra_granted_by: str | None = None
     planned_requests: int = 0
     reserved_requests: int = 0
@@ -49,6 +55,9 @@ class SessionBudget:
             max_scan_seconds=settings.security_agent_max_scan_seconds,
             max_identical_calls=settings.security_agent_max_identical_tool_calls,
             identical_call_window_seconds=settings.security_agent_identical_call_window_seconds,
+            max_exploratory_tests=settings.security_agent_max_exploratory_tests,
+            max_exploratory_iterations=settings.security_agent_max_exploratory_iterations,
+            max_exploratory_seconds=settings.security_agent_max_exploratory_seconds,
         )
 
     def _bucket(self, unit: str) -> str:
@@ -113,11 +122,26 @@ class SessionBudget:
             self.scan_seconds += float(amount)
             if self.scan_seconds > self.max_scan_seconds:
                 raise SafetyLimitExceededError("scan duration budget exhausted")
+        elif kind == "exploratory":
+            if self.exploratory_seconds >= self.max_exploratory_seconds:
+                raise SafetyLimitExceededError("exploratory time budget exhausted")
+            self.exploratory_tests += amount
+            self.exploratory_iterations += amount
+            if self.exploratory_tests > self.max_exploratory_tests:
+                raise SafetyLimitExceededError("exploratory test budget exhausted")
+            if self.exploratory_iterations > self.max_exploratory_iterations:
+                raise SafetyLimitExceededError("exploratory iteration budget exhausted")
 
     def consume_scan(self, seconds: float) -> None:
         self.scan_seconds += max(0.0, seconds)
         if self.scan_seconds > self.max_scan_seconds:
             raise SafetyLimitExceededError("scan duration budget exhausted")
+
+    def note_exploratory_seconds(self, seconds: float) -> None:
+        """Record sandbox time. The model cannot raise the cap."""
+        self.exploratory_seconds += max(0.0, seconds)
+        if self.exploratory_seconds > self.max_exploratory_seconds:
+            raise SafetyLimitExceededError("exploratory time budget exhausted")
 
     def remaining(self) -> dict[str, int | float]:
         return {
@@ -128,6 +152,9 @@ class SessionBudget:
             "iterations": self.max_iterations - self.iterations,
             "tokens": self.max_tokens - self.tokens,
             "scan_seconds": self.max_scan_seconds - self.scan_seconds,
+            "exploratory_tests": self.max_exploratory_tests - self.exploratory_tests,
+            "exploratory_iterations": self.max_exploratory_iterations - self.exploratory_iterations,
+            "exploratory_seconds": self.max_exploratory_seconds - self.exploratory_seconds,
         }
 
     def reallocate(self, *, source: str, destination: str, amount: int) -> None:
@@ -178,6 +205,15 @@ class SessionBudget:
             self.max_tokens = int(maximum.get("tokens", self.max_tokens))
             self.max_scan_seconds = float(maximum.get("scan_seconds", self.max_scan_seconds))
             self.max_identical_calls = int(maximum.get("identical_calls", self.max_identical_calls))
+            self.max_exploratory_tests = int(
+                maximum.get("exploratory_tests", self.max_exploratory_tests)
+            )
+            self.max_exploratory_iterations = int(
+                maximum.get("exploratory_iterations", self.max_exploratory_iterations)
+            )
+            self.max_exploratory_seconds = float(
+                maximum.get("exploratory_seconds", self.max_exploratory_seconds)
+            )
         if isinstance(used, dict):
             self.tool_calls = int(used.get("tool_calls", 0))
             self.requests = int(used.get("requests", 0))
@@ -186,6 +222,9 @@ class SessionBudget:
             self.iterations = int(used.get("iterations", 0))
             self.tokens = int(used.get("tokens", 0))
             self.scan_seconds = float(used.get("scan_seconds", 0))
+            self.exploratory_tests = int(used.get("exploratory_tests", 0))
+            self.exploratory_iterations = int(used.get("exploratory_iterations", 0))
+            self.exploratory_seconds = float(used.get("exploratory_seconds", 0))
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -198,6 +237,9 @@ class SessionBudget:
                 "tokens": self.max_tokens,
                 "scan_seconds": self.max_scan_seconds,
                 "identical_calls": self.max_identical_calls,
+                "exploratory_tests": self.max_exploratory_tests,
+                "exploratory_iterations": self.max_exploratory_iterations,
+                "exploratory_seconds": self.max_exploratory_seconds,
             },
             "used": {
                 "tool_calls": self.tool_calls,
@@ -207,6 +249,9 @@ class SessionBudget:
                 "iterations": self.iterations,
                 "tokens": self.tokens,
                 "scan_seconds": self.scan_seconds,
+                "exploratory_tests": self.exploratory_tests,
+                "exploratory_iterations": self.exploratory_iterations,
+                "exploratory_seconds": self.exploratory_seconds,
             },
             "remaining": self.remaining(),
             "extra_granted_by": self.extra_granted_by,

@@ -17,6 +17,7 @@ from app.parsing.solidity_cfg import (
     placeholder_is_guarded,
     write_reachable_after,
 )
+from app.parsing.solidity_cross import analyze_project
 from app.parsing.solidity_defi import DefiIssue, analyze_defi
 from app.parsing.solidity_flow import (
     oracle_freshness_protects,
@@ -72,6 +73,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         DonationInflationRule(),
         FeeOnTransferRule(),
         AssemblySensitiveRule(),
+        CrossContractRule(),
         *_defi_rules(),
     ]
 
@@ -739,6 +741,55 @@ class UpgradeAuthRule(_SolidityRule):
                 )
             )
         return found
+
+
+class CrossContractRule(_SolidityRule):
+    rule_id = "sol.cross_contract"
+    vulnerability_class = VulnerabilityClass.REENTRANCY
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        model = analyze_project()
+        if not model.contracts and not project_has_context():
+            model = analyze_project({graph.file_path: graph})
+        names = {event.text.strip() for event in graph.events if event.kind == "sol_contract"}
+        found: list[SecurityObservation] = []
+        anchor = next((event for event in graph.events if event.kind == "sol_function"), None)
+        if anchor is None:
+            return []
+        for item in model.findings:
+            if item.contract not in names:
+                continue
+            if item.confidence == "unknown" and item.kind == "authorization":
+                title = "Unresolved cross-contract authorization"
+            elif item.kind == "reentrancy":
+                title = "Cross-contract state dependency"
+            else:
+                title = "Cross-contract relationship"
+            found.append(
+                self._obs(
+                    graph,
+                    anchor,
+                    title,
+                    item.summary + " This is potential evidence, not a verified vulnerability.",
+                )
+            )
+        if model.incomplete and names:
+            found.append(
+                self._obs(
+                    graph,
+                    anchor,
+                    "Incomplete cross-contract model",
+                    model.limit_reason
+                    or "The project model hit a bound and is incomplete, not safe.",
+                )
+            )
+        return found
+
+
+def project_has_context() -> bool:
+    from app.parsing.solidity_cross import project_context_active
+
+    return project_context_active()
 
 
 class AssemblySensitiveRule(_SolidityRule):

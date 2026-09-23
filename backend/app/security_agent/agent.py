@@ -712,6 +712,12 @@ class SecurityResearchAgent:
             except SafetyLimitExceededError:
                 self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
                 self.session.state = ResearchState.BUDGET_EXHAUSTED
+        if result.get("duration_seconds") and request.tool == "exploratory_test":
+            try:
+                self.session.budget.note_exploratory_seconds(float(result["duration_seconds"]))
+            except SafetyLimitExceededError:
+                self.session.termination_reason = TerminationReason.BUDGET_EXHAUSTED
+                self.session.state = ResearchState.BUDGET_EXHAUSTED
         quality = str(result.get("quality") or ToolResultQuality.SUCCESS.value)
         summary = json.dumps(result, default=str)[:500]
         if contains_injection_attempt(summary):
@@ -1188,6 +1194,7 @@ def _tool_context(session: ResearchSession) -> ToolContext:
         nuclei_runner=session.nuclei_runner,
         zap_binary=session.zap_binary,
         nuclei_binary=session.nuclei_binary,
+        hypotheses=lambda: {item.id: item.target for item in session.hypotheses},
     )
 
 

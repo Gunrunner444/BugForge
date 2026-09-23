@@ -20,6 +20,9 @@ Unverified work ends as `INCONCLUSIVE` or `COMPLETED_NO_FINDINGS`.
 
 Replay observations are stored with `provenance=replay`. Replay evidence
 cannot qualify as live verification. AI hypothesis provenance cannot verify.
+Generated exploratory tests use `provenance=generated_test`, which is also
+non-live. The Docker execution of that test uses `provenance=execution`.
+Execution supports a hypothesis; it does not mark a finding verified.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

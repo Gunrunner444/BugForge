@@ -104,6 +104,13 @@ def estimate_operation_cost(
                 "not the full envelope up front."
             ),
         )
+    if tool == "exploratory_test" or kind == "exploratory":
+        return CostEstimate(
+            estimated_units=1,
+            unit="exploratory_tests",
+            estimated_requests=0,
+            explanation="One temporary generated test. Network stays disabled.",
+        )
     if tool == "browser_navigate" or kind == "browser":
         extra = 1
         if args.get("capture_screenshot", True):
@@ -132,6 +139,7 @@ def consume_units_for(estimate: CostEstimate) -> tuple[str, int]:
         "browser_actions": "browser",
         "tool_calls": "tool",
         "scan_seconds": "scan",
+        "exploratory_tests": "exploratory",
     }
     return mapping.get(estimate.unit, "tool"), estimate.estimated_units
 

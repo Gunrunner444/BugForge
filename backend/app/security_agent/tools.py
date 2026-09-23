@@ -145,6 +145,18 @@ _TOOL_META: dict[str, dict[str, Any]] = {
         "approval_kind": "send_poc_request",
         "network_access": True,
     },
+    "exploratory_test": {
+        "description": (
+            "Run one temporary generated test in Docker with network disabled. "
+            "The model supplies the test, not the command. A result is not verification."
+        ),
+        "budget_kind": "exploratory",
+        "capability": ToolCapability.EXECUTABLE,
+        "risk_level": ToolRiskLevel.LOW_RISK_ACTIVE,
+        "requires_active_testing": False,
+        "network_access": False,
+        "allowed_modes": (ResearchMode.LAB,),
+    },
     "api_test": {
         "description": "Import OpenAPI/Postman/Insomnia/HAR specs and run controlled candidate requests.",
         "budget_kind": "request",

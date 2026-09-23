@@ -57,7 +57,12 @@ _STRATEGY_SPECS: dict[ResearchStrategy, StrategySpec] = {
     ResearchStrategy.PASSIVE_RECON: StrategySpec(
         strategy=ResearchStrategy.PASSIVE_RECON,
         goal="Map in-scope source, captured HTTP, and existing evidence without sending active probes.",
-        preferred_tools=("source_inspect", "evidence_inspect", "proxy_evidence"),
+        preferred_tools=(
+            "source_inspect",
+            "evidence_inspect",
+            "proxy_evidence",
+            "exploratory_test",
+        ),
         allowed_evidence_types=("source", "observation", "request", "response"),
         minimum_evidence_expectations=("at least one source or HTTP observation",),
         preferred_oracle=OracleType.SOURCE_RUNTIME_CONSISTENCY.value,
