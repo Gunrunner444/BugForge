@@ -1,0 +1,76 @@
+name: Required CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
+          backend=false
+          frontend=false
+          if grep -Eq '^(backend/|\.github/workflows/(backend|required-ci)\.yml)$' "$RUNNER_TEMP/changed.txt"; then
+            backend=true
+          fi
+          if grep -Eq '^(frontend/|\.github/workflows/(frontend|required-ci)\.yml)$' "$RUNNER_TEMP/changed.txt"; then
+            frontend=true
+          fi
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+
+  backend:
+    name: Backend
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    uses: ./.github/workflows/backend.yml
+
+  frontend:
+    name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/frontend.yml
+
+  gate:
+    name: Required CI
+    needs: [changes, backend, frontend]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require relevant checks
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BACKEND_CHANGED: ${{ needs.changes.outputs.backend }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          python3 - << 'PY'
+          import os
+          import sys
+
+          if os.environ["CHANGES"] != "success":
+              sys.exit(1)
+
+          def acceptable(changed: str, result: str) -> bool:
+              if changed != "true":
+                  return result in {"skipped", "success"}
+              return result == "success"
+
+          backend_ok = acceptable(os.environ["BACKEND_CHANGED"], os.environ["BACKEND_RESULT"])
+          frontend_ok = acceptable(os.environ["FRONTEND_CHANGED"], os.environ["FRONTEND_RESULT"])
+          sys.exit(0 if backend_ok and frontend_ok else 1)
+          PY

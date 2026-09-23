@@ -41,8 +41,10 @@ _SOLIDITY_ORDER = (
 )
 _LANGUAGE_ORDER: dict[str, tuple[str, ...]] = {
     "solidity": _SOLIDITY_ORDER,
-    "c": ("bugforge-static", "coverage-fuzz", "sanitizer"),
-    "cpp": ("bugforge-static", "coverage-fuzz", "sanitizer"),
+    "c": ("bugforge-static", "native-fuzz", "sanitizer"),
+    "cpp": ("bugforge-static", "native-fuzz", "sanitizer"),
+    "go": ("bugforge-static", "go-test"),
+    "rust": ("bugforge-static", "cargo-test"),
     "java": ("bugforge-static", "jazzer", "property"),
     "python": ("bugforge-static", "property", "pytest"),
 }
@@ -55,6 +57,7 @@ class DiscoveryScheduler:
     max_rounds: int = 2
     corpus: DiscoveryCorpus = field(default_factory=DiscoveryCorpus)
     feedback: SchedulerFeedback = field(default_factory=SchedulerFeedback)
+    _coverage_seen: dict[str, float] = field(default_factory=dict)
 
     def select(self, request: AnalysisRequest) -> list[ScheduleDecision]:
         order = _LANGUAGE_ORDER.get(request.language, ("bugforge-static",))
@@ -95,7 +98,8 @@ class DiscoveryScheduler:
 
     def note_result(self, result: DynamicResult, request: AnalysisRequest) -> None:
         self.feedback.rounds += 1
-        if result.coverage.get("new") == "true":
+        increased = self._coverage_increased(result)
+        if increased is True:
             self.feedback.new_coverage = True
             self.feedback.stagnating = False
             if result.minimized_input:
@@ -106,7 +110,7 @@ class DiscoveryScheduler:
                     language=request.language,
                     target=request.target,
                 )
-        elif result.executed and result.coverage.get("new") == "false":
+        elif increased is False and result.executed:
             self.feedback.stagnating = True
         if result.crash:
             self.feedback.crashes += 1
@@ -134,6 +138,28 @@ class DiscoveryScheduler:
             and not self.feedback.new_coverage
         ):
             self.feedback.difficult = True
+
+    def _coverage_increased(self, result: DynamicResult) -> bool | None:
+        """True, false, or unknown. Unknown never counts as new coverage.
+
+        An explicit tool comparison wins. Otherwise a percent is compared only
+        with a percent this scheduler already observed for the same engine.
+        """
+        explicit = result.coverage.get("new_coverage", result.coverage.get("new", ""))
+        if explicit in {"true", "false"}:
+            return explicit == "true"
+        raw = result.coverage.get("coverage_percent") or result.coverage.get("percent")
+        if not raw or result.coverage.get("coverage_available") == "false":
+            return None
+        try:
+            current = float(raw)
+        except ValueError:
+            return None
+        previous = self._coverage_seen.get(result.engine)
+        self._coverage_seen[result.engine] = current
+        if previous is None:
+            return None
+        return current > previous
 
     def target_from_static(
         self,
@@ -214,7 +240,6 @@ class DiscoveryScheduler:
         capability = next(iter(engine.capabilities()), EngineCapability.PLANNING_ONLY)
         return ScheduleDecision(engine.engine_id, "run", "selected", capability.value)
 
-
     def plan_followup(self, request: AnalysisRequest) -> list[ScheduleDecision]:
         """Choose the next complementary engine from what the last round learned."""
         by_id = {engine.engine_id: engine for engine in self.engines}
@@ -225,7 +250,9 @@ class DiscoveryScheduler:
             if decision.action == "skip" and self.feedback.difficult:
                 decision = ScheduleDecision(
                     "halmos",
-                    "run" if by_id["halmos"].availability() is EngineAvailability.AVAILABLE else "skip",
+                    "run"
+                    if by_id["halmos"].availability() is EngineAvailability.AVAILABLE
+                    else "skip",
                     "coverage stalled, so symbolic execution is justified",
                     EngineCapability.SYMBOLIC_EXECUTION.value,
                 )
@@ -234,7 +261,9 @@ class DiscoveryScheduler:
             decisions.append(
                 ScheduleDecision(
                     "foundry",
-                    "run" if by_id["foundry"].availability() is EngineAvailability.AVAILABLE else "skip",
+                    "run"
+                    if by_id["foundry"].availability() is EngineAvailability.AVAILABLE
+                    else "skip",
                     "symbolic counterexample becomes a fuzz seed",
                     EngineCapability.FUZZING.value,
                 )
@@ -273,7 +302,9 @@ class DiscoveryScheduler:
                 continue
             engine = by_id[decision.engine_id]
             extra = dict(request.extra)
-            if decision.engine_id == "foundry" and self.corpus.by_source(SeedSource.SYMBOLIC_EXECUTION):
+            if decision.engine_id == "foundry" and self.corpus.by_source(
+                SeedSource.SYMBOLIC_EXECUTION
+            ):
                 extra["mode"] = "fuzz"
             elif decision.engine_id == "medusa":
                 extra["mode"] = "fuzz"
@@ -292,7 +323,10 @@ class DiscoveryScheduler:
                 corpus=self.corpus,
                 extra=extra,
             )
-            if EngineCapability.STATIC_ANALYSIS in engine.capabilities() and decision.engine_id != "halmos":
+            if (
+                EngineCapability.STATIC_ANALYSIS in engine.capabilities()
+                and decision.engine_id != "halmos"
+            ):
                 result = engine.analyze_target(targeted)
             else:
                 result = engine.start_campaign(targeted)

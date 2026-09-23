@@ -52,6 +52,12 @@ def _register_discovery(catalog: PluginCatalog) -> None:
         SlitherEngine,
         WakeEngine,
     )
+    from app.adapters.discovery.runtimes import (
+        CargoTestEngine,
+        GoTestEngine,
+        NativeFuzzEngine,
+        SanitizerEngine,
+    )
     from app.discovery.builtin import BugforgeStaticEngine
 
     catalog.discovery_engines.register(
@@ -63,6 +69,16 @@ def _register_discovery(catalog: PluginCatalog) -> None:
     catalog.discovery_engines.register("medusa", MedusaEngine, description="Optional Medusa")
     catalog.discovery_engines.register("halmos", HalmosEngine, description="Optional Halmos")
     catalog.discovery_engines.register("wake", WakeEngine, description="Optional Wake")
+    catalog.discovery_engines.register("go-test", GoTestEngine, description="Go test and fuzz")
+    catalog.discovery_engines.register("cargo-test", CargoTestEngine, description="Cargo test")
+    catalog.discovery_engines.register(
+        "native-fuzz", NativeFuzzEngine, description="C/C++ coverage fuzzing when a harness exists"
+    )
+    catalog.discovery_engines.register(
+        "sanitizer",
+        SanitizerEngine,
+        description="Sanitizer-aware execution when clang or cargo exists",
+    )
 
 
 def register_builtin_adapters(catalog: PluginCatalog) -> None:

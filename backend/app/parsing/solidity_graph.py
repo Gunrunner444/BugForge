@@ -112,9 +112,11 @@ class _Builder:
         self._scopes: list[Scope] = [self.graph.scopes[0]]
         self._node_index = 0
         self._floor: tuple[int, int, int] | None = None
+        self._constraints: list[str] = []
         self._structs: dict[str, str] = {}
 
     def consume(self, root: object) -> None:
+        self._index_structs(root)
         for child in _children(root):
             kind = _type(child)
             if kind == "pragma_directive":
@@ -130,9 +132,12 @@ class _Builder:
             context.append("compiler_floor=unknown")
         else:
             context.append(f"compiler_floor={self._floor[0]}.{self._floor[1]}.{self._floor[2]}")
+            context.append("compiler_floor_is_minimum=true")
             context.append(
                 "checked_arithmetic=" + ("true" if self._floor >= (0, 8, 0) else "false")
             )
+        if self._constraints:
+            context.append("pragma_constraints=" + " || ".join(self._constraints)[:300])
         self.graph.semantic_context = tuple(context)
         self.graph.imports = tuple(self._imports)
         self.graph.entities = tuple(self._entities)
@@ -149,6 +154,7 @@ class _Builder:
         if match:
             found = (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
             self._floor = found if self._floor is None else min(self._floor, found)
+        self._constraints.append(re.sub(r"\s+", " ", text).strip())
         self._event("sol_pragma", node, text)
         if ">=" in text and "<" not in text:
             self._event("sol_pragma_unbounded", node, text)
@@ -327,7 +333,9 @@ class _Builder:
             ]
         )
         param_types = {param.name: self._type_of(param.annotation or "") for param in params}
-        self._event("sol_function", node, self._text(node), extra=extra)
+        function_text = self._text(node)
+        self._event("sol_function", node, function_text, extra=extra)
+        self._record_cfg(node, function_text, contract, name)
         if override:
             self._event("sol_override", node, name, extra=f"contract={contract}")
         inner = "" if body is None else self._text(body).strip().strip("{}").strip()
@@ -409,10 +417,12 @@ class _Builder:
             self._event("sol_eip1967", statement, text, extra=prefix)
         if re.search(r"block\.(timestamp|prevrandao)|blockhash\s*\(", text):
             deadline = bool(re.search(r"\b(require|if)\b", text) and re.search(r"[<>]", text))
-            sensitive = "keccak" in text or bool(
-                re.search(r"random|lottery|winner|raffle|seed", function, re.IGNORECASE)
+            seed = (
+                "keccak" in text
+                or "%" in text
+                or bool(re.search(r"\b(winner|raffle|lottery)\b", text))
             )
-            if sensitive and not (deadline and "keccak" not in text):
+            if seed and not (deadline and "keccak" not in text and "%" not in text):
                 self._event("sol_randomness", statement, text, extra=prefix)
 
     def _call(
@@ -455,6 +465,8 @@ class _Builder:
             self._event("sol_delegatecall", node, text, extra=extra)
         if member == "safeTransferFrom":
             self._event("sol_token_callback", node, text, extra=extra)
+        if member in {"latestRoundData", "latestAnswer"}:
+            self._event("sol_oracle_call", node, text, extra=f"{prefix}|member={member}")
         if member == "encodePacked":
             packed = _packed_args(text, param_types)
             if "keccak" in statement or "ecrecover" in statement:
@@ -511,9 +523,7 @@ class _Builder:
                 "sol_state",
                 node,
                 text,
-                extra=(
-                    f"contract={contract}|name={name}|mutability={mutability}|type={type_text}"
-                ),
+                extra=(f"contract={contract}|name={name}|mutability={mutability}|type={type_text}"),
             )
         return name, mutability
 
@@ -550,10 +560,48 @@ class _Builder:
             if not base:
                 return ""
             return f"{base}[{array.group(2)}]"
+        if compact.startswith("(") and compact.endswith(")"):
+            parts = _split_args(compact[1:-1])
+            if not parts and compact != "()":
+                return ""
+            canon_parts = [self._type_of(part) for part in parts]
+            if not all(canon_parts):
+                return ""
+            return "(" + ",".join(canon_parts) + ")"
         canon = canonical_solidity_type(annotation)
         if canon:
             return canon
         return self._structs.get(compact, "")
+
+    def _index_structs(self, root: object) -> None:
+        nodes = [node for node in _preorder(root) if _type(node) == "struct_declaration"]
+        pending = nodes
+        for _ in range(len(nodes) + 1):
+            unresolved: list[object] = []
+            for node in pending:
+                name = _child_text(self, node, "identifier")
+                signature = self._struct_signature(node)
+                if name and signature:
+                    self._structs[name] = signature
+                else:
+                    unresolved.append(node)
+            if len(unresolved) == len(pending):
+                break
+            pending = unresolved
+
+    def _record_cfg(self, node: object, function_text: str, contract: str, name: str) -> None:
+        from app.parsing.solidity_cfg import build_function_cfg
+
+        cfg = build_function_cfg(function_text)
+        self._event(
+            "sol_cfg",
+            node,
+            name,
+            extra=(
+                f"contract={contract}|function={name}|nodes={len(cfg.nodes)}"
+                f"|known={str(cfg.known).lower()}"
+            ),
+        )
 
     def _struct_signature(self, node: object) -> str:
         members: list[str] = []

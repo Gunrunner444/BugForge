@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
 from app.parsing.model import SyntaxEvent, SyntaxGraph
+from app.parsing.solidity_cfg import auth_dominates_sensitive, write_reachable_after
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -43,6 +44,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         InitializerRule(),
         StorageCollisionRule(),
         UnboundedLoopRule(),
+        UnboundedStateLoopRule(),
         Erc20ReturnRule(),
         CallbackReentrancyRule(),
         CrossFunctionReentrancyRule(),
@@ -147,12 +149,13 @@ class UncheckedCallRule(_SolidityRule):
                 "send",
             }:
                 if fields.get("checked") != "true":
+                    kind = fields.get("kind") or "call"
                     found.append(
                         self._obs(
                             graph,
                             event,
-                            "Unchecked low-level call",
-                            "Low-level call result is ignored.",
+                            f"Unchecked {kind}",
+                            f"The {kind} success value is not checked on this path.",
                         )
                     )
         return found
@@ -214,14 +217,14 @@ class MissingAuthorizationRule(_SolidityRule):
                 continue
             if fields.get("mutability") in {"view", "pure"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or _function_has_guard(graph, event):
+            if _has_auth(fields.get("modifiers", "")) or _guard_dominates(event):
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Missing authorization",
-                    f"{name} is externally reachable without an auth check.",
+                    f"{name} is externally reachable without an auth check that dominates the operation.",
                 )
             )
         return found
@@ -364,6 +367,8 @@ class StorageCollisionRule(_SolidityRule):
         ]
         if not mutable_impl:
             return []
+        if any(event.kind == "sol_eip1967" for event in graph.events):
+            return []
         calls = [event for event in graph.events if event.kind == "sol_delegatecall"]
         if not calls:
             return []
@@ -390,16 +395,51 @@ class UnboundedLoopRule(_SolidityRule):
                 continue
             if re.search(r"<\s*\d+", event.text):
                 continue
-            external = re.search(r"\.(call|transfer|send|delegatecall|safeTransferFrom)\s*[\(\{]", event.text)
-            stored = re.search(r"\b\w+\s*\[[^\]]+\]\s*(\+=|-=|=)", event.text)
-            if not external and not stored:
+            if _fixed_array_loop(event.text, _enclosing_function(graph, event)):
+                continue
+            external = re.search(
+                r"\.(call|delegatecall|staticcall|send|transfer|safeTransferFrom)\s*[\(\{]",
+                event.text,
+            )
+            if not external:
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Unbounded external loop",
-                    "Loop bound follows an array length and performs an external call.",
+                    "Loop bound follows a dynamic length and performs an external call.",
+                )
+            )
+        return found
+
+
+class UnboundedStateLoopRule(_SolidityRule):
+    rule_id = "sol.unbounded_state_loop"
+    vulnerability_class = VulnerabilityClass.DENIAL_OF_SERVICE
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for event in graph.events:
+            if event.kind != "sol_loop":
+                continue
+            if ".length" not in event.text or re.search(r"<\s*\d+", event.text):
+                continue
+            if _fixed_array_loop(event.text, _enclosing_function(graph, event)):
+                continue
+            external = re.search(
+                r"\.(call|delegatecall|staticcall|send|transfer|safeTransferFrom)\s*[\(\{]",
+                event.text,
+            )
+            stored = re.search(r"\b\w+\s*\[[^\]]+\]\s*(\+=|-=|=)", event.text)
+            if external or not stored:
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    event,
+                    "Unbounded state-growth loop",
+                    "Loop bound follows a dynamic length and writes storage.",
                 )
             )
         return found
@@ -446,7 +486,8 @@ class CrossFunctionReentrancyRule(_SolidityRule):
                 event
                 for event in body
                 if event.kind == "sol_external_call"
-                and _fields(event.extra).get("kind") in {"call", "delegatecall", "send", "transfer"}
+                and _fields(event.extra).get("kind")
+                in {"call", "delegatecall", "send", "transfer", "safeTransferFrom"}
             ]
             if not external or function.span is None:
                 continue
@@ -458,6 +499,11 @@ class CrossFunctionReentrancyRule(_SolidityRule):
                     continue
                 external_span = external[0].span
                 if external_span is None or call.span.start_byte <= external_span.start_byte:
+                    continue
+                same_path = write_reachable_after(
+                    function.text, external[0].text[:80], call.text[:80]
+                )
+                if same_path is False:
                     continue
                 found.append(
                     self._obs(
@@ -593,16 +639,17 @@ class StaleOracleRule(_SolidityRule):
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
         found: list[SecurityObservation] = []
         for function in _functions(graph):
-            if not re.search(r"latestRoundData|latestAnswer", function.text):
+            calls = [event for event in _inside(graph, function) if event.kind == "sol_oracle_call"]
+            if not calls:
                 continue
-            if re.search(r"updatedAt|answeredInRound", function.text):
+            if re.search(r"updatedAt|answeredInRound|heartbeat|staleAfter", function.text):
                 continue
             found.append(
                 self._obs(
                     graph,
-                    function,
+                    calls[0],
                     "Unchecked oracle freshness",
-                    "An oracle answer is used without an updatedAt or round check.",
+                    "An oracle answer is used without a freshness or round check. This is a potential indicator.",
                 )
             )
         return found
@@ -665,7 +712,7 @@ class UpgradeAuthRule(_SolidityRule):
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or _function_has_guard(graph, event):
+            if _has_auth(fields.get("modifiers", "")) or _guard_dominates(event):
                 continue
             found.append(
                 self._obs(
@@ -733,6 +780,9 @@ def _reentrancy(
                 if written_before and not read_before and not used_in_call:
                     continue
                 if not read_before and not used_in_call and written_before:
+                    continue
+                same_path = write_reachable_after(function.text, call.text[:80], write.text[:80])
+                if same_path is False:
                     continue
                 title = "Callback reentrancy" if hooks_only else "State update after external call"
                 found.append(
@@ -826,8 +876,19 @@ def _has_auth(modifiers: str) -> bool:
     )
 
 
-def _function_has_guard(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
-    return any(event.kind == "sol_auth_guard" for event in _inside(graph, function))
+def _guard_dominates(function: SyntaxEvent) -> bool:
+    if auth_dominates_sensitive(function.text):
+        return True
+    return False
+
+
+def _fixed_array_loop(loop_text: str, function: SyntaxEvent | None) -> bool:
+    """A loop over a fixed-size array is not an unbounded-length walk."""
+    if function is None:
+        return False
+    if "[]" in function.text:
+        return False
+    return bool(re.search(r"\[\d+\]", function.text) and ".length" in loop_text)
 
 
 def _checked(graph: SyntaxGraph) -> bool | None:

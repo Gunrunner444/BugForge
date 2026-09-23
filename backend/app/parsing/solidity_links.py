@@ -6,6 +6,7 @@ when more than one definition matches.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.parsing.model import SyntaxGraph
@@ -22,12 +23,15 @@ class SolidityLink:
 
 def relate_solidity_files(graphs: dict[str, SyntaxGraph]) -> list[SolidityLink]:
     contracts: dict[str, list[tuple[str, str]]] = {}
+    structs: dict[str, list[str]] = {}
     for path, graph in graphs.items():
         if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
             continue
         for entity in graph.entities:
             if entity.entity_type in {"contract", "interface", "library"}:
                 contracts.setdefault(entity.name, []).append((path, entity.entity_type))
+            elif entity.entity_type == "struct":
+                structs.setdefault(entity.name, []).append(path)
     links: list[SolidityLink] = []
     for path, graph in graphs.items():
         for event in graph.events:
@@ -61,6 +65,11 @@ def relate_solidity_files(graphs: dict[str, SyntaxGraph]) -> list[SolidityLink]:
                 other_name = other.rsplit("/", 1)[-1]
                 if module and module == other_name:
                     links.append(SolidityLink("imports", path, module, other, other_name))
+                for name, definitions in structs.items():
+                    if len(definitions) != 1 or definitions[0] != other:
+                        continue
+                    if name and re.search(rf"\b{re.escape(name)}\b", graph.source):
+                        links.append(SolidityLink("struct", path, name, other, name))
     return links
 
 

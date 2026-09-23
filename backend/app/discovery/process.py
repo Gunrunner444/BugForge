@@ -1,7 +1,7 @@
 """Controlled local process execution for optional discovery tools.
 
 Commands are argument lists. BugForge secrets are stripped. Output is redacted.
-Nothing is downloaded.
+Nothing is downloaded. Startup, timeout, and a real exit are distinct states.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.security_testing.secrets import redact_text
@@ -25,6 +26,23 @@ _STRIP = frozenset(
         "BUGFORGE_OPERATOR_TOKEN",
     }
 )
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """What actually happened when BugForge tried to run a local executable.
+
+    ``available`` means the bare command name resolved on PATH.
+    ``started`` means the operating system spawned the process.
+    A missing binary, a spawn error, a timeout, and a non-zero exit are different.
+    """
+
+    started: bool
+    timed_out: bool
+    return_code: int | None
+    stdout: str
+    stderr: str
+    available: bool
 
 
 def tool_path(name: str) -> str | None:
@@ -56,12 +74,26 @@ def run_command(
     cwd: Path,
     timeout: float = 30,
     stdin: str = "",
-) -> tuple[int, str, str, bool]:
+) -> ProcessResult:
     if not argv or "/" in argv[0] or argv[0].startswith("."):
         name = argv[0] if argv else "command"
-        return 127, "", f"refusing path-qualified command {name}", False
+        return ProcessResult(
+            started=False,
+            timed_out=False,
+            return_code=None,
+            stdout="",
+            stderr=f"refusing path-qualified command {name}",
+            available=False,
+        )
     if tool_path(argv[0]) is None:
-        return 127, "", f"{argv[0]} is not installed", False
+        return ProcessResult(
+            started=False,
+            timed_out=False,
+            return_code=None,
+            stdout="",
+            stderr=f"{argv[0]} is not installed",
+            available=False,
+        )
     executable = tool_path(argv[0]) or argv[0]
     try:
         completed = subprocess.run(
@@ -85,10 +117,31 @@ def run_command(
             if isinstance(exc.stderr, bytes)
             else (exc.stderr or "")
         )
-        return -1, redact_text(stdout), redact_text(stderr or "timed out"), True
+        return ProcessResult(
+            started=True,
+            timed_out=True,
+            return_code=None,
+            stdout=redact_text(stdout),
+            stderr=redact_text(stderr or "timed out"),
+            available=True,
+        )
     except OSError as exc:
-        return -1, "", redact_text(str(exc)), False
-    return completed.returncode, redact_text(completed.stdout), redact_text(completed.stderr), False
+        return ProcessResult(
+            started=False,
+            timed_out=False,
+            return_code=None,
+            stdout="",
+            stderr=redact_text(str(exc)),
+            available=True,
+        )
+    return ProcessResult(
+        started=True,
+        timed_out=False,
+        return_code=completed.returncode,
+        stdout=redact_text(completed.stdout),
+        stderr=redact_text(completed.stderr),
+        available=True,
+    )
 
 
 def _env() -> dict[str, str]:

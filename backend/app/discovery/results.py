@@ -65,11 +65,7 @@ class DynamicResult:
             self.timestamp = datetime.now(UTC).isoformat()
 
     def to_evidence(self) -> Evidence:
-        kind = EvidenceKind.TOOL_STATUS
-        if self.executed and self.status is ResultStatus.INGESTED:
-            kind = EvidenceKind.SCANNER if self.findings else EvidenceKind.FUZZING
-        elif self.executed:
-            kind = EvidenceKind.FUZZING if self.coverage or self.crash else EvidenceKind.LOG
+        kind = _evidence_kind(self)
         summary = f"{self.engine} {self.status.value} executed={self.executed}"
         if self.oracle_explanation:
             summary = f"{summary}: {self.oracle_explanation}"
@@ -94,10 +90,47 @@ class DynamicResult:
                 "provenance": self.provenance,
                 "timestamp": self.timestamp,
                 "oracle": self.oracle_explanation,
+                "oracle_kind": self.oracle_kind,
+                "crash": self.crash,
+                "assertion": self.assertion,
+                "sanitizer": self.sanitizer,
                 **{key: str(value) for key, value in self.coverage.items()},
                 **self.metadata,
             },
         )
+
+
+def _evidence_kind(result: DynamicResult) -> EvidenceKind:
+    """Map a dynamic observation to an evidence kind without calling it verified.
+
+    Assertion, property, symbolic, sanitizer, and crash observations stay
+    distinguishable. A quiet log is only for an execution that has none of them.
+    """
+    oracle = result.oracle_kind
+    symbolic = (
+        oracle in {"symbolic", "counterexample"} or result.metadata.get("seed_source") == "symbolic"
+    )
+    if symbolic and (result.minimized_input or result.assertion):
+        return EvidenceKind.FUZZING
+    if result.crash or oracle == "crash":
+        return EvidenceKind.TEST_FAILURE
+    if result.sanitizer or oracle == "sanitizer":
+        return EvidenceKind.FUZZING
+    if result.assertion or oracle in {"assertion", "property", "invariant"}:
+        return EvidenceKind.TEST_FAILURE
+    if result.executed and result.status is ResultStatus.INGESTED:
+        return EvidenceKind.SCANNER if result.findings else EvidenceKind.FUZZING
+    if result.executed and _coverage_available(result.coverage):
+        return EvidenceKind.FUZZING
+    if result.executed:
+        return EvidenceKind.LOG
+    return EvidenceKind.TOOL_STATUS
+
+
+def _coverage_available(coverage: dict[str, str]) -> bool:
+    if coverage.get("coverage_available") == "true":
+        return True
+    return "percent" in coverage or "coverage_percent" in coverage
 
 
 def unavailable_result(engine: str, language: str, target: str, *, reason: str) -> DynamicResult:
