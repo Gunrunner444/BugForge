@@ -12,7 +12,17 @@ from collections.abc import Sequence
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
 from app.parsing.model import SyntaxEvent, SyntaxGraph
-from app.parsing.solidity_cfg import auth_dominates_sensitive, write_reachable_after
+from app.parsing.solidity_cfg import (
+    operation_guarded,
+    placeholder_is_guarded,
+    write_reachable_after,
+)
+from app.parsing.solidity_flow import (
+    oracle_freshness_protects,
+    signature_domain_gap,
+    signature_replay_gap,
+)
+from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -57,6 +67,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         StaleOracleRule(),
         DonationInflationRule(),
         FeeOnTransferRule(),
+        AssemblySensitiveRule(),
     ]
 
 
@@ -197,34 +208,27 @@ class MissingAuthorizationRule(_SolidityRule):
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
         found: list[SecurityObservation] = []
-        privileged = {
-            "withdraw",
-            "setowner",
-            "upgradeto",
-            "upgradetoandcall",
-            "pause",
-            "unpause",
-            "mint",
-            "grantrole",
-            "transferownership",
-        }
         for event in _functions(graph):
             fields = _fields(event.extra)
             name = _function_name(event).lower()
-            if name not in privileged:
+            if name in {"initialize", "reinitialize", "constructor"}:
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
             if fields.get("mutability") in {"view", "pure"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or _guard_dominates(event):
+            operations = _sensitive_operations(graph, event)
+            if not operations:
+                continue
+            guarded = _authorized_text(graph, event)
+            if all(_operation_is_guarded(guarded, operation) for operation in operations):
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Missing authorization",
-                    f"{name} is externally reachable without an auth check that dominates the operation.",
+                    f"{name} changes privileged state or transfers value without a check that dominates that operation.",
                 )
             )
         return found
@@ -313,14 +317,17 @@ class SignatureReplayRule(_SolidityRule):
             if event.kind != "sol_ecrecover":
                 continue
             function = _enclosing_function(graph, event)
-            if function and re.search(r"\bnonce", function.text, re.IGNORECASE):
+            if function is None:
+                continue
+            gap = signature_replay_gap(function.text)
+            if gap is None:
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Signature replay risk",
-                    "ecrecover is used without a nonce binding.",
+                    gap + " This is potential evidence, not a confirmed replay.",
                 )
             )
         return found
@@ -339,8 +346,7 @@ class InitializerRule(_SolidityRule):
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
-            modifiers = fields.get("modifiers", "").lower()
-            if "initializer" in modifiers:
+            if _initializer_protected(graph, fields.get("modifiers", "")):
                 continue
             found.append(
                 self._obs(
@@ -367,9 +373,17 @@ class StorageCollisionRule(_SolidityRule):
         ]
         if not mutable_impl:
             return []
-        if any(event.kind == "sol_eip1967" for event in graph.events):
-            return []
-        calls = [event for event in graph.events if event.kind == "sol_delegatecall"]
+        names = {_fields(event.extra).get("name", "") for event in mutable_impl}
+        calls = [
+            event
+            for event in graph.events
+            if event.kind == "sol_delegatecall"
+            and any(
+                name
+                and re.search(rf"\b{re.escape(name)}\b", _fields(event.extra).get("target", ""))
+                for name in names
+            )
+        ]
         if not calls:
             return []
         return [
@@ -377,7 +391,8 @@ class StorageCollisionRule(_SolidityRule):
                 graph,
                 calls[0],
                 "Proxy storage collision indicator",
-                "delegatecall uses a mutable implementation variable stored in normal layout.",
+                "delegatecall targets a mutable implementation variable in normal storage. "
+                "An EIP-1967 constant elsewhere does not make that variable the standard slot.",
             )
         ]
 
@@ -391,17 +406,10 @@ class UnboundedLoopRule(_SolidityRule):
         for event in graph.events:
             if event.kind != "sol_loop":
                 continue
-            if ".length" not in event.text:
+            function = _enclosing_function(graph, event)
+            if loop_is_bounded(event.text, function.text if function else ""):
                 continue
-            if re.search(r"<\s*\d+", event.text):
-                continue
-            if _fixed_array_loop(event.text, _enclosing_function(graph, event)):
-                continue
-            external = re.search(
-                r"\.(call|delegatecall|staticcall|send|transfer|safeTransferFrom)\s*[\(\{]",
-                event.text,
-            )
-            if not external:
+            if not loop_has_external_call(event.text):
                 continue
             found.append(
                 self._obs(
@@ -423,16 +431,10 @@ class UnboundedStateLoopRule(_SolidityRule):
         for event in graph.events:
             if event.kind != "sol_loop":
                 continue
-            if ".length" not in event.text or re.search(r"<\s*\d+", event.text):
+            function = _enclosing_function(graph, event)
+            if loop_is_bounded(event.text, function.text if function else ""):
                 continue
-            if _fixed_array_loop(event.text, _enclosing_function(graph, event)):
-                continue
-            external = re.search(
-                r"\.(call|delegatecall|staticcall|send|transfer|safeTransferFrom)\s*[\(\{]",
-                event.text,
-            )
-            stored = re.search(r"\b\w+\s*\[[^\]]+\]\s*(\+=|-=|=)", event.text)
-            if external or not stored:
+            if loop_has_external_call(event.text) or not loop_grows_state(event.text):
                 continue
             found.append(
                 self._obs(
@@ -472,14 +474,9 @@ class CrossFunctionReentrancyRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.REENTRANCY
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
-        writers = {
-            _fields(event.extra).get("function", "")
-            for event in graph.events
-            if event.kind == "sol_state_write"
-        }
         found: list[SecurityObservation] = []
         for function in _functions(graph):
-            if "nonreentrant" in _fields(function.extra).get("modifiers", "").lower():
+            if _reentrancy_locked(graph, function):
                 continue
             body = _inside(graph, function)
             external = [
@@ -495,7 +492,8 @@ class CrossFunctionReentrancyRule(_SolidityRule):
                 if call.kind != "sol_direct_call" or call.span is None:
                     continue
                 callee = _fields(call.extra).get("name", "")
-                if callee not in writers or callee == _function_name(function):
+                shared = _state_names(body) & _writes_of(graph, callee)
+                if not shared or callee == _function_name(function):
                     continue
                 external_span = external[0].span
                 if external_span is None or call.span.start_byte <= external_span.start_byte:
@@ -570,19 +568,15 @@ class SignatureDomainRule(_SolidityRule):
             function = _enclosing_function(graph, event)
             if function is None:
                 continue
-            if not re.search(r"\bnonce", function.text, re.IGNORECASE):
-                continue
-            if re.search(
-                r"DOMAIN_SEPARATOR|domainSeparator|chainid|chainId|address\(this\)|typehash|typeHash",
-                function.text,
-            ):
+            gap = signature_domain_gap(function.text)
+            if gap is None:
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Signature missing domain separation",
-                    "ecrecover is nonce-bound but not bound to a domain, chain, or this contract.",
+                    gap + " This is potential evidence, not a confirmed signature flaw.",
                 )
             )
         return found
@@ -642,7 +636,7 @@ class StaleOracleRule(_SolidityRule):
             calls = [event for event in _inside(graph, function) if event.kind == "sol_oracle_call"]
             if not calls:
                 continue
-            if re.search(r"updatedAt|answeredInRound|heartbeat|staleAfter", function.text):
+            if oracle_freshness_protects(function.text) is True:
                 continue
             found.append(
                 self._obs(
@@ -662,9 +656,7 @@ class DonationInflationRule(_SolidityRule):
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
         found: list[SecurityObservation] = []
         for function in _functions(graph):
-            if "balanceOf(address(this))" not in function.text.replace(" ", ""):
-                continue
-            if "totalSupply" not in function.text or "/" not in function.text:
+            if not any(_share_price(part) for part in function.text.split(";")):
                 continue
             found.append(
                 self._obs(
@@ -684,9 +676,11 @@ class FeeOnTransferRule(_SolidityRule):
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
         found: list[SecurityObservation] = []
         for function in _functions(graph):
-            if "balanceOf" not in function.text or ".transfer" not in function.text:
+            if not _erc20_transfer(function.text):
                 continue
             if function.text.count("balanceOf") >= 2 or "balanceAfter" in function.text:
+                continue
+            if "balanceOf" not in function.text:
                 continue
             found.append(
                 self._obs(
@@ -712,7 +706,15 @@ class UpgradeAuthRule(_SolidityRule):
                 continue
             if fields.get("visibility") not in {"public", "external"}:
                 continue
-            if _has_auth(fields.get("modifiers", "")) or _guard_dominates(event):
+            operations = [
+                item
+                for item in _inside(graph, event)
+                if item.kind in {"sol_state_write", "sol_delegatecall", "sol_external_call"}
+            ]
+            if not operations:
+                continue
+            guarded = _authorized_text(graph, event)
+            if all(_operation_is_guarded(guarded, operation) for operation in operations):
                 continue
             found.append(
                 self._obs(
@@ -725,10 +727,35 @@ class UpgradeAuthRule(_SolidityRule):
         return found
 
 
+class AssemblySensitiveRule(_SolidityRule):
+    rule_id = "sol.assembly_sensitive"
+    vulnerability_class = VulnerabilityClass.DYNAMIC_EXECUTION
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        sensitive = {"sstore", "call", "delegatecall", "staticcall", "callcode", "selfdestruct"}
+        found: list[SecurityObservation] = []
+        for event in graph.events:
+            if event.kind != "sol_yul":
+                continue
+            opcode = _fields(event.extra).get("op", event.text).strip()
+            if opcode not in sensitive:
+                continue
+            found.append(
+                self._obs(
+                    graph,
+                    event,
+                    f"Inline assembly {opcode}",
+                    f"Yul {opcode} is security-relevant. Unknown assembly around it is not treated as safe. "
+                    "This is potential evidence, not a confirmed vulnerability.",
+                )
+            )
+        return found
+
+
 def _reentrancy(
     rule: _SolidityRule, graph: SyntaxGraph, *, hooks_only: bool
 ) -> list[SecurityObservation]:
-    hooks = {"onerc721received", "tokensreceived", "onerc1155received"}
+    hooks = {"onerc721received", "tokensreceived", "onerc1155received", "onerc1155batchreceived"}
     found: list[SecurityObservation] = []
     for function in _functions(graph):
         name = _function_name(function).lower()
@@ -736,8 +763,7 @@ def _reentrancy(
             continue
         if not hooks_only and name in hooks:
             continue
-        modifiers = _fields(function.extra).get("modifiers", "").lower()
-        if "nonreentrant" in modifiers:
+        if _reentrancy_locked(graph, function):
             continue
         body_events = _inside(graph, function)
         calls = [
@@ -745,7 +771,7 @@ def _reentrancy(
             for event in body_events
             if event.kind == "sol_external_call"
             and _fields(event.extra).get("kind")
-            in {"call", "delegatecall", "transfer", "send", "safeTransferFrom"}
+            in {"call", "delegatecall", "staticcall", "transfer", "send", "safeTransferFrom"}
             and event.span is not None
         ]
         writes = [
@@ -763,34 +789,19 @@ def _reentrancy(
                 assert call.span is not None and write.span is not None
                 if write.span.start_byte <= call.span.start_byte:
                     continue
-                variable = _fields(write.extra).get("name", "")
-                read_before = any(
-                    _fields(read.extra).get("name") == variable
-                    and read.span is not None
-                    and read.span.start_byte < call.span.start_byte
-                    for read in reads
-                )
-                written_before = any(
-                    _fields(prior.extra).get("name") == variable
-                    and prior.span is not None
-                    and prior.span.start_byte < call.span.start_byte
-                    for prior in writes
-                )
-                used_in_call = bool(variable and variable in call.text)
-                if written_before and not read_before and not used_in_call:
-                    continue
-                if not read_before and not used_in_call and written_before:
+                if not _state_depends_on_call(call, write, reads, writes):
                     continue
                 same_path = write_reachable_after(function.text, call.text[:80], write.text[:80])
                 if same_path is False:
                     continue
                 title = "Callback reentrancy" if hooks_only else "State update after external call"
+                variable = _fields(write.extra).get("name", "")
                 found.append(
                     rule._obs(
                         graph,
                         function,
                         title,
-                        f"{variable or 'state'} is written after an external call.",
+                        f"{variable or 'state'} is written after control may transfer to another contract.",
                     )
                 )
                 break
@@ -856,39 +867,233 @@ def _fields(extra: str) -> dict[str, str]:
     return fields
 
 
-def _has_auth(modifiers: str) -> bool:
-    names = set()
+_PRIVILEGED = {
+    "withdraw",
+    "setowner",
+    "upgradeto",
+    "upgradetoandcall",
+    "pause",
+    "unpause",
+    "mint",
+    "grantrole",
+    "transferownership",
+}
+_CRITICAL_STATE = {
+    "owner",
+    "admin",
+    "governance",
+    "implementation",
+    "impl",
+    "pendingowner",
+    "paused",
+    "guardian",
+}
+_CONTROL_TRANSFER = {"call", "delegatecall", "staticcall", "transfer", "send", "safeTransferFrom"}
+
+
+def _sensitive_operations(graph: SyntaxGraph, function: SyntaxEvent) -> list[SyntaxEvent]:
+    privileged = _function_name(function).lower() in _PRIVILEGED
+    found: list[SyntaxEvent] = []
+    for event in _inside(graph, function):
+        fields = _fields(event.extra)
+        if event.kind == "sol_state_write":
+            written = fields.get("name", "").lower()
+            if (
+                written in _CRITICAL_STATE
+                or "role" in written
+                or written in {"totalsupply", "supply"}
+            ):
+                found.append(event)
+            elif privileged:
+                found.append(event)
+        elif event.kind == "sol_delegatecall":
+            found.append(event)
+        elif event.kind == "sol_external_call" and fields.get("kind") in _CONTROL_TRANSFER:
+            kind = fields.get("kind", "")
+            native_value = (
+                kind in {"send"}
+                or (kind == "call" and "value" in event.text)
+                or (kind == "transfer" and "," not in event.text)
+            )
+            if native_value or kind == "delegatecall" or privileged:
+                found.append(event)
+    return found
+
+
+def _operation_is_guarded(function_text: str, operation: SyntaxEvent) -> bool:
+    verdict = operation_guarded(function_text, operation.text[:120])
+    return verdict is True
+
+
+def _authorized_text(graph: SyntaxGraph, function: SyntaxEvent) -> str:
+    text = function.text
+    bodies = _modifier_bodies(graph)
+    injections: list[str] = []
+    for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
+        body = bodies.get(name, "")
+        if body and placeholder_is_guarded(body):
+            injections.append("require(msg.sender == owner);")
+    if injections:
+        brace = text.find("{")
+        if brace >= 0:
+            text = text[: brace + 1] + " ".join(injections) + text[brace + 1 :]
+    own = _function_name(function)
+    for name in _guard_helpers(graph):
+        if name == own:
+            continue
+        text = re.sub(
+            rf"\b{re.escape(name)}\s*\([^;]*\)\s*;",
+            "require(msg.sender == owner);",
+            text,
+        )
+    return text
+
+
+def _modifier_names(modifiers: str) -> list[str]:
+    names: list[str] = []
     for item in modifiers.split(","):
-        token = re.split(r"[\(\s]", item.strip(), maxsplit=1)[0].lower()
+        token = re.split(r"[\(\s]", item.strip(), maxsplit=1)[0]
         if token:
-            names.add(token)
-    return bool(
-        names
-        & {
-            "onlyowner",
-            "onlyrole",
-            "onlyadmin",
-            "authorized",
-            "requiresauth",
-            "requiresrole",
-            "auth",
-        }
-    )
+            names.append(token)
+    return names
 
 
-def _guard_dominates(function: SyntaxEvent) -> bool:
-    if auth_dominates_sensitive(function.text):
-        return True
+def _modifier_bodies(graph: SyntaxGraph) -> dict[str, str]:
+    found: dict[str, list[str]] = {}
+    for event in graph.events:
+        if event.kind != "sol_modifier":
+            continue
+        name = _fields(event.extra).get("name", "")
+        if name:
+            found.setdefault(name, []).append(event.text)
+    return {name: bodies[0] for name, bodies in found.items() if len(bodies) == 1 and bodies[0]}
+
+
+def _guard_helpers(graph: SyntaxGraph) -> dict[str, str]:
+    grouped: dict[str, list[str]] = {}
+    for function in _functions(graph):
+        name = _function_name(function)
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(function.text)
+    helpers: dict[str, str] = {}
+    for name, bodies in grouped.items():
+        if len(bodies) != 1:
+            continue
+        start = bodies[0].find("{")
+        end = bodies[0].rfind("}")
+        if start < 0 or end <= start:
+            continue
+        inner = bodies[0][start + 1 : end]
+        probe = "function _h() {" + inner + " owner = next; }"
+        if operation_guarded(probe, "owner = next") is True:
+            helpers[name] = inner
+    return helpers
+
+
+def _initializer_protected(graph: SyntaxGraph, modifiers: str) -> bool:
+    bodies = _modifier_bodies(graph)
+    for name in _modifier_names(modifiers):
+        if "initial" not in name.lower():
+            continue
+        body = bodies.get(name, "")
+        if "_;" not in body:
+            continue
+        before = body.split("_;", 1)[0]
+        sets_flag = bool(re.search(r"initialized\s*=\s*true|version\s*=", before))
+        checks_flag = "require" in before and bool(re.search(r"initialized|version", before))
+        if sets_flag or checks_flag:
+            return True
     return False
 
 
-def _fixed_array_loop(loop_text: str, function: SyntaxEvent | None) -> bool:
-    """A loop over a fixed-size array is not an unbounded-length walk."""
-    if function is None:
+def _reentrancy_locked(graph: SyntaxGraph, function: SyntaxEvent) -> bool:
+    bodies = _modifier_bodies(graph)
+    for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
+        body = bodies.get(name, "")
+        if "_;" not in body:
+            continue
+        before = body.split("_;", 1)[0]
+        if re.search(r"require\s*\(", before) and re.search(
+            r"locked|_status|entered|reentrancy", before, re.I
+        ):
+            return True
+        if re.search(r"\b(locked|_status)\b\s*=", before):
+            return True
+    return False
+
+
+def _state_names(events: list[SyntaxEvent]) -> set[str]:
+    names: set[str] = set()
+    for event in events:
+        if event.kind in {"sol_state_read", "sol_state_write"}:
+            name = _fields(event.extra).get("name", "")
+            if name:
+                names.add(name)
+    return names
+
+
+def _writes_of(graph: SyntaxGraph, function_name: str) -> set[str]:
+    names: set[str] = set()
+    for event in graph.events:
+        if event.kind != "sol_state_write":
+            continue
+        if _fields(event.extra).get("function") != function_name:
+            continue
+        name = _fields(event.extra).get("name", "")
+        if name:
+            names.add(name)
+    return names
+
+
+def _state_depends_on_call(
+    call: SyntaxEvent,
+    write: SyntaxEvent,
+    reads: list[SyntaxEvent],
+    writes: list[SyntaxEvent],
+) -> bool:
+    variable = _fields(write.extra).get("name", "")
+    assert call.span is not None and write.span is not None
+    read_before = any(
+        _fields(read.extra).get("name") == variable
+        and read.span is not None
+        and read.span.start_byte < call.span.start_byte
+        for read in reads
+    )
+    written_before = any(
+        _fields(prior.extra).get("name") == variable
+        and prior.span is not None
+        and prior.span.start_byte < call.span.start_byte
+        for prior in writes
+    )
+    used_in_call = bool(variable and variable in call.text)
+    shared = bool(_shared_identifiers(call.text, write.text))
+    if read_before or used_in_call or shared:
+        return True
+    if written_before:
         return False
-    if "[]" in function.text:
-        return False
-    return bool(re.search(r"\[\d+\]", function.text) and ".length" in loop_text)
+    kind = _fields(call.extra).get("kind", "")
+    if kind == "delegatecall":
+        return True
+    return bool(re.search(r"balance|share|deposit|supply|debt|owed|reserve", variable, re.I))
+
+
+def _shared_identifiers(left: str, right: str) -> set[str]:
+    skip = {"msg", "sender", "value", "call", "require", "bool", "memory", "this", "address"}
+    words = set(re.findall(r"[A-Za-z_]\w*", left)) - skip
+    other = set(re.findall(r"[A-Za-z_]\w*", right))
+    return {word for word in words & other if word not in skip}
+
+
+def _share_price(statement: str) -> bool:
+    compact = re.sub(r"\s+", "", statement)
+    return "balanceOf(address(this))" in compact and "totalSupply" in compact and "/" in compact
+
+
+def _erc20_transfer(text: str) -> bool:
+    if re.search(r"\.transferFrom\s*\(", text):
+        return True
+    return bool(re.search(r"\.transfer\s*\([^;\n]*,", text))
 
 
 def _checked(graph: SyntaxGraph) -> bool | None:

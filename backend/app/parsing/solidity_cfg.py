@@ -1,8 +1,9 @@
 """Conservative intra-procedural control-flow for one Solidity function.
 
-This is not a compiler CFG. Brace structure that cannot be split stays unknown.
-A guard dominates a later operation only when every path that reaches the
-operation has already passed the guard.
+This is not a compiler CFG. Brace structure that cannot be split stays unknown,
+and security rules must not treat an unknown graph as proof that a path is safe.
+A guard dominates a later operation only when every entry path to that operation
+has already passed the guard. A check on one branch does not protect another.
 """
 
 from __future__ import annotations
@@ -12,6 +13,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 _CONTROL = ("if", "for", "while", "do", "unchecked", "try")
+_TYPE_WORD = (
+    r"(?:u?int\d*|address|bool|string|bytes\d*|mapping|function|struct|"
+    r"[A-Za-z_]\w*)"
+)
 
 
 @dataclass
@@ -27,6 +32,9 @@ class FunctionCfg:
     edges: list[tuple[int, int, str]] = field(default_factory=list)
     entry: int = 0
     known: bool = True
+    then_of: dict[int, set[int]] = field(default_factory=dict)
+    else_of: dict[int, set[int]] = field(default_factory=dict)
+    join_of: dict[int, int] = field(default_factory=dict)
 
     def successors(self, node_id: int) -> list[int]:
         return [dst for src, dst, _label in self.edges if src == node_id]
@@ -36,7 +44,7 @@ class FunctionCfg:
         stack = [start]
         while stack:
             current = stack.pop()
-            if current in seen:
+            if current in seen or current < 0 or current >= len(self.nodes):
                 continue
             seen.add(current)
             stack.extend(self.successors(current))
@@ -65,24 +73,24 @@ class FunctionCfg:
         return True
 
 
-def extract_body(function_text: str) -> str:
+def extract_body(function_text: str) -> str | None:
+    """Return the function body, or None when the outer braces do not match."""
     start = function_text.find("{")
     if start < 0:
         return ""
-    depth = 0
-    for index in range(start, len(function_text)):
-        char = function_text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return function_text[start + 1 : index]
-    return ""
+    try:
+        _body, end = _matching_brace(function_text, start)
+    except ValueError:
+        return None
+    return function_text[start + 1 : end - 1]
 
 
 def build_function_cfg(function_text: str) -> FunctionCfg:
     body = extract_body(function_text)
+    if body is None:
+        failed = FunctionCfg(known=False)
+        failed.entry = _add(failed, "unknown", function_text[:180])
+        return failed
     if not body.strip():
         cfg = FunctionCfg()
         entry = _add(cfg, "entry", "")
@@ -109,7 +117,8 @@ def auth_dominates_sensitive(function_text: str) -> bool:
     """True when an authorization check protects every sensitive operation.
 
     ``owner = msg.sender`` and a ternary that mentions ``msg.sender`` are not
-    checks. A check that appears only after the operation does not protect it.
+    checks. A check that appears only after the operation, or only on another
+    branch, does not protect it.
     """
     cfg = build_function_cfg(function_text)
     if not cfg.known:
@@ -118,7 +127,36 @@ def auth_dominates_sensitive(function_text: str) -> bool:
     sensitive = _tight_nodes(cfg, _is_sensitive)
     if not guards or not sensitive:
         return False
-    return all(any(cfg.dominates(guard, op) for guard in guards) for op in sensitive)
+    return all(_op_protected(cfg, op, guards) for op in sensitive)
+
+
+def operation_guarded(function_text: str, operation: str) -> bool | None:
+    """Whether ``operation`` is dominated by a resolved authorization check.
+
+    None means the body could not be split, or the operation text was not found.
+    Callers must not treat None as safe.
+    """
+    cfg = build_function_cfg(function_text)
+    if not cfg.known or not operation:
+        return None
+    ops = _tight_ids(cfg, lambda text: operation in text)
+    if not ops:
+        return None
+    guards = _tight_nodes(cfg, _is_auth_guard)
+    if not guards:
+        return False
+    return all(_op_protected(cfg, op, guards) for op in ops)
+
+
+def placeholder_is_guarded(body: str) -> bool:
+    """True when checks in a modifier body dominate its ``_;`` placeholder."""
+    if not re.search(r"_\s*;", body):
+        return False
+    inner = body.strip()
+    if inner.startswith("{") and inner.endswith("}"):
+        inner = inner[1:-1]
+    replaced = re.sub(r"_\s*;", "owner = next;", inner, count=1)
+    return auth_dominates_sensitive("function _mod() {\n" + replaced + "\n}")
 
 
 def write_reachable_after(function_text: str, earlier: str, later: str) -> bool | None:
@@ -140,6 +178,78 @@ def write_reachable_after(function_text: str, earlier: str, later: str) -> bool 
         if end in reachable and end not in starts:
             return True
     return False
+
+
+def split_loop(statement: str) -> tuple[str, str, str]:
+    """Return ``(header, body, style)`` for a for, while, or do-while statement."""
+    stripped = statement.strip()
+    if re.match(r"do\b", stripped):
+        brace = stripped.find("{")
+        if brace < 0:
+            raise ValueError("do without block")
+        body, end = _matching_brace(stripped, brace)
+        header = stripped[end:].strip() or "while"
+        return header, body, "do"
+    match = re.match(r"(for|while)\b", stripped)
+    if not match:
+        raise ValueError("not a loop")
+    cursor = _consume_parens(stripped, match.end())
+    header = stripped[:cursor].strip()
+    rest = stripped[cursor:].strip()
+    if rest.startswith("{"):
+        body, _end = _matching_brace(rest, 0)
+        return header, body, match.group(1)
+    return header, rest, match.group(1)
+
+
+def _op_protected(cfg: FunctionCfg, op: int, guards: list[int]) -> bool:
+    for guard in guards:
+        if _guard_protects(cfg, guard, op):
+            return True
+    return False
+
+
+def _guard_protects(cfg: FunctionCfg, guard: int, op: int) -> bool:
+    node = cfg.nodes[guard]
+    if not cfg.dominates(guard, op):
+        return False
+    if node.kind == "require":
+        return True
+    if node.kind != "if":
+        return False
+    polarity = _auth_polarity(_condition(node.text))
+    if polarity is None:
+        return False
+    then_ids = cfg.then_of.get(guard, set())
+    else_ids = cfg.else_of.get(guard, set())
+    if polarity == "positive":
+        if op in else_ids:
+            return False
+        if op in then_ids:
+            return True
+        return _else_terminates(cfg, guard)
+    if op in then_ids:
+        return False
+    return _region_terminates(cfg, then_ids, cfg.join_of.get(guard))
+
+
+def _region_terminates(cfg: FunctionCfg, region: set[int], join: int | None) -> bool:
+    if not region or join is None:
+        return False
+    return not any(dst == join and src in region for src, dst, _label in cfg.edges)
+
+
+def _else_terminates(cfg: FunctionCfg, guard: int) -> bool:
+    """True when the unauthorized else branch cannot continue after the if."""
+    else_ids = cfg.else_of.get(guard, set())
+    join = cfg.join_of.get(guard)
+    if join is None:
+        return False
+    if not else_ids:
+        return not any(
+            src == guard and dst == join and label == "else" for src, dst, label in cfg.edges
+        )
+    return _region_terminates(cfg, else_ids, join)
 
 
 def _tight_nodes(cfg: FunctionCfg, predicate: Callable[[str], bool]) -> list[int]:
@@ -184,6 +294,10 @@ def split_top_statements(body: str) -> list[str]:
             index += 1
         if index >= length:
             break
+        skipped = _skip_string_or_comment(body, index)
+        if skipped is not None:
+            index = skipped
+            continue
         start = index
         if _keyword_at(body, index):
             index = _consume_control(body, index)
@@ -195,15 +309,54 @@ def split_top_statements(body: str) -> list[str]:
     return parts
 
 
-def _link_sequence(cfg: FunctionCfg, statements: list[str], entry: int, exit_id: int) -> list[int]:
+def _link_sequence(
+    cfg: FunctionCfg,
+    statements: list[str],
+    entry: int,
+    exit_id: int,
+    *,
+    loop_header: int | None = None,
+    loop_exit: int | None = None,
+    entry_label: str = "next",
+) -> list[int]:
     previous = [entry]
+    label = entry_label
     for statement in statements:
         kind = _statement_kind(statement)
+        if kind == "loop":
+            previous = _link_loop(cfg, statement, previous, exit_id, loop_header, loop_exit, label)
+            label = "next"
+            continue
+        if kind == "unchecked":
+            previous = _link_unchecked(
+                cfg, statement, previous, exit_id, loop_header, loop_exit, label
+            )
+            label = "next"
+            continue
+        if kind == "try":
+            previous = _link_try(cfg, statement, previous, exit_id, loop_header, loop_exit, label)
+            label = "next"
+            continue
         node = _add(cfg, kind, statement.strip())
-        for src in previous:
-            cfg.edges.append((src, node, "next"))
+        _connect(cfg, previous, node, label, entry)
+        label = "next"
         if kind in {"return", "revert"}:
             cfg.edges.append((node, exit_id, "exit"))
+            previous = []
+            continue
+        if kind == "break":
+            if loop_exit is None:
+                cfg.known = False
+                cfg.edges.append((node, exit_id, "exit"))
+            else:
+                cfg.edges.append((node, loop_exit, "break"))
+            previous = []
+            continue
+        if kind == "continue":
+            if loop_header is None:
+                cfg.known = False
+            else:
+                cfg.edges.append((node, loop_header, "continue"))
             previous = []
             continue
         if kind == "require":
@@ -211,61 +364,228 @@ def _link_sequence(cfg: FunctionCfg, statements: list[str], entry: int, exit_id:
             previous = [node]
             continue
         if kind == "if":
-            previous = _link_if(cfg, statement, node, exit_id)
-            continue
-        if kind == "loop":
-            cfg.edges.append((node, node, "back"))
-            previous = [node]
+            previous = _link_if(cfg, statement, node, exit_id, loop_header, loop_exit)
             continue
         previous = [node]
     return previous
 
 
-def _link_if(cfg: FunctionCfg, statement: str, node: int, exit_id: int) -> list[int]:
+def _connect(cfg: FunctionCfg, sources: list[int], dest: int, label: str, entry: int) -> None:
+    for src in sources:
+        cfg.edges.append((src, dest, label if src == entry else "next"))
+
+
+def _link_if(
+    cfg: FunctionCfg,
+    statement: str,
+    node: int,
+    exit_id: int,
+    loop_header: int | None,
+    loop_exit: int | None,
+) -> list[int]:
     then_body, else_body = _if_branches(statement)
     join = _add(cfg, "join", "")
-    then_end = _link_sequence(cfg, split_top_statements(then_body), node, exit_id)
+    then_start = len(cfg.nodes)
+    then_end = _link_sequence(
+        cfg,
+        split_top_statements(then_body),
+        node,
+        exit_id,
+        loop_header=loop_header,
+        loop_exit=loop_exit,
+        entry_label="then",
+    )
+    then_ids = set(range(then_start, len(cfg.nodes)))
     for src in then_end:
         cfg.edges.append((src, join, "then"))
     if else_body is None:
         cfg.edges.append((node, join, "else"))
+        else_ids: set[int] = set()
     else:
-        else_end = _link_sequence(cfg, split_top_statements(else_body), node, exit_id)
+        else_start = len(cfg.nodes)
+        else_end = _link_sequence(
+            cfg,
+            split_top_statements(else_body),
+            node,
+            exit_id,
+            loop_header=loop_header,
+            loop_exit=loop_exit,
+            entry_label="else",
+        )
+        else_ids = set(range(else_start, len(cfg.nodes)))
         for src in else_end:
             cfg.edges.append((src, join, "else"))
+    cfg.then_of[node] = then_ids
+    cfg.else_of[node] = else_ids
+    cfg.join_of[node] = join
     return [join]
 
 
+def _link_loop(
+    cfg: FunctionCfg,
+    statement: str,
+    previous: list[int],
+    exit_id: int,
+    outer_header: int | None,
+    outer_exit: int | None,
+    label: str,
+) -> list[int]:
+    del outer_header, outer_exit
+    header_text, body, style = split_loop(statement)
+    after = _add(cfg, "join", "")
+    if style == "do":
+        gate = _add(cfg, "join", "")
+        header = _add(cfg, "loop", header_text)
+        _connect(cfg, previous, gate, label, previous[0] if previous else -1)
+        terminals = _link_sequence(
+            cfg,
+            split_top_statements(body),
+            gate,
+            exit_id,
+            loop_header=header,
+            loop_exit=after,
+        )
+        for src in terminals:
+            cfg.edges.append((src, header, "next"))
+        succs = cfg.successors(gate)
+        back_target = succs[0] if succs else gate
+        cfg.edges.append((header, back_target, "back"))
+        cfg.edges.append((header, after, "exit"))
+        return [after]
+    header = _add(cfg, "loop", header_text)
+    _connect(cfg, previous, header, label, previous[0] if previous else -1)
+    cfg.edges.append((header, after, "exit"))
+    terminals = _link_sequence(
+        cfg,
+        split_top_statements(body),
+        header,
+        exit_id,
+        loop_header=header,
+        loop_exit=after,
+    )
+    for src in terminals:
+        cfg.edges.append((src, header, "back"))
+    return [after]
+
+
+def _link_unchecked(
+    cfg: FunctionCfg,
+    statement: str,
+    previous: list[int],
+    exit_id: int,
+    loop_header: int | None,
+    loop_exit: int | None,
+    label: str,
+) -> list[int]:
+    node = _add(cfg, "unchecked", "unchecked")
+    _connect(cfg, previous, node, label, previous[0] if previous else -1)
+    brace = statement.find("{")
+    if brace < 0:
+        return [node]
+    body, _end = _matching_brace(statement, brace)
+    return _link_sequence(
+        cfg,
+        split_top_statements(body),
+        node,
+        exit_id,
+        loop_header=loop_header,
+        loop_exit=loop_exit,
+    )
+
+
+def _link_try(
+    cfg: FunctionCfg,
+    statement: str,
+    previous: list[int],
+    exit_id: int,
+    loop_header: int | None,
+    loop_exit: int | None,
+    label: str,
+) -> list[int]:
+    node = _add(cfg, "try", "try")
+    _connect(cfg, previous, node, label, previous[0] if previous else -1)
+    join = _add(cfg, "join", "")
+    bodies = _brace_bodies(statement)
+    if len(bodies) < 2:
+        cfg.known = False
+    if not bodies:
+        cfg.edges.append((node, join, "next"))
+        return [join]
+    for body in bodies:
+        terminals = _link_sequence(
+            cfg,
+            split_top_statements(body),
+            node,
+            exit_id,
+            loop_header=loop_header,
+            loop_exit=loop_exit,
+        )
+        for src in terminals:
+            cfg.edges.append((src, join, "next"))
+    return [join]
+
+
+def _brace_bodies(statement: str) -> list[str]:
+    bodies: list[str] = []
+    index = 0
+    while index < len(statement):
+        skipped = _skip_string_or_comment(statement, index)
+        if skipped is not None:
+            index = skipped
+            continue
+        if statement[index] == "{":
+            body, end = _matching_brace(statement, index)
+            bodies.append(body)
+            index = end
+            continue
+        index += 1
+    return bodies
+
+
 def _if_branches(statement: str) -> tuple[str, str | None]:
-    then_at = statement.find("{")
-    if then_at < 0:
+    stripped = statement.strip()
+    match = re.match(r"if\b", stripped)
+    if not match:
         return "", None
-    then_body, then_end = _matching_brace(statement, then_at)
-    rest = statement[then_end:].strip()
-    if rest.startswith("else"):
-        else_at = rest.find("{")
-        if else_at < 0:
-            return then_body, rest[len("else") :].strip()
-        else_body, _end = _matching_brace(rest, else_at)
-        return then_body, else_body
+    try:
+        end_paren = _consume_parens(stripped, match.end())
+    except ValueError:
+        return "", None
+    rest = stripped[end_paren:].strip()
+    if rest.startswith("{"):
+        then_body, then_end = _matching_brace(
+            stripped, end_paren + (len(stripped[end_paren:]) - len(rest))
+        )
+        tail = stripped[then_end:].strip()
+    else:
+        then_body, tail = _split_braceless(rest)
+    if tail.startswith("else") and _boundary(tail, 4):
+        else_rest = tail[4:].strip()
+        if else_rest.startswith("{"):
+            else_body, _end = _matching_brace(else_rest, 0)
+            return then_body, else_body
+        return then_body, else_rest
     return then_body, None
 
 
+def _split_braceless(rest: str) -> tuple[str, str]:
+    if not rest:
+        return "", ""
+    if _keyword_at(rest, 0):
+        end = _consume_control(rest, 0)
+    else:
+        end = _consume_simple(rest, 0)
+    return rest[:end].strip(), rest[end:].strip()
+
+
 def _matching_brace(text: str, open_at: int) -> tuple[str, int]:
-    depth = 0
-    for index in range(open_at, len(text)):
-        if text[index] == "{":
-            depth += 1
-        elif text[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[open_at + 1 : index], index + 1
-    raise ValueError("unbalanced brace")
+    end = _consume_delimited(text, open_at, "{", "}")
+    return text[open_at + 1 : end - 1], end
 
 
 def _add(cfg: FunctionCfg, kind: str, text: str) -> int:
     node_id = len(cfg.nodes)
-    cfg.nodes.append(CfgNode(node_id, kind, text[:500]))
+    cfg.nodes.append(CfgNode(node_id, kind, text[:4000]))
     return node_id
 
 
@@ -283,6 +603,10 @@ def _boundary(text: str, index: int) -> bool:
 def _consume_simple(text: str, index: int) -> int:
     depth = 0
     while index < len(text):
+        skipped = _skip_string_or_comment(text, index)
+        if skipped is not None:
+            index = skipped
+            continue
         char = text[index]
         if char in "({[":
             depth += 1
@@ -316,6 +640,15 @@ def _consume_control(text: str, index: int) -> int:
         if text.startswith("else", probe) and _boundary(text, probe + 4):
             cursor = probe + 4
             cursor = _consume_block_or_stmt(text, cursor)
+    if keyword == "try":
+        while True:
+            probe = cursor
+            while probe < len(text) and text[probe].isspace():
+                probe += 1
+            if text.startswith("catch", probe) and _boundary(text, probe + 5):
+                cursor = _consume_block_or_stmt(text, probe + 5)
+                continue
+            break
     return cursor
 
 
@@ -324,24 +657,33 @@ def _consume_parens(text: str, index: int) -> int:
         index += 1
     if index >= len(text) or text[index] != "(":
         return index
+    return _consume_delimited(text, index, "(", ")")
+
+
+def _consume_delimited(text: str, index: int, open_ch: str, close_ch: str) -> int:
+    if index >= len(text) or text[index] != open_ch:
+        raise ValueError("missing delimiter")
     depth = 0
     while index < len(text):
-        if text[index] == "(":
+        skipped = _skip_string_or_comment(text, index)
+        if skipped is not None:
+            index = skipped
+            continue
+        if text[index] == open_ch:
             depth += 1
-        elif text[index] == ")":
+        elif text[index] == close_ch:
             depth -= 1
             if depth == 0:
                 return index + 1
         index += 1
-    raise ValueError("unbalanced paren")
+    raise ValueError("unbalanced delimiter")
 
 
 def _consume_block_or_stmt(text: str, index: int) -> int:
     while index < len(text) and text[index].isspace():
         index += 1
     if index < len(text) and text[index] == "{":
-        _body, end = _matching_brace(text, index)
-        return end
+        return _consume_delimited(text, index, "{", "}")
     if index < len(text) and _keyword_at(text, index):
         return _consume_control(text, index)
     return _consume_simple(text, index)
@@ -356,29 +698,58 @@ def _word(text: str, index: int) -> str:
 
 def _statement_kind(statement: str) -> str:
     stripped = statement.lstrip()
-    if stripped.startswith("if ") or stripped.startswith("if("):
+    if re.match(r"if\b", stripped):
         return "if"
-    if stripped.startswith(("for ", "for(", "while ", "while(", "do ", "do{")):
+    if re.match(r"(for|while|do)\b", stripped):
         return "loop"
-    if stripped.startswith("unchecked"):
+    if re.match(r"unchecked\b", stripped):
         return "unchecked"
-    if stripped.startswith("try ") or stripped.startswith("try{"):
+    if re.match(r"try\b", stripped):
         return "try"
     if re.match(r"return\b", stripped):
         return "return"
     if re.match(r"revert\b", stripped):
         return "revert"
+    if re.match(r"break\b", stripped):
+        return "break"
+    if re.match(r"continue\b", stripped):
+        return "continue"
     if re.match(r"require\s*\(", stripped) or re.match(r"assert\s*\(", stripped):
         return "require"
     return "stmt"
 
 
+def _condition(statement: str) -> str:
+    stripped = statement.strip()
+    if re.match(r"(require|assert)\b", stripped):
+        return stripped
+    open_at = stripped.find("(")
+    if open_at < 0:
+        return stripped
+    try:
+        end = _consume_parens(stripped, open_at)
+    except ValueError:
+        return stripped
+    return stripped[open_at:end]
+
+
+def _auth_polarity(text: str) -> str | None:
+    if re.search(r"msg\.sender\s*!=|!=\s*msg\.sender|!\s*hasRole\s*\(", text):
+        return "negative"
+    if re.search(r"msg\.sender\s*==|==\s*msg\.sender|\bhasRole\s*\(", text):
+        return "positive"
+    return None
+
+
 def _is_auth_guard(text: str) -> bool:
     if not text:
         return False
-    if not re.search(r"\b(require|assert|if)\s*\(", text):
-        return False
-    return bool(re.search(r"msg\.sender\s*==|==\s*msg\.sender|\bhasRole\s*\(|\bonlyOwner\b", text))
+    head = text.lstrip()
+    if re.match(r"(require|assert)\s*\(", head):
+        return _auth_polarity(head) is not None
+    if re.match(r"if\b", head):
+        return _auth_polarity(_condition(head)) is not None
+    return False
 
 
 def _is_sensitive(text: str) -> bool:
@@ -386,9 +757,34 @@ def _is_sensitive(text: str) -> bool:
         return False
     if re.search(r"\.(call|delegatecall|staticcall|send|transfer|safeTransferFrom)\s*[\(\{]", text):
         return True
+    if re.match(rf"{_TYPE_WORD}\b", text.lstrip()) and re.search(
+        r"\b(memory|calldata|storage)\b", text
+    ):
+        return False
     if re.match(
         r"(uint\d*|int\d*|address|bool|string|bytes\d*|mapping)\b",
         text.lstrip(),
     ):
         return False
     return bool(re.search(r"\b[A-Za-z_]\w*\b\s*(\[[^\]]+\])?\s*=[^=]", text))
+
+
+def _skip_string_or_comment(text: str, index: int) -> int | None:
+    if text.startswith("//", index):
+        newline = text.find("\n", index)
+        return len(text) if newline < 0 else newline + 1
+    if text.startswith("/*", index):
+        end = text.find("*/", index + 2)
+        return len(text) if end < 0 else end + 2
+    if index >= len(text) or text[index] not in "\"'":
+        return None
+    quote = text[index]
+    cursor = index + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == quote:
+            return cursor + 1
+        cursor += 1
+    return len(text)

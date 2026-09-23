@@ -85,14 +85,20 @@ Solidity is not in the generic taint table above. Its parser is Tree-sitter
 when the bundled grammar loads (`FULL_AST`, backend `tree_sitter`). If that
 parser cannot load, the file is `PROFILE_FALLBACK` and Solidity security rules
 do not run. The capability matrix uses `YES`, `LIMITED`, `UNSUPPORTED`, and
-`UNAVAILABLE_AT_RUNTIME`. Same-file call/state order and the intra-procedural CFG are `LIMITED`.
-The CFG is not a compiler CFG: unknown braces stay unknown. Compiler storage
-layout is not claimed. Selectors are emitted only when every parameter type
-canonicalizes, including same-file structs whose fields are known. A parse
-error does not receive a guessed selector. ABI tuples are dynamic only when a
-component is dynamic. External Foundry, Slither, Echidna, Medusa, Halmos, and
-Wake capabilities follow the installed binary and stay
-`UNAVAILABLE_AT_RUNTIME` when it is absent.
+`UNAVAILABLE_AT_RUNTIME`. Same-file call/state order, the intra-procedural CFG,
+and intra-procedural def-use are `LIMITED`. The CFG is not a compiler CFG:
+unknown braces stay unknown, and an unknown graph is not treated as proof that
+a path is safe. A guard counts only when it dominates the operation.
+Selectors are emitted only when every parameter type canonicalizes, including
+same-file enums (`uint8`), user-defined value types, contract types
+(`address`), and structs whose fields are known. A name defined in exactly one
+other file can be resolved by `unique_abi_aliases`; a repeated name stays
+unresolved. A parse error does not receive a guessed selector. ABI tuples are
+dynamic only when a component is dynamic. `solc` and `forge` are optional. When
+they are absent, compiler storage layout is `UNAVAILABLE` and is not invented.
+External Foundry, Slither, Echidna, Medusa, Halmos, and Wake capabilities follow
+the installed binary and stay `UNAVAILABLE_AT_RUNTIME` when it is absent.
+Static Solidity findings stay potential evidence.
 
 Vyper is detection-only. BugForge does not claim a native Vyper AST. Slither
 may analyze Vyper when the `slither` executable is installed; that external
@@ -101,5 +107,6 @@ result is still potential evidence.
 Go, Rust, and C/C++ can hand a target to `go test`, `cargo test`, or a local
 clang/AFL harness. Those bridges report `LIMITED` or `UNAVAILABLE_AT_RUNTIME`.
 They do not mark a finding verified. See
-[phase28-solidity-deep-analysis.md](phase28-solidity-deep-analysis.md) and
-[phase29-cfg-runtime-and-ci.md](phase29-cfg-runtime-and-ci.md).
+[phase28-solidity-deep-analysis.md](phase28-solidity-deep-analysis.md),
+[phase29-cfg-runtime-and-ci.md](phase29-cfg-runtime-and-ci.md), and
+[phase30-solidity-semantic-reinforcement.md](phase30-solidity-semantic-reinforcement.md).
