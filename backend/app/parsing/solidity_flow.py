@@ -273,8 +273,7 @@ def oracle_freshness_protects(function_text: str) -> bool | None:
         checks = [
             node.node_id
             for node in flow.cfg.nodes
-            if node.kind in {"require", "if"}
-            and any(re.search(rf"\b{re.escape(fresh)}\b", node.text) for fresh in slot["fresh"])
+            if node.kind in {"require", "if"} and _is_real_freshness(node.text, slot["fresh"])
         ]
         if not checks:
             return False
@@ -507,6 +506,13 @@ def _split_top(text: str) -> list[str]:
 
 
 def _nonce_consumed_for_digest(function_text: str, name: str) -> bool:
+    """True when every live ecrecover is covered by the nonce it actually signs.
+
+    Coverage means the same nonce (and the same mapping index, when there is
+    one) dominates that verification, or is incremented on every path from
+    that verification to the exit. An increment on another branch, another
+    index, or a path that never reaches ecrecover does not count.
+    """
     flow = analyze_flow(function_text)
     if not flow.known or flow.cfg is None:
         return False
@@ -518,25 +524,101 @@ def _nonce_consumed_for_digest(function_text: str, name: str) -> bool:
         and "ecrecover" in node.text
         and node.kind in {"stmt", "return", "require"}
     ]
-    writes = [
-        node
-        for node in flow.cfg.nodes
-        if node.node_id in live
-        and _is_nonce_consume(node.text, name)
-        and _nonce_index_compatible(flow, node.text, name)
-    ]
-    if not writes or not verifies:
+    if not verifies:
         return False
-    for write in writes:
-        for verify in verifies:
-            if write.node_id == verify.node_id:
-                return True
-            reachable = flow.cfg.reachable_from(write.node_id)
-            if verify.node_id in reachable:
-                return True
-            if write.node_id in flow.cfg.reachable_from(verify.node_id):
-                return True
-    return False
+    for verify in verifies:
+        indexes = _digest_nonce_indexes(flow, verify.node_id, verify.text, name)
+        if indexes is None:
+            return False
+        writes = [
+            node
+            for node in flow.cfg.nodes
+            if node.node_id in live
+            and node.kind == "stmt"
+            and _is_nonce_consume(node.text, name)
+            and _nonce_indexes_match(node.text, name, indexes)
+        ]
+        if not any(_nonce_covers(flow.cfg, write.node_id, verify.node_id) for write in writes):
+            return False
+    return True
+
+
+def _nonce_covers(cfg: FunctionCfg, write: int, verify: int) -> bool:
+    if write == verify or cfg.dominates(write, verify):
+        return True
+    if write not in cfg.reachable_from(verify):
+        return False
+    seen: set[int] = set()
+    stack = [verify]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current == write and current != verify:
+            continue
+        node = cfg.nodes[current]
+        if node.kind == "exit" and current != verify:
+            return False
+        for nxt in cfg.successors(current):
+            if nxt != write:
+                stack.append(nxt)
+    return True
+
+
+def _digest_nonce_indexes(
+    flow: FunctionFlow, node_id: int, text: str, name: str
+) -> set[str] | None:
+    arg = _call_arg(text, "ecrecover", 0)
+    if arg is None or flow.cfg is None:
+        return None
+    found: set[str] = set()
+    if _collect_nonce_indexes(arg, flow, node_id, name, found, set()) is None:
+        return None
+    return found
+
+
+def _collect_nonce_indexes(
+    expr: str,
+    flow: FunctionFlow,
+    node_id: int,
+    name: str,
+    found: set[str],
+    seen: set[str],
+) -> bool | None:
+    found.update(_nonce_indexes(expr, name))
+    env = flow.incoming.get(node_id, {})
+    unknown = False
+    for ident in _idents(expr):
+        if ident in _NOISE or _is_type_name(ident) or ident in seen:
+            continue
+        defs = env.get(ident)
+        if not defs:
+            continue
+        for definition in defs:
+            if definition.expr == "<unknown>":
+                unknown = True
+                continue
+            nested = _collect_nonce_indexes(
+                definition.expr, flow, definition.node, name, found, seen | {ident}
+            )
+            if nested is None:
+                unknown = True
+    if unknown and not found and not _direct(expr, name):
+        return None
+    return True
+
+
+def _nonce_indexes_match(write_text: str, name: str, digest_indexes: set[str]) -> bool:
+    write_indexes = _nonce_indexes(write_text, name)
+    if not write_indexes and not digest_indexes:
+        return True
+    if not write_indexes or not digest_indexes:
+        return False
+    combined = write_indexes | digest_indexes
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", item) for item in combined):
+        return False
+    return not write_indexes.isdisjoint(digest_indexes)
 
 
 def _statement_consumes_nonce(text: str) -> bool:
@@ -564,22 +646,26 @@ def _nonce_indexes(text: str, name: str) -> set[str]:
     return {item.strip() for item in re.findall(rf"\b{name}\s*\[([^\]]+)\]", text)}
 
 
-def _nonce_index_compatible(flow: FunctionFlow, write_text: str, name: str) -> bool:
-    if flow.cfg is None:
-        return False
-    write_indexes = _nonce_indexes(write_text, name)
-    digest_indexes: set[str] = set()
-    for node in flow.cfg.nodes:
-        if "keccak256" in node.text or "sha256" in node.text or "ecrecover" in node.text:
-            digest_indexes |= _nonce_indexes(node.text, name)
-    if not write_indexes or not digest_indexes:
-        return True
-    if not write_indexes.isdisjoint(digest_indexes):
-        return True
-    combined = write_indexes | digest_indexes
-    if all(re.fullmatch(r"[A-Za-z_]\w*", item) for item in combined):
-        return False
-    return True
+def _is_real_freshness(text: str, names: set[str]) -> bool:
+    """A timestamp exists only when the check bounds its age or its round.
+
+    ``updatedAt != 0`` shows the feed returned a timestamp. It does not limit
+    how old that timestamp is.
+    """
+    compact = re.sub(r"\s+", "", text)
+    for name in names:
+        escaped = re.escape(name)
+        if re.search(rf"block\.timestamp-{escaped}", compact) and re.search(r"[<>]", compact):
+            return True
+        if re.search(rf"{escaped}(?:>|>=)block\.timestamp", compact):
+            return True
+        if re.search(r"answeredInRound", name) and re.search(
+            rf"\b{escaped}\b\s*(?:>=|==)\s*[A-Za-z_]\w*", text
+        ):
+            return True
+        if re.search(rf"\b{escaped}\b\s*(?:>=|==)\s*\w*roundId\b", text):
+            return True
+    return False
 
 
 _ORACLE_COMPONENT = re.compile(

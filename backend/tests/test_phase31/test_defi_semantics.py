@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.parsing.engine import parse_source, reset_syntax_registry
-from app.parsing.solidity_defi import analyze_defi
+from app.parsing.solidity_defi import analyze_defi, defi_context_active
 from app.parsing.solidity_flow import (
     oracle_freshness_protects,
     signature_nonce_order,
@@ -268,6 +268,15 @@ def test_oracle_freshness_stays_with_its_call() -> None:
     function price() external view returns (int) {
         (, int answer1,, uint updatedAt1,) = feed.latestRoundData();
         (, int answer2,, uint updatedAt2,) = other.latestRoundData();
+        require(block.timestamp - updatedAt1 < 1 hours);
+        require(block.timestamp - updatedAt2 < 1 hours);
+        return answer1 + answer2;
+    }
+    """
+    nonzero = """
+    function price() external view returns (int) {
+        (, int answer1,, uint updatedAt1,) = feed.latestRoundData();
+        (, int answer2,, uint updatedAt2,) = other.latestRoundData();
         require(updatedAt1 != 0);
         require(updatedAt2 != 0);
         return answer1 + answer2;
@@ -281,6 +290,7 @@ def test_oracle_freshness_stays_with_its_call() -> None:
     """
     assert oracle_freshness_protects(mixed) is False
     assert oracle_freshness_protects(paired) is True
+    assert oracle_freshness_protects(nonzero) is False
     assert oracle_freshness_protects(latest) is False
 
 
@@ -558,7 +568,8 @@ def test_oracle_accounting_follows_the_economic_path(tmp_path: Path) -> None:
     contract Lend {
         function health(address feed, uint collateral) external view returns (uint) {
             (, int answer,, uint updatedAt,) = feed.latestRoundData();
-            require(updatedAt != 0 && answer > 0);
+            require(block.timestamp - updatedAt < 1 hours);
+            require(answer > 0);
             return uint(answer) * collateral / 1e8;
         }
     }
@@ -795,3 +806,239 @@ def test_adversarial_names_do_not_create_defi_findings(tmp_path: Path) -> None:
         "sol.stale_oracle",
     ):
         assert rule_id not in rules
+
+
+def test_reentrancy_clear_must_cover_every_normal_exit() -> None:
+    assert (
+        reentrancy_guard_holds(
+            "{ require(!locked); locked = true; _; if (condition) { locked = false; } }"
+        )
+        is False
+    )
+    assert (
+        reentrancy_guard_holds(
+            "{ require(!locked); locked = true; _; if (condition) { locked = false; } else { revert(); } }"
+        )
+        is False
+    )
+    assert (
+        reentrancy_guard_holds(
+            "{ require(!locked || msg.sender == owner); locked = true; _; locked = false; }"
+        )
+        is False
+    )
+    assert reentrancy_guard_holds("{ require(!other); locked = true; _; locked = false; }") is False
+    assert (
+        reentrancy_guard_holds("{ require(!locked); locked = true; _; return; locked = false; }")
+        is False
+    )
+    assert reentrancy_guard_holds(
+        "{ require(!locked); locked = true; _; if (ok) { locked = false; } else { locked = false; } }"
+    )
+
+
+def test_initializer_rejects_replayable_version_checks() -> None:
+    assert initializer_is_protected("{ require(version < 999); version = 1; _; }") is False
+    assert (
+        initializer_is_protected(
+            "{ require(!initialized || msg.sender == owner); initialized = true; _; }"
+        )
+        is False
+    )
+    assert initializer_is_protected("{ require(version > 0); version = 1; _; }") is False
+    assert initializer_is_protected("{ require(version == 0); version = 1; _; }") is True
+
+
+def test_nonce_consumption_is_branch_and_index_specific() -> None:
+    swapped = """
+    function recover(bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
+        nonces[owner] += 1;
+        h = keccak256(abi.encode(nonces[attacker]));
+        return ecrecover(h, v, r, s);
+    }
+    """
+    one_branch = """
+    function recover(bool flag, bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
+        if (flag) { nonce += 1; }
+        h = keccak256(abi.encode(nonce));
+        return ecrecover(h, v, r, s);
+    }
+    """
+    missed_path = """
+    function recover(bool flag, bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
+        if (flag) { nonce += 1; return address(0); }
+        h = keccak256(abi.encode(nonce));
+        return ecrecover(h, v, r, s);
+    }
+    """
+    split = """
+    function recover(bool flag, bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
+        if (flag) {
+            h = keccak256(abi.encode(nonce));
+            return ecrecover(h, v, r, s);
+        }
+        nonce += 1;
+        h = keccak256(abi.encode(nonce));
+        return ecrecover(h, v, r, s);
+    }
+    """
+    other_counter = """
+    function recover(bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
+        fees += 1;
+        h = keccak256(abi.encode(nonce));
+        return ecrecover(h, v, r, s);
+    }
+    """
+    assert signature_replay_gap(swapped) is not None
+    assert signature_replay_gap(one_branch) is not None
+    assert signature_replay_gap(missed_path) is not None
+    assert signature_replay_gap(split) is not None
+    assert signature_replay_gap(other_counter) is not None
+
+
+def test_direction_fee_vault_and_oracle_regressions(tmp_path: Path) -> None:
+    outbound = """
+    pragma solidity ^0.8.20;
+    interface IERC20 { function transfer(address to, uint256 amount) external returns (bool); }
+    contract Lend {
+        mapping(address => uint) debt;
+        function repay(IERC20 token, uint amount, address attacker) external {
+            debt[msg.sender] -= amount;
+            token.transfer(attacker, amount);
+        }
+    }
+    """
+    inbound = """
+    pragma solidity ^0.8.20;
+    interface IERC20 {
+        function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    }
+    contract Lend {
+        mapping(address => uint) debt;
+        function repay(IERC20 token, uint amount) external {
+            token.transferFrom(msg.sender, address(this), amount);
+            debt[msg.sender] -= amount;
+        }
+    }
+    """
+    unrelated_math = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        function deposit(uint assets) external pure returns (uint) {
+            uint fee = assets / 100;
+            return assets - fee;
+        }
+    }
+    """
+    twins = """
+    pragma solidity ^0.8.20;
+    contract VaultA {
+        uint totalSupply;
+        uint totalAssets;
+        function previewDeposit(uint assets) external view returns (uint) {
+            return assets * totalSupply / totalAssets;
+        }
+        function deposit(uint assets, uint minShares) external view returns (uint) {
+            uint minted = assets * totalSupply / totalAssets;
+            require(minted >= minShares);
+            return minted;
+        }
+    }
+    contract VaultB {
+        uint totalSupply;
+        uint totalAssets;
+        function previewDeposit(uint assets) external view returns (uint) {
+            return assets * totalAssets / totalSupply;
+        }
+        function deposit(uint assets) external view returns (uint) {
+            return assets * totalSupply / totalAssets;
+        }
+    }
+    """
+    negative = """
+    pragma solidity ^0.8.20;
+    contract Lend {
+        function health(address feed, uint collateral) external view returns (uint) {
+            (, int answer,, uint updatedAt,) = feed.latestRoundData();
+            require(answer != 0);
+            require(block.timestamp - updatedAt < 1 hours);
+            return uint(answer) * collateral / 1e8;
+        }
+    }
+    """
+    weak_fresh = """
+    pragma solidity ^0.8.20;
+    contract Lend {
+        function health(address feed, uint collateral) external view returns (uint) {
+            (, int answer,, uint updatedAt,) = feed.latestRoundData();
+            require(updatedAt != 0 && answer > 0);
+            return uint(answer) * collateral / 1e8;
+        }
+    }
+    """
+    local_token = """
+    pragma solidity ^0.8.20;
+    interface IERC20 {
+        function transferFrom(address from, address to, uint256 amount) external returns (bool);
+        function balanceOf(address) external view returns (uint256);
+    }
+    contract Vault {
+        mapping(address => uint) shares;
+        function deposit(address rawToken, uint amount) external {
+            IERC20 token = IERC20(rawToken);
+            token.transferFrom(msg.sender, address(this), amount);
+            shares[msg.sender] += amount;
+        }
+    }
+    """
+    deadline = """
+    pragma solidity ^0.8.20;
+    contract Pool {
+        function swap(uint amount, uint deadline) external pure returns (uint) {
+            require(deadline > 0);
+            return amount;
+        }
+    }
+    """
+    assert "sol.lending" in _ids(tmp_path, outbound)
+    assert "sol.lending" not in _ids(tmp_path, inbound)
+    assert "sol.erc4626" not in _ids(tmp_path, unrelated_math)
+    graph = parse_source("solidity", tmp_path / "Twins.sol", twins)
+    model = analyze_defi(graph)
+    vault_issues = [item for item in model.issues if item.rule_id == "sol.erc4626"]
+    assert vault_issues
+    assert all(item.contract == "VaultB" for item in vault_issues)
+    assert "sol.oracle_accounting" in _ids(tmp_path, negative)
+    assert "sol.oracle_accounting" in _ids(tmp_path, weak_fresh)
+    local = analyze_defi(parse_source("solidity", tmp_path / "Local.sol", local_token))
+    typed = next(item for item in local.interactions if item.function == "deposit")
+    assert typed.classification == "erc20"
+    assert typed.confidence == "strong"
+    assert typed.direction == "in"
+    assert "sol.slippage" not in _ids(tmp_path, deadline)
+    assert defi_context_active() is False
+
+
+def test_scans_do_not_share_defi_cache(tmp_path: Path) -> None:
+    first = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint totalSupply;
+        uint totalAssets;
+        function deposit(uint assets) external view returns (uint) {
+            return assets * totalSupply / totalAssets;
+        }
+    }
+    """
+    second = """
+    pragma solidity ^0.8.20;
+    contract Quiet {
+        function ping() external pure returns (uint) { return 1; }
+    }
+    """
+    assert "sol.erc4626" in _ids(tmp_path, first)
+    assert defi_context_active() is False
+    other = tmp_path / "other"
+    other.mkdir()
+    assert "sol.erc4626" not in _ids(other, second)
+    assert defi_context_active() is False

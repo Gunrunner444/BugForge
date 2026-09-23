@@ -1107,20 +1107,29 @@ def _defi_observations(
     title: str,
 ) -> list[SecurityObservation]:
     model = analyze_defi(graph)
-    functions = {_function_name(event): event for event in _functions(graph)}
+    indexed: dict[tuple[str, str], SyntaxEvent] = {}
+    by_name: dict[str, list[SyntaxEvent]] = {}
+    for event in _functions(graph):
+        contract = _fields(event.extra).get("contract", "")
+        fname = _function_name(event)
+        indexed[(contract, fname)] = event
+        by_name.setdefault(fname, []).append(event)
     found: list[SecurityObservation] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for issue in model.issues:
         if issue.rule_id != rule_id:
             continue
-        key = (issue.function, issue.summary)
+        key = (issue.contract, issue.function, issue.summary)
         if key in seen:
             continue
         seen.add(key)
-        event = functions.get(issue.function)
-        if event is None:
+        matched = indexed.get((issue.contract, issue.function))
+        if matched is None and not issue.contract:
+            matches = by_name.get(issue.function, [])
+            matched = matches[0] if len(matches) == 1 else None
+        if matched is None:
             continue
-        found.append(_issue_observation(rule, graph, event, title, issue))
+        found.append(_issue_observation(rule, graph, matched, title, issue))
     return found
 
 

@@ -19,6 +19,7 @@ from app.core.paths import to_relative_path
 from app.domain.findings import SecurityFinding
 from app.domain.language import LanguageCapability
 from app.parsing.model import SyntaxGraph
+from app.parsing.solidity_defi import reset_defi_context, set_defi_context
 from app.parsing.solidity_modifiers import (
     ModifierIndex,
     reset_modifier_index,
@@ -119,6 +120,7 @@ class SecurityAnalysisEngine:
         analyzed: int,
     ) -> SecurityScanResult:
         token = set_modifier_index(ModifierIndex.from_graphs(graphs))
+        defi_tokens = set_defi_context(graphs)
         try:
             return self._rules_over_indexed_graphs(
                 repo_path,
@@ -129,6 +131,7 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_defi_context(defi_tokens)
             reset_modifier_index(token)
 
     def _rules_over_indexed_graphs(

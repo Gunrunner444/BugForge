@@ -8,6 +8,7 @@ here marks a finding verified.
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 
 from app.parsing.model import SyntaxEvent, SyntaxGraph
@@ -56,10 +57,16 @@ _BOUND_NAMES = {
     "maxshares",
     "minassets",
     "maxassets",
-    "deadline",
     "minout",
     "amountinmax",
 }
+_DEADLINE_NAMES = {"deadline", "expiry", "expires", "expiresat"}
+_DEFI_CACHE: ContextVar[dict[int, DefiModel] | None] = ContextVar(
+    "bugforge_defi_cache", default=None
+)
+_PROJECT_KINDS: ContextVar[dict[str, tuple[str, str]] | None] = ContextVar(
+    "bugforge_solidity_token_kinds", default=None
+)
 _ACCOUNTING = re.compile(
     r"balance|share|deposit|supply|debt|owed|reserve|collateral|stake|liquidity",
     re.I,
@@ -77,6 +84,7 @@ class TokenInteraction:
     amount: str
     function: str
     text: str
+    direction: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,8 @@ class EconomicTransition:
     user: tuple[str, ...]
     protocol: tuple[str, ...]
     flows: tuple[str, ...]
+    inflows: tuple[str, ...] = ()
+    outflows: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,6 +104,7 @@ class DefiIssue:
     rule_id: str
     function: str
     summary: str
+    contract: str = ""
 
 
 @dataclass
@@ -102,25 +113,75 @@ class DefiModel:
     transitions: list[EconomicTransition] = field(default_factory=list)
     issues: list[DefiIssue] = field(default_factory=list)
     kinds: dict[str, str] = field(default_factory=dict)
+    kind_confidence: dict[str, str] = field(default_factory=dict)
 
 
 def analyze_defi(graph: SyntaxGraph) -> DefiModel:
+    """Return the DeFi model for ``graph``, reusing the per-scan cache when set."""
+    cache = _DEFI_CACHE.get()
+    if cache is not None and id(graph) in cache:
+        return cache[id(graph)]
+    model = _analyze_defi(graph)
+    if cache is not None:
+        cache[id(graph)] = model
+    return model
+
+
+def set_defi_context(
+    graphs: dict[str, SyntaxGraph],
+) -> tuple[Token[dict[str, tuple[str, str]] | None], Token[dict[int, DefiModel] | None]]:
+    """Install project token kinds and a fresh DeFi cache for one scan."""
+    merged: dict[str, tuple[str, str]] = {}
+    conflict: set[str] = set()
+    for graph in graphs.values():
+        if graph.language != "solidity":
+            continue
+        kinds, confidence = _contract_profiles(graph)
+        for name, kind in kinds.items():
+            pair = (kind, confidence.get(name, "structural"))
+            previous = merged.get(name)
+            if previous is not None and previous != pair:
+                conflict.add(name)
+            else:
+                merged[name] = pair
+    for name in conflict:
+        merged.pop(name, None)
+    kind_token = _PROJECT_KINDS.set(merged)
+    cache_token = _DEFI_CACHE.set({})
+    return kind_token, cache_token
+
+
+def reset_defi_context(
+    tokens: tuple[Token[dict[str, tuple[str, str]] | None], Token[dict[int, DefiModel] | None]],
+) -> None:
+    kind_token, cache_token = tokens
+    _DEFI_CACHE.reset(cache_token)
+    _PROJECT_KINDS.reset(kind_token)
+
+
+def defi_context_active() -> bool:
+    return _DEFI_CACHE.get() is not None or _PROJECT_KINDS.get() is not None
+
+
+def _analyze_defi(graph: SyntaxGraph) -> DefiModel:
     model = DefiModel()
     if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
         return model
-    model.kinds = _contract_kinds(graph)
+    kinds, confidence = _contract_profiles(graph)
+    model.kinds = kinds
+    model.kind_confidence = confidence
     known = _contract_names(graph)
     for function in _functions(graph):
         name = _function_name(function)
         contract = _fields(function.extra).get("contract", "")
         stripped = _strip(function.text)
         types = _variable_types(graph, function, contract)
-        calls = _token_calls(stripped, name, types, model.kinds, known)
+        calls = _token_calls(stripped, name, types, kinds, confidence, known)
         model.interactions.extend(calls)
         transition = _transition(name, contract, stripped, calls)
         if transition is not None:
             model.transitions.append(transition)
-        model.issues.extend(_function_issues(graph, function, name, stripped, calls))
+        model.issues.extend(_function_issues(graph, function, contract, name, stripped, calls))
     model.issues.extend(_vault_issues(graph))
     return model
 
@@ -128,38 +189,26 @@ def analyze_defi(graph: SyntaxGraph) -> DefiModel:
 def _function_issues(
     graph: SyntaxGraph,
     function: SyntaxEvent,
+    contract: str,
     name: str,
     text: str,
     calls: list[TokenInteraction],
 ) -> list[DefiIssue]:
     found: list[DefiIssue] = []
-    fee = _fee_issue(text, calls)
-    if fee:
-        found.append(DefiIssue("sol.fee_on_transfer", name, fee))
-    donation = _donation_issue(text)
-    if donation:
-        found.append(DefiIssue("sol.donation_inflation", name, donation))
-    rounding = _rounding_issue(name, text)
-    if rounding:
-        found.append(DefiIssue("sol.rounding_direction", name, rounding))
-    slippage = _slippage_issue(name, text)
-    if slippage:
-        found.append(DefiIssue("sol.slippage", name, slippage))
-    oracle = _oracle_issue(text)
-    if oracle:
-        found.append(DefiIssue("sol.oracle_accounting", name, oracle))
-    lending = _lending_issue(name, text)
-    if lending:
-        found.append(DefiIssue("sol.lending", name, lending))
-    amm = _amm_issue(name, text)
-    if amm:
-        found.append(DefiIssue("sol.amm", name, amm))
-    approval = _approval_issue(name, function.text)
-    if approval:
-        found.append(DefiIssue("sol.approval", name, approval))
-    callback = _callback_issue(graph, function, name)
-    if callback:
-        found.append(DefiIssue("sol.defi_reentrancy", name, callback))
+
+    def add(rule_id: str, summary: str) -> None:
+        if summary:
+            found.append(DefiIssue(rule_id, name, summary, contract))
+
+    add("sol.fee_on_transfer", _fee_issue(text, calls))
+    add("sol.donation_inflation", _donation_issue(text))
+    add("sol.rounding_direction", _rounding_issue(name, text))
+    add("sol.slippage", _slippage_issue(name, text))
+    add("sol.oracle_accounting", _oracle_issue(text))
+    add("sol.lending", _lending_issue(name, text, calls))
+    add("sol.amm", _amm_issue(name, text))
+    add("sol.approval", _approval_issue(name, function.text))
+    add("sol.defi_reentrancy", _callback_issue(graph, function, name))
     return found
 
 
@@ -173,16 +222,18 @@ def _fee_issue(text: str, calls: list[TokenInteraction]) -> str:
         return ""
     amount = next((call.amount for call in moves if call.amount), "")
     token = moves[0].token
-    if _credits_requested(text, amount) and not _credits_delta(text):
+    delta = _balance_delta(text, token, moves)
+    if _credits_requested(text, amount) and not _credits_balance_delta(text, delta):
         return (
             f"The function credits `{amount or 'the requested amount'}` from "
             f"`{token}.{moves[0].method}`, but the underlying token balance delta can be smaller "
             "when the token takes a fee or returns a short transfer."
         )
-    if _balance_reads(text, token) >= 1 and not _measures_delta(text, token):
+    if _balance_reads(text, token) >= 1 and delta is None:
         return (
             f"`{token}.{moves[0].method}` moves `{amount or 'an amount'}`, but the function never "
-            "records the balance delta, so later accounting can treat the requested amount as received."
+            "records the balance delta of that token and account around the transfer, so later "
+            "accounting can treat the requested amount as received."
         )
     return ""
 
@@ -239,9 +290,12 @@ def _slippage_issue(name: str, text: str) -> str:
     bounds = [
         param
         for param in params
-        if param.lower() in _BOUND_NAMES
-        or param.lower().startswith("min")
-        or param.lower().startswith("max")
+        if param.lower() not in _DEADLINE_NAMES
+        and (
+            param.lower() in _BOUND_NAMES
+            or param.lower().startswith("min")
+            or param.lower().startswith("max")
+        )
     ]
     if not bounds:
         return ""
@@ -274,8 +328,8 @@ def _oracle_issue(text: str) -> str:
         return ""
     fresh = oracle_freshness_protects(text)
     positive = any(
-        re.search(rf"\b{re.escape(name)}\b[^;\n]*(?:>|!=)\s*0", text) for name in answers
-    ) or bool(re.search(r"\bprice\b[^;\n]*(?:>|!=)\s*0", text))
+        re.search(rf"\b{re.escape(name)}\b[^;\n]*>\s*0", text) for name in answers
+    ) or bool(re.search(r"\bprice\b[^;\n]*>\s*0", text))
     scales = set(re.findall(r"1e\d+|10\s*\*\*\s*\d+", re.sub(r"\s+", "", text)))
     if fresh is not True:
         return (
@@ -297,10 +351,10 @@ def _oracle_issue(text: str) -> str:
     return ""
 
 
-def _lending_issue(name: str, text: str) -> str:
+def _lending_issue(name: str, text: str, calls: list[TokenInteraction]) -> str:
     if not re.search(r"\b(collateral|debt|health|healthFactor|ltv|liquidat)\b", text, re.I):
         return ""
-    if _debt_reduced(text) and not _asset_in(text):
+    if _debt_reduced(text) and not _asset_in(calls):
         return (
             "Debt is reduced without a corresponding token or value transfer, so the liability "
             "can disappear without assets arriving."
@@ -444,11 +498,13 @@ def _callback_issue(graph: SyntaxGraph, function: SyntaxEvent, name: str) -> str
 
 
 def _vault_issues(graph: SyntaxGraph) -> list[DefiIssue]:
-    bodies = {
-        _function_name(event): _strip(event.text)
-        for event in _functions(graph)
-        if _function_name(event)
-    }
+    by_contract: dict[str, dict[str, str]] = {}
+    for event in _functions(graph):
+        name = _function_name(event)
+        if not name:
+            continue
+        contract = _fields(event.extra).get("contract", "")
+        by_contract.setdefault(contract, {})[name] = _strip(event.text)
     found: list[DefiIssue] = []
     pairs = (
         ("previewDeposit", "deposit"),
@@ -456,43 +512,48 @@ def _vault_issues(graph: SyntaxGraph) -> list[DefiIssue]:
         ("previewWithdraw", "withdraw"),
         ("previewRedeem", "redeem"),
     )
-    for preview, live in pairs:
-        if preview not in bodies or live not in bodies:
-            continue
-        preview_formula = _primary_formula(bodies[preview])
-        live_formula = _primary_formula(bodies[live])
-        if preview_formula and live_formula and preview_formula != live_formula:
+    for contract, bodies in by_contract.items():
+        for preview, live in pairs:
+            if preview not in bodies or live not in bodies:
+                continue
+            preview_formula = _conversion_formula(bodies[preview])
+            live_formula = _conversion_formula(bodies[live])
+            if preview_formula and live_formula and preview_formula != live_formula:
+                found.append(
+                    DefiIssue(
+                        "sol.erc4626",
+                        live,
+                        f"`{contract}.{preview}` and `{contract}.{live}` do not use the same "
+                        "asset/share conversion, so a caller can receive a different amount than "
+                        "the preview promised.",
+                        contract,
+                    )
+                )
+        for action, noun in (
+            ("deposit", "shares"),
+            ("mint", "shares"),
+            ("withdraw", "assets"),
+            ("redeem", "assets"),
+        ):
+            body = bodies.get(action, "")
+            if not body or not _conversion_formula(body):
+                continue
+            if _output_protected(body, noun):
+                continue
             found.append(
                 DefiIssue(
                     "sol.erc4626",
-                    live,
-                    f"`{preview}` and `{live}` do not use the same conversion, so a caller can "
-                    "receive a different amount of assets or shares than the preview promised.",
+                    action,
+                    f"`{contract}.{action}` divides assets and shares without requiring a "
+                    f"non-zero {noun} result or a caller-supplied minimum, so rounding can "
+                    f"produce a zero {noun} transfer.",
+                    contract,
                 )
             )
-    for action, noun in (
-        ("deposit", "shares"),
-        ("mint", "shares"),
-        ("withdraw", "assets"),
-        ("redeem", "assets"),
-    ):
-        body = bodies.get(action, "")
-        if not body or "/" not in body:
-            continue
-        if _output_protected(body, noun):
-            continue
-        found.append(
-            DefiIssue(
-                "sol.erc4626",
-                action,
-                f"`{action}` divides assets and shares without requiring a non-zero {noun} result "
-                f"or a caller-supplied minimum, so rounding can produce a zero {noun} transfer.",
-            )
-        )
     return found
 
 
-def _contract_kinds(graph: SyntaxGraph) -> dict[str, str]:
+def _contract_profiles(graph: SyntaxGraph) -> tuple[dict[str, str], dict[str, str]]:
     methods: dict[str, set[str]] = {}
     bases: dict[str, list[str]] = {}
     for event in graph.events:
@@ -508,15 +569,21 @@ def _contract_kinds(graph: SyntaxGraph) -> dict[str, str]:
             contract = fields.get("contract", "")
             methods.setdefault(contract, set()).add(fields.get("function", "").lower())
     kinds: dict[str, str] = {}
+    confidence: dict[str, str] = {}
     for name in set(bases) | set(methods):
         lowered = name.lower()
         if lowered in _TOKEN_NAMES:
             kinds[name] = _TOKEN_NAMES[lowered]
+            confidence[name] = "strong"
         owned = {item.lower() for item in methods.get(name, set())}
-        if {"transfer", "balanceof"} <= owned and owned & _ERC20_METHODS:
+        if {"transfer", "balanceof"} <= owned and owned & (
+            _ERC20_METHODS - {"transfer", "balanceof"}
+        ):
             kinds.setdefault(name, "erc20")
+            confidence.setdefault(name, "structural")
         if {"safetransferfrom", "balanceof"} <= owned and "ownerof" in owned:
             kinds.setdefault(name, "erc721")
+            confidence.setdefault(name, "structural")
     changed = True
     while changed:
         changed = False
@@ -524,10 +591,15 @@ def _contract_kinds(graph: SyntaxGraph) -> dict[str, str]:
             for parent in parents:
                 parent_name = re.sub(r"\(.*", "", parent).strip()
                 kind = kinds.get(parent_name) or _TOKEN_NAMES.get(parent_name.lower(), "")
-                if kind and kinds.get(name) != kind:
-                    kinds[name] = kind
-                    changed = True
-    return kinds
+                if not kind or kinds.get(name) == kind:
+                    continue
+                kinds[name] = kind
+                parent_confidence = confidence.get(parent_name, "strong")
+                if parent_name.lower() in _TOKEN_NAMES:
+                    parent_confidence = "strong"
+                confidence[name] = parent_confidence
+                changed = True
+    return kinds, confidence
 
 
 def _contract_names(graph: SyntaxGraph) -> set[str]:
@@ -539,6 +611,7 @@ def _token_calls(
     function: str,
     types: dict[str, str],
     kinds: dict[str, str],
+    confidence_map: dict[str, str],
     known: set[str],
 ) -> list[TokenInteraction]:
     found: list[TokenInteraction] = []
@@ -552,7 +625,7 @@ def _token_calls(
             continue
         args = _split_args(text[open_at + 1 : close_at - 1])
         classification, confidence = _classify_call(
-            token, method, len(args), types, kinds, known, text
+            token, method, len(args), types, kinds, confidence_map, known, text
         )
         sender, receiver, amount = _call_roles(method, args)
         found.append(
@@ -566,6 +639,7 @@ def _token_calls(
                 amount,
                 function,
                 text[match.start() : close_at],
+                _call_direction(method, sender, receiver),
             )
         )
     return found
@@ -577,15 +651,21 @@ def _classify_call(
     arg_count: int,
     types: dict[str, str],
     kinds: dict[str, str],
+    confidence_map: dict[str, str],
     known: set[str],
     text: str,
 ) -> tuple[str, str]:
     if method == "transfer" and arg_count <= 1:
         return "native", "unknown"
     declared = _type_name(types.get(token, ""))
-    named = kinds.get(declared) or _TOKEN_NAMES.get(declared.lower(), "")
-    if named:
-        return named, "strong"
+    if declared.lower() in _TOKEN_NAMES:
+        return _TOKEN_NAMES[declared.lower()], "strong"
+    if declared in kinds:
+        return kinds[declared], confidence_map.get(declared, "structural")
+    project = _PROJECT_KINDS.get() or {}
+    if declared in project:
+        kind, confidence = project[declared]
+        return kind, confidence
     if declared and declared in known and declared not in kinds:
         return "unknown_external", "unknown"
     if declared.lower() in {"address", ""} and _used_as_token(token, text):
@@ -601,6 +681,30 @@ def _classify_call(
     if method in {"transfer", "transferFrom", "safeTransfer", "safeTransferFrom"}:
         return "unknown_external", "unknown"
     return "unknown_external", "unknown"
+
+
+def _call_direction(method: str, sender: str, receiver: str) -> str:
+    """Direction relative to the executing contract. Unknown stays unknown."""
+    send = re.sub(r"\s+", "", sender)
+    recv = re.sub(r"\s+", "", receiver)
+    here = {"address(this)", "this"}
+    if method in {"transferFrom", "safeTransferFrom"}:
+        to_here = recv in here
+        from_here = send in here
+        if to_here and from_here:
+            return "internal"
+        if to_here:
+            return "in"
+        if from_here:
+            return "out"
+        return "unknown"
+    if method in {"transfer", "safeTransfer"}:
+        if recv in here:
+            return "internal"
+        if recv:
+            return "out"
+        return "unknown"
+    return "unknown"
 
 
 def _used_as_token(token: str, text: str) -> bool:
@@ -656,13 +760,25 @@ def _transition(
     if re.search(r"\breserve", text):
         protocol.append("reserves:referenced")
     flows = tuple(
-        f"{call.classification}:{call.method}:{call.token}"
+        f"{call.classification}:{call.method}:{call.token}:{call.direction}"
         for call in calls
         if call.method in {"transfer", "transferFrom", "approve", "permit"}
     )
+    inflows = tuple(
+        f"{call.token}:{call.amount or 'amount'}" for call in calls if call.direction == "in"
+    )
+    outflows = tuple(
+        f"{call.token}:{call.amount or 'amount'}" for call in calls if call.direction == "out"
+    )
+    if inflows:
+        protocol.append("inflow")
+    if outflows:
+        protocol.append("outflow")
     if action == "other" and not user and not protocol and not flows:
         return None
-    return EconomicTransition(action, contract, name, tuple(user), tuple(protocol), flows)
+    return EconomicTransition(
+        action, contract, name, tuple(user), tuple(protocol), flows, inflows, outflows
+    )
 
 
 def _action(name: str) -> str:
@@ -724,14 +840,55 @@ def _credits_requested(text: str, amount: str) -> bool:
     )
 
 
-def _credits_delta(text: str) -> bool:
+def _credits_balance_delta(text: str, delta: tuple[str, str] | None) -> bool:
+    if delta is None:
+        return False
+    before, after = delta
+    accounting = (
+        r"(?:shares|share|balances|balance|deposits|deposit|collateral|staked|stake|"
+        r"liquidity|received|credited|accounted|minted)"
+    )
     return bool(
         re.search(
-            r"\b(?:received|credited|shares|share|balances|deposits|collateral)\w*\b"
-            r"(?:\s*\[[^\]]+\])?\s*(?:\+=|=(?!=))\s*[^;]*\b\w+\s*-\s*\w+",
+            rf"\b{accounting}\w*\b(?:\s*\[[^\]]+\])?\s*(?:\+=|=(?!=))\s*[^;]*"
+            rf"\b{re.escape(after)}\b\s*-\s*\b{re.escape(before)}\b",
             text,
         )
     )
+
+
+def _balance_delta(text: str, token: str, moves: list[TokenInteraction]) -> tuple[str, str] | None:
+    """A before/after balance of the same token and account around one transfer."""
+    reads = [
+        (match.start(), match.group(1), match.group(2), re.sub(r"\s+", "", match.group(3)))
+        for match in re.finditer(
+            r"\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\.\s*balanceOf\s*\(([^)]*)\)",
+            text,
+        )
+    ]
+    for call in moves:
+        if token and call.token != token:
+            continue
+        pos = text.find(call.text)
+        if pos < 0:
+            continue
+        befores = [item for item in reads if item[0] < pos and item[2] == call.token]
+        afters = [item for item in reads if item[0] > pos and item[2] == call.token]
+        for before in befores:
+            for after in afters:
+                if before[3] != after[3]:
+                    continue
+                before_name, after_name = before[1], after[1]
+                compared = re.search(
+                    rf"\b{re.escape(after_name)}\b\s*-\s*\b{re.escape(before_name)}\b|"
+                    rf"\b{re.escape(before_name)}\b\s*-\s*\b{re.escape(after_name)}\b|"
+                    rf"\b{re.escape(after_name)}\b\s*(?:>=|<=)\s*\b{re.escape(before_name)}\b|"
+                    rf"\b{re.escape(before_name)}\b\s*(?:>=|<=)\s*\b{re.escape(after_name)}\b",
+                    text,
+                )
+                if compared:
+                    return before_name, after_name
+    return None
 
 
 def _balance_reads(text: str, token: str) -> int:
@@ -740,10 +897,29 @@ def _balance_reads(text: str, token: str) -> int:
     return text.count("balanceOf")
 
 
-def _measures_delta(text: str, token: str) -> bool:
-    if _balance_reads(text, token) < 2 and text.count("balanceOf") < 2:
-        return False
-    return bool(re.search(r"-\s*[A-Za-z_]|>=|<=", text))
+def _conversion_formula(text: str) -> str:
+    """An asset/share division, not an unrelated quotient inside the function."""
+    formula = _primary_formula(text)
+    if not formula or "/" not in formula:
+        return ""
+    left, right = formula.split("/", 1)
+    asset = re.compile(r"assets?|amounts?|totalAssets", re.I)
+    share = re.compile(r"shares?|totalSupply|totalShares|\bsupply\b", re.I)
+    left_asset, right_asset = bool(asset.search(left)), bool(asset.search(right))
+    left_share, right_share = bool(share.search(left)), bool(share.search(right))
+    if (left_asset and right_share) or (left_share and right_asset):
+        return formula
+    if (
+        (left_asset or left_share)
+        and (right_asset or right_share)
+        and (
+            (left_asset and left_share)
+            or (right_asset and right_share)
+            or (left_asset and right_share)
+        )
+    ):
+        return formula
+    return ""
 
 
 def _debt_reduced(text: str) -> bool:
@@ -757,12 +933,10 @@ def _debt_reduced(text: str) -> bool:
     )
 
 
-def _asset_in(text: str) -> bool:
-    return bool(
-        re.search(r"\.transferFrom\s*\(", text)
-        or re.search(r"\.transfer\s*\([^;\n]*,", text)
-        or re.search(r"\.call\s*\{", text)
-        or re.search(r"\.safeTransferFrom\s*\(", text)
+def _asset_in(calls: list[TokenInteraction]) -> bool:
+    return any(
+        call.direction == "in" and call.classification in {"erc20", "erc721", "erc1155"}
+        for call in calls
     )
 
 
@@ -796,7 +970,7 @@ def _bound_is_only_nonzero(body: str, param: str) -> bool:
     others = []
     for left, right in comparisons:
         side = (left or right).strip()
-        if side and side not in {"0", "0x0"}:
+        if side and not re.fullmatch(r"0x0+|0+|\d+", side):
             others.append(side)
     return not others
 
@@ -918,7 +1092,54 @@ def _variable_types(graph: SyntaxGraph, function: SyntaxEvent, contract: str) ->
         name = fields.get("name", "")
         if name:
             types.setdefault(name, fields.get("type", ""))
+    for name, type_name in _local_declarations(function.text).items():
+        types.setdefault(name, type_name)
     return types
+
+
+def _local_declarations(function_text: str) -> dict[str, str]:
+    found: dict[str, str] = {}
+    body = _body(function_text)
+    pattern = re.compile(
+        r"\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:=|;)",
+    )
+    skip = {
+        "if",
+        "for",
+        "while",
+        "return",
+        "require",
+        "memory",
+        "calldata",
+        "storage",
+        "external",
+        "public",
+        "internal",
+        "private",
+        "pure",
+        "view",
+        "payable",
+        "mapping",
+    }
+    for match in pattern.finditer(body):
+        type_name, name = match.group(1), match.group(2)
+        if type_name in skip or name in skip:
+            continue
+        if (
+            type_name.lower() in {"uint", "int"}
+            or type_name[:1].isupper()
+            or type_name
+            in {
+                "address",
+                "bool",
+                "string",
+                "bytes",
+            }
+        ):
+            found.setdefault(name, type_name)
+        elif re.fullmatch(r"u?int\d+|bytes\d+", type_name):
+            found.setdefault(name, type_name)
+    return found
 
 
 def _parameter_types(function_text: str) -> dict[str, str]:

@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import re
 
-from app.parsing.solidity_cfg import FunctionCfg, _skip_string_or_comment, build_function_cfg
+from app.parsing.solidity_cfg import (
+    FunctionCfg,
+    _consume_parens,
+    _skip_string_or_comment,
+    build_function_cfg,
+)
 
 _INIT_FLAG = r"(?:_?initialized|version)"
 _LOCK_NAME = (
@@ -69,16 +74,28 @@ def _direct_initializer(body: str) -> bool:
     if not cfg.known:
         return False
     placeholders = [node.node_id for node in cfg.nodes if "INIT_PLACEHOLDER" in node.text]
-    checks = [node.node_id for node in cfg.nodes if _is_prior_init_check(node.text)]
-    writes = [node.node_id for node in cfg.nodes if _is_init_write(node.text)]
+    checks = [
+        (node.node_id, variable, kind, bound)
+        for node in cfg.nodes
+        for variable, kind, bound in _init_checks(node.text)
+    ]
+    writes = [
+        (node.node_id, variable, rhs)
+        for node in cfg.nodes
+        for variable, rhs in _init_assignments(node.text)
+    ]
     if not placeholders or not checks or not writes:
         return False
     for placeholder in placeholders:
-        guarding = [check for check in checks if cfg.dominates(check, placeholder)]
-        writing = [write for write in writes if cfg.dominates(write, placeholder)]
-        if not guarding or not writing:
-            return False
-        if not any(cfg.dominates(check, write) for check in guarding for write in writing):
+        if not any(
+            cfg.dominates(check_id, placeholder)
+            and cfg.dominates(write_id, placeholder)
+            and cfg.dominates(check_id, write_id)
+            and variable == written
+            and _init_write_matches(kind, bound, rhs)
+            for check_id, variable, kind, bound in checks
+            for write_id, written, rhs in writes
+        ):
             return False
     return True
 
@@ -118,26 +135,74 @@ def _strip(text: str) -> str:
     return "".join(chars)
 
 
-def _is_prior_init_check(text: str) -> bool:
-    compact = re.sub(r"\s+", " ", _strip(text))
-    if re.search(rf"require\s*\(\s*!\s*{_INIT_FLAG}\b", compact):
-        return True
-    if re.search(rf"require\s*\([^;]*\b{_INIT_FLAG}\b", compact) and re.search(
-        r"==\s*false|==\s*0\b|<\s*", compact
-    ):
-        return True
-    if re.search(rf"if\s*\(\s*{_INIT_FLAG}\s*\)", compact) and re.search(r"\brevert\b", compact):
-        return True
-    return bool(
-        re.search(rf"if\s*\([^)]*\b{_INIT_FLAG}\b[^)]*(>=|>|!=\s*0)", compact)
-        and re.search(r"\brevert\b|\brequire\b", compact)
-    )
+def _init_checks(text: str) -> list[tuple[str, str, str]]:
+    """Prior-state checks that can actually stop a repeat.
 
-
-def _is_init_write(text: str) -> bool:
+    A comparison that merely mentions ``version`` or ``<`` is not enough.
+    ``||`` bypasses the check, so the whole condition is rejected.
+    """
     if "INIT_PLACEHOLDER" in text or "BODY_PLACEHOLDER" in text:
+        return []
+    compact = re.sub(r"\s+", " ", _strip(text))
+    condition = _paren_condition(compact)
+    if condition is None or "||" in condition:
+        return []
+    found: list[tuple[str, str, str]] = []
+    for match in re.finditer(rf"!\s*({_INIT_FLAG})\b", condition):
+        found.append((match.group(1), "zero", ""))
+    for match in re.finditer(rf"\b({_INIT_FLAG})\b\s*==\s*(?:false|0)\b", condition):
+        found.append((match.group(1), "zero", ""))
+    if re.search(r"\brevert\b", compact):
+        bare = re.fullmatch(rf"\s*({_INIT_FLAG})\s*", condition)
+        if bare:
+            found.append((bare.group(1), "zero", ""))
+        for match in re.finditer(
+            rf"\b({_INIT_FLAG})\b\s*(?:!=\s*(?:0|false)\b|==\s*true\b)",
+            condition,
+        ):
+            found.append((match.group(1), "zero", ""))
+        for match in re.finditer(rf"\b({_INIT_FLAG})\b\s*>=\s*([A-Za-z_]\w*)\b", condition):
+            bound = match.group(2)
+            if bound not in {match.group(1), "true", "false"}:
+                found.append((match.group(1), "below", bound))
+    for match in re.finditer(rf"\b({_INIT_FLAG})\b\s*<\s*([A-Za-z_]\w*)\b", condition):
+        bound = match.group(2)
+        if bound != match.group(1):
+            found.append((match.group(1), "below", bound))
+    return found
+
+
+def _init_assignments(text: str) -> list[tuple[str, str]]:
+    if "INIT_PLACEHOLDER" in text or "BODY_PLACEHOLDER" in text:
+        return []
+    compact = re.sub(r"\s+", " ", _strip(text))
+    return [
+        (match.group(1), match.group(2).strip())
+        for match in re.finditer(rf"\b({_INIT_FLAG})\b\s*=(?!=)\s*([^;]+)", compact)
+    ]
+
+
+def _init_write_matches(kind: str, bound: str, rhs: str) -> bool:
+    value = rhs.strip()
+    if "(" in value or not re.fullmatch(r"true|false|\d+|[A-Za-z_]\w*", value):
         return False
-    return bool(re.search(rf"\b{_INIT_FLAG}\b\s*=(?!=)", _strip(text)))
+    if kind == "below":
+        return value == bound
+    if kind == "zero":
+        return value not in {"false", "0"}
+    return False
+
+
+def _paren_condition(compact: str) -> str | None:
+    match = re.search(r"\b(?:require|if)\s*\(", compact)
+    if match is None:
+        return None
+    open_at = compact.find("(", match.start())
+    try:
+        end = _consume_parens(compact, open_at)
+    except ValueError:
+        return None
+    return compact[open_at + 1 : end - 1]
 
 
 def _lock_variables(body: str) -> list[str]:
@@ -160,7 +225,7 @@ def _lock_check_dominates(cfg: FunctionCfg, variable: str, placeholder: int) -> 
 
 def _lock_set_dominates(cfg: FunctionCfg, variable: str, placeholder: int) -> bool:
     for node in cfg.nodes:
-        if not _is_entered_assignment(node.text, variable):
+        if node.kind != "stmt" or not _is_entered_assignment(node.text, variable):
             continue
         if not cfg.dominates(node.node_id, placeholder):
             continue
@@ -173,29 +238,57 @@ def _lock_set_dominates(cfg: FunctionCfg, variable: str, placeholder: int) -> bo
 
 
 def _lock_cleared_after(cfg: FunctionCfg, variable: str, placeholder: int) -> bool:
-    after = cfg.reachable_from(placeholder)
-    for node in cfg.nodes:
-        if node.node_id == placeholder or node.node_id not in after:
+    """True when every path from the body to a normal exit clears ``variable``.
+
+    A clear that is only reachable on some branch does not hold. Reaching the
+    exit through ``revert`` without a clear is also not a guard: the lock would
+    stay set only when that branch reverts, and the other branch can re-enter.
+    """
+    clears = {
+        node.node_id
+        for node in cfg.nodes
+        if node.kind == "stmt"
+        and node.node_id != placeholder
+        and _is_clear_assignment(node.text, variable)
+    }
+    if not any(node_id in cfg.reachable_from(placeholder) for node_id in clears):
+        return False
+    seen: set[int] = set()
+    stack = [placeholder]
+    while stack:
+        current = stack.pop()
+        if current in seen:
             continue
-        if _is_clear_assignment(node.text, variable):
-            return True
-    return False
+        seen.add(current)
+        if current in clears:
+            continue
+        node = cfg.nodes[current]
+        if node.kind == "exit" and current != placeholder:
+            return False
+        for nxt in cfg.successors(current):
+            if nxt not in clears:
+                stack.append(nxt)
+    return True
 
 
 def _is_lock_check(text: str, variable: str) -> bool:
     name = re.escape(variable)
     compact = re.sub(r"\s+", " ", _strip(text))
-    if re.search(rf"require\s*\(\s*!+\s*{name}\b", compact):
+    condition = _paren_condition(compact)
+    if condition is not None and "||" in condition:
+        return False
+    examined = condition if condition is not None else compact
+    if re.search(rf"!\s*{name}\b", examined) and re.search(r"\brequire\b|\brevert\b", compact):
         return True
-    if re.search(rf"require\s*\([^;]*\b{name}\b", compact) and re.search(
-        r"==\s*false|!=\s*_?ENTERED|==\s*_?NOT_ENTERED|==\s*1\b|!=\s*2\b",
-        compact,
-    ):
+    if re.search(
+        rf"\b{name}\b\s*(?:==\s*false|!=\s*_?ENTERED|==\s*_?NOT_ENTERED|==\s*1\b|!=\s*2\b)",
+        examined,
+    ) and re.search(r"\brequire\b|\brevert\b", compact):
         return True
-    if re.search(rf"if\s*\(\s*{name}\s*\)", compact) and "revert" in compact:
+    if re.fullmatch(rf"\s*{name}\s*", examined) and "revert" in compact:
         return True
     return bool(
-        re.search(rf"if\s*\([^)]*\b{name}\b[^)]*(==\s*_?ENTERED|!=\s*_?NOT_ENTERED)", compact)
+        re.search(rf"\b{name}\b\s*(?:==\s*_?ENTERED|!=\s*_?NOT_ENTERED)", examined)
         and "revert" in compact
     )
 

@@ -15,10 +15,15 @@ A modifier named `initializer` is not protection. The body must check a prior
 initialization or version state and then write that state before `_;`.
 
 Protected shapes include `require(!initialized); initialized = true; _;`,
-`if (initialized) revert();` before the write, and a monotonic version check
-such as `require(version == 0)` or `require(_initialized < version)` before
-the assignment. `initialized = true; _;` and `version = 1; _;` are not
-protection. A check that runs only after `_;` does not protect the body.
+`if (initialized) revert();` before the write, `require(version == 0); version = 1; _;`,
+and a monotonic check whose bound is the value that is actually assigned, such as
+`require(_initialized < version); _initialized = version; _;`.
+`initialized = true; _;` and `version = 1; _;` are not protection.
+`require(version < 999); version = 1; _;` is not protection: the same version
+can run again while the stored value stays below 999. A check that contains
+`||`, including `require(!initialized || msg.sender == owner)`, does not
+establish that initialization is closed. A variable named `version` is not
+a guard by itself. A check that runs only after `_;` does not protect the body.
 A unique internal helper called before `_;` can carry the check. Two
 definitions of that helper are not guessed.
 
@@ -30,13 +35,17 @@ modifier body:
 1. a check of the lock (`require(!locked)`, `require(_status != _ENTERED)`, or an equivalent revert),
 2. an assignment of that same variable to an entered literal (`true`, `2`, `_ENTERED`),
 3. the `_;` placeholder,
-4. a clear to an open literal (`false`, `1`, `_NOT_ENTERED`).
+4. a clear of that same variable on every path from `_;` to the exit.
 
-`locked = true; _;`, `require(msg.sender == owner); _;`, and
-`locked = computeLock(); _;` are not locks. The modifier name
-`nonReentrant` is ignored. An OpenZeppelin-style `_status` pair is accepted
-only when those three steps are visible. `Pausable` and `PullPayment` are
-not treated as reentrancy guards.
+A clear that is only reachable on one branch does not hold, including
+`if (condition) locked = false;` and `if (condition) locked = false; else revert();`.
+`require(!locked || msg.sender == owner)` does not establish an unlocked entry.
+`locked = true; _;`, `require(msg.sender == owner); _;`, a lock of a different
+variable, and `locked = computeLock(); _;` are not locks. Unknown control flow
+stays unknown rather than safe. The modifier name `nonReentrant` is ignored.
+An OpenZeppelin-style `_status` pair is accepted only when the check, the
+entered write, and the clear are visible on the paths above. `Pausable` and
+`PullPayment` are not treated as reentrancy guards.
 
 ### Modifier lookup
 
@@ -51,10 +60,13 @@ imported bases are visible without guessing.
 ### Signature nonce order
 
 A nonce assignment is consumption only when it increments or decrements the
-same nonce that reaches the `ecrecover` digest, on a path shared with that
-call. `nonce = 1` does not consume a nonce. An increment after `return` is
-not reachable and does not consume it. `nonces[owner]` in the digest is not
-consumed by `nonces[attacker] += 1`.
+same nonce that reaches that `ecrecover` digest. For every live verification,
+the matching update must dominate the call or sit on every path from the call
+to the exit. An increment on one branch, on a path that returns before
+verification, or on a different counter does not cover the other branch.
+`nonce = 1` does not consume a nonce. An increment after `return` is
+not reachable and does not consume it. `nonces[owner] += 1` does not consume
+a digest of `nonces[attacker]`, in either order.
 
 `signature_nonce_order` distinguishes:
 
@@ -74,7 +86,11 @@ Each `latestRoundData()` or `latestAnswer()` call is one observation
 `updatedAt`, and `answeredInRound` when those names are destructured.
 Freshness from call 1 does not protect the answer from call 2. A lone
 `latestAnswer` has no freshness component. An unrelated `updatedAt = block.timestamp`
-is not part of the observation.
+is not part of the observation. `require(updatedAt != 0)` shows that a
+timestamp was returned; it is not a maximum-age bound. A bound such as
+`block.timestamp - updatedAt < MAX_DELAY`, or `answeredInRound >= roundId`,
+is what can dominate later use of that observation's answer. `answer != 0`
+is not treated as `answer > 0`, because a signed oracle answer can be negative.
 
 ### Compiler tests
 
@@ -89,16 +105,23 @@ JSON, compiler errors, a storage layout, and a version-only payload.
 `analyze_defi` classifies calls by declared type, inherited interface name,
 and method set.
 
-- `IERC20`, `ERC20`, and `IERC20Metadata`, or a type that declares
-  `transfer` and `balanceOf` plus another ERC-20 method, are strong ERC-20
-  evidence.
-- `IERC721`, `IERC1155`, and `IERC4626` are recognized the same way.
+- `IERC20`, `ERC20`, and `IERC20Metadata` (and the 721, 1155, and 4626 names)
+  are strong evidence, including a local `IERC20 token = IERC20(rawToken)`.
+- A type that declares `transfer`, `balanceOf`, and another ERC-20 method is
+  structural evidence. Inheritance of a strong interface stays strong.
 - An `address` used with `balanceOf`, `totalSupply`, `transferFrom`,
   `approve`, or `allowance` is ERC-20 by usage.
 - `foo.transfer(a, b)` on an unresolved address, and `transfer` on a local
   contract that only happens to have that method, stay
   `unknown external transfer`.
+- Names that are defined more than once with different shapes are not guessed.
+  A project-level index, installed for one scan and cleared afterward, can
+  resolve a unique imported interface. It does not raise confidence above
+  what that definition supports.
 - A one-argument `.transfer` is native Ether, not ERC-20.
+- `transferFrom` into `address(this)` is an inflow. `transfer` to another
+  account is an outflow. Anything else stays unknown. An outflow does not
+  prove that assets arrived.
 
 The legacy `sol.erc20_unchecked_return` rule still keys off a transfer call
 that ignores its return value. That is a call-shape check, not a claim that
@@ -114,8 +137,11 @@ The rule no longer treats "a comma inside `.transfer`" plus a single
 `transferFrom` when accounting credits the requested amount
 (`shares[user] += amount`) instead of a measured balance delta, and it still
 flags a token movement that reads `balanceOf` once and never compares a
-before/after pair. A before/after subtraction or comparison is not a finding.
-A native `.transfer` of Ether is not a finding.
+before/after pair. A measured delta has to be the same token and the same
+account, with one read before the transfer and one after it, and the two
+saved values have to be subtracted or compared with each other. An unrelated
+subtraction elsewhere is not that delta. A native `.transfer` of Ether is
+not a finding.
 
 ## Donation and inflation
 
@@ -141,10 +167,15 @@ are compared as:
 - withdraw: assets requested, shares burned
 - redeem: shares burned, assets returned
 
-The rule flags a preview formula that does not match the executing function,
-and a division that can round to zero shares or assets when the function
-neither requires a non-zero result nor checks a caller-supplied minimum.
-It does not claim the formulas match the standard's rounding modes.
+Preview and execution are compared only inside the same contract. Two
+contracts that both define `deposit` are not matched to each other.
+The division has to be an asset/share conversion: one side mentions assets
+or `totalAssets`, and the other mentions shares or total supply. `assets / 100`
+inside a function named `deposit` is not an ERC-4626 finding.
+The rule flags a preview conversion that does not match the executing
+conversion, and a conversion that can round to zero shares or assets when
+the function neither requires a non-zero result nor checks a caller-supplied
+minimum. It does not claim the formulas match the standard's rounding modes.
 
 ## Rounding and slippage
 
@@ -158,10 +189,11 @@ adds three economic cases:
 `amount * 30 / 10000` and `totalSupply / 2` are not those cases.
 
 Slippage is context-dependent. A swap or vault function with no minimum
-argument is not a finding. A `minAmountOut`, `minShares`, `maxShares`, or
-`deadline` parameter is a finding when it is never used, when it is compared
-only with zero, or when the check happens after the accounting write it was
-meant to constrain.
+argument is not a finding. A `minAmountOut`, `minShares`, `maxShares`,
+`maxAssets`, or `amountInMax` parameter is a finding when it is never
+compared with the computed output, when it is compared only with a numeric
+literal, or when the check happens after the accounting write it was meant
+to constrain. A `deadline` is not an output-slippage bound.
 
 ## Oracle, lending, and AMM
 
@@ -172,9 +204,11 @@ is accepted, or whether the expression mixes scales such as `1e8` and `1e18`.
 It is not a second copy of "every oracle call needs a check."
 
 Lending support is initial. It records debt and collateral transitions and
-flags debt that is reduced with no token or value transfer, a health factor
-that is checked from a snapshot taken before the debt or collateral write,
-and liquidation math that mixes decimal scales.
+flags debt that is reduced without an incoming token transfer into the
+contract. `token.transfer(attacker, amount)` is an outflow and does not show
+that assets arrived. It also flags a health factor that is checked from a
+snapshot taken before the debt or collateral write, and liquidation math that
+mixes decimal scales.
 
 AMM support recognizes `reserve0` / `reserve1` / `amountOut`. A quote that
 only reads reserves is not a finding. A swap that transfers tokens without
@@ -202,8 +236,10 @@ A normal `approve` that sets an allowance is not reported by itself.
 `redeem`, `borrow`, `repay`, `liquidate`, `swap`, `addLiquidity`,
 `removeLiquidity`, `permit`) plus user effects (shares, debt, collateral,
 allowance), protocol effects (total shares, total assets, reserves), and
-token flows. Later Solidity phases should extend this model instead of
-adding unrelated detectors.
+token flows, plus inflows and outflows when the direction is known.
+The DeFi model is cached for the graphs in one scan and the cache is cleared
+when the scan finishes, so one repository cannot leak into the next.
+Later Solidity phases should extend this model instead of adding unrelated detectors.
 
 ## Tests
 
@@ -225,8 +261,9 @@ is the same.
   modifiers reached only through assembly.
 - Token classification is structural. It does not execute a token or prove
   fee-on-transfer behavior.
-- Share math is recognized per function, not across an entire inheritance
-  hierarchy of vault implementations.
+- Share math is recognized per function inside one contract, not across an
+  inheritance hierarchy of vault implementations. Functions are keyed by
+  contract and name, not by name alone.
 - ERC-4626, lending, and AMM coverage is a set of relationships, not a model
   of Uniswap, Aave, or Compound.
 - Oracle wrappers that hide `latestRoundData` behind an unresolved helper
