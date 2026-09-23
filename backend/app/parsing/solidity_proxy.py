@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from app.parsing.model import SyntaxEvent, SyntaxGraph
 from app.parsing.solidity_cfg import _consume_parens, operation_guarded, placeholder_is_guarded
 from app.parsing.solidity_modifiers import resolve_modifier
-from app.parsing.solidity_storage import StorageModel, analyze_storage
+from app.parsing.solidity_storage import StorageModel, analyze_storage, resolve_yul_target
 
 _EIP1967_IMPL = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 _IMPL_NAMES = {"implementation", "impl"}
@@ -38,6 +38,14 @@ class DelegateSite:
 
 
 @dataclass(frozen=True)
+class PatternEvidence:
+    kind: str
+    summary: str
+    confidence: str
+    related: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class UpgradeSite:
     contract: str
     function: str
@@ -52,6 +60,7 @@ class ProxyModel:
     delegates: list[DelegateSite] = field(default_factory=list)
     upgrades: list[UpgradeSite] = field(default_factory=list)
     patterns: list[str] = field(default_factory=list)
+    pattern_evidence: list[PatternEvidence] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     storage: StorageModel | None = None
 
@@ -138,6 +147,21 @@ def _delegates(graph: SyntaxGraph, state: dict[tuple[str, str], str]) -> list[De
                             False,
                             False,
                             "delegatecall",
+                        )
+                    )
+                    continue
+                resolved, known, _literal, _constant = resolve_yul_target(block, target, graph)
+                if known and resolved != target:
+                    found.append(
+                        DelegateSite(
+                            contract,
+                            fields.get("function", ""),
+                            f"{target}<-{resolved}",
+                            "storage_slot",
+                            False,
+                            False,
+                            False,
+                            "delegatecall(" + target + ")",
                         )
                     )
                     continue
@@ -248,15 +272,17 @@ def _upgrades(
         contract = fields.get("contract", "")
         writes = _written_names(graph, event)
         semantic = [item for item in writes if item in targets or item.lower() in _IMPL_NAMES]
-        slot_write = _sstore_known_impl(event.text, impl_slots)
-        named = name.lower().startswith("upgrade") or name.lower() in {
-            "setimplementation",
-            "upgradeToAndCall".lower(),
-        }
-        sensitive = bool(
-            writes or slot_write or "delegatecall" in event.text or ".call" in event.text
-        )
-        if not semantic and not slot_write and not (named and sensitive):
+        slot_write = _sstore_known_impl(event.text, impl_slots, graph)
+        beacon_or_facet = [
+            item
+            for item in writes
+            if item.lower() in {"beacon", "facet"}
+            or item.lower().endswith("facet")
+            or _writes_selector_map(graph, contract, item)
+        ]
+        if model.delegates and beacon_or_facet and not semantic:
+            semantic = beacon_or_facet
+        if not semantic and not slot_write:
             continue
         changed = tuple(semantic or ([slot_write] if slot_write else writes[:1]))
         operation = changed[0] if changed else name
@@ -283,8 +309,7 @@ def _upgrades(
 
 def _patterns(graph: SyntaxGraph, model: ProxyModel) -> list[str]:
     labels: list[str] = []
-    names = {_function_name(event) for event in _functions(graph)}
-    texts = [event.text for event in _functions(graph)]
+    evidence: list[PatternEvidence] = []
     if any(
         site.function in {"fallback", "receive", ""} or "fallback" in site.function
         for site in model.delegates
@@ -292,19 +317,16 @@ def _patterns(graph: SyntaxGraph, model: ProxyModel) -> list[str]:
         labels.append("fallback-proxy")
     elif model.delegates:
         labels.append("delegatecall-proxy")
-    if "proxiableUUID" in names and any(
-        item.function.lower().startswith("upgrade") for item in model.upgrades
-    ):
-        labels.append("uups-like")
-    if any(re.search(r"\bbeacon\b", text) for text in texts) and model.delegates:
-        labels.append("beacon-like")
-    if any(re.search(r"\b(facet|diamond)\b", text, re.I) for text in texts):
-        labels.append("diamond-like")
-    if any(
-        re.search(r"\badmin\b", event.text) and "delegatecall" in event.text
-        for event in _functions(graph)
-    ):
-        labels.append("transparent-like")
+    uups = _uups_evidence(graph, model)
+    beacon = _beacon_evidence(graph, model)
+    transparent = _transparent_evidence(graph, model)
+    diamond = _diamond_evidence(graph, model)
+    for item in (uups, beacon, transparent, diamond):
+        if item is None:
+            continue
+        labels.append(item.kind)
+        evidence.append(item)
+    model.pattern_evidence = evidence
     return labels
 
 
@@ -328,6 +350,32 @@ def _notes(graph: SyntaxGraph, model: ProxyModel) -> list[str]:
             f"`{fields.get('contract', '')}.{_function_name(event)}` is externally reachable. "
             "Whether it can be repeated depends on the initializer check, not on the function name."
         )
+    if model.storage:
+        for comparison in model.storage.comparisons:
+            if not comparison.appended:
+                continue
+            for event in _functions(graph):
+                if _function_name(event) not in {"initialize", "reinitialize"}:
+                    continue
+                owner = _fields(event.extra).get("contract", "")
+                if owner not in {comparison.left_contract, comparison.right_contract}:
+                    continue
+                written = set(_written_names(graph, event))
+                owned = {
+                    item.name
+                    for item in model.storage.variables
+                    if item.contract == owner or item.origin == owner
+                }
+                missing = [
+                    name for name in comparison.appended if name in owned and name not in written
+                ]
+                if not missing:
+                    continue
+                notes.append(
+                    f"`{_function_name(event)}` does not write newly appended storage "
+                    f"{', '.join(missing)}. This is potential evidence that new state is "
+                    "uninitialized, not proof that the initializer is unprotected."
+                )
     for site in model.upgrades:
         if site.invokes_call:
             notes.append(
@@ -377,13 +425,149 @@ def _function_authorized(graph: SyntaxGraph, function: SyntaxEvent, operation: s
     return operation_guarded(text, operation[:120]) is True
 
 
-def _sstore_known_impl(text: str, known_slots: set[str]) -> str:
+def _sstore_known_impl(text: str, known_slots: set[str], graph: SyntaxGraph) -> str:
     for block in _assembly_blocks(text):
         for match in re.finditer(r"\bsstore\s*\(\s*([^,\)]+)", block):
             expression = match.group(1).strip()
-            if expression in known_slots or expression.lower() == _EIP1967_IMPL:
-                return expression
+            resolved, known, literal, constant = resolve_yul_target(block, expression, graph)
+            if (
+                expression in known_slots
+                or expression.lower() == _EIP1967_IMPL
+                or literal.lower() == _EIP1967_IMPL
+                or (known and (constant in known_slots or literal in known_slots))
+            ):
+                return resolved or expression
     return ""
+
+
+def _writes_selector_map(graph: SyntaxGraph, contract: str, variable: str) -> bool:
+    for event in graph.events:
+        if event.kind != "sol_state":
+            continue
+        fields = _fields(event.extra)
+        if fields.get("contract") != contract or fields.get("name") != variable:
+            continue
+        return "bytes4" in fields.get("type", "") and "address" in fields.get("type", "")
+    return False
+
+
+def _uups_evidence(graph: SyntaxGraph, model: ProxyModel) -> PatternEvidence | None:
+    uuid = next(
+        (event for event in _functions(graph) if _function_name(event) == "proxiableUUID"),
+        None,
+    )
+    if uuid is None:
+        return None
+    related: list[str] = ["proxiableUUID"]
+    slot_linked = _EIP1967_IMPL in re.sub(r"\s+", "", uuid.text).lower() or any(
+        access.known and access.literal.lower() == _EIP1967_IMPL
+        for access in (model.storage.yul if model.storage else [])
+    )
+    if slot_linked:
+        related.append("implementation-slot")
+    upgrade_linked = any(
+        any(item.lower() in _IMPL_NAMES or item.lower().startswith("0x") for item in site.writes)
+        for site in model.upgrades
+    )
+    if upgrade_linked:
+        related.append("upgrade")
+    delegate_linked = any(site.provenance in {"state", "storage_slot"} for site in model.delegates)
+    if delegate_linked:
+        related.append("delegatecall")
+    if len(related) < 2:
+        return None
+    return PatternEvidence(
+        "uups-like",
+        "proxiableUUID is structurally associated with an implementation slot or upgrade. "
+        "This is not UUPS compliance and it is not a vulnerability by itself.",
+        "structural" if slot_linked else "usage",
+        tuple(related),
+    )
+
+
+def _beacon_evidence(graph: SyntaxGraph, model: ProxyModel) -> PatternEvidence | None:
+    if not model.delegates:
+        return None
+    beacon_names = {
+        _fields(event.extra).get("name", "")
+        for event in graph.events
+        if event.kind == "sol_state"
+        and (
+            _fields(event.extra).get("name", "").lower() == "beacon"
+            or "beacon" in _fields(event.extra).get("type", "").lower()
+        )
+    }
+    beacon_names.discard("")
+    if not beacon_names:
+        return None
+    texts = "\n".join(event.text for event in _functions(graph))
+    implementation_read = any(
+        re.search(rf"\b{re.escape(name)}\b\s*\.\s*implementation\s*\(", texts)
+        or re.search(rf"Beacon\s*\(\s*{re.escape(name)}\s*\)\s*\.\s*implementation\s*\(", texts)
+        for name in beacon_names
+    )
+    if not implementation_read:
+        return None
+    return PatternEvidence(
+        "beacon-like",
+        "A beacon address is read for an implementation before delegatecall. "
+        "This is a structural chain, not a beacon-proxy certificate.",
+        "structural",
+        ("proxy", "beacon", "implementation"),
+    )
+
+
+def _transparent_evidence(graph: SyntaxGraph, model: ProxyModel) -> PatternEvidence | None:
+    fallback = [
+        site
+        for site in model.delegates
+        if site.function in {"fallback", "receive", ""} or "fallback" in site.function
+    ]
+    if not fallback:
+        return None
+    admin_check = False
+    for event in _functions(graph):
+        if re.search(r"msg\.sender\s*(==|!=)\s*\w*admin\w*", event.text):
+            admin_check = True
+    if not admin_check:
+        return None
+    return PatternEvidence(
+        "transparent-like",
+        "An admin sender check coexists with a fallback delegatecall. "
+        "The word admin alone does not make the proxy transparent.",
+        "structural",
+        ("admin", "fallback", "delegatecall"),
+    )
+
+
+def _diamond_evidence(graph: SyntaxGraph, model: ProxyModel) -> PatternEvidence | None:
+    if not model.delegates:
+        return None
+    selector_maps = [
+        _fields(event.extra).get("name", "")
+        for event in graph.events
+        if event.kind == "sol_state"
+        and "bytes4" in _fields(event.extra).get("type", "")
+        and "address" in _fields(event.extra).get("type", "")
+    ]
+    if not selector_maps:
+        return None
+    texts = "\n".join(event.text for event in _functions(graph))
+    dispatch = any(name and name in texts and "delegatecall" in texts for name in selector_maps)
+    cut = any(
+        _function_name(event) in {"diamondCut", "updateFacet"}
+        or any(name in _written_names(graph, event) for name in selector_maps)
+        for event in _functions(graph)
+    )
+    if not dispatch or not cut:
+        return None
+    return PatternEvidence(
+        "diamond-like",
+        "A selector-to-address mapping is written and used to choose a delegatecall target. "
+        "Unknown selectors stay unknown. This is not a diamond certificate.",
+        "structural",
+        tuple(selector_maps[:4]) + ("delegatecall",),
+    )
 
 
 def _is_parameter(graph: SyntaxGraph, contract: str, function: str, name: str) -> bool:

@@ -415,7 +415,9 @@ class StorageCollisionRule(_SolidityRule):
                 None,
             )
         )
-        if calls:
+        comparisons = model.storage.comparisons if model.storage is not None else []
+        compatible_only = bool(comparisons) and all(item.compatible is True for item in comparisons)
+        if calls and not compatible_only:
             found.append(
                 self._obs(
                     graph,
@@ -423,6 +425,7 @@ class StorageCollisionRule(_SolidityRule):
                     "Proxy storage collision indicator",
                     "delegatecall targets a mutable implementation variable in normal storage. "
                     "An EIP-1967 constant elsewhere does not make that variable the standard slot. "
+                    "A compatible shared layout is not reported as a collision. "
                     "This is potential evidence, not a confirmed collision.",
                 )
             )

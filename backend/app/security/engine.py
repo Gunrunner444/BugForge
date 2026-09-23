@@ -126,6 +126,7 @@ class SecurityAnalysisEngine:
         storage_token = set_storage_context(graphs)
         proxy_token = set_proxy_context()
         try:
+            _overlay_compiler_layouts(graphs)
             return self._rules_over_indexed_graphs(
                 repo_path,
                 graphs,
@@ -284,6 +285,29 @@ class SecurityAnalysisEngine:
                 language=adapter.language_id,
             )
         return graph, None
+
+
+def _overlay_compiler_layouts(graphs: dict[str, SyntaxGraph]) -> None:
+    """Keep parser layouts and record an optional compiler overlay.
+
+    The compiler is never required. A missing compiler does not invent slots,
+    and a compiler slot never replaces the parser slot.
+    """
+    from app.parsing.solidity_compiler import compiler_semantics_for_scan
+    from app.parsing.solidity_storage import analyze_storage, apply_compiler_layout
+
+    for graph in graphs.values():
+        if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
+            continue
+        try:
+            source = Path(graph.file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            source = ""
+        apply_compiler_layout(
+            analyze_storage(graph),
+            compiler_semantics_for_scan(source),
+            source_path=graph.file_path,
+        )
 
 
 def _accepts_project(rule: object) -> bool:

@@ -10,12 +10,14 @@ from app.parsing.engine import parse_source, reset_syntax_registry
 from app.parsing.solidity_compiler import (
     CompilerSemantics,
     compiler_semantics,
+    compiler_semantics_for_scan,
     solidity_compiler_status,
 )
 from app.parsing.solidity_proxy import analyze_proxy, proxy_context_active
 from app.parsing.solidity_storage import (
     analyze_storage,
     apply_compiler_layout,
+    compare_storage_layouts,
     storage_context_active,
 )
 from app.plugins import reset_plugin_catalog
@@ -455,3 +457,272 @@ def test_phase31_regressions_still_hold(tmp_path: Path) -> None:
     assert "sol.lending" in _ids(tmp_path, outbound)
     assert proxy_context_active() is False
     assert storage_context_active() is False
+
+
+def test_compatible_proxy_layout_is_not_a_collision(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Proxy {
+        address implementation;
+        uint256 adminValue;
+        fallback() external payable { implementation.delegatecall(msg.data); }
+    }
+    contract Impl {
+        address implementation;
+        uint256 adminValue;
+    }
+    """
+    model = analyze_storage(_graph(tmp_path, source, "Compatible.sol"))
+    assert model.comparisons
+    assert model.comparisons[0].compatible is True
+    assert model.overlaps == []
+    assert "sol.storage_collision" not in _ids(tmp_path, source)
+
+
+def test_version_layout_detects_shift_and_append(tmp_path: Path) -> None:
+    first = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint256 value;
+        uint256 amount;
+    }
+    """
+    shifted = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        address owner;
+        uint256 value;
+        uint256 amount;
+    }
+    """
+    appended = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint256 value;
+        uint256 amount;
+        uint256 extra;
+    }
+    """
+    removed = """
+    pragma solidity ^0.8.20;
+    contract Token { uint256 value; }
+    """
+    reordered = """
+    pragma solidity ^0.8.20;
+    contract Token { uint256 amount; uint256 value; }
+    """
+    left = analyze_storage(_graph(tmp_path, first, "V1.sol"))
+    right = analyze_storage(_graph(tmp_path, shifted, "V2.sol"))
+    comparison = compare_storage_layouts(left, right, "Token", "Token", "implementation-version")
+    assert comparison.compatible is False
+    assert "added_before_existing" in {item.kind for item in comparison.changes}
+    assert "slot_changed" in {item.kind for item in comparison.changes}
+    grown = compare_storage_layouts(
+        left, analyze_storage(_graph(tmp_path, appended, "V3.sol")), "Token", "Token", "version"
+    )
+    assert grown.compatible is True
+    assert grown.appended == ("extra",)
+    shorter = compare_storage_layouts(
+        left, analyze_storage(_graph(tmp_path, removed, "V4.sol")), "Token", "Token", "version"
+    )
+    assert any(item.kind == "removed_existing" for item in shorter.changes)
+    swapped = compare_storage_layouts(
+        left, analyze_storage(_graph(tmp_path, reordered, "V5.sol")), "Token", "Token", "version"
+    )
+    assert any(item.kind == "reordered" for item in swapped.changes)
+
+
+def test_layout_type_packing_mapping_and_struct_changes(tmp_path: Path) -> None:
+    base = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint128 left;
+        uint128 right;
+        mapping(address => uint256) balances;
+        struct Point { uint256 x; uint256 y; }
+        Point point;
+        uint256[2] items;
+    }
+    """
+    changed = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint256 left;
+        uint128 right;
+        mapping(address => address) balances;
+        struct Point { uint256 x; address y; }
+        Point point;
+        uint256[3] items;
+    }
+    """
+    comparison = compare_storage_layouts(
+        analyze_storage(_graph(tmp_path, base, "A.sol")),
+        analyze_storage(_graph(tmp_path, changed, "B.sol")),
+        "Token",
+        "Token",
+        "version",
+    )
+    kinds = {item.kind for item in comparison.changes}
+    assert "type_changed" in kinds
+    assert "mapping_changed" in kinds
+    assert "struct_changed" in kinds
+    assert comparison.compatible is False
+
+
+def test_compiler_match_requires_contract_identity(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Proxy { address implementation; }
+    contract Impl { uint256 value; }
+    """
+    model = analyze_storage(_graph(tmp_path, source, "Both.sol"))
+    apply_compiler_layout(
+        model,
+        CompilerSemantics(
+            "AVAILABLE",
+            "solc",
+            "test",
+            layouts=[
+                {"contract": "Proxy", "label": "value", "slot": "9", "source": "Other.sol"},
+                {
+                    "contract": "Impl",
+                    "label": "value",
+                    "slot": "3",
+                    "offset": "0",
+                    "type": "uint256",
+                },
+                {"label": "implementation", "slot": "1"},
+            ],
+        ),
+        source_path=str(tmp_path / "Both.sol"),
+    )
+    assert model.ambiguities
+    assert any(item.name == "value" and item.compiler_slot == "3" for item in model.disagreements)
+    assert all(
+        item.contract != "Proxy" or item.name != "implementation" for item in model.disagreements
+    )
+    assert all(item.slot == 0 for item in model.variables)
+
+
+def test_scan_records_unavailable_compiler_without_inventing_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.parsing.solidity_compiler.shutil.which", lambda _name: None)
+    source = "pragma solidity ^0.8.20; contract C { uint256 value; }"
+    assert compiler_semantics_for_scan(source).status == "UNAVAILABLE"
+    path = tmp_path / "C.sol"
+    path.write_text(source, encoding="utf-8")
+    SecurityAnalysisEngine().analyze_repository(tmp_path, [path])
+    model = analyze_storage(_graph(tmp_path, source, "C.sol"))
+    assert model.variables[0].slot == 0
+    monkeypatch.setattr(
+        "app.parsing.solidity_compiler.shutil.which",
+        lambda name: "/usr/bin/forge" if name == "forge" else None,
+    )
+    present = compiler_semantics_for_scan(source)
+    assert present.status == "AVAILABLE"
+    assert present.storage == [] and present.layouts == []
+
+
+def test_namespaced_storage_is_not_sequential(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Names {
+        bytes32 constant KNOWN = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+        bytes32 constant LITERAL = 0x1234;
+        bytes32 constant CUSTOM = keccak256("example.main");
+        bytes32 constant ERC = keccak256(abi.encode(uint256(keccak256("eip7201:example.main") - 1))) & ~bytes32(uint256(0xff));
+        bytes32 constant UNKNOWN = keccak256(abi.encodePacked(LITERAL));
+        uint256 value;
+        function hash(uint256 seed) external pure returns (bytes32) {
+            return keccak256(abi.encodePacked(seed));
+        }
+    }
+    """
+    model = analyze_storage(_graph(tmp_path, source, "Ns.sol"))
+    by_name = {item.name: item for item in model.namespaces}
+    assert by_name["LITERAL"].known is True
+    assert by_name["LITERAL"].resolved_slot == "0x1234"
+    assert by_name["CUSTOM"].known is True
+    assert by_name["CUSTOM"].resolved_slot.startswith("0x")
+    assert by_name["ERC"].known is True
+    assert by_name["ERC"].resolved_slot != by_name["CUSTOM"].resolved_slot
+    assert by_name["UNKNOWN"].known is False
+    assert "hash" not in by_name
+    value = next(item for item in model.variables if item.name == "value")
+    assert value.slot == 0
+    assert value.mutability == "storage"
+
+
+def test_yul_delegatecall_follows_sload(tmp_path: Path) -> None:
+    source = f"""
+    pragma solidity ^0.8.20;
+    contract Proxy {{
+        bytes32 constant SLOT = {_IMPL_SLOT};
+        fallback() external payable {{
+            assembly {{
+                let impl := sload(SLOT)
+                let ok := delegatecall(gas(), impl, 0, 0, 0, 0)
+            }}
+        }}
+        function copy() external {{
+            assembly {{
+                let x := sload(SLOT)
+                sstore(SLOT, x)
+            }}
+        }}
+    }}
+    """
+    model = analyze_proxy(_graph(tmp_path, source, "Flow.sol"))
+    delegate = next(item for item in model.delegates if item.function == "fallback")
+    assert delegate.provenance == "storage_slot"
+    assert "sload(SLOT)" in delegate.target
+    stored = next(item for item in model.storage.yul if item.op == "sstore")
+    assert stored.known is True
+    assert stored.value_from.startswith("sload(")
+
+
+def test_upgrade_name_without_implementation_is_not_an_upgrade(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Counter {
+        uint256 counter;
+        mapping(address => uint256) users;
+        function upgradeCounter(uint256 x) external { counter = x; }
+        function upgradeUserRecord(address who, uint256 x) external { users[who] = x; }
+        function proxiableUUID() external pure returns (bytes32) { return bytes32(0); }
+    }
+    """
+    model = analyze_proxy(_graph(tmp_path, source, "Name.sol"))
+    assert model.upgrades == []
+    assert "uups-like" not in model.patterns
+    assert "sol.upgrade_auth" not in _ids(tmp_path, source)
+
+
+def test_proxy_relationships_need_more_than_words(tmp_path: Path) -> None:
+    words = """
+    pragma solidity ^0.8.20;
+    contract Talk {
+        function note() external pure returns (string memory) {
+            return "beacon diamond facet admin";
+        }
+    }
+    """
+    beacon = """
+    pragma solidity ^0.8.20;
+    interface IBeacon { function implementation() external view returns (address); }
+    contract Proxy {
+        address beacon;
+        fallback() external payable {
+            address impl = IBeacon(beacon).implementation();
+            impl.delegatecall(msg.data);
+        }
+    }
+    """
+    talk = analyze_proxy(_graph(tmp_path, words, "Talk.sol"))
+    assert "beacon-like" not in talk.patterns
+    assert "diamond-like" not in talk.patterns
+    assert "transparent-like" not in talk.patterns
+    linked = analyze_proxy(_graph(tmp_path, beacon, "Beacon.sol"))
+    assert "beacon-like" in linked.patterns
+    assert linked.pattern_evidence[0].confidence == "structural"

@@ -39,21 +39,41 @@ the JSON fails, and `AVAILABLE` for a version-only result or a parsed layout.
 The flat `storage` list is still label and slot. A `layouts` list adds the
 contract name and, when the compiler JSON has them, offset and type.
 
-`apply_compiler_layout` does not replace parser slots. If both sides name a
-slot for the same variable and the numbers differ, both are kept and the
-disagreement is recorded. A missing compiler does not become a layout.
+`apply_compiler_layout` does not replace parser slots. A compiler entry matches
+a parser variable only when the contract and the label agree. Source file is
+used when both sides have one. A label that appears in more than one contract,
+or a compiler entry with no contract, is ambiguous and is not matched. Slot,
+offset, and source type are compared when the compiler provides them. A
+disagreement is recorded and both layouts are kept. A missing compiler does
+not become a layout. A scan calls `compiler_semantics_for_scan`: unavailable
+stays unavailable, `forge` without a safe standard-JSON runner does not invent
+slots, and `solc` is invoked only with `--standard-json` and a minimal
+environment.
+
+## Layout comparison
+
+`compare_storage_layouts` compares any two storage models. It returns a
+`StorageLayoutComparison` with the relationship, compatibility, confidence,
+and typed changes: `added_before_existing`, `removed_existing`, `reordered`,
+`type_changed`, `slot_changed`, `offset_changed`, `packing_changed`,
+`inheritance_changed`, `mapping_changed`, `struct_changed`, or `unknown`.
+Names are supporting evidence, not identity. A variable appended after the
+existing layout can stay compatible. An uncertain layout stays unknown.
+Namespaced slots are `StorageNamespace` values and are not compared as
+sequential slot 0.
 
 ## Collisions
 
 `sol.storage_collision` still reports a delegatecall whose target is a
-mutable `implementation` or `impl` in normal storage. An EIP-1967 constant
-elsewhere does not remove that indicator.
+mutable `implementation` or `impl` in normal storage when no compatible
+layout comparison covers that file. An EIP-1967 constant elsewhere does not
+remove that indicator.
 
-A second indicator is emitted only when the parser actually places a proxy
-variable and another contract's variable in the same slot, and the proxy
-contract contains a delegatecall. Two variables with similar names, and a
-business field named `implementation` that is never the target of a
-delegatecall, are not a collision. An uncertain layout does not become an
+A same-slot note is emitted only when the proxy and another contract have an
+incompatible layout and the proxy contains a delegatecall. Two contracts that
+share slot numbers with the same types, offsets, and order are not a
+collision. A business field named `implementation` that is never the target
+of a delegatecall is not a collision. An uncertain layout does not become an
 overlap.
 
 ## Delegatecall
@@ -65,6 +85,7 @@ Each delegatecall is classified by its target:
 - a storage variable is state-backed
 - a function parameter is caller-controlled
 - an assembly target is classified the same way when the argument is recoverable
+- a Yul `let` that is a direct `sload` of a literal or constant slot is `storage_slot`
 - anything else stays unknown
 
 Unknown assembly is not treated as a vulnerable delegatecall. It remains
@@ -77,9 +98,9 @@ fixed target does not.
 
 An upgrade is a public write of a delegatecall target, a write of a storage
 variable named `implementation` or `impl`, an `sstore` of a known
-implementation-slot constant, or a function whose name starts with `upgrade`
-or is `setImplementation` and which writes state or calls out. The name is
-not what makes the write safe.
+implementation-slot constant, or a write of a beacon or selector map in a
+contract that already delegatecalls. A function named `upgradeCounter` or
+`upgradeUserRecord` is not an upgrade. The name is supporting evidence only.
 
 The write is authorized only when a resolved modifier, or a check in the
 function, dominates it. The modifier body has to be the Phase 31
@@ -90,10 +111,17 @@ body is found. Two base bodies are ambiguous and do not suppress the finding.
 ## Proxy shapes and initializers
 
 The model can label a contract `uups-like`, `fallback-proxy`,
-`delegatecall-proxy`, `beacon-like`, `transparent-like`, or `diamond-like`
-from structural relationships such as `proxiableUUID` next to an upgrade
-function, a fallback that delegatecalls, or the words beacon, admin, facet,
-and diamond used in that code. Those labels are not standard compliance.
+`delegatecall-proxy`, `beacon-like`, `transparent-like`, or `diamond-like`.
+UUPS-like requires `proxiableUUID` together with an implementation upgrade,
+slot, or delegatecall. Beacon-like requires a beacon address whose
+`implementation()` is read beside a delegatecall. Transparent-like requires
+an admin sender check and a fallback delegatecall. Diamond-like requires a
+`bytes4 => address` map that is both written and used for delegatecall.
+The words beacon, admin, facet, and diamond are not enough. Those labels are
+structural evidence with a confidence, not standard compliance, and they do
+not mark the proxy secure. A newly appended variable that an initializer
+does not write is noted as potentially uninitialized. `initialize` by itself
+is still not protection.
 
 Initializer protection is still the Phase 31 check: a prior state check that
 dominates a real write before `_;`. An implementation with an unprotected
