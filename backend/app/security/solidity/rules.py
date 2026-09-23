@@ -26,6 +26,7 @@ from app.parsing.solidity_flow import (
 from app.parsing.solidity_guards import initializer_is_protected, reentrancy_guard_holds
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
 from app.parsing.solidity_modifiers import resolve_modifier
+from app.parsing.solidity_proxy import analyze_proxy
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -181,26 +182,42 @@ class ArbitraryDelegatecallRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.UNSAFE_EXTERNAL_CALL
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
-        immutable = {
-            _fields(event.extra).get("name", "")
-            for event in graph.events
-            if event.kind == "sol_state"
-            and _fields(event.extra).get("mutability") in {"immutable", "constant"}
+        model = analyze_proxy(graph)
+        functions = {
+            (_fields(event.extra).get("contract", ""), _function_name(event)): event
+            for event in _functions(graph)
         }
+        delegate_events = [event for event in graph.events if event.kind == "sol_delegatecall"]
         found: list[SecurityObservation] = []
-        for event in graph.events:
-            if event.kind != "sol_delegatecall":
+        used: set[int] = set()
+        for site in model.delegates:
+            if site.provenance in {"self", "immutable", "constant", "unknown"}:
                 continue
-            target = _fields(event.extra).get("target", "")
-            base = target.split(".", 1)[0].strip()
-            if "address(this)" in target or base in immutable:
+            if site.upgrade_controlled:
                 continue
+            event = next(
+                (
+                    item
+                    for item in delegate_events
+                    if id(item) not in used and site.target in _fields(item.extra).get("target", "")
+                ),
+                None,
+            )
+            if event is None:
+                event = functions.get((site.contract, site.function))
+            if event is None:
+                continue
+            used.add(id(event))
+            if site.caller_controlled:
+                detail = "delegatecall target is taken from a caller-controlled value."
+            else:
+                detail = "delegatecall target is not a fixed implementation."
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Arbitrary delegatecall",
-                    "delegatecall target is not a fixed implementation.",
+                    detail + " This is potential evidence, not a confirmed call.",
                 )
             )
         return found
@@ -370,6 +387,8 @@ class StorageCollisionRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.UNSAFE_PROXY
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        model = analyze_proxy(graph)
+        found: list[SecurityObservation] = []
         mutable_impl = [
             event
             for event in graph.events
@@ -377,8 +396,6 @@ class StorageCollisionRule(_SolidityRule):
             and _fields(event.extra).get("name") in {"implementation", "impl"}
             and _fields(event.extra).get("mutability") == "storage"
         ]
-        if not mutable_impl:
-            return []
         names = {_fields(event.extra).get("name", "") for event in mutable_impl}
         calls = [
             event
@@ -390,17 +407,32 @@ class StorageCollisionRule(_SolidityRule):
                 for name in names
             )
         ]
-        if not calls:
-            return []
-        return [
-            self._obs(
-                graph,
-                calls[0],
-                "Proxy storage collision indicator",
-                "delegatecall targets a mutable implementation variable in normal storage. "
-                "An EIP-1967 constant elsewhere does not make that variable the standard slot.",
+        anchor = (
+            calls[0]
+            if calls
+            else next(
+                (event for event in graph.events if event.kind == "sol_delegatecall"),
+                None,
             )
-        ]
+        )
+        comparisons = model.storage.comparisons if model.storage is not None else []
+        compatible_only = bool(comparisons) and all(item.compatible is True for item in comparisons)
+        if calls and not compatible_only:
+            found.append(
+                self._obs(
+                    graph,
+                    calls[0],
+                    "Proxy storage collision indicator",
+                    "delegatecall targets a mutable implementation variable in normal storage. "
+                    "An EIP-1967 constant elsewhere does not make that variable the standard slot. "
+                    "A compatible shared layout is not reported as a collision. "
+                    "This is potential evidence, not a confirmed collision.",
+                )
+            )
+        if anchor is not None and model.storage is not None:
+            for note in model.storage.overlaps:
+                found.append(self._obs(graph, anchor, "Proxy storage collision indicator", note))
+        return found
 
 
 class UnboundedLoopRule(_SolidityRule):
@@ -686,30 +718,24 @@ class UpgradeAuthRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.UNSAFE_PROXY
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        model = analyze_proxy(graph)
+        functions = {
+            (_fields(event.extra).get("contract", ""), _function_name(event)): event
+            for event in _functions(graph)
+        }
         found: list[SecurityObservation] = []
-        for event in _functions(graph):
-            name = _function_name(event).lower()
-            fields = _fields(event.extra)
-            if not name.startswith("upgrade"):
+        for site in model.upgrades:
+            if site.authorized:
                 continue
-            if fields.get("visibility") not in {"public", "external"}:
-                continue
-            operations = [
-                item
-                for item in _inside(graph, event)
-                if item.kind in {"sol_state_write", "sol_delegatecall", "sol_external_call"}
-            ]
-            if not operations:
-                continue
-            guarded = _authorized_text(graph, event)
-            if all(_operation_is_guarded(guarded, operation) for operation in operations):
+            event = functions.get((site.contract, site.function))
+            if event is None:
                 continue
             found.append(
                 self._obs(
                     graph,
                     event,
                     "Upgradeable function without auth",
-                    f"{name} can be called without an authorization check.",
+                    site.summary,
                 )
             )
         return found

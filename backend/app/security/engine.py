@@ -25,6 +25,8 @@ from app.parsing.solidity_modifiers import (
     reset_modifier_index,
     set_modifier_index,
 )
+from app.parsing.solidity_proxy import reset_proxy_context, set_proxy_context
+from app.parsing.solidity_storage import reset_storage_context, set_storage_context
 from app.security.correlation import ObservationCluster
 from app.security.finding_intelligence import semantic_clusters
 from app.security.findings import findings_from_clusters
@@ -121,7 +123,10 @@ class SecurityAnalysisEngine:
     ) -> SecurityScanResult:
         token = set_modifier_index(ModifierIndex.from_graphs(graphs))
         defi_tokens = set_defi_context(graphs)
+        storage_token = set_storage_context(graphs)
+        proxy_token = set_proxy_context()
         try:
+            _overlay_compiler_layouts(graphs)
             return self._rules_over_indexed_graphs(
                 repo_path,
                 graphs,
@@ -131,6 +136,8 @@ class SecurityAnalysisEngine:
                 analyzed,
             )
         finally:
+            reset_proxy_context(proxy_token)
+            reset_storage_context(storage_token)
             reset_defi_context(defi_tokens)
             reset_modifier_index(token)
 
@@ -278,6 +285,29 @@ class SecurityAnalysisEngine:
                 language=adapter.language_id,
             )
         return graph, None
+
+
+def _overlay_compiler_layouts(graphs: dict[str, SyntaxGraph]) -> None:
+    """Keep parser layouts and record an optional compiler overlay.
+
+    The compiler is never required. A missing compiler does not invent slots,
+    and a compiler slot never replaces the parser slot.
+    """
+    from app.parsing.solidity_compiler import compiler_semantics_for_scan
+    from app.parsing.solidity_storage import analyze_storage, apply_compiler_layout
+
+    for graph in graphs.values():
+        if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
+            continue
+        try:
+            source = Path(graph.file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            source = ""
+        apply_compiler_layout(
+            analyze_storage(graph),
+            compiler_semantics_for_scan(source),
+            source_path=graph.file_path,
+        )
 
 
 def _accepts_project(rule: object) -> bool:
