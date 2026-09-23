@@ -84,9 +84,7 @@ def issue_server_observation(
         raise ValueError("A server observation must be bound to a semantic target")
     if not finding_id.strip():
         raise ValueError("A server observation must be bound to a finding")
-    metadata = {
-        key: value for key, value in item.metadata.items() if key not in _DROPPED
-    }
+    metadata = {key: value for key, value in item.metadata.items() if key not in _DROPPED}
     metadata["attribution"] = "server"
     metadata["execution_id"] = execution_id
     metadata["observed_target"] = observed_target

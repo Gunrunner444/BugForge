@@ -36,9 +36,7 @@ def _write(root: Path, name: str, source: str) -> None:
 
 def _scan(root: Path):
     files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".js", ".ts"}
+        path for path in root.rglob("*") if path.is_file() and path.suffix in {".py", ".js", ".ts"}
     ]
     return SecurityAnalysisEngine().analyze_repository(root, files)
 
@@ -91,7 +89,9 @@ def _obs(*, line: int, text: str, sink_occurrence: str = "") -> SecurityObservat
     )
 
 
-def _static_finding(*, key: str, line: int, title: str = "Potential dynamic execution") -> SecurityFinding:
+def _static_finding(
+    *, key: str, line: int, title: str = "Potential dynamic execution"
+) -> SecurityFinding:
     evidence = Evidence(
         kind=EvidenceKind.STATIC_ANALYSIS,
         source="sec.taint.dynamic_execution",
@@ -466,13 +466,17 @@ async def test_repeated_scan_does_not_duplicate_or_downgrade(
     verified_row = await repo.get(created[0].id)
     assert verified_row is not None
     verified_row.status = FindingStatus.VERIFIED.value
-    verified_row.evidence_json = _to_row(verified, project_id=project.id, analysis_id=None).evidence_json
+    verified_row.evidence_json = _to_row(
+        verified, project_id=project.id, analysis_id=None
+    ).evidence_json
     verified_row.evidence_tier = verified.evidence_tier.value
     rejected = other.reject()
     rejected_row = await repo.get(created[1].id)
     assert rejected_row is not None
     rejected_row.status = FindingStatus.REJECTED.value
-    rejected_row.evidence_json = _to_row(rejected, project_id=project.id, analysis_id=None).evidence_json
+    rejected_row.evidence_json = _to_row(
+        rejected, project_id=project.id, analysis_id=None
+    ).evidence_json
     await db_session.flush()
 
     again = await repo.bulk_create(
@@ -527,11 +531,7 @@ def test_identical_sink_occurrences_stay_distinct(tmp_path: Path) -> None:
         "app.py",
         'eval(request.args.get("q"))\neval(request.args.get("q"))\n',
     )
-    found = [
-        item
-        for item in _scan(tmp_path).findings
-        if item.vulnerability_class == EVAL
-    ]
+    found = [item for item in _scan(tmp_path).findings if item.vulnerability_class == EVAL]
     assert len(found) == 2
     assert found[0].finding_key != found[1].finding_key
     _write(
@@ -539,11 +539,7 @@ def test_identical_sink_occurrences_stay_distinct(tmp_path: Path) -> None:
         "app.py",
         '\n\neval(request.args.get("q"))\neval(request.args.get("q"))\n',
     )
-    shifted = [
-        item
-        for item in _scan(tmp_path).findings
-        if item.vulnerability_class == EVAL
-    ]
+    shifted = [item for item in _scan(tmp_path).findings if item.vulnerability_class == EVAL]
     assert {item.finding_key for item in found} == {item.finding_key for item in shifted}
 
 
@@ -583,7 +579,9 @@ async def test_agent_does_not_downgrade_verified_or_accepted(tmp_path: Path) -> 
 
     result = await FrozenAgent(provider=MockLLMProvider()).analyze(tmp_path, use_ai=True)
     assert result.findings[0].status is FindingStatus.VERIFIED
-    assert any(item.kind is EvidenceKind.HTTP_RESPONSE for item in result.findings[0].evidence.items)
+    assert any(
+        item.kind is EvidenceKind.HTTP_RESPONSE for item in result.findings[0].evidence.items
+    )
     assert any(item.kind is EvidenceKind.AI_ANALYSIS for item in result.findings[0].evidence.items)
 
     accepted = verified.human_accept()

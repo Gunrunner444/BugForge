@@ -721,10 +721,10 @@ def test_local_report_separates_statuses_and_review() -> None:
         SecurityFinding.potential("Maybe"),
         SecurityFinding.verified(
             "Yes",
-            evidence=[issue_for_finding(SecurityFinding.potential("Yes"), _http_evidence(), "verify-1")],
-        ).with_review(
-            HumanReviewState.ACCEPTED
-        ),
+            evidence=[
+                issue_for_finding(SecurityFinding.potential("Yes"), _http_evidence(), "verify-1")
+            ],
+        ).with_review(HumanReviewState.ACCEPTED),
         SecurityFinding.rejected("No"),
     ]
     report = LocalReportProvider().render(findings)

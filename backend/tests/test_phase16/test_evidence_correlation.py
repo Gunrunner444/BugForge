@@ -153,7 +153,11 @@ def test_status_transitions_stay_on_the_existing_model() -> None:
         summary="exploit ran",
         details="shown",
         artifact_path="app.py",
-        metadata={"line": "3", "vulnerability_class": "dynamic_execution", "execution_id": "http-1"},
+        metadata={
+            "line": "3",
+            "vulnerability_class": "dynamic_execution",
+            "execution_id": "http-1",
+        },
     )
     from app.domain.trusted_evidence import issue_for_finding
 

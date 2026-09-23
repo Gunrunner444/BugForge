@@ -9,9 +9,7 @@ from app.parsing.model import SyntaxGraph
 from app.parsing.solidity_graph import parse_solidity_source
 
 
-def candidate_foundry_test(
-    request: AnalysisRequest, graph: SyntaxGraph | None = None
-) -> str:
+def candidate_foundry_test(request: AnalysisRequest, graph: SyntaxGraph | None = None) -> str:
     function = request.function or "target"
     contract = request.contract or "Target"
     signature = request.extra.get("signature", "")

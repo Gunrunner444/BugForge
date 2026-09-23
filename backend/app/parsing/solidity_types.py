@@ -29,33 +29,46 @@ def canonical_solidity_type(annotation: str) -> str:
 
 def type_kind(annotation: str) -> str:
     """elementary, array, fixed_array, mapping, tuple, dynamic, or unresolved."""
-    text = _strip_locations(annotation)
+    text = _strip_locations(annotation).replace(" ", "")
     if not text:
         return "unresolved"
-    if text.startswith("mapping(") or text.startswith("mapping "):
+    if text.startswith("mapping("):
         return "mapping"
-    if text.startswith("("):
+    array = re.fullmatch(r"(.+)\[(\d*)\]", text)
+    if array and array.group(1):
+        return "fixed_array" if array.group(2) else "array"
+    if text.startswith("(") and text.endswith(")"):
         return "tuple"
-    if text.endswith("]"):
-        match = re.fullmatch(r".+\[(\d*)\]", text.replace(" ", ""))
-        if match is None:
-            return "unresolved"
-        return "fixed_array" if match.group(1) else "array"
-    canon = _piece(text.replace(" ", ""))
+    canon = _piece(text)
     if not canon:
         return "unresolved"
-    if canon in _DYNAMIC or canon.endswith("]"):
-        return "dynamic" if canon in _DYNAMIC else type_kind(canon)
+    if canon in _DYNAMIC:
+        return "dynamic"
+    if canon.endswith("]"):
+        return type_kind(canon)
     return "elementary"
 
 
 def is_dynamic_type(annotation: str) -> bool:
-    kind = type_kind(annotation)
-    if kind in {"dynamic", "array", "tuple"}:
-        return True
-    if kind == "fixed_array":
-        return is_dynamic_type(re.sub(r"\[\d+\]$", "", _strip_locations(annotation)))
-    return False
+    """ABI dynamic/static classification.
+
+    A tuple or fixed array is dynamic only when a component is dynamic.
+    Unresolved names are not treated as dynamic.
+    """
+    text = _strip_locations(annotation).replace(" ", "")
+    if not text:
+        return False
+    array = re.fullmatch(r"(.+)\[(\d*)\]", text)
+    if array and array.group(1):
+        if array.group(2) == "":
+            return True
+        return is_dynamic_type(array.group(1))
+    if text.startswith("(") and text.endswith(")"):
+        parts = _split_top(text[1:-1])
+        if not parts and text != "()":
+            return False
+        return any(is_dynamic_type(part) for part in parts)
+    return type_kind(text) == "dynamic"
 
 
 def _strip_locations(annotation: str) -> str:

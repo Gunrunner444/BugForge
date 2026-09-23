@@ -279,7 +279,11 @@ def _latest_name_origin(
             continue
         module = imp.module or ""
         exported = imp.name or bound
-        kind = "require" if imp.syntax_kind in {"require"} or imp.import_type == "require" else "import"
+        kind = (
+            "require"
+            if imp.syntax_kind in {"require"} or imp.import_type == "require"
+            else "import"
+        )
         candidates.append((byte, 0, (kind, module, exported)))
     scope_chain = _scope_chain(scope_id)
     for binding in bindings:
@@ -328,7 +332,11 @@ def _origin_from_binding(
     if callees & _REQUIRE_CALLEES:
         module = _require_module(rhs, binding, imports)
         if module:
-            return ("require", module, _imported_local_name_for_module(module, imports) or binding.name)
+            return (
+                "require",
+                module,
+                _imported_local_name_for_module(module, imports) or binding.name,
+            )
         return ("assignment", "", binding.name)
     if _looks_like_import_rhs(rhs) and not binding.rhs_callees:
         module, exported = _split_import_rhs(rhs)

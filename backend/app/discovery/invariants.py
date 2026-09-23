@@ -29,9 +29,12 @@ def suggest_invariants(graph: SyntaxGraph) -> list[InvariantCandidate]:
     texts = [event.text for event in functions]
     blob = "\n".join(texts)
     found: list[InvariantCandidate] = []
-    balance_maps = [name for name, info in state.items() if "mapping" in info and "balance" in name.lower()]
+    balance_maps = [
+        name for name, info in state.items() if "mapping" in info and "balance" in name.lower()
+    ]
     writes_supply = "totalSupply" in blob and any(
-        name in {"transfer", "mint", "burn"} or "totalSupply" in text for name, text in _named(functions)
+        name in {"transfer", "mint", "burn"} or "totalSupply" in text
+        for name, text in _named(functions)
     )
     if balance_maps and "totalSupply" in state and writes_supply:
         found.append(

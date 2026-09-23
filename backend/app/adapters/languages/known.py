@@ -199,6 +199,7 @@ AUXILIARY_LANGUAGES: tuple[DetectionLanguageAdapter, ...] = (
     DetectionLanguageAdapter("dart", "Dart", frozenset({".dart"}), is_source=True),
     DetectionLanguageAdapter("lua", "Lua", frozenset({".lua"}), is_source=True),
     DetectionLanguageAdapter("elixir", "Elixir", frozenset({".ex", ".exs"}), is_source=True),
+    DetectionLanguageAdapter("vyper", "Vyper", frozenset({".vy"}), is_source=True),
 )
 
 PROGRAMMING_LANGUAGE_ADAPTERS: tuple[type[LanguageAdapter], ...] = (

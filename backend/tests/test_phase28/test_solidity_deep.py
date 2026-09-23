@@ -366,7 +366,7 @@ def test_harness_uses_parsed_parameters(tmp_path: Path) -> None:
 
 def test_static_engine_respects_language(tmp_path: Path) -> None:
     (tmp_path / "A.sol").write_text(
-        "pragma solidity ^0.8.20; contract A { function withdraw() external { msg.sender.call(\"\"); } }",
+        'pragma solidity ^0.8.20; contract A { function withdraw() external { msg.sender.call(""); } }',
         encoding="utf-8",
     )
     (tmp_path / "app.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
@@ -382,8 +382,12 @@ def test_static_engine_respects_language(tmp_path: Path) -> None:
 
 def test_corpus_identity_survives_snapshot() -> None:
     corpus = DiscoveryCorpus()
-    first = corpus.add("seed-body", source=SeedSource.STATIC_FINDING, reason="reach sink", target="withdraw")
-    again = corpus.add("seed-body", source=SeedSource.STATIC_FINDING, reason="again", target="withdraw")
+    first = corpus.add(
+        "seed-body", source=SeedSource.STATIC_FINDING, reason="reach sink", target="withdraw"
+    )
+    again = corpus.add(
+        "seed-body", source=SeedSource.STATIC_FINDING, reason="again", target="withdraw"
+    )
     assert first.seed_id == again.seed_id
     assert len(corpus.seeds) == 1
     assert first.preview != "seed-body" or "seed-body" in first.preview
@@ -397,9 +401,14 @@ def test_oracle_distinguishes_reverts_from_tool_failure() -> None:
     assert evaluate_oracle(OracleKind.EXPECTED_REVERT, actual="revert").meaningful is False
     unexpected = evaluate_oracle(OracleKind.UNEXPECTED_REVERT, actual="revert Panic")
     assert unexpected.meaningful is True
-    assert evaluate_oracle(OracleKind.TOOL_FAILURE, actual="Compiler run failed").meaningful is False
+    assert (
+        evaluate_oracle(OracleKind.TOOL_FAILURE, actual="Compiler run failed").meaningful is False
+    )
     assert evaluate_oracle(OracleKind.PANIC, actual="0x11").meaningful is True
-    assert evaluate_oracle(OracleKind.EXIT_STATUS, exit_code=500, actual="HTTP 500").meaningful is False
+    assert (
+        evaluate_oracle(OracleKind.EXIT_STATUS, exit_code=500, actual="HTTP 500").meaningful
+        is False
+    )
 
 
 def test_evidence_motivates_round_trip() -> None:
@@ -491,7 +500,9 @@ def test_scheduler_followup_uses_stagnation_then_counterexample(tmp_path: Path) 
                 coverage={"new": "true" if request.extra.get("mode") == "fuzz" else "false"},
             )
 
-    foundry = _Engine("foundry", frozenset({EngineCapability.TEST_EXECUTION, EngineCapability.FUZZING}))
+    foundry = _Engine(
+        "foundry", frozenset({EngineCapability.TEST_EXECUTION, EngineCapability.FUZZING})
+    )
     halmos = _Engine("halmos", frozenset({EngineCapability.SYMBOLIC_EXECUTION}))
     scheduler = DiscoveryScheduler((foundry, halmos), max_rounds=1)  # type: ignore[arg-type]
     request = AnalysisRequest(
@@ -526,12 +537,36 @@ def test_scheduler_followup_uses_stagnation_then_counterexample(tmp_path: Path) 
 def test_optional_tools_stay_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.adapters.discovery.external.tool_path", lambda _name: None)
     request = AnalysisRequest(tmp_path, "solidity", target="Vault.sol", difficult=True)
-    for engine in (SlitherEngine(), FoundryEngine(), EchidnaEngine(), MedusaEngine(), HalmosEngine(), WakeEngine()):
-        result = engine.start_campaign(request) if engine.engine_id != "slither" else engine.analyze_target(request)
+    for engine in (
+        SlitherEngine(),
+        FoundryEngine(),
+        EchidnaEngine(),
+        MedusaEngine(),
+        HalmosEngine(),
+        WakeEngine(),
+    ):
+        result = (
+            engine.start_campaign(request)
+            if engine.engine_id != "slither"
+            else engine.analyze_target(request)
+        )
         if engine.engine_id == "halmos":
             planned = engine.start_campaign(AnalysisRequest(tmp_path, "solidity", target="Vault"))
             assert planned.executed is False
             assert planned.status is ResultStatus.PLANNED
+            assert result.status is ResultStatus.NOT_IMPLEMENTED
+            missing = engine.start_campaign(
+                AnalysisRequest(
+                    tmp_path,
+                    "solidity",
+                    target="test_withdraw",
+                    function="test_withdraw",
+                    difficult=True,
+                )
+            )
+            assert missing.executed is False
+            assert missing.status is ResultStatus.UNAVAILABLE
+            continue
         assert result.executed is False
         assert result.findings == ()
         assert result.status is ResultStatus.UNAVAILABLE
@@ -549,14 +584,18 @@ def test_tool_parsers_do_not_invent_findings() -> None:
     assert medusa["assertion"]
     quiet = parse_medusa_output("medusa finished\n")
     assert quiet["assertion"] == ""
-    assert quiet["coverage"] == {}
+    assert quiet["coverage"]["coverage_available"] == "false"
+    assert "new" not in quiet["coverage"]
+    assert "new_coverage" not in quiet["coverage"]
     halmos = parse_halmos_output("[FAIL] test_withdraw()\nCounterexample:\n  amount = 1\n")
     assert "Counterexample" in halmos["counterexample"]
     assert halmos["test"] == "test_withdraw"
 
 
 def test_foundry_config_and_cross_file_links(tmp_path: Path) -> None:
-    (tmp_path / "foundry.toml").write_text('src = "src"\nsolc_version = "0.8.20"\n', encoding="utf-8")
+    (tmp_path / "foundry.toml").write_text(
+        'src = "src"\nsolc_version = "0.8.20"\n', encoding="utf-8"
+    )
     (tmp_path / "src").mkdir()
     config = read_foundry_config(tmp_path)
     assert config["solc_version"] == "0.8.20"

@@ -33,7 +33,8 @@ def _of(result, vuln: VulnerabilityClass, filename: str | None = None) -> list[i
     return sorted(
         obs.line
         for obs in result.observations
-        if obs.vulnerability_class is vuln and (filename is None or obs.file_path.endswith(filename))
+        if obs.vulnerability_class is vuln
+        and (filename is None or obs.file_path.endswith(filename))
     )
 
 
@@ -81,9 +82,7 @@ def test_cross_file_wrapper_sink_and_constant_argument(tmp_path: Path) -> None:
         {
             "helpers.py": "def run_code(value):\n    eval(value)\n",
             "app.py": (
-                "from helpers import run_code\n"
-                "run_code(request.args.get('q'))\n"
-                "run_code('safe')\n"
+                "from helpers import run_code\nrun_code(request.args.get('q'))\nrun_code('safe')\n"
             ),
         },
     )
@@ -230,21 +229,43 @@ def test_wrong_argument_is_not_a_sink(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("helper", "caller", "vuln"),
     [
-        ("def run_query(value):\n    cursor.execute(value)\n", "run_query", VulnerabilityClass.SQL_INJECTION),
-        ("def run_cmd(value):\n    os.system(value)\n", "run_cmd", VulnerabilityClass.COMMAND_INJECTION),
-        ("def read(value):\n    open(value)\n", "read", VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL),
+        (
+            "def run_query(value):\n    cursor.execute(value)\n",
+            "run_query",
+            VulnerabilityClass.SQL_INJECTION,
+        ),
+        (
+            "def run_cmd(value):\n    os.system(value)\n",
+            "run_cmd",
+            VulnerabilityClass.COMMAND_INJECTION,
+        ),
+        (
+            "def read(value):\n    open(value)\n",
+            "read",
+            VulnerabilityClass.POTENTIAL_PATH_TRAVERSAL,
+        ),
         ("def fetch(value):\n    requests.get(value)\n", "fetch", VulnerabilityClass.SSRF),
         (
             "def render(value):\n    markupsafe.Markup(value)\n",
             "render",
             VulnerabilityClass.XSS,
         ),
-        ("def load(value):\n    pickle.loads(value)\n", "load", VulnerabilityClass.UNSAFE_DESERIALIZATION),
-        ("def run_code(value):\n    eval(value)\n", "run_code", VulnerabilityClass.DYNAMIC_EXECUTION),
+        (
+            "def load(value):\n    pickle.loads(value)\n",
+            "load",
+            VulnerabilityClass.UNSAFE_DESERIALIZATION,
+        ),
+        (
+            "def run_code(value):\n    eval(value)\n",
+            "run_code",
+            VulnerabilityClass.DYNAMIC_EXECUTION,
+        ),
         ("def go(value):\n    redirect(value)\n", "go", VulnerabilityClass.UNSAFE_REDIRECT),
     ],
 )
-def test_cross_file_categories(tmp_path: Path, helper: str, caller: str, vuln: VulnerabilityClass) -> None:
+def test_cross_file_categories(
+    tmp_path: Path, helper: str, caller: str, vuln: VulnerabilityClass
+) -> None:
     positive = _scan(
         tmp_path / "pos",
         {
@@ -358,7 +379,10 @@ def test_analysis_is_deterministic(tmp_path: Path) -> None:
 def test_malformed_python_is_not_a_clean_result(tmp_path: Path) -> None:
     result = _scan(tmp_path, {"broken.py": "def broken(:\n    eval(request.args.get('q'))\n"})
     assert result.diagnostics
-    assert any(item.kind in {"parser_failure", "parser_error", "partial_analysis"} for item in result.diagnostics)
+    assert any(
+        item.kind in {"parser_failure", "parser_error", "partial_analysis"}
+        for item in result.diagnostics
+    )
 
 
 def test_js_named_import_bindings() -> None:

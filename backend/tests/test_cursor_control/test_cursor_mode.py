@@ -87,7 +87,9 @@ async def _create(client: httpx.AsyncClient, root: Path) -> str:
 def lab_repo() -> Path:
     root = Path("/tmp") / f"bugforge-cursor-{uuid4().hex}"
     root.mkdir()
-    (root / "sample.py").write_text("import os\n\ndef run(cmd: str) -> None:\n    os.system(cmd)\n", encoding="utf-8")
+    (root / "sample.py").write_text(
+        "import os\n\ndef run(cmd: str) -> None:\n    os.system(cmd)\n", encoding="utf-8"
+    )
     (root / "secret.py").write_text('token = "AKIAIOSFODNN7EXAMPLE"\n', encoding="utf-8")
     return root
 
@@ -103,9 +105,13 @@ async def test_external_provider_refuses_generation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cursor_step_does_not_call_any_provider(client: httpx.AsyncClient, lab_repo: Path) -> None:
+async def test_cursor_step_does_not_call_any_provider(
+    client: httpx.AsyncClient, lab_repo: Path
+) -> None:
     with (
-        patch("app.api.v1.endpoints.security_agent.get_provider", side_effect=AssertionError("llm")),
+        patch(
+            "app.api.v1.endpoints.security_agent.get_provider", side_effect=AssertionError("llm")
+        ),
         patch.object(MockLLMProvider, "complete", side_effect=AssertionError("mock")),
         patch.object(OpenAIProvider, "complete", side_effect=AssertionError("openai")),
         patch.object(AnthropicProvider, "complete", side_effect=AssertionError("anthropic")),
@@ -406,7 +412,9 @@ def test_mcp_surface_has_no_secrets_or_bypasses() -> None:
     with pytest.raises(LocalApiError):
         loopback_api_url("https://gitlab.com")
     with pytest.raises(LocalApiError):
-        dispatch_tool("bugforge_request_tool", {"session_id": "a" * 12, "tool": "grant_approval"}, _api())
+        dispatch_tool(
+            "bugforge_request_tool", {"session_id": "a" * 12, "tool": "grant_approval"}, _api()
+        )
 
 
 def test_mcp_workflow_does_not_call_step() -> None:
@@ -458,7 +466,10 @@ def test_mcp_error_scrubs_token() -> None:
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
-            "params": {"name": "bugforge_request_tool", "arguments": {"session_id": "bad", "tool": "http_request"}},
+            "params": {
+                "name": "bugforge_request_tool",
+                "arguments": {"session_id": "bad", "tool": "http_request"},
+            },
         },
         api,
     )

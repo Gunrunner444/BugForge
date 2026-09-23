@@ -312,9 +312,7 @@ def calls_contained_in(
     return [
         call
         for call in chosen
-        if not any(
-            _call_strictly_contains(other, call) for other in chosen if other is not call
-        )
+        if not any(_call_strictly_contains(other, call) for other in chosen if other is not call)
     ]
 
 
@@ -335,8 +333,7 @@ def _call_strictly_contains(outer: CallSite, inner: CallSite) -> bool:
     if not inside:
         return False
     return (
-        outer.span.start_byte < inner.span.start_byte
-        or outer.span.end_byte > inner.span.end_byte
+        outer.span.start_byte < inner.span.start_byte or outer.span.end_byte > inner.span.end_byte
     )
 
 
@@ -1028,9 +1025,7 @@ def _mirror_field_timeline(
     return changed, capped, next_mirror
 
 
-def lexically_shadows(
-    graph: SyntaxGraph | None, scope_id: str, name: str, at_byte: int
-) -> bool:
+def lexically_shadows(graph: SyntaxGraph | None, scope_id: str, name: str, at_byte: int) -> bool:
     """True when ``name`` is rebound in the scope that contains this use.
 
     Import bindings are not shadows. A nested function or assignment hides the
@@ -1062,7 +1057,11 @@ def _name_rebound(graph: SyntaxGraph, scope_id: str, name: str, at_byte: int) ->
         scope = scopes.get(current)
         function_scope = scope is not None and scope.kind.value in {"function", "method"}
         for binding in graph.bindings:
-            if binding.scope_id != current or binding.name != name or _is_import_binding(graph, binding):
+            if (
+                binding.scope_id != current
+                or binding.name != name
+                or _is_import_binding(graph, binding)
+            ):
                 continue
             if function_scope:
                 return True
@@ -1435,16 +1434,16 @@ def _known_method(graph: SyntaxGraph, call: CallSite) -> tuple[object, bool] | N
     if receiver.endswith("()"):
         class_name: str | None = receiver[:-2].rsplit(".", 1)[-1]
         instance = True
-    elif any(entity.entity_type == "class" and entity.name == receiver for entity in graph.entities):
+    elif any(
+        entity.entity_type == "class" and entity.name == receiver for entity in graph.entities
+    ):
         class_name = receiver
         instance = False
     elif receiver in {"self", "cls"}:
         class_name = _enclosing_class(graph, call.scope_id)
         instance = True
     else:
-        binding = _reaching_binding(
-            graph, receiver, call.scope_id, _use_byte(call.span, call.line)
-        )
+        binding = _reaching_binding(graph, receiver, call.scope_id, _use_byte(call.span, call.line))
         if binding is None:
             return None
         found = _constructed_classes(graph, binding)
@@ -1574,7 +1573,13 @@ def _reaching_binding(graph: SyntaxGraph, name: str, scope_id: str, at_byte: int
             and _use_byte(binding.span, binding.line) <= at_byte
         ]
         if hits:
-            chosen = max(hits, key=lambda binding: (_use_byte(binding.span, binding.line), binding.definition_index))
+            chosen = max(
+                hits,
+                key=lambda binding: (
+                    _use_byte(binding.span, binding.line),
+                    binding.definition_index,
+                ),
+            )
             if chosen.is_conditional:
                 return None
             return chosen

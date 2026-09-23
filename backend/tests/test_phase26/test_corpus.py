@@ -41,27 +41,67 @@ def _secret_hidden(result, secret: str) -> None:
 
 def test_javascript_corpus(tmp_path: Path) -> None:
     base = tmp_path / "js"
-    assert SQL in _kinds(_scan(base, "sql.js", "function h(req){ const q = req.query.q; db.query('SELECT ' + q); }\n"))
-    assert SQL not in _kinds(_scan(base, "param.js", "function h(req){ const q = req.query.q; db.query('SELECT ?', [q]); }\n"))
-    assert CMD in _kinds(_scan(base, "exec.js", "function h(req){ const q = req.query.q; exec(q); }\n"))
-    assert CMD not in _kinds(_scan(base, "argv.js", "function h(req){ const q = req.query.q; execFile('git', ['show', q]); }\n"))
-    assert CMD in _kinds(_scan(base, "bin.js", "function h(req){ const q = req.query.q; spawn(q, ['--help']); }\n"))
-    assert PATH in _kinds(_scan(base, "path.js", "function h(req){ const q = req.query.q; fs.readFile(q, cb); }\n"))
-    assert SSRF in _kinds(_scan(base, "ssrf.js", "function h(req){ const q = req.query.q; fetch(q); }\n"))
-    assert SSRF not in _kinds(_scan(base, "url.js", "function h(){ fetch('https://example.com'); }\n"))
-    assert XSS in _kinds(_scan(base, "xss.js", "function h(req){ const q = req.query.q; el.innerHTML = q; }\n"))
-    assert XSS not in _kinds(_scan(base, "text.js", "function h(req){ const q = req.query.q; el.textContent = q; }\n"))
-    assert EVAL in _kinds(_scan(base, "eval.js", "function h(req){ const q = req.query.q; eval(q); }\n"))
-    assert REDIR in _kinds(_scan(base, "redir.js", "function h(req, res){ res.redirect(req.query.next); }\n"))
+    assert SQL in _kinds(
+        _scan(
+            base, "sql.js", "function h(req){ const q = req.query.q; db.query('SELECT ' + q); }\n"
+        )
+    )
+    assert SQL not in _kinds(
+        _scan(
+            base,
+            "param.js",
+            "function h(req){ const q = req.query.q; db.query('SELECT ?', [q]); }\n",
+        )
+    )
+    assert CMD in _kinds(
+        _scan(base, "exec.js", "function h(req){ const q = req.query.q; exec(q); }\n")
+    )
+    assert CMD not in _kinds(
+        _scan(
+            base,
+            "argv.js",
+            "function h(req){ const q = req.query.q; execFile('git', ['show', q]); }\n",
+        )
+    )
+    assert CMD in _kinds(
+        _scan(base, "bin.js", "function h(req){ const q = req.query.q; spawn(q, ['--help']); }\n")
+    )
+    assert PATH in _kinds(
+        _scan(base, "path.js", "function h(req){ const q = req.query.q; fs.readFile(q, cb); }\n")
+    )
+    assert SSRF in _kinds(
+        _scan(base, "ssrf.js", "function h(req){ const q = req.query.q; fetch(q); }\n")
+    )
+    assert SSRF not in _kinds(
+        _scan(base, "url.js", "function h(){ fetch('https://example.com'); }\n")
+    )
+    assert XSS in _kinds(
+        _scan(base, "xss.js", "function h(req){ const q = req.query.q; el.innerHTML = q; }\n")
+    )
+    assert XSS not in _kinds(
+        _scan(base, "text.js", "function h(req){ const q = req.query.q; el.textContent = q; }\n")
+    )
+    assert EVAL in _kinds(
+        _scan(base, "eval.js", "function h(req){ const q = req.query.q; eval(q); }\n")
+    )
+    assert REDIR in _kinds(
+        _scan(base, "redir.js", "function h(req, res){ res.redirect(req.query.next); }\n")
+    )
     shadowed = _scan(
         base,
         "shadow.js",
         "function h(req){\n  function query(x){ return x; }\n  const q = req.query.q;\n  query(q);\n  db.query(q);\n}\n",
     )
     assert SQL in _kinds(shadowed)
-    assert all("function query" not in obs.evidence_text for obs in shadowed.observations if obs.vulnerability_class is SQL)
+    assert all(
+        "function query" not in obs.evidence_text
+        for obs in shadowed.observations
+        if obs.vulnerability_class is SQL
+    )
     assert PDESER in _kinds(_scan(base, "json.js", "function h(req){ JSON.parse(req.query.q); }\n"))
-    assert DESER not in _kinds(_scan(base, "json.js", "function h(req){ JSON.parse(req.query.q); }\n"))
+    assert DESER not in _kinds(
+        _scan(base, "json.js", "function h(req){ JSON.parse(req.query.q); }\n")
+    )
     secret = "sk_live_js_same_line"
     _secret_hidden(_scan(base, "sec.js", f'const api_key = "{secret}";\n'), secret)
     assert _kinds(_scan(base, "mention.js", "const message = 'this text mentions md5';\n")) == set()
@@ -71,23 +111,45 @@ def test_javascript_corpus(tmp_path: Path) -> None:
 
 def test_typescript_corpus(tmp_path: Path) -> None:
     base = tmp_path / "ts"
-    assert SQL in _kinds(_scan(base, "sql.ts", "function h(req: Request){ const q = req.query.q; db.query(q); }\n"))
-    assert CMD in _kinds(_scan(base, "cmd.ts", "function h(req: Request){ const q = req.query.q; child_process.exec(q); }\n"))
-    assert PATH in _kinds(_scan(base, "path.ts", "function h(req: Request){ fs.readFileSync(req.query.q); }\n"))
-    assert SSRF in _kinds(_scan(base, "ssrf.ts", "function h(req: Request){ axios.get(req.query.q); }\n"))
-    assert XSS in _kinds(_scan(base, "xss.ts", "function h(req: Request){ el.innerHTML = req.query.q; }\n"))
-    assert EVAL in _kinds(_scan(base, "eval.ts", "function h(req: Request){ eval(req.query.q); }\n"))
-    assert REDIR in _kinds(_scan(base, "redir.ts", "function h(req: Request, res: Response){ res.redirect(req.query.next); }\n"))
-    assert SQL not in _kinds(_scan(base, "safe.ts", "function h(req: Request){ db.query('SELECT ?', [req.query.q]); }\n"))
+    assert SQL in _kinds(
+        _scan(base, "sql.ts", "function h(req: Request){ const q = req.query.q; db.query(q); }\n")
+    )
+    assert CMD in _kinds(
+        _scan(
+            base,
+            "cmd.ts",
+            "function h(req: Request){ const q = req.query.q; child_process.exec(q); }\n",
+        )
+    )
+    assert PATH in _kinds(
+        _scan(base, "path.ts", "function h(req: Request){ fs.readFileSync(req.query.q); }\n")
+    )
+    assert SSRF in _kinds(
+        _scan(base, "ssrf.ts", "function h(req: Request){ axios.get(req.query.q); }\n")
+    )
+    assert XSS in _kinds(
+        _scan(base, "xss.ts", "function h(req: Request){ el.innerHTML = req.query.q; }\n")
+    )
+    assert EVAL in _kinds(
+        _scan(base, "eval.ts", "function h(req: Request){ eval(req.query.q); }\n")
+    )
+    assert REDIR in _kinds(
+        _scan(
+            base,
+            "redir.ts",
+            "function h(req: Request, res: Response){ res.redirect(req.query.next); }\n",
+        )
+    )
+    assert SQL not in _kinds(
+        _scan(base, "safe.ts", "function h(req: Request){ db.query('SELECT ?', [req.query.q]); }\n")
+    )
     secret = "sk_live_ts_same_line"
     _secret_hidden(_scan(base, "sec.ts", f'const password = "{secret}";\n'), secret)
 
 
 def test_go_corpus(tmp_path: Path) -> None:
     base = tmp_path / "go"
-    handler = (
-        "package main\nfunc h(r *http.Request) {\n  q := r.FormValue(\"q\")\n  %s\n}\n"
-    )
+    handler = 'package main\nfunc h(r *http.Request) {\n  q := r.FormValue("q")\n  %s\n}\n'
     assert SQL in _kinds(_scan(base, "sql.go", handler % "db.Query(q)"))
     assert SQL not in _kinds(_scan(base, "const.go", handler % 'db.Query("SELECT 1")'))
     assert CMD not in _kinds(_scan(base, "git.go", handler % 'exec.Command("git", q)'))
@@ -107,11 +169,11 @@ def test_go_corpus(tmp_path: Path) -> None:
 
 def test_java_and_kotlin_corpus(tmp_path: Path) -> None:
     base = tmp_path / "jvm"
-    java = (
-        "class A { void h(HttpServletRequest req){ String q = req.getParameter(\"q\"); %s } }\n"
-    )
+    java = 'class A { void h(HttpServletRequest req){ String q = req.getParameter("q"); %s } }\n'
     assert SQL in _kinds(_scan(base, "sql.java", java % "stmt.executeQuery(q);"))
-    assert SQL not in _kinds(_scan(base, "prep.java", java % "ps.setString(1, q); ps.executeQuery();"))
+    assert SQL not in _kinds(
+        _scan(base, "prep.java", java % "ps.setString(1, q); ps.executeQuery();")
+    )
     assert CMD in _kinds(_scan(base, "cmd.java", java % "Runtime.getRuntime().exec(q);"))
     assert CMD not in _kinds(_scan(base, "pb.java", java % 'new ProcessBuilder("git", q).start();'))
     assert PATH in _kinds(_scan(base, "path.java", java % "new File(q);"))
@@ -121,10 +183,16 @@ def test_java_and_kotlin_corpus(tmp_path: Path) -> None:
     assert XSS not in _kinds(_scan(base, "print.java", java % "System.out.print(q);"))
     assert DESER in _kinds(_scan(base, "deser.java", java % "new ObjectInputStream(q);"))
     assert DESER not in _kinds(
-        _scan(base, "read.java", "class A { void h(InputStream in){ new ObjectInputStream(in).readObject(); } }\n")
+        _scan(
+            base,
+            "read.java",
+            "class A { void h(InputStream in){ new ObjectInputStream(in).readObject(); } }\n",
+        )
     )
     secret = "sk_live_java_same_line"
-    _secret_hidden(_scan(base, "sec.java", f'class A {{ String password = "{secret}"; }}\n'), secret)
+    _secret_hidden(
+        _scan(base, "sec.java", f'class A {{ String password = "{secret}"; }}\n'), secret
+    )
 
     kotlin = 'fun h(call: ApplicationCall){ val q = call.parameters["q"]; %s }\n'
     assert SQL in _kinds(_scan(base, "sql.kt", kotlin % "stmt.executeQuery(q)"))
@@ -142,11 +210,15 @@ def test_php_corpus(tmp_path: Path) -> None:
     base = tmp_path / "php"
     body = "<?php function h(){ $q = $_GET['q']; %s }\n"
     assert SQL in _kinds(_scan(base, "sql.php", body % "mysqli_query($c, $q);"))
-    assert SQL not in _kinds(_scan(base, "prep.php", body % "$pdo->prepare('SELECT * FROM t WHERE n = ?');"))
+    assert SQL not in _kinds(
+        _scan(base, "prep.php", body % "$pdo->prepare('SELECT * FROM t WHERE n = ?');")
+    )
     assert CMD in _kinds(_scan(base, "cmd.php", body % "system($q);"))
     assert PATH in _kinds(_scan(base, "inc.php", body % "include $q;"))
     assert SSRF in _kinds(_scan(base, "file.php", body % "file_get_contents($q);"))
-    assert SSRF not in _kinds(_scan(base, "curl.php", body % "curl_setopt($ch, CURLOPT_URL, $q); curl_exec($ch);"))
+    assert SSRF not in _kinds(
+        _scan(base, "curl.php", body % "curl_setopt($ch, CURLOPT_URL, $q); curl_exec($ch);")
+    )
     assert DESER in _kinds(_scan(base, "unser.php", body % "unserialize($q);"))
     assert EVAL in _kinds(_scan(base, "eval.php", body % "eval($q);"))
     assert REDIR in _kinds(_scan(base, "redir.php", body % "header('Location: ' . $q);"))
@@ -161,10 +233,12 @@ def test_php_corpus(tmp_path: Path) -> None:
 
 def test_csharp_corpus(tmp_path: Path) -> None:
     base = tmp_path / "cs"
-    body = "void H(){ var q = Request.Query[\"q\"]; %s }\n"
+    body = 'void H(){ var q = Request.Query["q"]; %s }\n'
     assert SQL in _kinds(_scan(base, "sql.cs", body % "cmd.ExecuteReader(q);"))
     assert SQL in _kinds(_scan(base, "raw.cs", body % "db.FromSqlRaw(q);"))
-    assert SQL not in _kinds(_scan(base, "param.cs", body % 'cmd.Parameters.AddWithValue("@q", q);'))
+    assert SQL not in _kinds(
+        _scan(base, "param.cs", body % 'cmd.Parameters.AddWithValue("@q", q);')
+    )
     assert CMD in _kinds(_scan(base, "proc.cs", body % "Process.Start(q);"))
     assert CMD not in _kinds(_scan(base, "git.cs", body % 'Process.Start("git", q);'))
     assert PATH in _kinds(_scan(base, "file.cs", body % "File.ReadAllText(q);"))
@@ -196,7 +270,9 @@ def test_ruby_corpus(tmp_path: Path) -> None:
     assert PATH in _kinds(_scan(base, "path.rb", method("File.read(q)")))
     assert SSRF in _kinds(_scan(base, "http.rb", method("Net::HTTP.get(q)")))
     assert XSS in _kinds(_scan(base, "xss.rb", method("q.html_safe")))
-    assert XSS not in _kinds(_scan(base, "esc.rb", "def h\n  q = h(params[:q])\n  q.html_safe\nend\n"))
+    assert XSS not in _kinds(
+        _scan(base, "esc.rb", "def h\n  q = h(params[:q])\n  q.html_safe\nend\n")
+    )
     assert DESER in _kinds(_scan(base, "mar.rb", method("Marshal.load(q)")))
     assert EVAL in _kinds(_scan(base, "eval.rb", method("eval(q)")))
     assert EVAL not in _kinds(_scan(base, "send.rb", method("obj.send(q)")))
@@ -252,4 +328,7 @@ def test_nestjs_parameter_source(tmp_path: Path) -> None:
 def test_priority_languages_have_dedicated_security_fixtures(language: str) -> None:
     tested = [family for family, label in COVERAGE[language].items() if label == "tested"]
     assert tested
-    assert all(label in {"tested", "existing-suite", "limited", "unsupported"} for label in COVERAGE[language].values())
+    assert all(
+        label in {"tested", "existing-suite", "limited", "unsupported"}
+        for label in COVERAGE[language].values()
+    )

@@ -1092,9 +1092,7 @@ class SecurityResearchAgent:
                 )
                 for index, item in enumerate(payload.plan_steps or [])
             )
-            return AgentDecision(
-                kind="plan", plan=ResearchPlan(steps=steps), thinking=thinking
-            )
+            return AgentDecision(kind="plan", plan=ResearchPlan(steps=steps), thinking=thinking)
         return AgentDecision(kind=payload.kind, note=reason, thinking=thinking)
 
     def _record_hypothesis(self, hypothesis: ResearchHypothesis, *, update: bool = False) -> None:

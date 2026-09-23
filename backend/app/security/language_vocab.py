@@ -195,7 +195,17 @@ JAVASCRIPT = LanguageSecurityVocab(
             "raw",
             alternatives=("bound parameters",),
         ),
-        _sink("js.cmd", CMD, "exec", "execSync", "spawn", "spawnSync", "child_process.exec", "execFile", argument_indexes=(0, 1)),
+        _sink(
+            "js.cmd",
+            CMD,
+            "exec",
+            "execSync",
+            "spawn",
+            "spawnSync",
+            "child_process.exec",
+            "execFile",
+            argument_indexes=(0, 1),
+        ),
         _sink(
             "js.path", PATH, "readFile", "readFileSync", "writeFile", "createReadStream", "sendFile"
         ),

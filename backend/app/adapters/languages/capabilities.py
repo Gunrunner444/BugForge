@@ -31,6 +31,10 @@ def capability_matrix(language_id: str) -> dict[str, str]:
     tier = parser_tier_for(key)
     if key == "solidity":
         report = _solidity_matrix(tier)
+    elif key == "vyper":
+        report = _vyper_matrix()
+    elif key in {"go", "rust", "c", "cpp"}:
+        report = _runtime_matrix(key, tier)
     elif tier is ParserTier.DETECTION_ONLY:
         report = _detection_matrix()
     elif tier is ParserTier.SPECIALIZED or key in {"html", "css", "scss", "sql"}:
@@ -79,7 +83,48 @@ def _solidity_matrix(tier: ParserTier) -> dict[str, str]:
         "compiler_ast": "LIMITED"
         if tool_path("solc") or tool_path("forge")
         else "UNAVAILABLE_AT_RUNTIME",
+        "detect": "YES",
+        "parse": "YES" if tier is ParserTier.FULL_AST else "LIMITED",
+        "ast": "YES" if tier is ParserTier.FULL_AST else "LIMITED",
+        "symbols": "YES" if tier is ParserTier.FULL_AST else "LIMITED",
+        "cfg": "LIMITED" if tier is ParserTier.FULL_AST else "UNSUPPORTED",
+        "property_testing": "LIMITED"
+        if tool_path("echidna") or tool_path("medusa")
+        else "UNAVAILABLE_AT_RUNTIME",
+        "sanitizers": "UNSUPPORTED",
     }
+
+
+def _vyper_matrix() -> dict[str, str]:
+    report = _detection_matrix()
+    report["external_static"] = "LIMITED" if tool_path("slither") else "UNAVAILABLE_AT_RUNTIME"
+    report["security_rules"] = "UNSUPPORTED"
+    report["cfg"] = "UNSUPPORTED"
+    report["property_testing"] = "UNSUPPORTED"
+    report["sanitizers"] = "UNSUPPORTED"
+    return report
+
+
+def _runtime_matrix(language_id: str, tier: ParserTier) -> dict[str, str]:
+    report = _base(tier, data_flow="YES", security="YES", quality="YES")
+    if language_id == "go":
+        present = tool_path("go") is not None
+        report["runtime_testing"] = "LIMITED" if present else "UNAVAILABLE_AT_RUNTIME"
+        report["fuzzing"] = "LIMITED" if present else "UNAVAILABLE_AT_RUNTIME"
+    elif language_id == "rust":
+        present = tool_path("cargo") is not None
+        report["runtime_testing"] = "LIMITED" if present else "UNAVAILABLE_AT_RUNTIME"
+        report["fuzzing"] = "LIMITED" if tool_path("cargo-fuzz") else "UNAVAILABLE_AT_RUNTIME"
+        report["sanitizers"] = "LIMITED" if present else "UNAVAILABLE_AT_RUNTIME"
+    else:
+        present = tool_path("clang") is not None or tool_path("afl-fuzz") is not None
+        report["runtime_testing"] = "UNAVAILABLE_AT_RUNTIME"
+        report["fuzzing"] = "LIMITED" if present else "UNAVAILABLE_AT_RUNTIME"
+        report["sanitizers"] = "LIMITED" if tool_path("clang") else "UNAVAILABLE_AT_RUNTIME"
+    report["cfg"] = "UNSUPPORTED"
+    report["property_testing"] = "UNSUPPORTED"
+    report["symbolic"] = "UNSUPPORTED"
+    return report
 
 
 def _detection_matrix() -> dict[str, str]:
@@ -112,6 +157,13 @@ def _base(tier: ParserTier, *, data_flow: str, security: str, quality: str) -> d
         "framework": "LIMITED" if tier is ParserTier.FULL_AST else "UNSUPPORTED",
         "external_static": "UNSUPPORTED",
         "compiler_ast": "UNSUPPORTED",
+        "detect": "YES",
+        "parse": "YES" if parsed else "UNSUPPORTED",
+        "ast": level,
+        "symbols": level,
+        "cfg": "UNSUPPORTED",
+        "property_testing": "UNSUPPORTED",
+        "sanitizers": "UNSUPPORTED",
     }
 
 

@@ -49,6 +49,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 26 | Polyglot security coverage and semantic target binding | ✅ Implemented |
 | Phase 27 | Multi-engine discovery and Solidity analysis | ✅ Implemented |
 | Phase 28 | Discovery hardening and Solidity deep analysis | ✅ Implemented |
+| Phase 29 | CFG-aware Solidity analysis, runtime bridges, and protected CI | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 

@@ -49,6 +49,7 @@ DETECTION_ONLY_LANGUAGE_IDS: tuple[str, ...] = (
     "dart",
     "lua",
     "elixir",
+    "vyper",
 )
 
 PARSE_CAPS = frozenset(
@@ -205,4 +206,5 @@ EXTENSIONS: dict[str, tuple[str, ...]] = {
     "dart": (".dart",),
     "lua": (".lua",),
     "elixir": (".ex", ".exs"),
+    "vyper": (".vy",),
 }

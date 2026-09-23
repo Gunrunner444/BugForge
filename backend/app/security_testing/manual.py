@@ -33,7 +33,9 @@ class ManualEvidenceCollector:
     ) -> EvidenceBundle:
         from app.adapters.evidence.attribution import ServerAttribution, attribution_metadata
 
-        server = attribution_metadata(attribution) if isinstance(attribution, ServerAttribution) else {}
+        server = (
+            attribution_metadata(attribution) if isinstance(attribution, ServerAttribution) else {}
+        )
         items: list[Evidence] = []
         for note in notes:
             items.append(

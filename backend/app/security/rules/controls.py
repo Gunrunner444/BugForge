@@ -43,9 +43,7 @@ _PASSWORD_EQ = re.compile(
     r"\s*==\s*([A-Za-z_][A-Za-z0-9_]*)"
 )
 _HASH_NAME = re.compile(r"(?i)hash|digest|checksum")
-_CSRF_NAMES = frozenset(
-    {"WTF_CSRF_ENABLED", "csrf_protect", "csrf_protection", "CSRF_ENABLED"}
-)
+_CSRF_NAMES = frozenset({"WTF_CSRF_ENABLED", "csrf_protect", "csrf_protection", "CSRF_ENABLED"})
 _CSRF_DECORATOR = re.compile(r"(?i)(?:^|\.)csrf_exempt$")
 _ADMIN_DECORATOR = re.compile(
     r"(?i)admin_required|require_admin|staff_member_required|permission_required"
@@ -210,7 +208,9 @@ def _jwt_hits(rule: SecurityRule, graph: SyntaxGraph) -> list[SecurityObservatio
     for call in graph.calls:
         if not _is_jwt_decode(graph, call) or not _verification_disabled(graph, call):
             continue
-        line = graph.lines[call.line - 1] if 0 < call.line <= len(graph.lines) else call.argument_text
+        line = (
+            graph.lines[call.line - 1] if 0 < call.line <= len(graph.lines) else call.argument_text
+        )
         observations.append(
             _observation(rule, graph, call.line, line, "JWT decoded without signature verification")
         )
@@ -297,8 +297,12 @@ def _csrf_hits(rule: SecurityRule, graph: SyntaxGraph) -> list[SecurityObservati
             continue
         if binding.line in seen:
             continue
-        line = graph.lines[binding.line - 1] if 0 < binding.line <= len(graph.lines) else binding.rhs
-        observations.append(_observation(rule, graph, binding.line, line, "CSRF protection disabled"))
+        line = (
+            graph.lines[binding.line - 1] if 0 < binding.line <= len(graph.lines) else binding.rhs
+        )
+        observations.append(
+            _observation(rule, graph, binding.line, line, "CSRF protection disabled")
+        )
     return observations
 
 
@@ -317,4 +321,3 @@ def _observation(
         language=graph.language,
         documentation=rule.documentation,
     )
-

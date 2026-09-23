@@ -77,10 +77,10 @@ def parse_python_graph(file_path: Path, source: str) -> SyntaxGraph:
         errors=(),
         parser_backend="cpython_ast",
         parser_tier=ParserTier.FULL_AST,
-            diagnostics=ParserDiagnostics(
-                native_available=True,
-                status="native_parser_available",
-            ),
+        diagnostics=ParserDiagnostics(
+            native_available=True,
+            status="native_parser_available",
+        ),
         scopes=tuple(builder.scopes),
         symbols=tuple(builder.symbols),
         nodes=tuple(builder.nodes),
@@ -359,7 +359,9 @@ class _PythonGraphVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self._scope_stack.pop()
 
-    def _visit_comprehension(self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> None:
+    def _visit_comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> None:
         span = _span(self.source, node)
         self._block_seq = getattr(self, "_block_seq", 0) + 1
         scope = Scope(

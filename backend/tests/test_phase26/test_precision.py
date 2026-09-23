@@ -36,11 +36,7 @@ def run(request):
     subprocess.run(['/bin/bash', '-c', user])
 """
     result = _scan(tmp_path, "cmd.py", source)
-    lines = {
-        obs.line
-        for obs in result.observations
-        if obs.vulnerability_class is CMD
-    }
+    lines = {obs.line for obs in result.observations if obs.vulnerability_class is CMD}
     assert 4 not in lines
     assert lines == {5, 6, 7, 8, 9}
 
@@ -69,9 +65,7 @@ def test_fastapi_query_respects_lexical_scope(tmp_path: Path) -> None:
         "    q = Query(user_value)\n"
         "    cursor.execute(q)\n",
     )
-    sql_lines = {
-        obs.line for obs in nested.observations if obs.vulnerability_class is SQL
-    }
+    sql_lines = {obs.line for obs in nested.observations if obs.vulnerability_class is SQL}
     assert 6 not in sql_lines
     assert sql_lines == {9}
 
@@ -142,7 +136,13 @@ def test_same_line_secrets_are_redacted(tmp_path: Path) -> None:
     result = _scan(tmp_path, "secrets.py", source)
     assert _has(result, SECRET)
     blob = " ".join(obs.evidence_text for obs in result.observations)
-    for hidden in (secret, "s3cret-pass", "supersecrettokenvalue", "AKIAIOSFODNN7EXAMPLE", "MII_SAME_LINE"):
+    for hidden in (
+        secret,
+        "s3cret-pass",
+        "supersecrettokenvalue",
+        "AKIAIOSFODNN7EXAMPLE",
+        "MII_SAME_LINE",
+    ):
         assert hidden not in blob
     assert "***" in blob
 

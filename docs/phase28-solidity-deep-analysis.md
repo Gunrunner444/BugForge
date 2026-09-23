@@ -16,7 +16,7 @@ security analysis. A request that names Python does not scan `.sol` files.
 
 The scheduler still does not run every installed tool. Wake stays off unless
 the request asks for it. Echidna and Medusa wait for a contract, function, or
-harness. Halmos waits until a dynamic result reports coverage that is not new.
+harness. Halmos waits until a dynamic result reports a real coverage comparison that did not increase. A passing Foundry suite is not new coverage.
 A later round can turn a Halmos counterexample into a corpus seed and a Foundry
 fuzz mode. Those transitions are stored as reasons. None of them call
 `SecurityFinding.verify`.

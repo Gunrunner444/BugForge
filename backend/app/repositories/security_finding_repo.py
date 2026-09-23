@@ -63,9 +63,7 @@ class SecurityFindingRepository:
         There is no overwrite path that can drop evidence or downgrade status.
         ``analysis_id`` is left unchanged unless a new analysis is supplied.
         """
-        return await self.save_lifecycle(
-            finding, project_id=project_id, analysis_id=analysis_id
-        )
+        return await self.save_lifecycle(finding, project_id=project_id, analysis_id=analysis_id)
 
     async def list_for_project(
         self, project_id: UUID, *, offset: int = 0, limit: int = 100
