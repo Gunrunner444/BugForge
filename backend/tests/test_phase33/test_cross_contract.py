@@ -130,7 +130,7 @@ def test_token_callback_needs_shared_state(tmp_path: Path) -> None:
         mapping(address => uint256) balances;
         function deposit(uint256 amount) external {
             uint256 beforeBalance = balances[msg.sender];
-            token.transfer(msg.sender, beforeBalance);
+            token.transfer(address(this), beforeBalance);
         }
         function tokensReceived(address from, uint256 amount) external {
             balances[from] = amount;
@@ -282,3 +282,62 @@ def test_economic_edges_use_the_defi_model(tmp_path: Path) -> None:
     model = analyze_project({str(tmp_path / "E.sol"): _graph(tmp_path, source, "E.sol")})
     assert model.economics
     assert any("transferFrom" in item or "in" in item for item in model.economics)
+
+
+def test_unrelated_callback_names_are_not_reentrancy(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    interface IERC20 { function transfer(address to, uint256 amount) external returns (bool); }
+    contract Other {
+        mapping(address => uint256) balances;
+        function tokensReceived(address from, uint256 amount) external {
+            balances[from] = amount;
+        }
+    }
+    contract Vault {
+        IERC20 token;
+        mapping(address => uint256) balances;
+        function deposit() external {
+            uint256 beforeBalance = balances[msg.sender];
+            token.transfer(msg.sender, beforeBalance);
+        }
+    }
+    """
+    model = analyze_project({str(tmp_path / "U.sol"): _graph(tmp_path, source, "U.sol")})
+    assert not any(item.kind == "reentrancy" for item in model.findings)
+
+
+def test_duplicate_symbols_stay_ambiguous(tmp_path: Path) -> None:
+    left = "pragma solidity ^0.8.20; contract Math { function add(uint256 a) external {} }"
+    right = "pragma solidity ^0.8.20; contract Math { function add(uint256 a) external {} contract User { function go() external { add(1); } } }"
+    model = analyze_project(
+        {
+            str(tmp_path / "A.sol"): _graph(tmp_path, left, "A.sol"),
+            str(tmp_path / "B.sol"): _graph(tmp_path, right, "B.sol"),
+        }
+    )
+    assert any(item.status == "ambiguous" for item in model.calls)
+
+
+def test_project_guard_matches_function_guard(tmp_path: Path) -> None:
+    from app.parsing.solidity_guards import reentrancy_guard_holds
+
+    body = "{ require(!locked); locked = true; _; locked = false; }"
+    assert reentrancy_guard_holds(body)
+    source = f"""
+    pragma solidity ^0.8.20;
+    contract Vault {{
+        mapping(address => uint256) balances;
+        bool locked;
+        modifier nonReentrant() {{ {body} }}
+        function withdraw() external nonReentrant {{
+            uint256 amount = balances[msg.sender];
+            msg.sender.call{{value: amount}}("");
+            balances[msg.sender] = 0;
+        }}
+    }}
+    """
+    model = analyze_project({str(tmp_path / "G.sol"): _graph(tmp_path, source, "G.sol")})
+    assert not any(
+        item.kind == "reentrancy" and item.function == "withdraw" for item in model.findings
+    )

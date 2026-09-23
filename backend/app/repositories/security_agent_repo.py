@@ -19,6 +19,7 @@ from app.models.security_agent import (
     DBResearchEvidenceEdge,
     DBResearchEvidenceLink,
     DBResearchEvidenceNode,
+    DBResearchExploratoryAttempt,
     DBResearchFinding,
     DBResearchHypothesis,
     DBResearchIdentity,
@@ -276,7 +277,17 @@ class SecurityAgentRepository:
                         payload=_redact_json(entry.extra),
                     )
                 )
+        await self._replace_exploratory(session)
         await self._session.flush()
+
+    async def _replace_exploratory(self, session: ResearchSession) -> None:
+        await self._session.execute(
+            delete(DBResearchExploratoryAttempt).where(
+                DBResearchExploratoryAttempt.session_id == session.id
+            )
+        )
+        for record in session.exploratory_attempts:
+            self._session.add(_exploratory_row(session.id, record))
 
     async def save_checkpoint(self, session: ResearchSession, *, label: str = "") -> str:
         checkpoint = ResearchCheckpoint.capture(session, label=label)
@@ -327,6 +338,7 @@ class SecurityAgentRepository:
                 selectinload(DBResearchSession.identities),
                 selectinload(DBResearchSession.memories),
                 selectinload(DBResearchSession.checkpoints),
+                selectinload(DBResearchSession.exploratory_attempts),
             )
             .where(DBResearchSession.id == session_id)
         )
@@ -516,6 +528,12 @@ class SecurityAgentRepository:
                 extra=dict(item.payload or {}),
             )
         research.memory = memory
+        research.exploratory_attempts = [
+            _exploratory_record(item) for item in row.exploratory_attempts
+        ]
+        from app.security_testing.exploratory import release_exploratory_engine
+
+        release_exploratory_engine(research.id)
         agent = SecurityResearchAgent(research)
         agent.tools.restore_disabled(sorted(research.disabled_tools))
         agent._refresh_privilege()
@@ -794,6 +812,92 @@ def _research_evidence(raw: dict[str, Any]) -> Evidence | None:
             metadata={"quarantined": "true"},
         )
     return restore_server_observation(item)
+
+
+def _exploratory_row(session_id: str, record: Any) -> DBResearchExploratoryAttempt:
+    created = getattr(record, "created_at", "")
+    when = datetime.now(UTC)
+    if isinstance(created, str) and created:
+        try:
+            when = datetime.fromisoformat(created)
+        except ValueError:
+            when = datetime.now(UTC)
+    return DBResearchExploratoryAttempt(
+        attempt_id=str(record.attempt_id),
+        session_id=session_id,
+        project_id=str(record.project_id),
+        hypothesis_id=str(record.hypothesis_id),
+        parent_attempt_id=str(record.parent_attempt_id or ""),
+        candidate_id=str(record.candidate_id),
+        test_hash=str(record.test_hash),
+        target_file=redact_text(str(record.target_file))[:2000],
+        target_symbol=str(record.target_symbol)[:255],
+        language=str(record.language)[:32],
+        framework=str(record.framework)[:32],
+        test_code=redact_text(str(record.test_code)),
+        rationale=redact_text(str(record.rationale))[:4000],
+        expected_behavior=redact_text(str(record.expected_behavior))[:4000],
+        oracle=str(record.oracle)[:40],
+        confidence=str(record.confidence)[:16],
+        repository_snapshot=str(record.repository_snapshot)[:64],
+        repository_commit=str(record.repository_commit)[:64],
+        execution_profile=str(record.execution_profile)[:64],
+        command_identity=list(record.command_identity or []),
+        classification=str(record.classification)[:32],
+        stdout_summary=redact_text(str(record.stdout_summary))[:4000],
+        stderr_summary=redact_text(str(record.stderr_summary))[:4000],
+        artifacts=dict(record.artifacts or {}),
+        duration=float(record.duration or 0),
+        timeout=bool(record.timeout),
+        executed=bool(record.executed),
+        meaningful=bool(record.meaningful),
+        follow_up_recommended=bool(record.follow_up_recommended),
+        repeat_classification=str(record.repeat_classification)[:64],
+        verified=False,
+        follow_up=str(record.follow_up or "")[:32],
+        created_at=when,
+    )
+
+
+def _exploratory_record(row: DBResearchExploratoryAttempt) -> Any:
+    from app.security_testing.exploratory import ExploratoryRecord
+
+    created = row.created_at.isoformat() if row.created_at is not None else ""
+    return ExploratoryRecord(
+        attempt_id=row.attempt_id,
+        session_id=row.session_id,
+        project_id=row.project_id,
+        hypothesis_id=row.hypothesis_id,
+        parent_attempt_id=row.parent_attempt_id,
+        candidate_id=row.candidate_id,
+        test_hash=row.test_hash,
+        target_file=row.target_file,
+        target_symbol=row.target_symbol,
+        language=row.language,
+        framework=row.framework,
+        test_code=row.test_code,
+        rationale=row.rationale,
+        expected_behavior=row.expected_behavior,
+        oracle=row.oracle,
+        confidence=row.confidence,
+        repository_snapshot=row.repository_snapshot,
+        repository_commit=row.repository_commit,
+        execution_profile=row.execution_profile,
+        command_identity=list(row.command_identity or []),
+        classification=row.classification,
+        stdout_summary=row.stdout_summary,
+        stderr_summary=row.stderr_summary,
+        artifacts=dict(row.artifacts or {}),
+        duration=float(row.duration or 0),
+        timeout=bool(row.timeout),
+        executed=bool(row.executed),
+        meaningful=bool(row.meaningful),
+        follow_up_recommended=bool(row.follow_up_recommended),
+        repeat_classification=row.repeat_classification,
+        verified=False,
+        follow_up=row.follow_up or "",
+        created_at=created,
+    )
 
 
 def _redact_json(value: Any) -> Any:

@@ -217,6 +217,7 @@ class ResearchSession:
     operator_identity: str = ""
     research_project_id: str = ""
     controller: ResearchController = ResearchController.INTERNAL_LLM
+    exploratory_attempts: list[Any] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -315,6 +316,9 @@ class SecurityResearchAgent:
         self.session.termination_reason = TerminationReason.USER_STOPPED
         self._timeline("stop", decision=f"STOP:{reason}")
         self._timeline("human_override", decision=f"STOP:{reason}")
+        from app.security_testing.exploratory import release_exploratory_engine
+
+        release_exploratory_engine(self.session.id)
 
     def reject_action(self, reason: str) -> None:
         self._timeline("human_override", decision=f"REJECT_ACTION:{reason}")
@@ -1195,6 +1199,7 @@ def _tool_context(session: ResearchSession) -> ToolContext:
         zap_binary=session.zap_binary,
         nuclei_binary=session.nuclei_binary,
         hypotheses=lambda: {item.id: item.target for item in session.hypotheses},
+        exploratory_records=session.exploratory_attempts,
     )
 
 

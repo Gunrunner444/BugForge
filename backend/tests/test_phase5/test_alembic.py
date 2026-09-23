@@ -71,11 +71,19 @@ def test_alembic_revision_chain_includes_021() -> None:
 def test_alembic_revision_chain_includes_022() -> None:
     cfg = Config("alembic.ini")
     script = ScriptDirectory.from_config(cfg)
-    heads = script.get_heads()
-    assert heads == ["022"]
     revision = script.get_revision("022")
     assert revision is not None
     assert revision.down_revision == "021"
+
+
+def test_alembic_revision_chain_includes_023() -> None:
+    cfg = Config("alembic.ini")
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert heads == ["023"]
+    revision = script.get_revision("023")
+    assert revision is not None
+    assert revision.down_revision == "022"
 
 
 def test_alembic_revision_chain_includes_019() -> None:

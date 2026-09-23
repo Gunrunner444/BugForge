@@ -23,7 +23,14 @@ from app.security_agent.strategies import ResearchStrategy, spec_for, tools_for_
 from app.security_testing.errors import RestrictedActivityError
 
 _NON_LIVE_PROVENANCE = frozenset(
-    {"ai_hypothesis", "replay", "tool_request", "scanner_plan", "generated_test"}
+    {
+        "ai_hypothesis",
+        "replay",
+        "tool_request",
+        "scanner_plan",
+        "generated_test",
+        "sandbox_execution",
+    }
 )
 _AUTHZ_CLASSES = frozenset(
     {
@@ -237,6 +244,8 @@ class AdvancedResearchOrchestrator:
             if estimate.unit == "fuzz_requests"
             else used.get("browser_actions", 0)
             if estimate.unit == "browser_actions"
+            else used.get("exploratory_tests", 0)
+            if estimate.unit == "exploratory_tests"
             else used.get("tool_calls", 0)
         )
         self.session.budget.plan(estimate.unit, estimate.estimated_units)

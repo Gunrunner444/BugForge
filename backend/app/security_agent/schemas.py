@@ -136,6 +136,7 @@ class ExploratoryTestArgs(BaseModel):
     project_id: str = ""
     session_id: str = ""
     confidence: str = "low"
+    follow_up: str = ""
 
     @field_validator("language", "framework", "oracle")
     @classmethod
@@ -151,6 +152,17 @@ class ExploratoryTestArgs(BaseModel):
         cleaned = value.strip().lower()
         if cleaned not in {"low", "medium", "high"}:
             raise ValueError("confidence must be low, medium, or high")
+        return cleaned
+
+    @field_validator("follow_up")
+    @classmethod
+    def follow_up_kind(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return ""
+        allowed = {"confirmation", "falsification", "boundary", "negative_control", "alternative"}
+        if cleaned not in allowed:
+            raise ValueError("unknown follow-up kind")
         return cleaned
 
 

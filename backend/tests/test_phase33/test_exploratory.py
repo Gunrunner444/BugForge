@@ -102,6 +102,7 @@ def _engine(executor: TestExecutor | None = None, **kwargs: object) -> Explorato
         executor=executor if executor is not None else RecordingExecutor(),
         docker_available=kwargs.get("docker_available", True),  # type: ignore[arg-type]
         forge_available=kwargs.get("forge_available", False),  # type: ignore[arg-type]
+        pytest_ready=kwargs.get("pytest_ready", True),  # type: ignore[arg-type]
     )
 
 
@@ -248,7 +249,9 @@ async def test_results_follow_up_budget_and_flaky(repo) -> None:
         max_seconds=30,
         max_test_bytes=2000,
     )
-    engine = ExploratoryEngine(policy=policy, executor=failing, docker_available=True)
+    engine = ExploratoryEngine(
+        policy=policy, executor=failing, docker_available=True, pytest_ready=True
+    )
     context = _context(graph, repo_path=str(repo))
     first = await engine.run(_candidate(), context)
     assert first.classification == ExploratoryClassification.FAILED.value
@@ -256,7 +259,8 @@ async def test_results_follow_up_budget_and_flaky(repo) -> None:
     assert first.verified is False
     assert first.follow_up_recommended is True
     assert any(node.provenance == "generated_test" for node in graph.nodes.values())
-    assert any(node.provenance == "execution" for node in graph.nodes.values())
+    assert any(node.provenance == "sandbox_execution" for node in graph.nodes.values())
+    assert any(node.provenance == "execution" for node in graph.nodes.values()) is False
     second = await engine.run(
         _candidate(
             test_code="def test_control():\n    assert Thing().method(1) == 1\n",
@@ -319,7 +323,9 @@ async def test_artifact_cap_and_restored_budget(repo) -> None:
     policy = ExploratoryTestPolicy(
         enabled=True, max_tests=2, max_iterations=2, max_seconds=30, max_artifact_bytes=16
     )
-    engine = ExploratoryEngine(policy=policy, executor=huge, docker_available=True)
+    engine = ExploratoryEngine(
+        policy=policy, executor=huge, docker_available=True, pytest_ready=True
+    )
     attempt = await engine.run(_candidate(), _context(repo_path=str(repo)))
     assert attempt.artifacts["blob.txt"].startswith("omitted:")
     assert "x" * 20 not in attempt.artifacts["blob.txt"]
@@ -345,5 +351,9 @@ def test_foundry_profile_blocks_flags_and_needs_forge() -> None:
     profile = profile_for("solidity", "foundry", forge_available=True)
     assert profile is not None
     assert "--fork-url" not in profile.container_command()
-    assert profile.container_command()[:3] == ["forge", "test", "--match-path"]
+    command = profile.container_command()
+    assert command[:3] == ["forge", "test", "--root"]
+    assert "/bugforge-repo" in command
+    assert "--fork-url" not in command
+    assert "--match-path" in command
     assert validate_solidity_test(code) is None

@@ -52,6 +52,7 @@ class ToolContext:
     nuclei_binary: str | None = None
     browser: Any = None
     hypotheses: Callable[[], dict[str, str]] = field(default_factory=lambda: lambda: {})
+    exploratory_records: list[Any] = field(default_factory=list)
 
 
 def bind_engine_tools(ctx: ToolContext, registry: ToolRegistry) -> ToolRegistry:
@@ -746,33 +747,33 @@ def _quality_from_state(state: ToolExecutionState) -> ToolResultQuality:
     return mapping.get(state, ToolResultQuality.FAILED)
 
 
-_EXPLORATORY_ENGINES: dict[str, Any] = {}
-
-
 def _exploratory_test(ctx: ToolContext) -> Executor:
     async def run(arguments: dict[str, Any]) -> dict[str, Any]:
         import shutil
 
         from app.security_testing.exploratory import (
             ExploratoryContext,
-            ExploratoryEngine,
             ExploratoryTestCandidate,
             ExploratoryTestPolicy,
+            cached_exploratory_engine,
             docker_executor_for_exploratory,
             public_attempt,
             snapshot_hash,
         )
 
         policy = ExploratoryTestPolicy.from_settings()
-        engine = _EXPLORATORY_ENGINES.get(ctx.session_id)
-        if not isinstance(engine, ExploratoryEngine):
-            docker_ok = shutil.which("docker") is not None
-            engine = ExploratoryEngine(
-                policy=policy,
-                executor=docker_executor_for_exploratory(docker_ok),
-                docker_available=docker_ok,
-            )
-            _EXPLORATORY_ENGINES[ctx.session_id] = engine
+        settings = get_settings()
+        docker_ok = shutil.which("docker") is not None
+        engine = cached_exploratory_engine(
+            ctx.session_id,
+            ctx.exploratory_records,
+            policy=policy,
+            executor=docker_executor_for_exploratory(
+                docker_ok, image=settings.security_agent_exploratory_python_image
+            ),
+            docker_available=docker_ok,
+            pytest_ready=bool(settings.security_agent_exploratory_pytest_ready),
+        )
         candidate = ExploratoryTestCandidate(
             target=str(arguments.get("target_file") or ctx.repo_root),
             language=str(arguments.get("language") or ""),
@@ -784,6 +785,7 @@ def _exploratory_test(ctx: ToolContext) -> Executor:
             expected_behavior=str(arguments.get("expected_behavior") or ""),
             oracle=str(arguments.get("oracle") or ""),
             confidence=str(arguments.get("confidence") or "low"),
+            follow_up=str(arguments.get("follow_up") or ""),
             parent_attempt_id=str(arguments.get("parent_attempt_id") or ""),
             target_file=str(arguments.get("target_file") or ""),
             project_id=str(arguments.get("project_id") or ctx.project_id),

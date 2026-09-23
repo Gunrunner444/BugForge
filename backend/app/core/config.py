@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     security_agent_max_generated_test_bytes: int = 16_384
     security_agent_max_exploratory_artifact_bytes: int = 65_536
     security_agent_exploratory_require_docker: bool = True
+    # Operator attests that the image already contains pytest. BugForge does not pip install.
+    security_agent_exploratory_pytest_ready: bool = False
+    security_agent_exploratory_python_image: str = ""
 
     # -------------------------------------------------------------------
     # Autonomous Repository Discovery (v1.1.0)

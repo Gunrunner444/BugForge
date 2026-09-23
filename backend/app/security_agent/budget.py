@@ -41,6 +41,12 @@ class SessionBudget:
     reserved_browser_actions: int = 0
     planned_tool_calls: int = 0
     reserved_tool_calls: int = 0
+    planned_exploratory_tests: int = 0
+    reserved_exploratory_tests: int = 0
+    planned_exploratory_iterations: int = 0
+    reserved_exploratory_iterations: int = 0
+    planned_exploratory_seconds: float = 0.0
+    reserved_exploratory_seconds: float = 0.0
 
     @classmethod
     def from_settings(cls) -> SessionBudget:
@@ -67,31 +73,49 @@ class SessionBudget:
             return "fuzz_requests"
         if unit in {"browser_actions", "browser"}:
             return "browser_actions"
+        if unit in {"exploratory_tests", "exploratory"}:
+            return "exploratory_tests"
+        if unit in {"exploratory_iterations"}:
+            return "exploratory_iterations"
+        if unit in {"exploratory_seconds"}:
+            return "exploratory_seconds"
         return "tool_calls"
 
-    def plan(self, unit: str, amount: int) -> None:
+    def plan(self, unit: str, amount: int | float) -> None:
         """Record a planner estimate. Does not consume budget."""
         bucket = self._bucket(unit)
         if bucket == "requests":
-            self.planned_requests += max(0, amount)
+            self.planned_requests += max(0, int(amount))
         elif bucket == "fuzz_requests":
-            self.planned_fuzz_requests += max(0, amount)
+            self.planned_fuzz_requests += max(0, int(amount))
         elif bucket == "browser_actions":
-            self.planned_browser_actions += max(0, amount)
+            self.planned_browser_actions += max(0, int(amount))
+        elif bucket == "exploratory_tests":
+            self.planned_exploratory_tests += max(0, int(amount))
+        elif bucket == "exploratory_iterations":
+            self.planned_exploratory_iterations += max(0, int(amount))
+        elif bucket == "exploratory_seconds":
+            self.planned_exploratory_seconds += max(0.0, float(amount))
         else:
-            self.planned_tool_calls += max(0, amount)
+            self.planned_tool_calls += max(0, int(amount))
 
-    def reserve(self, unit: str, amount: int) -> None:
+    def reserve(self, unit: str, amount: int | float) -> None:
         """Reserve estimated units before execution. Same units as consume()."""
         bucket = self._bucket(unit)
         if bucket == "requests":
-            self.reserved_requests = max(0, amount)
+            self.reserved_requests = max(0, int(amount))
         elif bucket == "fuzz_requests":
-            self.reserved_fuzz_requests = max(0, amount)
+            self.reserved_fuzz_requests = max(0, int(amount))
         elif bucket == "browser_actions":
-            self.reserved_browser_actions = max(0, amount)
+            self.reserved_browser_actions = max(0, int(amount))
+        elif bucket == "exploratory_tests":
+            self.reserved_exploratory_tests = max(0, int(amount))
+        elif bucket == "exploratory_iterations":
+            self.reserved_exploratory_iterations = max(0, int(amount))
+        elif bucket == "exploratory_seconds":
+            self.reserved_exploratory_seconds = max(0.0, float(amount))
         else:
-            self.reserved_tool_calls = max(0, amount)
+            self.reserved_tool_calls = max(0, int(amount))
 
     def consume(self, kind: str, *, amount: int = 1) -> None:
         if kind == "tool":
@@ -260,12 +284,18 @@ class SessionBudget:
                 "fuzz_requests": self.planned_fuzz_requests,
                 "browser_actions": self.planned_browser_actions,
                 "tool_calls": self.planned_tool_calls,
+                "exploratory_tests": self.planned_exploratory_tests,
+                "exploratory_iterations": self.planned_exploratory_iterations,
+                "exploratory_seconds": self.planned_exploratory_seconds,
             },
             "reserved": {
                 "requests": self.reserved_requests,
                 "fuzz_requests": self.reserved_fuzz_requests,
                 "browser_actions": self.reserved_browser_actions,
                 "tool_calls": self.reserved_tool_calls,
+                "exploratory_tests": self.reserved_exploratory_tests,
+                "exploratory_iterations": self.reserved_exploratory_iterations,
+                "exploratory_seconds": self.reserved_exploratory_seconds,
             },
             "consumed": {
                 "tool_calls": self.tool_calls,
@@ -275,5 +305,8 @@ class SessionBudget:
                 "iterations": self.iterations,
                 "tokens": self.tokens,
                 "scan_seconds": self.scan_seconds,
+                "exploratory_tests": self.exploratory_tests,
+                "exploratory_iterations": self.exploratory_iterations,
+                "exploratory_seconds": self.exploratory_seconds,
             },
         }

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from app.parsing.model import SyntaxEvent, SyntaxGraph
 from app.parsing.solidity_defi import analyze_defi
+from app.parsing.solidity_guards import reentrancy_guard_holds
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
 
@@ -51,6 +52,53 @@ _SKIP_CALLS = {
 }
 
 _CTX: ContextVar[ProjectModel | None] = ContextVar("bugforge_project_model", default=None)
+
+
+@dataclass(frozen=True)
+class SymbolIdentity:
+    contract: str
+    function: str
+    file: str
+    qualified_id: str
+
+
+class SymbolTable:
+    """Function symbols. Duplicate contract/function pairs stay ambiguous."""
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[SymbolIdentity, SyntaxEvent]] = []
+
+    def add(self, ident: SymbolIdentity, event: SyntaxEvent) -> None:
+        self.entries.append((ident, event))
+
+    def matches(self, contract: str, function: str) -> list[tuple[SymbolIdentity, SyntaxEvent]]:
+        return [
+            item
+            for item in self.entries
+            if item[0].contract == contract and item[0].function == function
+        ]
+
+    def status(self, contract: str, function: str) -> str:
+        count = len(self.matches(contract, function))
+        if count == 1:
+            return "resolved"
+        if count > 1:
+            return "ambiguous"
+        return "missing"
+
+    def get(self, key: tuple[str, str]) -> SyntaxEvent | None:
+        found = self.matches(key[0], key[1])
+        if len(found) == 1:
+            return found[0][1]
+        return None
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, tuple) or len(key) != 2:
+            return False
+        return self.status(str(key[0]), str(key[1])) == "resolved"
+
+    def items(self) -> list[tuple[tuple[str, str], SyntaxEvent]]:
+        return [((ident.contract, ident.function), event) for ident, event in self.entries]
 
 
 @dataclass(frozen=True)
@@ -101,6 +149,7 @@ class ProjectModel:
     economics: list[str] = field(default_factory=list)
     incomplete: bool = False
     limit_reason: str = ""
+    edge_keys: set[tuple[str, str, str, str, str, str]] = field(default_factory=set)
 
 
 def set_project_context(graphs: dict[str, SyntaxGraph]) -> Token[ProjectModel | None]:
@@ -149,7 +198,7 @@ def build_project(graphs: dict[str, SyntaxGraph]) -> ProjectModel:
             model.incomplete = True
             model.limit_reason = model.limit_reason or "call-edge limit reached"
             break
-    _reentrancy(model, functions)
+    _reentrancy(model, functions, solidity)
     return model
 
 
@@ -169,14 +218,41 @@ def _contracts(graphs: dict[str, SyntaxGraph]) -> list[ContractRef]:
     return found
 
 
-def _functions(graphs: dict[str, SyntaxGraph]) -> dict[tuple[str, str], SyntaxEvent]:
-    found: dict[tuple[str, str], SyntaxEvent] = {}
+def _add_edge(model: ProjectModel, edge: CallEdge) -> None:
+    if len(model.calls) >= _MAX_EDGES:
+        model.incomplete = True
+        model.limit_reason = model.limit_reason or "call-edge limit reached"
+        return
+    key = (
+        edge.caller_contract,
+        edge.caller_function,
+        edge.callee_contract,
+        edge.callee_function,
+        edge.kind,
+        edge.status,
+    )
+    if key in model.edge_keys:
+        return
+    model.edge_keys.add(key)
+    model.calls.append(edge)
+
+
+def _functions(graphs: dict[str, SyntaxGraph]) -> SymbolTable:
+    found = SymbolTable()
     for graph in graphs.values():
         for event in graph.events:
             if event.kind != "sol_function":
                 continue
             fields = _fields(event.extra)
-            found[(fields.get("contract", ""), fields.get("function", ""))] = event
+            contract = fields.get("contract", "")
+            name = fields.get("function", "")
+            ident = SymbolIdentity(
+                contract,
+                name,
+                graph.file_path,
+                f"{graph.file_path}:{contract}.{name}",
+            )
+            found.add(ident, event)
     return found
 
 
@@ -184,25 +260,12 @@ def _calls_for_graph(
     model: ProjectModel,
     graph: SyntaxGraph,
     by_name: dict[str, list[ContractRef]],
-    functions: dict[tuple[str, str], SyntaxEvent],
+    functions: SymbolTable,
 ) -> None:
     types = _variable_types(graph)
-    seen: set[tuple[str, str, str, str, str]] = set()
 
     def add(edge: CallEdge) -> None:
-        if len(model.calls) >= _MAX_EDGES:
-            return
-        key = (
-            edge.caller_function,
-            edge.callee_contract,
-            edge.callee_function,
-            edge.kind,
-            edge.status,
-        )
-        if key in seen:
-            return
-        seen.add(key)
-        model.calls.append(edge)
+        _add_edge(model, edge)
 
     for event in graph.events:
         if event.kind != "sol_function":
@@ -225,23 +288,11 @@ def _calls_for_graph(
                 )
                 continue
             if not target:
-                before = len(model.calls)
                 _direct_edge(model, caller_contract, caller_function, member, by_name, functions)
-                if len(model.calls) > before:
-                    seen.add(
-                        (
-                            caller_function,
-                            model.calls[-1].callee_contract,
-                            model.calls[-1].callee_function,
-                            model.calls[-1].kind,
-                            model.calls[-1].status,
-                        )
-                    )
                 continue
             type_name = types.get((caller_contract, target), "")
             if not type_name and target in by_name:
                 type_name = target
-            before = len(model.calls)
             _member_edge(
                 model,
                 caller_contract,
@@ -251,24 +302,17 @@ def _calls_for_graph(
                 type_name,
                 by_name,
                 member,
+                _args,
+                types,
             )
-            if len(model.calls) > before:
-                seen.add(
-                    (
-                        caller_function,
-                        model.calls[-1].callee_contract,
-                        model.calls[-1].callee_function,
-                        model.calls[-1].kind,
-                        model.calls[-1].status,
-                    )
-                )
     for (contract, name), event in functions.items():
         if contract not in {item.name for item in by_name.get(contract, [])}:
             continue
         if graph.file_path != _file_of(by_name, contract):
             continue
         if name.lower() in _CALLBACKS:
-            model.calls.append(
+            _add_edge(
+                model,
                 CallEdge(
                     "",
                     "",
@@ -277,7 +321,7 @@ def _calls_for_graph(
                     "callback",
                     "unresolved",
                     "callback entry is visible; the external caller is not resolved from this project",
-                )
+                ),
             )
 
 
@@ -287,33 +331,41 @@ def _direct_edge(
     caller_function: str,
     name: str,
     by_name: dict[str, list[ContractRef]],
-    functions: dict[tuple[str, str], SyntaxEvent],
+    functions: SymbolTable,
 ) -> None:
     if not name or name in _SKIP_CALLS:
         return
-    if (caller_contract, name) in functions:
+    local = functions.status(caller_contract, name)
+    if local == "resolved":
         kind = "library" if _kind(by_name, caller_contract) == "library" else "direct"
-        model.calls.append(
+        _add_edge(
+            model,
             CallEdge(
                 caller_contract, caller_function, caller_contract, name, kind, "resolved", name
-            )
+            ),
         )
         return
-    matches = [contract for contract in by_name if (contract, name) in functions]
-    if len(matches) == 1:
-        model.calls.append(
+    if local == "ambiguous":
+        _add_edge(
+            model,
             CallEdge(
                 caller_contract,
                 caller_function,
-                matches[0],
+                "",
                 name,
-                "library" if _kind(by_name, matches[0]) == "library" else "direct",
-                "resolved",
-                name,
-            )
+                "direct",
+                "ambiguous",
+                "duplicate symbol; callee was not selected",
+            ),
         )
-    elif len(matches) > 1:
-        model.calls.append(
+        return
+    matches = [contract for contract in by_name if functions.status(contract, name) == "resolved"]
+    ambiguous = [
+        contract for contract in by_name if functions.status(contract, name) == "ambiguous"
+    ]
+    if ambiguous or len(matches) > 1:
+        _add_edge(
+            model,
             CallEdge(
                 caller_contract,
                 caller_function,
@@ -322,11 +374,25 @@ def _direct_edge(
                 "direct",
                 "ambiguous",
                 "multiple contracts define this function",
-            )
+            ),
+        )
+    elif len(matches) == 1:
+        _add_edge(
+            model,
+            CallEdge(
+                caller_contract,
+                caller_function,
+                matches[0],
+                name,
+                "library" if _kind(by_name, matches[0]) == "library" else "direct",
+                "resolved",
+                name,
+            ),
         )
     else:
-        model.calls.append(
-            CallEdge(caller_contract, caller_function, "", name, "direct", "unresolved", name)
+        _add_edge(
+            model,
+            CallEdge(caller_contract, caller_function, "", name, "direct", "unresolved", name),
         )
 
 
@@ -339,11 +405,19 @@ def _member_edge(
     type_name: str,
     by_name: dict[str, list[ContractRef]],
     low_level: str,
+    args: str = "",
+    types: dict[tuple[str, str], str] | None = None,
 ) -> None:
     if member.lower() in _TOKEN_METHODS:
-        status = "resolved" if type_name and type_name in by_name else "unresolved"
-        callee = type_name if status == "resolved" else ""
-        model.calls.append(
+        owners = by_name.get(type_name, []) if type_name else []
+        if len(owners) > 1:
+            status, callee = "ambiguous", ""
+        elif len(owners) == 1:
+            status, callee = "resolved", type_name
+        else:
+            status, callee = "unresolved", ""
+        _add_edge(
+            model,
             CallEdge(
                 caller_contract,
                 caller_function,
@@ -351,8 +425,8 @@ def _member_edge(
                 member,
                 "token",
                 status,
-                target or member,
-            )
+                _token_detail(caller_contract, member, args, types or {}),
+            ),
         )
         return
     if type_name and type_name in by_name:
@@ -363,12 +437,14 @@ def _member_edge(
             detail = "interface callee; an implementation was not selected"
         else:
             detail = target
-        model.calls.append(
-            CallEdge(caller_contract, caller_function, type_name, member, kind, status, detail)
+        _add_edge(
+            model,
+            CallEdge(caller_contract, caller_function, type_name, member, kind, status, detail),
         )
         return
     if low_level in {"call", "staticcall", "delegatecall"} or member in {"call", "staticcall"}:
-        model.calls.append(
+        _add_edge(
+            model,
             CallEdge(
                 caller_contract,
                 caller_function,
@@ -377,10 +453,11 @@ def _member_edge(
                 "direct",
                 "unresolved",
                 target or "unresolved external call",
-            )
+            ),
         )
         return
-    model.calls.append(
+    _add_edge(
+        model,
         CallEdge(
             caller_contract,
             caller_function,
@@ -389,14 +466,14 @@ def _member_edge(
             "direct",
             "unresolved",
             target or member,
-        )
+        ),
     )
 
 
 def _flows_for_graph(
     model: ProjectModel,
     graph: SyntaxGraph,
-    functions: dict[tuple[str, str], SyntaxEvent],
+    functions: SymbolTable,
 ) -> None:
     for event in graph.events:
         if event.kind != "sol_function":
@@ -460,7 +537,7 @@ def _helper_flow(
     caller: str,
     callee: str,
     args: str,
-    functions: dict[tuple[str, str], SyntaxEvent],
+    functions: SymbolTable,
     branched: bool,
 ) -> None:
     event = functions.get((contract, callee))
@@ -489,7 +566,7 @@ def _authorization(
     model: ProjectModel,
     graph: SyntaxGraph,
     by_name: dict[str, list[ContractRef]],
-    functions: dict[tuple[str, str], SyntaxEvent],
+    functions: SymbolTable,
 ) -> None:
     for event in graph.events:
         if event.kind != "sol_function":
@@ -563,7 +640,8 @@ def _economics(model: ProjectModel, graph: SyntaxGraph) -> None:
     proxy = analyze_proxy(graph)
     for site in proxy.delegates:
         if site.provenance in {"state", "storage_slot"}:
-            model.calls.append(
+            _add_edge(
+                model,
                 CallEdge(
                     site.contract,
                     site.function,
@@ -572,18 +650,22 @@ def _economics(model: ProjectModel, graph: SyntaxGraph) -> None:
                     "proxy",
                     "unresolved" if site.provenance == "storage_slot" else "resolved",
                     f"{site.provenance}:{site.target}",
-                )
+                ),
             )
 
 
-def _reentrancy(model: ProjectModel, functions: dict[tuple[str, str], SyntaxEvent]) -> None:
+def _reentrancy(
+    model: ProjectModel, functions: SymbolTable, graphs: dict[str, SyntaxGraph]
+) -> None:
     helpers = {
         (edge.caller_contract, edge.caller_function, edge.callee_function)
         for edge in model.calls
         if edge.status == "resolved" and edge.caller_contract == edge.callee_contract
     }
+    by_file = {graph.file_path: graph for graph in graphs.values()}
     for (contract, name), event in functions.items():
-        if _guarded(event.text):
+        graph = by_file.get(_symbol_file(functions, contract, name))
+        if graph is not None and _guarded(graph, contract, event):
             continue
         flows = [
             item
@@ -614,38 +696,89 @@ def _reentrancy(model: ProjectModel, functions: dict[tuple[str, str], SyntaxEven
                     "structural",
                 )
             )
-    readers = {
-        (item.contract, item.source.removeprefix("state:"))
-        for item in model.flows
-        if item.source.startswith("state:")
-    }
     for edge in model.calls:
-        if edge.kind != "token":
+        if edge.kind != "token" or edge.status != "resolved":
             continue
+        receiver = _detail_field(edge.detail, "receiver")
+        if receiver != edge.caller_contract:
+            continue
+        caller_event = functions.get((edge.caller_contract, edge.caller_function))
+        reads = {
+            item.source.removeprefix("state:")
+            for item in model.flows
+            if item.contract == edge.caller_contract
+            and item.function == edge.caller_function
+            and item.source.startswith("state:")
+        }
         for (contract, name), event in functions.items():
-            if name.lower() not in _CALLBACKS:
+            if contract != receiver or name.lower() not in _CALLBACKS:
                 continue
             writes = _names_inside_text(event.text)
-            if any(
-                (edge.caller_contract, write) in readers or (contract, write) in readers
-                for write in writes
-            ):
+            shared = reads & writes
+            if not shared and caller_event is not None:
+                shared = {
+                    write
+                    for write in writes
+                    if re.search(rf"\b{re.escape(write)}\b", caller_event.text)
+                }
+            if shared:
                 model.findings.append(
                     CrossFinding(
                         "reentrancy",
-                        edge.caller_contract or contract,
-                        edge.caller_function or name,
-                        "A token call can reach a callback that writes state also used by the caller. "
-                        "This is potential evidence, not a confirmed reentrancy.",
+                        edge.caller_contract,
+                        edge.caller_function,
+                        "A resolved token receiver is this contract, and its callback writes "
+                        "state the caller read before the call. This is potential evidence, "
+                        "not a confirmed reentrancy.",
                         "structural",
                     )
                 )
 
 
-def _guarded(text: str) -> bool:
-    return bool(
-        re.search(r"\b(nonReentrant|lock|locked)\b", text)
-    ) and "require(!locked" in text.replace(" ", "")
+def _symbol_file(functions: SymbolTable, contract: str, name: str) -> str:
+    found = functions.matches(contract, name)
+    if len(found) != 1:
+        return ""
+    return found[0][0].file
+
+
+def _guarded(graph: SyntaxGraph, contract: str, event: SyntaxEvent) -> bool:
+    fields = _fields(event.extra)
+    modifiers = [
+        re.split(r"[\(\s]", item.strip(), maxsplit=1)[0]
+        for item in fields.get("modifiers", "").split(",")
+        if item.strip()
+    ]
+    for modifier in modifiers:
+        resolution = resolve_modifier(graph, contract, modifier)
+        if resolution.status == "resolved" and reentrancy_guard_holds(resolution.body):
+            return True
+    return False
+
+
+def _token_detail(caller: str, member: str, args: str, types: dict[tuple[str, str], str]) -> str:
+    parts = [item.strip() for item in args.split(",") if item.strip()]
+    if member.lower() in {"transferfrom", "safetransferfrom"} and len(parts) > 1:
+        recipient = parts[1]
+    else:
+        recipient = parts[0] if parts else ""
+    receiver = ""
+    if recipient in {"address(this)", "this"} or recipient.startswith("address(this"):
+        receiver = caller
+    else:
+        bare = recipient.removeprefix("address(").removesuffix(")") if recipient else ""
+        typed = types.get((caller, bare), "")
+        if typed == caller:
+            receiver = caller
+    return f"receiver={receiver};token_arg={recipient}"
+
+
+def _detail_field(detail: str, name: str) -> str:
+    prefix = f"{name}="
+    for part in detail.split(";"):
+        if part.startswith(prefix):
+            return part[len(prefix) :]
+    return ""
 
 
 def _write_after_call(text: str) -> bool:
