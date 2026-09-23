@@ -114,9 +114,10 @@ class _Builder:
         self._floor: tuple[int, int, int] | None = None
         self._constraints: list[str] = []
         self._structs: dict[str, str] = {}
+        self._aliases: dict[str, str] = {}
 
     def consume(self, root: object) -> None:
-        self._index_structs(root)
+        self._index_types(root)
         for child in _children(root):
             kind = _type(child)
             if kind == "pragma_directive":
@@ -334,7 +335,7 @@ class _Builder:
         )
         param_types = {param.name: self._type_of(param.annotation or "") for param in params}
         function_text = self._text(node)
-        self._event("sol_function", node, function_text, extra=extra)
+        self._event("sol_function", node, function_text, extra=extra, limit=12000)
         self._record_cfg(node, function_text, contract, name)
         if override:
             self._event("sol_override", node, name, extra=f"contract={contract}")
@@ -386,8 +387,13 @@ class _Builder:
                     self._event("sol_downcast", node, cast, extra=prefix + _cast_guard(text))
                 if re.match(r"uint(256)?\s*\(", cast) and _signed_argument(cast, param_types):
                     self._event("sol_sign_cast", node, cast, extra=prefix)
-            elif kind == "for_statement":
-                self._event("sol_loop", node, self._text(node), extra=prefix)
+            elif kind in {"for_statement", "while_statement", "do_while_statement"}:
+                self._event(
+                    "sol_loop", node, self._text(node), extra=prefix + f"|style={kind}", limit=4000
+                )
+            elif kind == "yul_evm_builtin":
+                opcode = self._text(node)
+                self._event("sol_yul", node, opcode, extra=prefix + f"|op={opcode}")
             elif kind == "assembly_statement":
                 self._event("sol_assembly", node, self._text(node)[:180], extra=prefix)
             elif kind == "identifier" and self._text(node) == "ecrecover":
@@ -549,6 +555,17 @@ class _Builder:
             signature = self._struct_signature(node)
             if signature:
                 self._structs[name] = signature
+        if kind == "modifier":
+            body = _first(node, "function_body")
+            body_text = self._text(body) if body is not None else ""
+            self._event(
+                "sol_modifier",
+                node,
+                body_text,
+                extra=f"contract={parent or ''}|name={name}",
+                limit=4000,
+            )
+            return
         self._event(f"sol_{kind}", node, name, extra=f"contract={parent or ''}")
 
     def _type_of(self, annotation: str) -> str:
@@ -571,7 +588,71 @@ class _Builder:
         canon = canonical_solidity_type(annotation)
         if canon:
             return canon
-        return self._structs.get(compact, "")
+        if compact in self._structs:
+            return self._structs[compact]
+        return self._aliases.get(compact, "")
+
+    def _index_types(self, root: object) -> None:
+        for node in _preorder(root):
+            kind = _type(node)
+            if kind == "enum_declaration":
+                name = _direct_identifier(self, node)
+                if name:
+                    self._aliases[name] = "uint8"
+                    self._event(
+                        "sol_type_def",
+                        node,
+                        name,
+                        extra=f"name={name}|abi=uint8|kind=enum",
+                    )
+            elif kind in {"contract_declaration", "interface_declaration"}:
+                name = _direct_identifier(self, node)
+                if name and name not in self._structs:
+                    self._aliases[name] = "address"
+                    label = "interface" if kind.startswith("interface") else "contract"
+                    self._event(
+                        "sol_type_def",
+                        node,
+                        name,
+                        extra=f"name={name}|abi=address|kind={label}",
+                    )
+        pending = [
+            node for node in _preorder(root) if _type(node) == "user_defined_type_definition"
+        ]
+        for _ in range(len(pending) + 1):
+            unresolved: list[object] = []
+            for node in pending:
+                match = re.search(r"\btype\s+([A-Za-z_]\w*)\s+is\s+([^;]+)", self._text(node))
+                if not match:
+                    continue
+                name = match.group(1)
+                canon = self._type_of(match.group(2).strip())
+                if not canon:
+                    unresolved.append(node)
+                    continue
+                self._aliases[name] = canon
+                self._event(
+                    "sol_type_def",
+                    node,
+                    name,
+                    extra=f"name={name}|abi={canon}|kind=udvt",
+                )
+            if len(unresolved) == len(pending):
+                break
+            pending = unresolved
+        self._index_structs(root)
+        for node in _preorder(root):
+            if _type(node) != "struct_declaration":
+                continue
+            name = _direct_identifier(self, node)
+            signature = self._structs.get(name, "")
+            if name and signature:
+                self._event(
+                    "sol_type_def",
+                    node,
+                    name,
+                    extra=f"name={name}|abi={signature}|kind=struct",
+                )
 
     def _index_structs(self, root: object) -> None:
         nodes = [node for node in _preorder(root) if _type(node) == "struct_declaration"]
@@ -617,11 +698,11 @@ class _Builder:
             return ""
         return "(" + ",".join(members) + ")"
 
-    def _event(self, kind: str, node: object, text: str, extra: str = "") -> None:
+    def _event(self, kind: str, node: object, text: str, extra: str = "", limit: int = 400) -> None:
         span = span_from_ts_node(node)
         self._events.append(
             SyntaxEvent(
-                kind=kind, line=span.start_line, text=text[:400], span=span, extra=extra[:400]
+                kind=kind, line=span.start_line, text=text[:limit], span=span, extra=extra[:800]
             )
         )
 
@@ -673,6 +754,13 @@ def _first(node: object, kind: str) -> object | None:
         if _type(child) == kind:
             return child
     return None
+
+
+def _direct_identifier(builder: _Builder, node: object) -> str:
+    for child in _children(node):
+        if _type(child) == "identifier":
+            return builder._text(child)
+    return ""
 
 
 def _child_text(builder: _Builder, node: object, kind: str) -> str:
@@ -750,9 +838,18 @@ def _packed_args(call_text: str, param_types: dict[str, str]) -> str:
             else:
                 static += 1
             continue
+        compact = re.sub(r"\s+", "", arg)
+        cast = re.fullmatch(
+            r"(u?int\d*|bytes\d+|address|bool|string|bytes)\((.*)\)",
+            compact,
+        )
         if re.fullmatch(r"0x[0-9a-fA-F]+|\d+|true|false|\"[^\"]*\"", arg):
             static += 1
-        elif arg.startswith("string(") or arg.startswith("bytes(") or arg.endswith("]"):
+        elif cast and cast.group(1) in {"string", "bytes"}:
+            dynamic += 1
+        elif cast:
+            static += 1
+        elif arg.startswith("string(") or arg.startswith("bytes(") or compact.endswith("[]"):
             dynamic += 1
         else:
             unknown += 1

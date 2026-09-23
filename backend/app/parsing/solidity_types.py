@@ -27,6 +27,41 @@ def canonical_solidity_type(annotation: str) -> str:
     return _piece(text)
 
 
+def canonical_with_aliases(annotation: str, aliases: dict[str, str]) -> str:
+    """Canonicalize ``annotation``, using aliases only for names that are known.
+
+    ``aliases`` values must already be canonical ABI types. An unknown name
+    stays unresolved instead of being guessed.
+    """
+    text = _strip_locations(annotation).replace(" ", "")
+    if not text:
+        return ""
+    return _piece_aliased(text, aliases)
+
+
+def _piece_aliased(compact: str, aliases: dict[str, str]) -> str:
+    array = re.fullmatch(r"(.+)\[(\d*)\]", compact)
+    if array and array.group(1):
+        base = _piece_aliased(array.group(1), aliases)
+        if not base:
+            return ""
+        return f"{base}[{array.group(2)}]"
+    if compact.startswith("("):
+        if not compact.endswith(")"):
+            return ""
+        inner = compact[1:-1]
+        parts = _split_top(inner)
+        if not parts or any(part == "" for part in parts):
+            return "" if inner else "()"
+        canon = [_piece_aliased(part, aliases) for part in parts]
+        if not all(canon):
+            return ""
+        return "(" + ",".join(canon) + ")"
+    if compact in aliases and aliases[compact]:
+        return aliases[compact]
+    return _piece(compact)
+
+
 def type_kind(annotation: str) -> str:
     """elementary, array, fixed_array, mapping, tuple, dynamic, or unresolved."""
     text = _strip_locations(annotation).replace(" ", "")

@@ -350,8 +350,10 @@ def test_safe_solidity_contract_has_no_solidity_findings(tmp_path: Path) -> None
             pragma solidity ^0.8.20;
             contract Safe {
                 uint nonce;
+                bytes32 DOMAIN_SEPARATOR;
                 function recover(bytes32 h, uint8 v, bytes32 r, bytes32 s) external returns (address) {
                     nonce += 1;
+                    h = keccak256(abi.encode(DOMAIN_SEPARATOR, address(this), nonce));
                     return ecrecover(h, v, r, s);
                 }
             }
@@ -363,7 +365,8 @@ def test_safe_solidity_contract_has_no_solidity_findings(tmp_path: Path) -> None
             pragma solidity ^0.8.20;
             contract Safe {
                 address owner;
-                modifier initializer() { _; }
+                bool initialized;
+                modifier initializer() { require(!initialized); initialized = true; _; }
                 function initialize(address next) external initializer { owner = next; }
             }
             """,

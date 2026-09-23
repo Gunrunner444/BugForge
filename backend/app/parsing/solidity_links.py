@@ -9,7 +9,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.parsing.keccak import function_selector
 from app.parsing.model import SyntaxGraph
+from app.parsing.solidity_types import canonical_with_aliases
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,48 @@ def relate_solidity_files(graphs: dict[str, SyntaxGraph]) -> list[SolidityLink]:
                     if name and re.search(rf"\b{re.escape(name)}\b", graph.source):
                         links.append(SolidityLink("struct", path, name, other, name))
     return links
+
+
+def unique_abi_aliases(graphs: dict[str, SyntaxGraph]) -> dict[str, str]:
+    """ABI types defined exactly once across the supplied graphs.
+
+    A repeated name is omitted. Callers must not guess which definition applies.
+    """
+    found: dict[str, list[str]] = {}
+    for graph in graphs.values():
+        if graph.language != "solidity" or graph.parser_tier.value == "profile_fallback":
+            continue
+        for event in graph.events:
+            if event.kind != "sol_type_def":
+                continue
+            fields = _fields(event.extra)
+            name = fields.get("name", "")
+            abi = fields.get("abi", "")
+            if name and abi:
+                found.setdefault(name, []).append(abi)
+    return {name: values[0] for name, values in found.items() if len(values) == 1}
+
+
+def selector_for_function(
+    graph: SyntaxGraph, function: str, aliases: dict[str, str]
+) -> tuple[str, str]:
+    """Return ``(canonical params, selector)`` or ``("", "")`` when unresolved."""
+    matches = [
+        entity
+        for entity in graph.entities
+        if entity.entity_type == "function" and entity.name == function
+    ]
+    if len(matches) != 1:
+        return "", ""
+    entity = matches[0]
+    canons: list[str] = []
+    for param in entity.parameters:
+        canon = canonical_with_aliases(param.annotation or "", aliases)
+        if not canon:
+            return "", ""
+        canons.append(canon)
+    joined = ",".join(canons)
+    return joined, function_selector(f"{function}({joined})")
 
 
 def _fields(extra: str) -> dict[str, str]:

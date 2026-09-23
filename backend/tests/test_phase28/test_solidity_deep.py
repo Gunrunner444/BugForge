@@ -288,7 +288,7 @@ def test_signature_domain_and_selfdestruct(tmp_path: Path) -> None:
         }
         """,
     )
-    assert "sol.signature_replay" not in domain
+    assert "sol.signature_replay" in domain
     assert "sol.signature_domain" in domain
     bound = _ids(
         tmp_path,
