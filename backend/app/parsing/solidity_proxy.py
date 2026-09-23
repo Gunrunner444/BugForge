@@ -382,6 +382,23 @@ def _notes(graph: SyntaxGraph, model: ProxyModel) -> list[str]:
                 f"`{site.contract}.{site.function}` can call out while replacing an implementation. "
                 "That may run initialization in the new context. This is not a proof that it does."
             )
+    detail = model.storage.yul_detail if model.storage is not None else None
+    known_impl = detail is not None and any(
+        item.slot.role == "implementation" and item.slot.slot_class == "known"
+        for item in detail.loads
+    )
+    if (
+        model.storage
+        and model.storage.compiler_status == "AVAILABLE"
+        and model.storage.compiler_matches > 0
+        and not model.storage.disagreements
+        and not model.storage.semantic_disagreements
+        and known_impl
+    ):
+        notes.append(
+            "Compiler layout does not disagree with the parser. That can strengthen "
+            "confidence in a known implementation slot. It does not verify the proxy."
+        )
     for access in model.storage.yul if model.storage else []:
         if not access.known:
             notes.append(

@@ -21,8 +21,11 @@ Unverified work ends as `INCONCLUSIVE` or `COMPLETED_NO_FINDINGS`.
 Replay observations are stored with `provenance=replay`. Replay evidence
 cannot qualify as live verification. AI hypothesis provenance cannot verify.
 Generated exploratory tests use `provenance=generated_test`, which is also
-non-live. The Docker execution of that test uses `provenance=execution`.
-Execution supports a hypothesis; it does not mark a finding verified.
+non-live. The Docker execution of that test uses `provenance=sandbox_execution`.
+That provenance is not in the live verification set. A sandbox failure is not
+a verified finding, and a sandbox pass is not a safe result. The graph links
+the hypothesis to the test (`motivates`) and the test to the attempt
+(`executes`). Support or contradiction of the hypothesis stays potential.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

@@ -28,6 +28,7 @@ from app.parsing.solidity_guards import initializer_is_protected, reentrancy_gua
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
+from app.parsing.solidity_storage import analyze_storage
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
 
 _DOC = RuleDocumentation(
@@ -73,6 +74,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         DonationInflationRule(),
         FeeOnTransferRule(),
         AssemblySensitiveRule(),
+        YulStructureRule(),
         CrossContractRule(),
         *_defi_rules(),
     ]
@@ -790,6 +792,29 @@ def project_has_context() -> bool:
     from app.parsing.solidity_cross import project_context_active
 
     return project_context_active()
+
+
+class YulStructureRule(_SolidityRule):
+    rule_id = "sol.yul"
+    vulnerability_class = VulnerabilityClass.DYNAMIC_EXECUTION
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        detail = analyze_storage(graph).yul_detail
+        if detail is None or not detail.hostile:
+            return []
+        anchor = next((event for event in graph.events if event.kind == "sol_function"), None)
+        if anchor is None:
+            return []
+        return [
+            self._obs(
+                graph,
+                anchor,
+                item,
+                item + " This is potential Yul structure, not a verified vulnerability. "
+                "An incomplete model is not evidence that the assembly is safe.",
+            )
+            for item in detail.hostile
+        ]
 
 
 class AssemblySensitiveRule(_SolidityRule):
