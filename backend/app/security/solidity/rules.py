@@ -1008,7 +1008,9 @@ def _with_semantics(
         if len(matches) == 1:
             from app.parsing.solidity_cross_dataflow import analyze_reentrancy
 
-            item.metadata["property_status"] = analyze_reentrancy(program, matches[0].identity).status
+            item.metadata["property_status"] = analyze_reentrancy(
+                program, matches[0].identity
+            ).status
         if delegate and len(matches) == 1:
             item.metadata["target_provenance"] = flow.target_provenance(matches[0].identity)
     return observations
