@@ -401,23 +401,40 @@ def _intraprocedural(
             ):
                 local, expr = match.group(1), match.group(2)
                 identity = f"{function.identity}:local:{local}:{node.node_id}"
-                deps = tuple(
-                    incoming[name]
-                    for name in re.findall(r"\b([A-Za-z_]\w*)\b", expr)
-                    if name in incoming
+                names = re.findall(r"\b([A-Za-z_]\w*)\b", expr)
+                deps = tuple(incoming[name] for name in names if name in incoming)
+                state_deps = tuple(
+                    item.operation_id
+                    for item in function.access_sites
+                    if item.kind != "write" and item.symbol in names and item.path in expr
                 )
+                deps = tuple(dict.fromkeys((*deps, *state_deps)))
                 _add_value(
                     values,
                     known,
                     identity,
                     "local",
-                    _expr_provenance(expr, function),
+                    _join_provenance(deps, values, expr, function),
                     deps,
                     function,
                 )
                 for dep in deps:
                     edges.append(DependencyEdge(dep, identity, "local-dependency"))
                 outgoing[local] = identity
+            store = re.search(
+                r"\b([A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.\w+)?)\s*=\s*([A-Za-z_]\w*)\s*;",
+                node.text,
+            )
+            if store and store.group(2) in outgoing:
+                for item in function.access_sites:
+                    if item.kind != "read" and item.path == store.group(1):
+                        edges.append(
+                            DependencyEdge(
+                                outgoing[store.group(2)],
+                                item.operation_id,
+                                "local-to-state",
+                            )
+                        )
             if outgoing != environments[node.node_id]:
                 environments[node.node_id] = outgoing
                 changed = True
@@ -472,10 +489,9 @@ def _intraprocedural(
     may_write: list[tuple[str, str]] = []
     if cfg.known:
         for site in function.call_sites:
-            call_nodes = [node.node_id for node in cfg.nodes if site.callee in node.text]
-            if len(call_nodes) != 1:
+            call_node = _node_for_offset(cfg, function, site.span.start_byte)
+            if call_node is None:
                 continue
-            call_node = call_nodes[0]
             before = {
                 node.node_id for node in cfg.nodes if call_node in cfg.reachable_from(node.node_id)
             }
@@ -510,13 +526,43 @@ def _add_value(
 
 
 def _expr_provenance(expr: str, function: SemanticFunction) -> str:
-    if (
-        "msg.sender" in expr
-        or "msg.value" in expr
-        or any(name in function.parameters for name in re.findall(r"\b([A-Za-z_]\w*)\b", expr))
-    ):
-        return "attacker"
+    del expr, function
     return "derived"
+
+
+def _join_provenance(
+    deps: tuple[str, ...], values: list[FlowValue], expr: str, function: SemanticFunction
+) -> str:
+    del expr, function
+    known = {item.identity: item.provenance for item in values}
+    found = {known[item] for item in deps if item in known}
+    if not found:
+        return "unknown" if deps else "derived"
+    if "attacker" in found:
+        return "attacker"
+    if "unknown" in found:
+        return "unknown"
+    if len(found) == 1:
+        return next(iter(found))
+    return "derived"
+
+
+def _node_for_offset(cfg: object, function: SemanticFunction, start_byte: int) -> int | None:
+    source = function.source or ""
+    base = function.span[0] if function.span else 0
+    local = start_byte - base
+    cursor = 0
+    for node in getattr(cfg, "nodes", []):
+        text = str(node.text).strip()
+        if not text:
+            continue
+        at = source.find(text, cursor)
+        if at < 0:
+            continue
+        if at <= local < at + len(text) + 2:
+            return int(node.node_id)
+        cursor = at
+    return None
 
 
 def _cfg_home(cfg: object, path: str, kind: str) -> int | None:

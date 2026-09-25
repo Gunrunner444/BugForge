@@ -41,21 +41,21 @@ def analyze_reentrancy(program: SemanticProgram, function_id: str) -> PropertyRe
             incomplete_reason=summary.incomplete_reason,
             function_ids=(summary.identity,),
         )
-    hits = [(call, path) for call, path in summary.may_write_after if path in summary.reads]
+    hits = _dependent_reentrancy(flow, summary)
     if not hits:
         return PropertyResult(
             "unknown",
             "low",
-            "no state read was shown to be written after a reachable call",
+            "no state read was shown to reach a later write through a call",
             function_ids=(summary.identity,),
         )
-    call, path = hits[0]
+    call, read_id, write_id = hits[0]
     return PropertyResult(
         "potential",
         "medium",
-        f"{path} may be written after call {call}",
+        "a state read reaches a write after an external call",
         provenance="state",
-        dependencies=(path, call),
+        dependencies=(read_id, write_id),
         function_ids=(summary.identity,),
         call_ids=(call,),
     )
@@ -86,9 +86,11 @@ def analyze_authorization(program: SemanticProgram, function_id: str) -> Propert
     )
 
 
-def analyze_delegatecall(program: SemanticProgram, function_id: str) -> PropertyResult:
+def analyze_delegatecall(
+    program: SemanticProgram, function_id: str, call_id: str = ""
+) -> PropertyResult:
     flow = analyze_dataflow(program)
-    provenance = flow.target_provenance(function_id)
+    provenance = flow.target_provenance(function_id, call_id)
     if provenance == "unknown":
         return PropertyResult(
             "unknown", "low", "delegatecall target was not resolved", provenance=provenance
@@ -110,12 +112,51 @@ def analyze_asset_flow(program: SemanticProgram, function_id: str) -> PropertyRe
         return PropertyResult("unknown", "low", "no asset flow was resolved")
     flow_item = summary.asset_flows[0]
     return PropertyResult(
-        "potential",
+        "unknown",
         "low",
-        f"asset movement {flow_item.source} to {flow_item.destination}",
+        f"asset flow observed from {flow_item.source} to {flow_item.destination}",
         dependencies=flow_item.dependencies,
         function_ids=(summary.identity,),
     )
+
+
+def _dependent_reentrancy(flow: DataflowModel, summary: object) -> list[tuple[str, str, str]]:
+    reads = getattr(summary, "may_read_before", ())
+    writes = getattr(summary, "may_write_after", ())
+    found: list[tuple[str, str, str]] = []
+    for call, write_path in writes:
+        read_paths = {path for item_call, path in reads if item_call == call}
+        read_ids = _ops(flow, {"read", "read-modify-write"}, read_paths)
+        write_ids = _ops(flow, {"write", "read-modify-write"}, {write_path})
+        for read_id in read_ids:
+            if _reaches(flow, read_id, set(write_ids)):
+                found.append((call, read_id, next(iter(write_ids))))
+                break
+    return found
+
+
+def _ops(flow: DataflowModel, kinds: set[str], paths: set[str]) -> list[str]:
+    found: list[str] = []
+    for value in flow.values.values():
+        if value.kind not in kinds:
+            continue
+        if any(f"::{path}:" in value.identity for path in paths):
+            found.append(value.identity)
+    return found
+
+
+def _reaches(flow: DataflowModel, source: str, sinks: set[str]) -> bool:
+    seen: set[str] = set()
+    stack = [source]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current in sinks and current != source:
+            return True
+        stack.extend(edge.sink for edge in flow.edges if edge.source == current)
+    return False
 
 
 def graph_edges_are_connected(flow: DataflowModel) -> bool:
