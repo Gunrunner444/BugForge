@@ -30,6 +30,7 @@ from app.models.security_agent import (
     DBResearchFinding,
     DBResearchHypothesis,
     DBResearchIdentity,
+    DBResearchLead,
     DBResearchMemory,
     DBResearchProject,
     DBResearchSession,
@@ -92,6 +93,7 @@ __all__ = [
     "DBResearchMemory",
     "DBResearchCheckpoint",
     "DBResearchIdentity",
+    "DBResearchLead",
     "DBResearchProject",
     "DBReproductionPlan",
 ]

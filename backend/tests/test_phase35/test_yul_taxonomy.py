@@ -143,3 +143,44 @@ def test_cross_contract_authorization_is_not_reentrancy(tmp_path: Path) -> None:
     """
     found = CrossContractRule().check(_graph(tmp_path, reentrancy, "Vault.sol"))
     assert any(item.vulnerability_class is VulnerabilityClass.REENTRANCY for item in found)
+
+
+def test_unbounded_calldataload_is_hostile_and_a_literal_offset_is_not(tmp_path: Path) -> None:
+    unbounded = """
+    pragma solidity ^0.8.20;
+    contract BadDecode {
+        function pull(bytes calldata data) external pure returns (address token, uint256 amount) {
+            assembly {
+                token := calldataload(data.offset)
+                amount := calldataload(add(data.offset, 32))
+            }
+        }
+    }
+    """
+    model = analyze_yul(_graph(tmp_path, unbounded, "Bad.sol"))
+    assert "unbounded calldata load" in model.hostile
+    observations = YulStructureRule().check(_graph(tmp_path, unbounded, "Bad.sol"))
+    assert any(
+        item.vulnerability_class is VulnerabilityClass.DYNAMIC_EXECUTION for item in observations
+    )
+    bounded = """
+    pragma solidity ^0.8.20;
+    contract SafeDecode {
+        function pull(bytes calldata data) external pure returns (address token, uint256 amount) {
+            require(data.length >= 64);
+            (token, amount) = abi.decode(data, (address, uint256));
+        }
+    }
+    """
+    safe = analyze_yul(_graph(tmp_path, bounded, "Safe.sol"))
+    assert "unbounded calldata load" not in safe.hostile
+    literal = analyze_yul(_graph(tmp_path, _yul("let word := calldataload(0)"), "Lit.sol"))
+    assert "unbounded calldata load" not in literal.hostile
+    checked = analyze_yul(
+        _graph(
+            tmp_path,
+            _yul("let size := calldatasize()\nlet word := calldataload(add(4, 32))"),
+            "Checked.sol",
+        )
+    )
+    assert "unbounded calldata load" not in checked.hostile

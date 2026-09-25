@@ -16,6 +16,17 @@ from app.parsing.solidity_cfg import _skip_string_or_comment
 
 _MAX_BLOCKS = 32
 _MAX_NODES = 200
+
+
+def _yul_limits() -> tuple[int, int]:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    blocks = int(getattr(settings, "solidity_yul_max_blocks", _MAX_BLOCKS) or _MAX_BLOCKS)
+    nodes = int(getattr(settings, "solidity_yul_max_nodes", _MAX_NODES) or _MAX_NODES)
+    return blocks, nodes
+
+
 _IMPL_SLOT = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 _ADMIN_SLOT = "b53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
 _BEACON_SLOT = "a3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
@@ -146,11 +157,13 @@ def analyze_yul(graph: SyntaxGraph) -> YulModel:
         for block in _assembly_blocks(_strip_comments(event.text), model):
             if model.incomplete:
                 break
-            if model.nodes >= _MAX_NODES or len(model.loads) + len(model.calls) >= _MAX_BLOCKS:
+            block_limit, node_limit = _yul_limits()
+            if model.nodes >= node_limit or len(model.loads) + len(model.calls) >= block_limit:
                 _limit(model)
                 break
             if re.search(r"\bassembly\b", block):
                 _trace(model, "nested assembly", False)
+            _note_unbounded_calldata(block, model, seen_hostile)
             _walk_block(
                 block,
                 constants,
@@ -177,7 +190,8 @@ def _walk_block(
     env: dict[str, YulExpression] = {}
     index = 0
     while index < len(block) and not model.incomplete:
-        if model.nodes >= _MAX_NODES:
+        _, node_limit = _yul_limits()
+        if model.nodes >= node_limit:
             _limit(model)
             break
         skipped = _skip_string_or_comment(block, index)
@@ -749,6 +763,22 @@ def _unbalanced(model: YulModel, kind: str) -> None:
 
 def _trace(model: YulModel, summary: str, known: bool) -> None:
     model.traces.append(YulTrace(summary, known))
+
+
+def _note_unbounded_calldata(block: str, model: YulModel, seen: set[str]) -> None:
+    """Flag a dynamic ``calldataload`` that the block never bounds with ``calldatasize``.
+
+    A numeric offset such as ``calldataload(0)`` is not this pattern. A later
+    ``calldatasize`` check in the same block keeps the load unknown rather than hostile.
+    """
+    if re.search(r"\bcalldatasize\s*\(", block):
+        return
+    for match in re.finditer(r"\bcalldataload\s*\(\s*([^)]*)\)", block):
+        argument = " ".join(match.group(1).split())
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)", argument):
+            continue
+        _hostile(model, seen, "unbounded calldata load")
+        return
 
 
 def _hostile(model: YulModel, seen: set[str], summary: str) -> None:

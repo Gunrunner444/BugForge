@@ -26,6 +26,7 @@ def _register_security_testing(catalog: PluginCatalog) -> None:
     from app.adapters.proxies.burp import BurpHistoryAdapter
     from app.adapters.proxies.har import HarProxyAdapter
     from app.adapters.security_tools.nuclei import NucleiAdapter
+    from app.adapters.security_tools.semgrep import SemgrepAdapter
     from app.adapters.security_tools.zap import ZapAdapter
 
     catalog.browsers.register(
@@ -35,6 +36,9 @@ def _register_security_testing(catalog: PluginCatalog) -> None:
     catalog.proxies.register("burp", BurpHistoryAdapter, description="Burp HTTP history import")
     catalog.security_tools.register("zap", ZapAdapter, description="OWASP ZAP automation/alerts")
     catalog.security_tools.register("nuclei", NucleiAdapter, description="Nuclei template scans")
+    catalog.security_tools.register(
+        "semgrep", SemgrepAdapter, description="Optional Semgrep JSON ingest"
+    )
     catalog.fuzzers.register(
         "controlled",
         ControlledFuzzingAdapter,

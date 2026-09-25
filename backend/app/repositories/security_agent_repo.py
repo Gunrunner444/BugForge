@@ -106,7 +106,12 @@ class SecurityAgentRepository:
         row.exchanges = _redact_json(session.exchanges)
         row.operator_identity = session.operator_identity
         row.research_project_id = session.research_project_id
-        row.human_overrides = {"strategy": session.strategy, "next_action": session.next_action}
+        row.human_overrides = {
+            "strategy": session.strategy,
+            "next_action": session.next_action,
+            "project_key": session.project_id,
+            "research_route": session.research_route,
+        }
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         for hyp in session.hypotheses:
@@ -261,6 +266,16 @@ class SecurityAgentRepository:
                     )
                 )
                 del snap
+        from app.security_agent.chains import remember_chain
+        from app.security_agent.leads import save_lead
+        from app.security_agent.memory import ResearchMemory
+
+        if session.memory is None:
+            session.memory = ResearchMemory(project_id=session.project_id)
+        for chain in session.chains:
+            remember_chain(session.memory, chain)
+        for lead in session.leads:
+            await save_lead(self._session, lead)
         memory = session.memory
         if memory is not None:
             await self._session.execute(
@@ -528,6 +543,15 @@ class SecurityAgentRepository:
                 extra=dict(item.payload or {}),
             )
         research.memory = memory
+        from app.security_agent.chains import chains_from_memory
+        from app.security_agent.leads import load_project_leads
+
+        project_key = str(overrides.get("project_key") or row.project_id or "")
+        if project_key and not research.project_id:
+            research.project_id = project_key
+        research.research_route = str(overrides.get("research_route") or "wide")
+        research.leads = await load_project_leads(self._session, project_key)
+        research.chains = chains_from_memory(memory)
         research.exploratory_attempts = [
             _exploratory_record(item) for item in row.exploratory_attempts
         ]

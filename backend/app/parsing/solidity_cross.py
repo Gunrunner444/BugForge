@@ -20,6 +20,22 @@ from app.parsing.solidity_proxy import analyze_proxy
 
 _MAX_CONTRACTS = 48
 _MAX_EDGES = 240
+
+
+def _contract_limit() -> int:
+    from app.core.config import get_settings
+
+    return int(
+        getattr(get_settings(), "solidity_cross_max_contracts", _MAX_CONTRACTS) or _MAX_CONTRACTS
+    )
+
+
+def _edge_limit() -> int:
+    from app.core.config import get_settings
+
+    return int(getattr(get_settings(), "solidity_cross_max_edges", _MAX_EDGES) or _MAX_EDGES)
+
+
 _CALLBACKS = {
     "tokensreceived",
     "ontokenreceived",
@@ -180,8 +196,8 @@ def build_project(graphs: dict[str, SyntaxGraph]) -> ProjectModel:
         if graph.language == "solidity" and graph.parser_tier.value != "profile_fallback"
     }
     contracts = _contracts(solidity)
-    if len(contracts) > _MAX_CONTRACTS:
-        contracts = contracts[:_MAX_CONTRACTS]
+    if len(contracts) > _contract_limit():
+        contracts = contracts[: _contract_limit()]
         model.incomplete = True
         model.limit_reason = "contract limit reached; further relationships are unknown"
     model.contracts = contracts
@@ -194,7 +210,7 @@ def build_project(graphs: dict[str, SyntaxGraph]) -> ProjectModel:
         _flows_for_graph(model, graph, functions)
         _authorization(model, graph, by_name, functions)
         _economics(model, graph)
-        if len(model.calls) >= _MAX_EDGES:
+        if len(model.calls) >= _edge_limit():
             model.incomplete = True
             model.limit_reason = model.limit_reason or "call-edge limit reached"
             break
@@ -219,7 +235,7 @@ def _contracts(graphs: dict[str, SyntaxGraph]) -> list[ContractRef]:
 
 
 def _add_edge(model: ProjectModel, edge: CallEdge) -> None:
-    if len(model.calls) >= _MAX_EDGES:
+    if len(model.calls) >= _edge_limit():
         model.incomplete = True
         model.limit_reason = model.limit_reason or "call-edge limit reached"
         return
