@@ -421,3 +421,26 @@ class DBResearchExploratoryAttempt(Base):
     session: Mapped[DBResearchSession] = relationship(
         "DBResearchSession", back_populates="exploratory_attempts"
     )
+
+
+class DBResearchLead(Base):
+    """Persistent research lead. Status is not a verification state."""
+
+    __tablename__ = "research_leads"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    target: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="NEW")
+    priority: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    next_action: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    kill_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    evidence_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    observation_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    related_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    chain_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )

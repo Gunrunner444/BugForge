@@ -684,16 +684,43 @@ def _record_comparisons(graph: SyntaxGraph, model: StorageModel) -> None:
             comparison = compare_storage_layouts(model, model, left_name, right_name, relationship)
             model.comparisons.append(comparison)
             if comparison.compatible is False and relationship == "proxy-implementation":
-                detail = "; ".join(
-                    f"{item.kind} `{item.variable}` {item.detail}".strip()
-                    for item in comparison.changes
+                notes.append(_incompatible_note(relationship, left_name, right_name, comparison))
+    if delegate_contracts:
+        implementations = [name for name in contracts if name not in delegate_contracts]
+        for index, left_name in enumerate(implementations):
+            for right_name in implementations[index + 1 :]:
+                comparison = compare_storage_layouts(
+                    model, model, left_name, right_name, "implementation-upgrade"
                 )
-                notes.append(
-                    f"Incompatible {relationship} between `{left_name}` and `{right_name}`: "
-                    f"{detail}. Shared slot numbers are not a collision by themselves. "
-                    "This is potential evidence, not a confirmed collision."
-                )
+                model.comparisons.append(comparison)
+                if comparison.compatible is False and _shares_layout_name(
+                    model, left_name, right_name
+                ):
+                    notes.append(
+                        _incompatible_note(
+                            "implementation-upgrade", left_name, right_name, comparison
+                        )
+                    )
     model.overlaps = list(dict.fromkeys(notes))
+
+
+def _shares_layout_name(model: StorageModel, left: str, right: str) -> bool:
+    left_names = {item.name for item in model.variables if item.contract == left and item.name}
+    right_names = {item.name for item in model.variables if item.contract == right and item.name}
+    return bool(left_names & right_names)
+
+
+def _incompatible_note(
+    relationship: str, left_name: str, right_name: str, comparison: StorageLayoutComparison
+) -> str:
+    detail = "; ".join(
+        f"{item.kind} `{item.variable}` {item.detail}".strip() for item in comparison.changes
+    )
+    return (
+        f"Incompatible {relationship} between `{left_name}` and `{right_name}`: "
+        f"{detail}. Shared slot numbers are not a collision by themselves. "
+        "This is potential evidence, not a confirmed collision."
+    )
 
 
 def _storage_sequence(model: StorageModel, contract: str) -> tuple[list[StorageVariable], str]:

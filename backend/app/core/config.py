@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     solidity_project_max_bytes: int = 200_000
     solidity_project_include_dependencies: bool = False
     solidity_compiler_emit_ir: bool = True
+    solidity_yul_max_blocks: int = 32
+    solidity_yul_max_nodes: int = 200
     solidity_cross_max_contracts: int = 48
     solidity_cross_max_edges: int = 240
     solidity_compiler_timeout_seconds: int = 20

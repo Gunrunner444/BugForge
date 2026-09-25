@@ -1,0 +1,153 @@
+"""Research leads stored in BugForge's existing research persistence.
+
+A lead is a work item. It is not a finding and it is never verified by itself.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.security_agent import DBResearchLead
+
+LEAD_STATUSES = frozenset(
+    {"NEW", "ACTIVE", "BLOCKED", "KILLED", "PROMOTED", "REPRODUCED", "VERIFIED", "REPORTED"}
+)
+
+
+@dataclass
+class ResearchLead:
+    id: str
+    project_id: str
+    session_id: str
+    target: str
+    hypothesis: str
+    status: str = "NEW"
+    priority: str = "medium"
+    next_action: str = ""
+    kill_reason: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    observation_ids: list[str] = field(default_factory=list)
+    related_ids: list[str] = field(default_factory=list)
+    chain_ids: list[str] = field(default_factory=list)
+    updated_at: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in LEAD_STATUSES:
+            raise ValueError(f"unknown lead status {self.status}")
+        if not self.updated_at:
+            self.updated_at = datetime.now(UTC).isoformat()
+
+
+class LeadStore:
+    def __init__(self) -> None:
+        self._items: dict[str, ResearchLead] = {}
+
+    def upsert(self, lead: ResearchLead) -> ResearchLead:
+        _validate(lead)
+        lead.updated_at = datetime.now(UTC).isoformat()
+        self._items[lead.id] = lead
+        return lead
+
+    def get(self, lead_id: str) -> ResearchLead | None:
+        return self._items.get(lead_id)
+
+    def list_project(self, project_id: str) -> list[ResearchLead]:
+        return [item for item in self._items.values() if item.project_id == project_id]
+
+    def stale(self, project_id: str, *, before: str) -> list[ResearchLead]:
+        return [
+            item
+            for item in self.list_project(project_id)
+            if item.status in {"NEW", "ACTIVE", "BLOCKED"} and item.updated_at < before
+        ]
+
+
+def new_lead(
+    *,
+    project_id: str,
+    session_id: str,
+    target: str,
+    hypothesis: str,
+    priority: str = "medium",
+) -> ResearchLead:
+    return ResearchLead(
+        id=uuid4().hex,
+        project_id=project_id,
+        session_id=session_id,
+        target=target,
+        hypothesis=hypothesis,
+        priority=priority,
+    )
+
+
+def _validate(lead: ResearchLead) -> None:
+    if lead.status == "KILLED" and not lead.kill_reason.strip():
+        raise ValueError("a killed lead requires a kill reason")
+    if lead.status == "VERIFIED" and not lead.evidence_ids:
+        raise ValueError("a lead cannot be verified without evidence ids")
+
+
+def _stamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def lead_from_row(row: DBResearchLead) -> ResearchLead:
+    updated = row.updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=UTC)
+    return ResearchLead(
+        id=row.id,
+        project_id=row.project_id,
+        session_id=row.session_id,
+        target=row.target,
+        hypothesis=row.hypothesis,
+        status=row.status,
+        priority=row.priority,
+        next_action=row.next_action,
+        kill_reason=row.kill_reason,
+        evidence_ids=list(row.evidence_ids or []),
+        observation_ids=list(row.observation_ids or []),
+        related_ids=list(row.related_ids or []),
+        chain_ids=list(row.chain_ids or []),
+        updated_at=updated.isoformat(),
+    )
+
+
+async def save_lead(session: AsyncSession, lead: ResearchLead) -> ResearchLead:
+    """Write a lead into the existing research_leads table."""
+    _validate(lead)
+    lead.updated_at = datetime.now(UTC).isoformat()
+    row = await session.get(DBResearchLead, lead.id)
+    if row is None:
+        row = DBResearchLead(id=lead.id, updated_at=_stamp(lead.updated_at))
+        session.add(row)
+    row.project_id = lead.project_id
+    row.session_id = lead.session_id
+    row.target = lead.target
+    row.hypothesis = lead.hypothesis
+    row.status = lead.status
+    row.priority = lead.priority
+    row.next_action = lead.next_action
+    row.kill_reason = lead.kill_reason
+    row.evidence_ids = list(lead.evidence_ids)
+    row.observation_ids = list(lead.observation_ids)
+    row.related_ids = list(lead.related_ids)
+    row.chain_ids = list(lead.chain_ids)
+    row.updated_at = _stamp(lead.updated_at)
+    await session.flush()
+    return lead
+
+
+async def load_project_leads(session: AsyncSession, project_id: str) -> list[ResearchLead]:
+    result = await session.execute(
+        select(DBResearchLead).where(DBResearchLead.project_id == project_id)
+    )
+    return [lead_from_row(row) for row in result.scalars()]

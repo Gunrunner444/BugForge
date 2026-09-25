@@ -26,6 +26,7 @@ from app.parsing.solidity_flow import (
 )
 from app.parsing.solidity_guards import initializer_is_protected, reentrancy_guard_holds
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
+from app.parsing.solidity_methodology import analyze_methodology
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
 from app.parsing.solidity_storage import analyze_storage
@@ -77,6 +78,11 @@ def solidity_security_rules() -> list[SecurityRule]:
         AssemblySensitiveRule(),
         YulStructureRule(),
         CrossContractRule(),
+        AccountingDesyncRule(),
+        SiblingAuthRule(),
+        BoundaryRule(),
+        Erc4626InflationRule(),
+        FlashSpotRule(),
         *_defi_rules(),
     ]
 
@@ -390,6 +396,58 @@ class InitializerRule(_SolidityRule):
                 )
             )
         return found
+
+
+class _MethodologyRule(_SolidityRule):
+    issue_id = ""
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for issue in analyze_methodology(graph):
+            if issue.rule_id != self.issue_id:
+                continue
+            event = next(
+                (
+                    item
+                    for item in graph.events
+                    if item.kind == "sol_function" and issue.function in item.text
+                ),
+                None,
+            )
+            if event is None:
+                continue
+            found.append(self._obs(graph, event, self.issue_id, issue.summary))
+        return found
+
+
+class AccountingDesyncRule(_MethodologyRule):
+    rule_id = "sol.accounting_desync"
+    issue_id = "sol.accounting_desync"
+    vulnerability_class = VulnerabilityClass.BUSINESS_LOGIC
+
+
+class SiblingAuthRule(_MethodologyRule):
+    rule_id = "sol.sibling_auth"
+    issue_id = "sol.sibling_auth"
+    vulnerability_class = VulnerabilityClass.AUTHORIZATION
+
+
+class BoundaryRule(_MethodologyRule):
+    rule_id = "sol.boundary"
+    issue_id = "sol.boundary"
+    vulnerability_class = VulnerabilityClass.BUSINESS_LOGIC
+
+
+class Erc4626InflationRule(_MethodologyRule):
+    rule_id = "sol.erc4626_inflation"
+    issue_id = "sol.erc4626_inflation"
+    vulnerability_class = VulnerabilityClass.BUSINESS_LOGIC
+
+
+class FlashSpotRule(_MethodologyRule):
+    rule_id = "sol.flash_spot"
+    issue_id = "sol.flash_spot"
+    vulnerability_class = VulnerabilityClass.BUSINESS_LOGIC
 
 
 class StorageCollisionRule(_SolidityRule):
