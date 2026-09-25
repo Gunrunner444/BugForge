@@ -133,10 +133,9 @@ def _rank_step(session: Any, evidence_id: str, node: Any, session_id: str, proje
     for finding in getattr(session, "findings", []) or []:
         if not getattr(finding, "is_verified", False):
             continue
-        if evidence_id not in {str(getattr(finding, "id", ""))}:
-            continue
         items = getattr(getattr(finding, "evidence", None), "items", ())
-        if independent_verification_items(items, project_id=project_id):
+        verified = independent_verification_items(items, project_id=project_id)
+        if any(str(getattr(item, "id", "") or "") == evidence_id for item in verified):
             return "verified"
     extra = dict(getattr(node, "extra", {}) or {})
     extra.pop("lifecycle", None)

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from app.parsing.model import SyntaxEvent, SyntaxGraph
 from app.parsing.span import SourceSpan
 
-SCHEMA_VERSION = "phase38.1"
+SCHEMA_VERSION = "phase39.1"
 FUNCTION_LIMIT = 200
 _LOW = frozenset({"call", "delegatecall", "staticcall", "transfer", "send"})
 _TOKEN = frozenset({"transfer", "transferFrom", "safeTransfer", "safeTransferFrom", "mint", "burn"})
@@ -65,6 +65,8 @@ class StateAccess:
     domain: str
     location: str
     span: SourceSpanRef
+    operation_id: str = ""
+    guard_status: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class SemanticCall:
     return_used: bool
     success_handled: bool
     span: SourceSpanRef
+    call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,7 @@ class SemanticFunction:
     access_sites: tuple[StateAccess, ...] = ()
     guard: GuardFact | None = None
     constraints: tuple[str, ...] = ()
+    parameters: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
@@ -264,10 +268,10 @@ def _compiler_binding(
     if len({item.get("version", "") for item in project.compiler_profiles}) > 1:
         version = "mixed"
     profiles: list[dict[str, str]] = []
-    file_name = graph.file_path.replace("\\", "/").split("/")[-1]
     for item in project.compiler_profiles:
         sources = item.get("sources", "")
-        if sources and file_name not in sources and graph.file_path not in sources:
+        listed = [part.strip() for part in sources.split(",") if part.strip()]
+        if listed and not any(_same_source(graph.file_path, part) for part in listed):
             continue
         profiles.append(
             {
@@ -356,11 +360,11 @@ def _functions(
             continue
         contract = fields.get("contract", "")
         state = by_contract.get(contract, {})
-        shadowed = _shadowed_names(event.text)
+        shadowed = _param_names(event.text)
         visible = {symbol: decl for symbol, decl in state.items() if symbol not in shadowed}
         inside = _inside(graph, event)
         reads, writes, same, before, after = _effects(event.text, visible, inside)
-        accesses = _accesses(graph, event.text, visible)
+        accesses = _stamp_operation_guards(event.text, _accesses(graph, event, visible))
         call_sites = _calls(graph, event, name, names, inside)
         low = tuple(
             sorted({site.callee for site in call_sites if site.callee in _LOW and site.external})
@@ -406,6 +410,7 @@ def _functions(
                 access_sites=tuple(accesses),
                 guard=guard,
                 constraints=_constraints(event.text),
+                parameters=tuple(sorted(_param_names(event.text))),
             )
         )
     return found, len(events), reason
@@ -416,82 +421,114 @@ def _effects(
     visible: dict[str, StateDeclaration],
     inside: list[SyntaxEvent],
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    writes = {
-        _extra(event).get("name", "")
-        for event in inside
-        if event.kind == "sol_state_write" and _extra(event).get("name", "") in visible
-    }
-    reads = {
-        _extra(event).get("name", "")
-        for event in inside
-        if event.kind == "sol_state_read" and _extra(event).get("name", "") in visible
-    }
+    del inside
+    from app.parsing.solidity_cfg import extract_body, split_top_statements
+    from app.parsing.solidity_expr import occurrences
+
+    reads: set[str] = set()
+    writes: set[str] = set()
     same: set[str] = set()
-    for name in visible:
-        if re.search(rf"\b{re.escape(name)}\s*(?:\+=|-=|\*=|/=)", text):
-            same.add(name)
-            reads.add(name)
-            writes.add(name)
-        elif (
-            re.search(rf"\b{re.escape(name)}\b[^\n;]*\b{re.escape(name)}\b", text)
-            and name in writes
-        ):
-            if re.search(rf"\b{re.escape(name)}\s*(?:\[[^\]]+\])?(?:\.\w+)?\s*=", text):
-                same.add(name)
-                reads.add(name)
-    read_before = set(same)
-    write_before: set[str] = set()
-    for name in writes & reads:
-        assign = re.search(rf"\b{re.escape(name)}\s*(?:\[[^\]]+\])?\s*=(?!=)", text)
-        later = re.search(rf"=\s*[^;]*\b{re.escape(name)}\b", text)
-        if assign and later and assign.start() < later.start() and name not in same:
-            write_before.add(name)
+    body = extract_body(text) or text
+    for statement in split_top_statements(body):
+        items = occurrences(statement, set(visible))
+        statement_reads = {item.base for item in items if item.kind != "write"}
+        statement_writes = {item.base for item in items if item.kind != "read"}
+        reads |= {item.base for item in items if item.kind != "write"}
+        writes |= statement_writes
+        same |= statement_reads & statement_writes
     return (
         tuple(sorted(reads)),
         tuple(sorted(writes)),
         tuple(sorted(same)),
-        tuple(sorted(read_before)),
-        tuple(sorted(write_before)),
+        tuple(sorted(same)),
+        (),
     )
 
 
 def _accesses(
-    graph: SyntaxGraph, text: str, visible: dict[str, StateDeclaration]
+    graph: SyntaxGraph, function: SyntaxEvent, visible: dict[str, StateDeclaration]
 ) -> list[StateAccess]:
+    from app.parsing.solidity_cfg import extract_body, split_top_statements
+    from app.parsing.solidity_expr import occurrences
+
+    text = function.text
     found: list[StateAccess] = []
-    pattern = re.compile(r"\b([A-Za-z_]\w*)\s*((?:\[[^\]]+\])+)\s*((?:\.\s*[A-Za-z_]\w*)*)")
-    for match in pattern.finditer(text):
-        base, indexes, members = match.group(1), match.group(2), match.group(3) or ""
-        decl = visible.get(base)
-        if decl is None:
+    body = extract_body(text) or text
+    body_at = text.find(body) if body else 0
+    origin = function.span.start_byte if function.span else 0
+    cursor = 0
+    for statement in split_top_statements(body):
+        at = body.find(statement, cursor)
+        if at < 0:
+            at = cursor
+        cursor = at + len(statement)
+        for item in occurrences(statement, set(visible)):
+            decl = visible.get(item.base)
+            if decl is None:
+                continue
+            domain = "state"
+            if item.index_text and "mapping" in decl.type_name:
+                domain = "mapping"
+            elif item.index_text:
+                domain = "array"
+            if item.member_path:
+                domain = "struct-member"
+            start = origin + body_at + at + item.start
+            end = origin + body_at + at + item.end
+            line = text.count("\n", 0, body_at + at + item.start) + (
+                function.span.start_line if function.span else 1
+            )
+            found.append(
+                StateAccess(
+                    declaration_id=decl.declaration_id,
+                    contract=decl.contract,
+                    symbol=item.base,
+                    path=item.path,
+                    index_text=item.index_text,
+                    member_path=item.member_path,
+                    kind=item.kind,
+                    domain=domain,
+                    location=decl.location,
+                    span=SourceSpanRef(graph.file_path, start, end, line, line),
+                    operation_id=f"{decl.declaration_id}:{item.kind}:{start}",
+                )
+            )
+    return found
+
+
+def _stamp_operation_guards(text: str, accesses: list[StateAccess]) -> list[StateAccess]:
+    from app.parsing.solidity_cfg import operation_guarded
+
+    stamped: list[StateAccess] = []
+    for item in accesses:
+        if item.kind == "read":
+            stamped.append(item)
             continue
-        member_path = members.replace(" ", "")
-        path = f"{base}{indexes}{member_path}"
-        domain = (
-            "mapping"
-            if "mapping" in decl.type_name
-            else "array"
-            if "[" in decl.type_name
-            else "state"
-        )
-        if member_path:
-            domain = "struct-member"
-        line = text.count("\n", 0, match.start()) + 1
-        found.append(
+        verdict = operation_guarded(text, item.path)
+        status = "guarded" if verdict is True else "unguarded" if verdict is False else "unknown"
+        stamped.append(
             StateAccess(
-                declaration_id=decl.declaration_id,
-                contract=decl.contract,
-                symbol=base,
-                path=path,
-                index_text=indexes,
-                member_path=member_path.lstrip("."),
-                kind="write" if re.search(rf"{re.escape(path)}\s*(?:=|\+=|-=)", text) else "read",
-                domain=domain,
-                location=decl.location,
-                span=SourceSpanRef(graph.file_path, match.start(), match.end(), line, line),
+                declaration_id=item.declaration_id,
+                contract=item.contract,
+                symbol=item.symbol,
+                path=item.path,
+                index_text=item.index_text,
+                member_path=item.member_path,
+                kind=item.kind,
+                domain=item.domain,
+                location=item.location,
+                span=item.span,
+                operation_id=item.operation_id,
+                guard_status=status,
             )
         )
-    return found
+    return stamped
+
+
+def _same_source(file_path: str, source: str) -> bool:
+    file_norm = file_path.replace("\\", "/").rstrip("/")
+    source_norm = source.replace("\\", "/").lstrip("./")
+    return file_norm == source_norm or file_norm.endswith("/" + source_norm)
 
 
 def _calls(
@@ -516,7 +553,15 @@ def _calls(
             continue
         seen.add(key)
         found.append(
-            _classify_call(graph, function_name, site.name, site.qualified, site.span, inside)
+            _classify_call(
+                graph,
+                function_name,
+                site.name,
+                site.qualified,
+                site.span,
+                inside,
+                function.text,
+            )
         )
     return found
 
@@ -528,6 +573,7 @@ def _classify_call(
     qualified: str,
     span: SourceSpan | None,
     inside: list[SyntaxEvent],
+    function_text: str,
 ) -> SemanticCall:
     head = re.split(r"[\(\{]", qualified, maxsplit=1)[0].strip()
     target = head[: -len(callee)].rstrip(".") if callee and head.endswith(callee) else head
@@ -537,7 +583,9 @@ def _classify_call(
         value = value_match.group(1).strip()
     checked = any(
         event.kind == "sol_external_call"
-        and callee in event.text
+        and event.span is not None
+        and span is not None
+        and event.span.start_byte == span.start_byte
         and _extra(event).get("checked") == "true"
         for event in inside
     )
@@ -545,7 +593,21 @@ def _classify_call(
     external = True
     resolution = "unresolved"
     callback = False
-    if callee in {"delegatecall"}:
+    for member, kind in (
+        (".delegatecall", "delegatecall"),
+        (".staticcall", "staticcall"),
+        (".call", "low-level-call"),
+        (".send", "send"),
+    ):
+        if member in qualified and f"{member}{{" in qualified or member + "(" in qualified:
+            call_type = kind
+            target = qualified.split(member, 1)[0].strip()
+            callee = member[1:]
+            resolution = "low-level"
+            break
+    if call_type == "delegatecall":
+        pass
+    elif callee in {"delegatecall"}:
         call_type = "delegatecall"
     elif callee == "staticcall":
         call_type = "staticcall"
@@ -572,10 +634,15 @@ def _classify_call(
         resolution = "external-this"
     elif callee in {"delegatecall", "call", "staticcall", "send"}:
         resolution = "low-level"
+    elif target == "super":
+        external = False
+        call_type = "inherited"
+        resolution = "unknown" if _overload_count(graph, callee) != 1 else "resolved"
     elif "." not in head and callee:
         external = False
         call_type = "internal"
-        resolution = "resolved" if _function_names_text(graph, callee) else "unresolved"
+        count = _overload_count(graph, callee)
+        resolution = "resolved" if count == 1 else "unknown" if count > 1 else "unresolved"
     elif "." in head:
         call_type = "contract-typed"
         resolution = "unresolved"
@@ -590,7 +657,9 @@ def _classify_call(
         call_type=call_type,
         external=external or callee in _LOW,
         callback_potential=callback or callee in {"call", "delegatecall", "transfer", "send"},
-        return_used=bool(re.search(r"=\s*[^;]*" + re.escape(callee), qualified)),
+        return_used=_return_used(
+            function_text, qualified, source_span.start_byte if source_span else 0
+        ),
         success_handled=checked,
         span=SourceSpanRef(
             graph.file_path,
@@ -599,7 +668,25 @@ def _classify_call(
             source_span.start_line if source_span else 0,
             source_span.end_line if source_span else 0,
         ),
+        call_id=f"{caller}:{callee}:{source_span.start_byte if source_span else 0}",
     )
+
+
+def _overload_count(graph: SyntaxGraph, name: str) -> int:
+    return sum(
+        1
+        for event in graph.events
+        if event.kind == "sol_function" and _function_name(event) == name
+    )
+
+
+def _return_used(function_text: str, qualified: str, start_byte: int) -> bool:
+    local = function_text.find(qualified)
+    if local < 0:
+        local = 0
+    prefix = function_text[max(0, local - 48) : local]
+    del start_byte
+    return bool(re.search(r"(=|\()\s*$", prefix))
 
 
 def _function_names_text(graph: SyntaxGraph, name: str) -> bool:
@@ -651,12 +738,16 @@ def _guard(
         brace = text.find("{")
         if brace >= 0:
             text = text[: brace + 1] + " ".join(injections) + text[brace + 1 :]
-    operation = writes[0] if writes else (calls[0] if calls else "")
-    verdict = operation_guarded(text, operation) if operation else None
-    if verdict is True:
+    operations = [item for item in (*writes, *calls) if item]
+    verdicts: list[bool | None] = [operation_guarded(text, operation) for operation in operations]
+    if not operations:
+        status = "unknown"
+    elif ambiguous or unresolved_guard or any(item is None for item in verdicts):
+        status = "unknown"
+    elif all(item is True for item in verdicts):
         dominates = True
         status = "guarded"
-    elif verdict is False and not ambiguous and not unresolved_guard:
+    elif any(item is False for item in verdicts):
         status = "unguarded"
     else:
         status = "unknown"
@@ -705,6 +796,13 @@ def _path_status(text: str) -> str:
 
 def _constraints(text: str) -> tuple[str, ...]:
     return tuple(match.group(0)[:180] for match in re.finditer(r"require\s*\([^;]*\)", text))
+
+
+def _param_names(text: str) -> set[str]:
+    header = text.split("{", 1)[0]
+    params = header[header.find("(") + 1 : header.rfind(")")] if "(" in header else ""
+    names = set(re.findall(r"\b([A-Za-z_]\w*)\s*(?:,|$)", params))
+    return {name for name in names if name not in {"memory", "storage", "calldata"}}
 
 
 def _shadowed_names(text: str) -> set[str]:
