@@ -218,6 +218,9 @@ class ResearchSession:
     research_project_id: str = ""
     controller: ResearchController = ResearchController.INTERNAL_LLM
     exploratory_attempts: list[Any] = field(default_factory=list)
+    leads: list[Any] = field(default_factory=list)
+    chains: list[Any] = field(default_factory=list)
+    research_route: str = "wide"
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -266,6 +269,9 @@ class ResearchSession:
             "operator_identity": self.operator_identity,
             "replay_mode": self.replay_mode,
             "research_project_id": self.research_project_id,
+            "research_route": self.research_route,
+            "leads": [item.snapshot() for item in self.leads if hasattr(item, "snapshot")],
+            "chains": [item.snapshot() for item in self.chains if hasattr(item, "snapshot")],
         }
 
     def cancelled(self) -> bool:
@@ -1140,6 +1146,9 @@ class SecurityResearchAgent:
                 )
             hypothesis.supporting_evidence_ids = hypothesis.supporting_evidence_ids
             self.session.hypotheses.append(hypothesis)
+            from app.security_agent.leads import lead_for_hypothesis
+
+            lead_for_hypothesis(self.session, hypothesis)
             for evidence_id in hypothesis.supporting_evidence_ids:
                 if evidence_id in self.session.graph.nodes and evidence_id != node.id:
                     self.session.graph.link(node.id, evidence_id, "supports")

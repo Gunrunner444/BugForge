@@ -157,6 +157,11 @@ def _sibling_auth(contract: str, functions: list[SyntaxEvent]) -> list[Methodolo
                 continue
             if re.search(r"\b(view|pure)\b", event.text.split("{", 1)[0]):
                 continue
+            body = event.text.split("{", 1)[-1]
+            if not _VALUE_MOVE.search(event.text) and not re.search(
+                r"\b[A-Za-z_]\w*\s*(?:\+=|-=|=)", body
+            ):
+                continue
             found.append(
                 MethodologyIssue(
                     "sol.sibling_auth",
@@ -189,6 +194,11 @@ def _boundaries(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
         inclusive = {op for op in ops if op in {">=", "<="}}
         if not strict or not inclusive:
             continue
+        if not any(
+            _VALUE_MOVE.search(event.text) or re.search(r"\b[A-Za-z_]\w*\s*(?:\+=|-=)", event.text)
+            for event, _op in uses
+        ):
+            continue
         event = uses[0][0]
         found.append(
             MethodologyIssue(
@@ -204,6 +214,18 @@ def _boundaries(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
 
 
 def _erc4626(contract: str, functions: list[SyntaxEvent]) -> list[MethodologyIssue]:
+    vault_names = {_name(event).lower() for event in functions} & {
+        "deposit",
+        "mint",
+        "withdraw",
+        "redeem",
+        "previewdeposit",
+        "previewmint",
+        "previewwithdraw",
+        "previewredeem",
+    }
+    if len(vault_names) < 2:
+        return []
     found: list[MethodologyIssue] = []
     for event in functions:
         name = _name(event).lower()
@@ -235,6 +257,8 @@ def _flash_spot(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
     for event in functions:
         text = event.text
         if not _SPOT.search(text) or not _VALUE_MOVE.search(text):
+            continue
+        if re.search(r"\b(view|pure)\b", text.split("{", 1)[0]):
             continue
         if _ORACLE.search(text):
             continue

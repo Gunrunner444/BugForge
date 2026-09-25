@@ -693,7 +693,16 @@ def _record_comparisons(graph: SyntaxGraph, model: StorageModel) -> None:
                     model, model, left_name, right_name, "implementation-upgrade"
                 )
                 model.comparisons.append(comparison)
-                if comparison.compatible is False and _shares_layout_name(
+                if left_name in model.uncertain or right_name in model.uncertain:
+                    model.ambiguities.append(
+                        f"Implementation layout for `{left_name}` and `{right_name}` is incomplete. "
+                        "No collision is claimed."
+                    )
+                    continue
+                slot_note = _slot_type_collision(model, left_name, right_name)
+                if slot_note:
+                    notes.append(slot_note)
+                elif comparison.compatible is False and _shares_layout_name(
                     model, left_name, right_name
                 ):
                     notes.append(
@@ -702,6 +711,29 @@ def _record_comparisons(graph: SyntaxGraph, model: StorageModel) -> None:
                         )
                     )
     model.overlaps = list(dict.fromkeys(notes))
+
+
+def _slot_type_collision(model: StorageModel, left: str, right: str) -> str:
+    """Flag a shared slot whose type or packing differs, even when names differ."""
+    right_at = {
+        (item.slot, item.offset): item
+        for item in model.variables
+        if item.contract == right and item.slot is not None and not item.uncertain
+    }
+    for item in model.variables:
+        if item.contract != left or item.slot is None or item.uncertain:
+            continue
+        other = right_at.get((item.slot, item.offset))
+        if other is None or _type_signature(item) == _type_signature(other):
+            continue
+        return (
+            f"Incompatible implementation-upgrade between `{left}` and `{right}`: "
+            f"slot {item.slot} offset {item.offset} holds `{item.name}` ({item.type_name}) "
+            f"and `{other.name}` ({other.type_name}). "
+            "An append-only upgrade is not reported. "
+            "This is potential evidence, not a confirmed collision."
+        )
+    return ""
 
 
 def _shares_layout_name(model: StorageModel, left: str, right: str) -> bool:

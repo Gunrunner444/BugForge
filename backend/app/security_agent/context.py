@@ -86,6 +86,7 @@ class ContextManager:
             "supported": [item.snapshot() for item in supported],
             "reproduction": reproductions,
             "recent_actions": [item.snapshot() for item in session.timeline[-12:]],
+            "research_methodology": _methodology(session),
         }
         return {"trusted": trusted, "untrusted": untrusted}
 
@@ -111,6 +112,7 @@ class ContextManager:
             "supported": "UNTRUSTED_EVIDENCE",
             "reproduction": "UNTRUSTED_EVIDENCE",
             "recent_actions": "UNTRUSTED_EVIDENCE",
+            "research_methodology": "UNTRUSTED_EVIDENCE",
         }
         untrusted = payload["untrusted"]
         blocks = [trusted]
@@ -136,6 +138,12 @@ class ContextManager:
             "expected_output_tokens": expected_output,
             "total_tokens": prompt_tokens + schema_tokens + expected_output,
         }
+
+
+def _methodology(session: Any) -> dict[str, Any]:
+    from app.security_agent.methodology import planner_brief
+
+    return planner_brief(session)
 
 
 def _context_limit(session: Any) -> int | None:

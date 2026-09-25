@@ -7,14 +7,30 @@ from pathlib import Path
 import pytest
 
 from app.adapters.security_tools.semgrep import SemgrepAdapter, normalize_semgrep, semgrep_available
+from app.ai.mock_provider import MockLLMProvider
 from app.domain.evidence import EvidenceKind
 from app.parsing.engine import parse_source, reset_syntax_registry
 from app.plugins import reset_plugin_catalog
+from app.repositories.security_agent_repo import SecurityAgentRepository
 from app.security.engine import SecurityAnalysisEngine
-from app.security_agent.chains import ChainStep, assess_chain, propose_chain
-from app.security_agent.leads import LeadStore, load_project_leads, new_lead, save_lead
+from app.security_agent.agent import ResearchSession, SecurityResearchAgent
+from app.security_agent.chains import ChainStep, assess_chain, propose_chain, reject_chain
+from app.security_agent.context import ContextManager
+from app.security_agent.leads import (
+    LeadStore,
+    load_project_leads,
+    new_lead,
+    planner_leads,
+    save_lead,
+)
+from app.security_agent.methodology import set_route, what_if
 from app.security_agent.prioritize import prioritize
+from app.security_agent.schemas import ResearchHypothesis
+from app.security_agent.states import ResearchMode
+from app.security_testing.engine import SecurityTestEngine
 from app.security_testing.oob import OobLedger
+from app.security_testing.process import ProcessOutcome, ProcessRunner
+from app.security_testing.safety import SafetyLimits
 
 
 @pytest.fixture(autouse=True)
@@ -71,7 +87,7 @@ def test_sibling_authorization_difference(tmp_path: Path) -> None:
     pragma solidity ^0.8.20;
     contract Gov {
         function vote() external onlyOwner {}
-        function poke() external {}
+        function poke() external { votes += 1; }
         function reset() external onlyOwner {}
     }
     """
@@ -92,9 +108,11 @@ def test_boundary_and_safe_match(tmp_path: Path) -> None:
     contract Pool {
         function withdraw(uint256 amount, uint256 balance) external {
             require(amount > balance);
+            balance -= amount;
         }
         function redeem(uint256 amount, uint256 balance) external {
             require(amount >= balance);
+            balance -= amount;
         }
     }
     """
@@ -245,7 +263,7 @@ def test_chain_stays_unverified_without_authoritative_evidence() -> None:
             ChainStep("value leaves", evidence_id="e2", evidence_tier="reproduced"),
         ),
     )
-    assert assess_chain(evidenced).status == "evidenced"
+    assert assess_chain(evidenced).status == "reproduced"
     assert assess_chain(evidenced).verified is False
     verified = propose_chain(
         "c3",
@@ -300,6 +318,159 @@ def test_prioritize_is_stable() -> None:
     assert prioritize(["sol.boundary", "sol.accounting_desync", "sol.boundary"])[0] == (
         "sol.accounting_desync"
     )
+
+
+def test_renamed_slot_collision_and_append_only(tmp_path: Path) -> None:
+    renamed = """
+    pragma solidity ^0.8.20;
+    contract CollisionProxy {
+        address implementation;
+        fallback() external payable { implementation.delegatecall(msg.data); }
+    }
+    contract ImplV1 { uint256 value; }
+    contract ImplV2 { address owner; }
+    """
+    appended = """
+    pragma solidity ^0.8.20;
+    contract CollisionProxy {
+        address implementation;
+        fallback() external payable { implementation.delegatecall(msg.data); }
+    }
+    contract ImplV1 { uint256 value; }
+    contract ImplV2 { uint256 value; uint256 extra; }
+    """
+    path = tmp_path / "C.sol"
+    path.write_text(renamed, encoding="utf-8")
+    renamed_notes = " ".join(
+        item.summary
+        for item in SecurityAnalysisEngine().analyze_repository(tmp_path, [path]).observations
+    )
+    assert "owner" in renamed_notes
+    assert "holds `" in renamed_notes
+    path.write_text(appended, encoding="utf-8")
+    appended_notes = " ".join(
+        item.summary
+        for item in SecurityAnalysisEngine().analyze_repository(tmp_path, [path]).observations
+        if item.rule_id == "sol.storage_collision"
+    )
+    assert "holds `extra`" not in appended_notes
+
+
+def test_empty_public_sibling_is_not_missing_auth(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Gov {
+        function vote() external onlyOwner {}
+        function poke() external {}
+    }
+    """
+    assert "sol.sibling_auth" not in _ids(tmp_path, source)
+
+
+class _SemgrepRunner(ProcessRunner):
+    def run(self, argv, *, timeout, cwd=None, env=None, input_text=None):
+        return ProcessOutcome(
+            argv=tuple(argv),
+            returncode=0,
+            stdout='{"results":[{"check_id":"r","path":"a.sol","start":{"line":1},"extra":{"message":"x"}}]}',
+            stderr="semgrep 1.0",
+            timed_out=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_research_session_restores_leads_for_the_planner(db_session) -> None:
+    from datetime import UTC, datetime
+
+    from sqlalchemy import update
+
+    from app.models.security_agent import DBResearchLead
+
+    session = ResearchSession(
+        project_id="phase36-proj",
+        target="vault",
+        mode=ResearchMode.LAB,
+        engine=SecurityTestEngine.lab("phase36-proj", limits=SafetyLimits.lab()),
+        provider=MockLLMProvider(),
+    )
+    agent = SecurityResearchAgent(session)
+    agent._record_hypothesis(
+        ResearchHypothesis(
+            id="hyp-36",
+            title="share accounting drifts",
+            vulnerability_class="business_logic",
+            target="vault",
+            reason="early return",
+            suggested_next_action="compare claim and withdraw",
+        )
+    )
+    set_route(session, "deep")
+    chain = propose_chain(
+        "chain-36",
+        (
+            ChainStep("weak auth", hypothesis_id="hyp-36"),
+            ChainStep("value leaves"),
+        ),
+        parent_id="hyp-36",
+    )
+    session.chains.append(chain)
+    assert session.leads[0].status == "ACTIVE"
+    assert what_if("vault", "What happens if totalAssets is zero?").prompt.startswith("What")
+    repo = SecurityAgentRepository(db_session)
+    await repo.save_session(session)
+    await db_session.commit()
+    await db_session.execute(
+        update(DBResearchLead)
+        .where(DBResearchLead.id == session.leads[0].id)
+        .values(updated_at=datetime(2000, 1, 1, tzinfo=UTC))
+    )
+    await db_session.commit()
+    db_session.expire_all()
+    restored = await repo.reconstruct(session.id)
+    assert restored is not None
+    brief = ContextManager().build(restored.session)["untrusted"]["research_methodology"]
+    assert brief["route"] == "deep"
+    assert any(item["id"] == session.leads[0].id for item in brief["unresolved_leads"])
+    assert any(item["id"] == session.leads[0].id for item in brief["stale_leads"])
+    assert restored.session.chains[0].status == "proposed"
+    assert restored.session.chains[0].next_experiment
+    lead = restored.session.leads[0]
+    lead.status = "KILLED"
+    lead.kill_reason = "known issue"
+    await repo.save_session(restored.session)
+    await db_session.commit()
+    db_session.expire_all()
+    killed = await repo.reconstruct(session.id)
+    assert killed is not None
+    assert killed.session.leads[0].status == "KILLED"
+    assert planner_leads(killed.session.leads)["unresolved"] == []
+    killed.session.leads[0].status = "REPORTED"
+    killed.session.leads[0].kill_reason = ""
+    await repo.save_session(killed.session)
+    await db_session.commit()
+    db_session.expire_all()
+    reported = await repo.reconstruct(session.id)
+    assert reported is not None
+    assert reported.session.leads[0].status == "REPORTED"
+    assert planner_leads(reported.session.leads)["unresolved"] == []
+    rejected = reject_chain(
+        propose_chain("c-no", (ChainStep("a"), ChainStep("b"))), "not reachable"
+    )
+    assert rejected.status == "rejected"
+    assert rejected.verified is False
+
+
+def test_semgrep_local_scan_uses_runner_output() -> None:
+    missing = SemgrepAdapter().scan_local("/tmp/proj")
+    assert missing[0].kind is EvidenceKind.TOOL_STATUS
+    assert missing[0].contributes_to_verification is False
+    ran = SemgrepAdapter(binary="semgrep", runner=_SemgrepRunner()).scan_local("/tmp/proj")
+    assert ran[0].kind is EvidenceKind.STATIC_ANALYSIS
+    assert ran[0].contributes_to_verification is False
+    refused = SemgrepAdapter(binary="semgrep", runner=_SemgrepRunner()).scan_local(
+        "https://example.test"
+    )
+    assert refused[0].metadata["state"] == "invalid_scope"
 
 
 def test_parser_still_reads_methodology_sources(tmp_path: Path) -> None:

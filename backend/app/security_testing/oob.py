@@ -12,24 +12,41 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class OobProvider:
+    """Optional callback transport. This build has no network provider."""
+
+    name: str = "none"
+
+    def available(self) -> bool:
+        return False
+
+
+@dataclass
 class OobEvent:
     correlation_id: str
     session_id: str
     payload_id: str
+    hypothesis_id: str = ""
     body: str = ""
     state: str = "ABSENT"
+    duplicate: bool = False
 
 
 @dataclass
 class OobLedger:
+    """Correlation only. A provider may be attached later; none ships here."""
+
     available: bool = False
+    provider: OobProvider = field(default_factory=OobProvider)
     events: dict[str, OobEvent] = field(default_factory=dict)
 
-    def mint(self, session_id: str, payload_id: str) -> OobEvent:
+    def mint(self, session_id: str, payload_id: str, hypothesis_id: str = "") -> OobEvent:
         if not self.available:
             return OobEvent("", session_id, payload_id, state="UNAVAILABLE")
         digest = hashlib.sha256(f"{session_id}:{payload_id}".encode()).hexdigest()[:16]
-        event = OobEvent(digest, session_id, payload_id, state="WAITING")
+        event = OobEvent(
+            digest, session_id, payload_id, hypothesis_id=hypothesis_id, state="WAITING"
+        )
         self.events[digest] = event
         return event
 
@@ -37,6 +54,9 @@ class OobLedger:
         event = self.events.get(correlation_id)
         if event is None or event.session_id != session_id or event.payload_id != payload_id:
             raise ValueError("callback does not belong to this session and payload")
+        if event.state == "CALLBACK":
+            event.duplicate = True
+            return event
         event.body = body[:200]
         event.state = "CALLBACK"
         return event

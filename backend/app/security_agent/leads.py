@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -35,6 +36,24 @@ class ResearchLead:
     related_ids: list[str] = field(default_factory=list)
     chain_ids: list[str] = field(default_factory=list)
     updated_at: str = ""
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "session_id": self.session_id,
+            "target": self.target,
+            "hypothesis": self.hypothesis,
+            "status": self.status,
+            "priority": self.priority,
+            "next_action": self.next_action,
+            "kill_reason": self.kill_reason,
+            "evidence_ids": list(self.evidence_ids),
+            "observation_ids": list(self.observation_ids),
+            "related_ids": list(self.related_ids),
+            "chain_ids": list(self.chain_ids),
+            "updated_at": self.updated_at,
+        }
 
     def __post_init__(self) -> None:
         if self.status not in LEAD_STATUSES:
@@ -151,3 +170,62 @@ async def load_project_leads(session: AsyncSession, project_id: str) -> list[Res
         select(DBResearchLead).where(DBResearchLead.project_id == project_id)
     )
     return [lead_from_row(row) for row in result.scalars()]
+
+
+_CLOSED = frozenset({"KILLED", "REPORTED"})
+_OPEN = frozenset({"NEW", "ACTIVE", "BLOCKED", "PROMOTED", "REPRODUCED"})
+
+
+def lead_for_hypothesis(research: Any, hypothesis: Any) -> ResearchLead:
+    """Create or update the lead that tracks one hypothesis. Closed leads stay closed."""
+    related = str(getattr(hypothesis, "id", "") or "")
+    found: ResearchLead | None = next(
+        (
+            item
+            for item in research.leads
+            if isinstance(item, ResearchLead) and related and related in item.related_ids
+        ),
+        None,
+    )
+    existing = found
+    if existing is not None and existing.status in _CLOSED:
+        return existing
+    if existing is None:
+        existing = new_lead(
+            project_id=str(research.project_id),
+            session_id=str(research.id),
+            target=str(getattr(hypothesis, "target", "") or research.target),
+            hypothesis=str(getattr(hypothesis, "title", "") or ""),
+            priority=str(getattr(hypothesis, "severity", "") or "medium"),
+        )
+        existing.related_ids.append(related)
+        research.leads.append(existing)
+    existing.status = "ACTIVE"
+    existing.next_action = str(
+        getattr(hypothesis, "suggested_next_action", "") or existing.next_action
+    )
+    existing.evidence_ids = list(getattr(hypothesis, "supporting_evidence_ids", ()) or ())
+    existing.observation_ids = [related] if related else list(existing.observation_ids)
+    _validate(existing)
+    return existing
+
+
+def planner_leads(
+    leads: list[ResearchLead], *, stale_before: datetime | None = None
+) -> dict[str, list[dict[str, object]]]:
+    """Unresolved leads for the planner. Killed and reported leads stay out."""
+    unresolved: list[dict[str, object]] = []
+    stale: list[dict[str, object]] = []
+    for lead in leads:
+        if lead.status in _CLOSED or lead.status == "VERIFIED":
+            continue
+        if lead.status not in _OPEN:
+            continue
+        payload = lead.snapshot()
+        unresolved.append(payload)
+        if stale_before is None or lead.status not in {"NEW", "ACTIVE", "BLOCKED"}:
+            continue
+        updated = _stamp(lead.updated_at) if lead.updated_at else stale_before
+        if updated < stale_before:
+            stale.append(payload)
+    return {"unresolved": unresolved, "stale": stale}

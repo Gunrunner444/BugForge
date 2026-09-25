@@ -15,6 +15,7 @@ from app.adapters.security_tools.base import SecurityToolAdapter, SecurityToolCa
 from app.domain.evidence import Evidence, EvidenceKind
 from app.domain.scope import ScopeConstraint
 from app.security_testing.failures import ToolExecutionResult, ToolExecutionState
+from app.security_testing.process import ProcessRunner
 from app.security_testing.sanitization import wrap_untrusted
 
 
@@ -88,8 +89,14 @@ def hits_as_evidence(hits: list[SemgrepHit]) -> list[Evidence]:
 
 
 class SemgrepAdapter(SecurityToolAdapter):
-    def __init__(self, *, binary: str | None = None) -> None:
+    """Local project scan plus JSON ingestion. Live targets are refused.
+
+    A missing binary is TOOL_UNAVAILABLE. Results stay static and unverified.
+    """
+
+    def __init__(self, *, binary: str | None = None, runner: ProcessRunner | None = None) -> None:
         self._binary = binary
+        self._runner = runner
         self.last_result: ToolExecutionResult | None = None
 
     @property
@@ -148,6 +155,59 @@ class SemgrepAdapter(SecurityToolAdapter):
                 )
             ]
         return ()
+
+    def scan_local(self, path: str) -> list[Evidence]:
+        """Run Semgrep against one local path. Network targets are not accepted."""
+        if "://" in path or path.startswith("//"):
+            self.last_result = ToolExecutionResult(
+                tool="semgrep", state=ToolExecutionState.INVALID_SCOPE
+            )
+            return [
+                Evidence(
+                    kind=EvidenceKind.TOOL_STATUS,
+                    source="semgrep",
+                    summary="semgrep invalid_scope",
+                    metadata={"state": "invalid_scope", "is_finding": False, "verified": False},
+                )
+            ]
+        binary = self._binary if self._binary else shutil.which("semgrep")
+        installed = bool(binary) and (self._binary is not None or semgrep_available())
+        if not installed or self._runner is None:
+            self.last_result = ToolExecutionResult(
+                tool="semgrep", state=ToolExecutionState.TOOL_UNAVAILABLE
+            )
+            return [
+                Evidence(
+                    kind=EvidenceKind.TOOL_STATUS,
+                    source="semgrep",
+                    summary="semgrep tool_unavailable",
+                    details="No process runner is configured.",
+                    metadata={"state": "tool_unavailable", "is_finding": False, "verified": False},
+                )
+            ]
+        command = str(binary or "semgrep")
+        outcome = self._runner.run(
+            [command, "--json", "--quiet", path],
+            timeout=30,
+        )
+        if outcome.unavailable:
+            self.last_result = ToolExecutionResult(
+                tool="semgrep", state=ToolExecutionState.TOOL_UNAVAILABLE, detail=outcome.stderr
+            )
+            return [
+                Evidence(
+                    kind=EvidenceKind.TOOL_STATUS,
+                    source="semgrep",
+                    summary="semgrep tool_unavailable",
+                    metadata={"state": "tool_unavailable", "is_finding": False, "verified": False},
+                )
+            ]
+        version = wrap_untrusted("semgrep", (outcome.stderr or "semgrep")[:120])
+        evidence = self.ingest_json(outcome.stdout or "{}")
+        for item in evidence:
+            item.metadata["ruleset"] = "semgrep-json"
+            item.metadata["tool_version"] = version
+        return evidence
 
     def _active_scan(self, *, scope: ScopeConstraint, target: str) -> Sequence[Evidence]:
         del scope, target

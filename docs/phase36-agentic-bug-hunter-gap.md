@@ -37,10 +37,23 @@ Independently reimplemented. See `THIRD_PARTY_NOTICES.md`.
 - Treating Semgrep or an OOB callback as a verified bounty
 - Replacing ScopeGuard, evidence, replay, or Foundry exploratory
 
+## What is actually wired
+
+- Research leads are rows in `research_leads`. Saving a research session writes them. Restoring that session loads them by project key and puts unresolved and stale leads in the planner context. Killed and reported leads stay closed.
+- A new hypothesis opens or updates a lead. It does not verify the lead.
+- Wide versus deep is a planner route on the session. It does not change safety limits.
+- Chains are stored in the existing research-memory table as `exploit_chain` entries and restored with the session. A proposal is not verified.
+- Semgrep can ingest JSON and, when a process runner and binary are both present, scan one local path. A missing binary is unavailable. Output is static evidence and cannot verify a finding. There is no live-target scan.
+- OOB is a correlation ledger plus an empty provider. There is no interactsh client. A callback is not verification.
+- Storage collisions can be different names at the same slot and offset when a delegatecall proxy is in the same graph. Uncertain layouts are incomplete, not collisions. Append-only upgrades are not slot collisions. Cross-repository proxy identity is still not inferred.
+
 ## Limitations
 
-- Sibling families are a fixed name set, not a full semantic embedding.
-- Accounting comparison needs the coupled names in both function bodies.
-- Implementation storage collisions require a delegatecall in the same graph and a shared variable name.
-- Yul remains incomplete when a block exceeds the configured node cap.
+- Sibling families still start from a name set. An empty public function is not a missing-authorization finding.
+- Accounting still needs a shared coupled name, or a write that the sibling also uses, plus an early return.
+- A boundary finding requires the comparison to guard a value write or transfer.
+- ERC-4626 inflation requires at least two vault entry points, not a stray `totalSupply`.
+- Flash-spot ignores view functions, oracle reads, and a function that merely is named `flashLoan`.
+- Yul remains incomplete past the configured node cap.
 - Exploratory Docker still does not contain `forge`.
+- Deployment and source identity mapping is unchanged.
