@@ -1,58 +1,52 @@
-# Phase 42 — verification bridge and counterexamples
+# Phase 42 — verification bridge
 
-Phase 42 consumes Phase 41 candidates. It does not replace them and it does
-not call another model.
+Phase 42 queues Phase 41 candidate paths. It does not verify them and it
+does not call another model.
 
 ## Queue
 
-`bridge` builds one verification request per candidate path. The request
-records the path, invariant, contract, function, compiler version from the
-transition model (or `unspecified`), assumptions, and path conditions. Every
-queued result is `not_requested`. Building the queue does not verify anything.
+`bridge` keeps paths whose status is `candidate`. `unknown` chains and
+`explore:` truncations are not queued. For each selected path, up to
+`MAX_ATTEMPTS` (8), it builds a `VerificationSpecification` with `specify`
+and a `VerificationRequest`. Every queued result is `not_requested`.
+`request.encoded` is always false. That flag is not read by `run_smt` or
+`run_forge`.
+
+The request records the path, invariant, contract, function, compiler
+version from the transition model (or `unspecified`), assumptions, path
+conditions, the specification hash, and the specification's SMT capability
+(`supported` or `unsupported`). Building the queue does not run a tool.
+If more candidate paths exist than the attempt cap, `BridgeResult.truncated`
+is `verification attempt limit reached`.
 
 ## Tools
 
 `solc`, `forge`, and `semgrep` are detected at runtime with `shutil.which`.
-A missing binary is `unavailable`. No result is fabricated. BugForge does not
-embed an API key and does not call an LLM from this layer.
+A missing binary is `unavailable` when a run is attempted without a
+specification, or when an encoded specification cannot be executed. No
+result is fabricated. Semgrep is only reported in `tool_availability`. This
+layer does not invent Semgrep findings. BugForge does not embed an API key
+and does not call an LLM from this layer.
 
-The default SMT and Foundry harnesses are new strings marked
-`BUGFORGE GENERATED VERIFICATION HARNESS — not production source`. They are
-not written back into the target contract. The default SMT stub is
-`assert(true)` and is forced to `encoded=false`, so a compiler success on
-that stub cannot become `proved_safe`.
+## Status without a specification
 
-## Status
+`run_smt` and `run_forge` require a `VerificationSpecification` produced by
+`specify`. A caller-supplied harness and `encoded=True` do not authorize a
+result. With no specification and no binary, the status is `unavailable`.
+With no specification and a runner or a binary, the status is `unsupported`.
 
-| Status | Meaning |
-| --- | --- |
-| `not_requested` | The request was only queued |
-| `unavailable` | The tool binary is absent |
-| `unknown` | The tool ran, or a passing Forge suite was seen, without an authoritative result |
-| `timeout` | The tool reported a timeout |
-| `unsupported` | The tool reported an unsupported feature |
-| `failed` | The tool or harness failed |
-| `counterexample` | An encoded SMT run reported an assertion violation |
-| `proved_safe` | An encoded SMT run explicitly reported a proof |
-| `reproduced` | An encoded Forge run failed and the output was kept |
-
-Exit code 0 is not a proof. A passing Forge run is testing evidence and stays
-`unknown`. A tool status of `proved_safe`, `counterexample`, or `reproduced`
-is downgraded to `unknown` unless the request is marked `encoded` and, for
-SMT, the harness was supplied as that encoding.
+`parse_smt_output` and `parse_forge_output` classify unbound text. The words
+`proved`, `counterexample`, and `Suite result: FAILED` stay `unknown`.
+Timeout and compiler-failure wording are still distinguished. Authoritative
+parsing is `parse_smt_bound` and `parse_forge_bound` in the Phase 43 layer.
 
 ## Evidence
 
-`evidence_for` maps `proved_safe` and `counterexample` to static analysis,
-other non-reproduction statuses to tool status, and `reproduced` to a
-reproduction record only when the raw Forge artifact is present.
-`lifecycle_effect` is always `none`. Static evidence and an unsigned
-reproduction record do not satisfy independent verification. They do not
-mark a finding verified.
+`lifecycle_effect` is always `none`. An unbound result is tool-status
+evidence. It does not satisfy independent verification and it does not mark
+a finding verified.
 
 ## Not claimed
 
-This bridge does not encode every candidate into an SMT assertion or a
-Foundry sequence. Unencoded properties stay non-authoritative. A
-counterexample is the tool's text, normalized into actors, calls, and source
-lines that were actually present. Fields the tool did not supply stay empty.
+The bridge does not encode every candidate. Encoding, harness binding, and
+tool authority are Phase 43. A candidate path is not a finding.

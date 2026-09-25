@@ -88,6 +88,69 @@ FALSE_NEGATIVES = (
         "expected_semantic_relation": "unknown",
         "reason": "local non-interference does not survive an internal write",
     },
+    {
+        "phase": "41",
+        "vulnerability_class": "identity",
+        "fixture": "two-sources-same-contract-function-line",
+        "corrected_behavior": "the shared identity is incomplete and the summaries are not merged",
+        "reason": "contract name, function name, and line are not unique across sources",
+    },
+    {
+        "phase": "41",
+        "vulnerability_class": "invariant",
+        "fixture": "unrelated-contracts-same-variable-names",
+        "corrected_behavior": "each declaring contract keeps its own candidate invariant",
+        "reason": "a shared variable name is not a cross-contract relation",
+    },
+    {
+        "phase": "41",
+        "vulnerability_class": "path",
+        "fixture": "call-chain-without-shared-state",
+        "corrected_behavior": "the chain status is unknown and records an unknown relationship",
+        "reason": "reachability of a candidate function is not influence",
+    },
+    {
+        "phase": "41",
+        "vulnerability_class": "path",
+        "fixture": "call-chain-with-shared-declaration",
+        "corrected_behavior": "the chain is a candidate only when an earlier transition uses the same declaration",
+        "reason": "a semantic connection is a shared declaration, not a call edge",
+    },
+    {
+        "phase": "42",
+        "vulnerability_class": "verification-binding",
+        "fixture": "encoded-flag-and-arbitrary-harness",
+        "corrected_behavior": "the result stays non-authoritative",
+        "reason": "a caller flag cannot authorize a harness BugForge did not bind",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "verification-binding",
+        "fixture": "modified-or-stale-harness",
+        "corrected_behavior": "a digest or specification mismatch stays unknown",
+        "reason": "a generated banner is not a binding",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "smt",
+        "fixture": "unrelated-proved-or-counterexample",
+        "corrected_behavior": "diagnostics that do not name the artifact stay unknown",
+        "reason": "the words proved and counterexample are not the candidate property",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "foundry",
+        "fixture": "fail-without-specification-token",
+        "corrected_behavior": "a failing suite without the fail token is not reproduced",
+        "reason": "a runner string is not execution of the candidate",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "encoding",
+        "fixture": "unsupported-property",
+        "corrected_behavior": "the harness contains no assertion and the status is unsupported",
+        "reason": "a comment is not a predicate",
+    },
 )
 
 
@@ -181,7 +244,7 @@ def test_candidate_path_is_not_reproduced(tmp_path: Path) -> None:
 def test_false_negative_registry() -> None:
     assert FALSE_NEGATIVES[0]["corrected_behavior"]
     for item in FALSE_NEGATIVES:
-        assert item["phase"] == "41"
+        assert item["phase"] in {"41", "42", "43"}
         assert item["vulnerability_class"]
         assert item["fixture"]
         assert item["corrected_behavior"]

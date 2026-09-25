@@ -269,7 +269,8 @@ def test_invariant_preserved_and_potential_are_not_proofs(tmp_path: Path) -> Non
     assert all(item.status == "candidate" for item in model.invariants)
     statuses = {item.status for item in model.checks}
     assert "potential" in statuses
-    assert "preserved" in statuses
+    assert "non_interference_observed" in statuses
+    assert "preserved" not in statuses
     assert "safe" not in statuses
     assert _FORBIDDEN.isdisjoint(statuses)
     assert _FORBIDDEN.isdisjoint({item.status for item in model.paths})
@@ -338,7 +339,9 @@ def test_cross_contract_resolution_is_not_guessed(tmp_path: Path) -> None:
         if item.depth == 2 and any(step.relation == "invokes" for step in item.steps)
     ]
     assert chain
-    assert {item.status for item in chain} == {"candidate"}
+    assert {item.status for item in chain} == {"unknown"}
+    assert all(item.relationship == "unknown" for item in chain)
+    assert all("unknown relationship" in item.reason for item in chain)
 
 
 def test_candidate_steps_are_structured_and_authority_is_operation_specific(tmp_path: Path) -> None:
@@ -436,7 +439,7 @@ def test_internal_call_does_not_preserve_a_callee_write(tmp_path: Path) -> None:
     by_function = {item.transition_id.split(":", 1)[0]: item.status for item in asset_checks}
     assert by_function["Vault.ping"] == "unknown"
     assert by_function["Vault.touch"] == "potential"
-    assert by_function["Vault.idle"] == "preserved"
+    assert by_function["Vault.idle"] == "non_interference_observed"
 
 
 def test_comment_does_not_count_as_asset_inflow(tmp_path: Path) -> None:
@@ -589,3 +592,232 @@ def test_paths_never_claim_verification(tmp_path: Path) -> None:
     assert _FORBIDDEN.isdisjoint({item.status for item in model.paths})
     assert _FORBIDDEN.isdisjoint({item.status for item in model.transitions})
     assert _FORBIDDEN.isdisjoint({item.status for item in model.checks})
+
+
+def test_same_function_identity_in_two_sources_is_not_merged(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        function mint() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    reset_syntax_registry()
+    reset_plugin_catalog()
+    left = build_semantic_program(parse_source("solidity", tmp_path / "left.sol", source))
+    right = build_semantic_program(parse_source("solidity", tmp_path / "right.sol", source))
+    model = analyze_state_transitions(left, also=(right,))
+    assert model.status == "partial"
+    assert "function identity collision across sources" in model.incomplete_reason
+    mint = [item for item in model.transitions if item.function_id.startswith("Vault.mint")]
+    assert len(mint) == 2
+    assert {item.status for item in mint} == {"incomplete"}
+    assert {item.source_file for item in mint} == {
+        str(tmp_path / "left.sol"),
+        str(tmp_path / "right.sol"),
+    }
+    assert not any(
+        item.status == "potential" and item.transition_id.startswith("Vault.mint")
+        for item in model.checks
+    )
+
+
+def test_same_variable_name_does_not_merge_contracts(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint256 totalSupply;
+        uint256 balances;
+        function mint() external { totalSupply = totalSupply + 1; }
+    }
+    contract Unrelated {
+        uint256 totalSupply;
+        uint256 balances;
+        function idle() external {}
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    equalities = [item for item in model.invariants if item.category == "equality"]
+    assert len(equalities) == 2
+    assert {item.contract for item in equalities} == {"Token", "Unrelated"}
+    mint_checks = [
+        item
+        for item in model.checks
+        if item.transition_id.startswith("Token.mint") and item.status == "potential"
+    ]
+    assert mint_checks
+    assert all("Token" in item.invariant_id for item in mint_checks)
+    assert not any("Unrelated" in item.invariant_id for item in mint_checks)
+    assert len({item.declarations for item in equalities}) == 2
+    assert all(
+        item.predicate is not None and item.predicate.predicate_type == "equality"
+        for item in equalities
+    )
+    assert all(item.representation_status == "exact" for item in equalities)
+
+
+def test_mapping_sum_is_not_an_exact_formula(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Token {
+        uint256 totalSupply;
+        mapping(address => uint256) balances;
+        function mint() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    equality = next(item for item in model.invariants if item.category == "equality")
+    assert equality.representation_status == "partial"
+    assert equality.predicate is not None
+    assert equality.predicate.rhs.startswith("sum(")
+    assert "mapping aggregation is not encoded" in equality.unsupported
+
+
+def test_multi_step_requires_shared_state(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        uint256 balances;
+        uint256 other;
+        function a() external { uint256 seen = totalSupply; b(); }
+        function b() external { c(); }
+        function c() external { totalSupply = totalSupply + 1; }
+        function u() external { v(); }
+        function v() external { w(); }
+        function w() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    connected = next(
+        item
+        for item in model.paths
+        if item.path_id.startswith("chain:")
+        and item.function_ids[0].startswith("Vault.a")
+        and item.function_ids[-1].startswith("Vault.c")
+    )
+    unrelated = next(
+        item
+        for item in model.paths
+        if item.path_id.startswith("chain:")
+        and item.function_ids[0].startswith("Vault.u")
+        and item.function_ids[-1].startswith("Vault.w")
+    )
+    assert connected.status == "candidate"
+    assert connected.relationship == "connected"
+    assert any(step.relation == "depends-on" for step in connected.steps)
+    assert unrelated.status == "unknown"
+    assert unrelated.relationship == "unknown"
+    assert "unknown relationship" in unrelated.reason
+    assert not any(step.relation == "violates-candidate-invariant" for step in unrelated.steps)
+
+
+def test_depth_counts_transitions_and_the_bound_is_partial(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        uint256 balances;
+        function a() external { uint256 seen = totalSupply; b(); }
+        function b() external { c(); }
+        function c() external { d(); }
+        function d() external { totalSupply = totalSupply + 1; e(); }
+        function e() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    intra = [
+        item for item in model.paths if item.depth == 1 and item.relationship == "intra-function"
+    ]
+    assert intra
+    assert all(item.bound.startswith("depth=1;") for item in intra)
+    depth2 = [
+        item
+        for item in model.paths
+        if item.depth == 2
+        and item.function_ids[0].startswith("Vault.c")
+        and item.function_ids[-1].startswith("Vault.d")
+    ]
+    depth3 = [
+        item
+        for item in model.paths
+        if item.depth == 3
+        and item.function_ids[0].startswith("Vault.b")
+        and item.function_ids[-1].startswith("Vault.d")
+    ]
+    depth4 = [
+        item
+        for item in model.paths
+        if item.depth == 4
+        and item.function_ids[0].startswith("Vault.a")
+        and item.function_ids[-1].startswith("Vault.d")
+    ]
+    assert depth2 and depth2[0].status == "unknown"
+    assert depth3 and depth3[0].status == "unknown"
+    assert depth4 and depth4[0].status == "candidate"
+    assert depth4[0].completeness == "complete"
+    assert depth4[0].bound == f"depth=4; cap<={MAX_DEPTH}"
+    truncated = [item for item in model.paths if item.path_id.startswith("explore:")]
+    assert truncated
+    assert all(item.status == "incomplete" for item in truncated)
+    assert all(item.completeness == "partial" for item in truncated)
+    assert all("truncated exploration" in item.reason for item in truncated)
+    assert all(
+        not any(step.relation == "violates-candidate-invariant" for step in item.steps)
+        for item in truncated
+    )
+    assert model.status == "partial"
+    assert "depth bound reached" in model.incomplete_reason
+
+
+def test_allowance_write_covers_only_earlier_calls(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        mapping(address => uint256) allowance;
+        function pay(address token, address from, uint256 amount) external {
+            uint256 current = allowance[from];
+            token.transferFrom(from, address(this), current);
+            allowance[from] = 0;
+            token.transferFrom(from, address(this), current);
+        }
+    }
+    """
+    result = analyze_accounting_transition(_program(tmp_path, source), "pay")
+    assert result.status == "potential"
+    assert result.relation == "allowance-not-consumed"
+
+
+def test_loop_is_not_non_interference(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        uint256 balances;
+        function idle() external {
+            uint256 i = 0;
+            while (i < 1) { i = i + 1; }
+        }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    checks = [item for item in model.checks if item.transition_id.startswith("Vault.idle")]
+    assert checks
+    assert {item.status for item in checks} == {"incomplete"}
+    assert all("loop-carried" in item.reason for item in checks)
+
+
+def test_external_call_is_not_non_interference(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        uint256 balances;
+        function ping(address target) external { target.call(""); }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    checks = [item for item in model.checks if item.transition_id.startswith("Vault.ping")]
+    assert checks
+    assert {item.status for item in checks} == {"unknown"}
+    assert all("external call" in item.reason for item in checks)

@@ -24,7 +24,12 @@ from app.parsing.solidity_dataflow import (
     FunctionSummary,
     analyze_dataflow,
 )
-from app.parsing.solidity_ir import SemanticFunction, SemanticProgram, StateAccess
+from app.parsing.solidity_ir import (
+    SemanticFunction,
+    SemanticProgram,
+    StateAccess,
+    StateDeclaration,
+)
 from app.parsing.solidity_value_flow import CallResolution, _path_in, resolve_call
 
 MAX_TRANSITIONS = 64
@@ -95,6 +100,7 @@ class StateTransition:
     call_ids: tuple[str, ...] = ()
     resolutions: tuple[str, ...] = ()
     facts: tuple[TransitionFact, ...] = ()
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,23 @@ class CandidatePath:
     incomplete_reason: str = ""
     reason: str = ""
     invariant_id: str = ""
+    relationship: str = ""
+
+
+@dataclass(frozen=True)
+class AbstractPredicate:
+    """Machine-readable candidate predicate. Not a proved formula."""
+
+    predicate_type: str
+    lhs: str = ""
+    rhs: str = ""
+    subject: str = ""
+    operator: str = ""
+    previous: str = ""
+    next: str = ""
+    required_guard: str = ""
+    representation_status: str = "unknown"
+    unsupported: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +166,12 @@ class CandidateInvariant:
     status: str
     confidence: str
     assumptions: tuple[str, ...]
+    declarations: tuple[str, ...] = ()
+    predicate: AbstractPredicate | None = None
+    unsupported: tuple[str, ...] = ()
+    representation_status: str = "unknown"
+    contract: str = ""
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,14 +218,25 @@ def analyze_state_transitions(
             "unavailable", incomplete_reason="no functions", bounds=_bounds(limits)
         )
     caps = _bounds(limits)
+    collided = _identity_collisions(programs)
     flow = analyze_dataflow(program)
     for extra in also:
-        _merge_flow(flow, analyze_dataflow(extra))
+        _merge_flow(flow, analyze_dataflow(extra), collided)
     reason = program.incomplete_reason
-    if len(functions) > caps["transitions"]:
-        functions = functions[: caps["transitions"]]
+    if collided:
+        reason = _join_reason(reason, "function identity collision across sources")
+    if _compiler_version(programs) == "mixed":
+        reason = _join_reason(reason, "compiler versions differ")
+    selected = _function_pairs(programs)
+    if len(selected) > caps["transitions"]:
+        selected = selected[: caps["transitions"]]
         reason = _join_reason(reason, "transition limit reached")
-    transitions = tuple(_transition(programs, flow, item, caps) for item in functions)
+    transitions = tuple(
+        _collision_transition(item, home)
+        if item.identity in collided
+        else _transition(programs, flow, item, caps, home)
+        for home, item in selected
+    )
     invariants = _invariants(programs, caps)
     checks = _checks(programs, transitions, invariants, flow, caps)
     paths, path_reason = _paths(programs, flow, transitions, checks, invariants, caps)
@@ -263,10 +303,22 @@ def _bounds(limits: dict[str, int] | None) -> dict[str, int]:
 
 
 def _functions(programs: Sequence[SemanticProgram]) -> list[SemanticFunction]:
-    found: list[SemanticFunction] = []
-    for program in programs:
-        found.extend(program.functions)
-    found.sort(key=lambda item: (item.contract, item.line, item.name, item.identity))
+    return [function for _program, function in _function_pairs(programs)]
+
+
+def _function_pairs(
+    programs: Sequence[SemanticProgram],
+) -> list[tuple[SemanticProgram, SemanticFunction]]:
+    found = [(program, function) for program in programs for function in program.functions]
+    found.sort(
+        key=lambda item: (
+            item[1].contract,
+            item[1].line,
+            item[1].name,
+            item[1].identity,
+            item[0].file,
+        )
+    )
     return found
 
 
@@ -275,6 +327,7 @@ def _transition(
     flow: DataflowModel,
     function: SemanticFunction,
     caps: dict[str, int],
+    home: SemanticProgram,
 ) -> StateTransition:
     del caps
     summary = flow._summary(function.identity)
@@ -335,6 +388,7 @@ def _transition(
         tuple(site.call_id for site in function.call_sites),
         tuple(resolutions),
         tuple(facts),
+        home.file,
     )
 
 
@@ -421,7 +475,7 @@ def _relation_findings(
     program: SemanticProgram, function: SemanticFunction, summary: FunctionSummary
 ) -> tuple[AccountingAssessment, ...]:
     """Every accounting relation this function supports. The first is not the only one."""
-    roles = _declared_roles(program)
+    roles = _declared_roles(program, function.contract)
     assumption = ("variable role is a name heuristic, not a type proof",)
     writes = [item for item in function.access_sites if item.kind != "read"]
     found: list[AccountingAssessment] = []
@@ -468,7 +522,7 @@ def _relation_findings(
         if _role(item.symbol) == "debt"
         and item.operation_id in influenced
         and _direction(function, item) == "decrease"
-        and not _has_inflow(function)
+        and not _repayment_reaches(summary, item)
     ]
     if debt_writes:
         found.append(
@@ -551,13 +605,28 @@ def _allowance_unconsumed(
         for item in function.access_sites
         if _role(item.symbol) == "allowance" and item.kind != "read"
     ]
-    if not spends or not reads or writes:
+    if not spends or not reads:
         return ()
     hits: list[StateAccess] = []
-    for item in reads:
-        if any(_read_reaches_arguments(summary, item, site.arguments) for site in spends):
-            hits.append(item)
-    return tuple(hits)
+    for site in spends:
+        reaching = [
+            item for item in reads if _read_reaches_arguments(summary, item, site.arguments)
+        ]
+        if not reaching:
+            continue
+        if any(_write_consumes_call(item, site, writes) for item in reaching):
+            continue
+        hits.extend(reaching)
+    return tuple(dict.fromkeys(hits))
+
+
+def _write_consumes_call(read: StateAccess, site: object, writes: list[StateAccess]) -> bool:
+    """A later write of the same declaration covers only calls that precede it."""
+    call_end = int(getattr(getattr(site, "span", None), "end_byte", 0) or 0)
+    return any(
+        item.declaration_id == read.declaration_id and item.span.start_byte > call_end
+        for item in writes
+    )
 
 
 def _read_reaches_arguments(summary: FunctionSummary, access: StateAccess, arguments: str) -> bool:
@@ -595,105 +664,219 @@ def _name_in(name: str, text: str) -> bool:
 def _invariants(
     programs: Sequence[SemanticProgram], caps: dict[str, int]
 ) -> tuple[CandidateInvariant, ...]:
-    roles: dict[str, str] = {}
+    """One candidate per declaring contract. Matching names do not merge contracts."""
+    grouped: dict[tuple[str, str], list[StateDeclaration]] = defaultdict(list)
     for program in programs:
-        roles.update(_declared_roles(program))
-    by_role: dict[str, list[str]] = defaultdict(list)
-    for name, role in sorted(roles.items()):
-        by_role[role].append(name)
-    specs: list[tuple[str, str, str, tuple[str, ...]]] = []
+        for decl in program.declarations:
+            if _role(decl.symbol):
+                grouped[(program.file, decl.contract)].append(decl)
+    found: list[CandidateInvariant] = []
+    for source_file, contract in sorted(grouped):
+        decls = grouped[(source_file, contract)]
+        by_role: dict[str, list[StateDeclaration]] = defaultdict(list)
+        for decl in sorted(decls, key=lambda item: item.declaration_id):
+            by_role[_role(decl.symbol)].append(decl)
+        built = _contract_invariants(programs, source_file, contract, by_role)
+        for item in built:
+            if len(found) >= caps["invariants"]:
+                return tuple(found)
+            found.append(item)
+    return tuple(found)
+
+
+def _contract_invariants(
+    programs: Sequence[SemanticProgram],
+    source_file: str,
+    contract: str,
+    by_role: dict[str, list[StateDeclaration]],
+) -> list[CandidateInvariant]:
+    specs: list[tuple[str, str, str, AbstractPredicate, tuple[StateDeclaration, ...]]] = []
     if by_role["supply"] and by_role["balance"]:
+        supply, balance = by_role["supply"][0], by_role["balance"][0]
+        mapping = "mapping" in balance.type_name
         specs.append(
             (
                 "supply-balance",
-                "sum(balance) == totalSupply",
                 "equality",
+                f"{supply.symbol} == sum({balance.symbol})"
+                if mapping
+                else f"{supply.symbol} == {balance.symbol}",
+                AbstractPredicate(
+                    "equality",
+                    lhs=supply.symbol,
+                    rhs=f"sum({balance.symbol})" if mapping else balance.symbol,
+                    representation_status="partial" if mapping else "exact",
+                    unsupported=("mapping aggregation is not encoded",) if mapping else (),
+                ),
                 tuple(by_role["supply"] + by_role["balance"]),
             )
         )
     if by_role["assets"] and (by_role["supply"] or by_role["shares"]):
+        assets = by_role["assets"][0]
+        other = (by_role["shares"] or by_role["supply"])[0]
+        involved = tuple(by_role["assets"] + by_role["supply"] + by_role["shares"])
         specs.append(
             (
                 "asset-share",
-                "shares correspond to assets",
                 "asset-share",
-                tuple(by_role["assets"] + by_role["supply"] + by_role["shares"]),
+                f"{other.symbol} corresponds to {assets.symbol}",
+                AbstractPredicate(
+                    "asset-share",
+                    lhs=other.symbol,
+                    rhs=assets.symbol,
+                    representation_status="partial",
+                    unsupported=("exchange-rate formula is not encoded",),
+                ),
+                involved,
             )
         )
     if by_role["authority"]:
+        subject = by_role["authority"][0]
         specs.append(
             (
                 "authorization",
-                "only authorized actors may modify authority state",
                 "authorization",
+                f"authorized actor required to modify {subject.symbol}",
+                AbstractPredicate(
+                    "authorization",
+                    subject=subject.symbol,
+                    required_guard="authorized_actor",
+                    representation_status="partial",
+                    unsupported=("guard predicate is not a complete authorization formula",),
+                ),
                 tuple(by_role["authority"]),
             )
         )
     if by_role["nonce"]:
-        specs.append(("nonce", "nonce advances on use", "monotonicity", tuple(by_role["nonce"])))
+        subject = by_role["nonce"][0]
+        specs.append(
+            (
+                "nonce",
+                "monotonicity",
+                f"{subject.symbol}_after > {subject.symbol}_before",
+                AbstractPredicate(
+                    "monotonic",
+                    subject=subject.symbol,
+                    operator=">",
+                    previous=f"{subject.symbol}_before",
+                    next=f"{subject.symbol}_after",
+                    representation_status="partial",
+                    unsupported=("before and after values are not tracked",),
+                ),
+                tuple(by_role["nonce"]),
+            )
+        )
     if by_role["implementation"]:
+        subject = by_role["implementation"][0]
         specs.append(
             (
                 "upgrade",
-                "implementation changes require an authorized transition",
                 "upgrade",
+                f"authorized actor required to modify {subject.symbol}",
+                AbstractPredicate(
+                    "authorization",
+                    subject=subject.symbol,
+                    required_guard="authorized_actor",
+                    representation_status="partial",
+                    unsupported=("storage compatibility is not encoded",),
+                ),
                 tuple(by_role["implementation"]),
             )
         )
     if by_role["paused"]:
+        subject = by_role["paused"][0]
         specs.append(
             (
                 "pause",
-                "paused implies sensitive operations are unavailable",
                 "pause",
+                f"{subject.symbol} implies sensitive operations are unavailable",
+                AbstractPredicate(
+                    "pause",
+                    subject=subject.symbol,
+                    representation_status="partial",
+                    unsupported=("sensitive-operation set is not encoded",),
+                ),
                 tuple(by_role["paused"]),
             )
         )
     if by_role["debt"]:
+        subject = by_role["debt"][0]
         specs.append(
-            ("debt", "debt is reduced only with modeled repayment", "debt", tuple(by_role["debt"]))
+            (
+                "debt",
+                "debt",
+                f"{subject.symbol} decreases only with modeled repayment",
+                AbstractPredicate(
+                    "debt",
+                    subject=subject.symbol,
+                    representation_status="partial",
+                    unsupported=("repayment formula is not encoded",),
+                ),
+                tuple(by_role["debt"]),
+            )
         )
     if by_role["reserve"]:
+        subject = by_role["reserve"][0]
         specs.append(
             (
                 "reserve",
-                "reserve changes track modeled inflow and outflow",
                 "reserve",
+                f"{subject.symbol}_after = {subject.symbol}_before + inflow - outflow",
+                AbstractPredicate(
+                    "reserve",
+                    subject=subject.symbol,
+                    representation_status="partial",
+                    unsupported=("inflow and outflow are not fully encoded",),
+                ),
                 tuple(by_role["reserve"]),
             )
         )
     if by_role["allowance"]:
+        subject = by_role["allowance"][0]
         specs.append(
             (
                 "allowance",
-                "transferFrom consumes allowance",
                 "allowance",
+                f"transferFrom consumes {subject.symbol}",
+                AbstractPredicate(
+                    "allowance",
+                    subject=subject.symbol,
+                    representation_status="partial",
+                    unsupported=("allowance consumption formula is not encoded",),
+                ),
                 tuple(by_role["allowance"]),
             )
         )
     found: list[CandidateInvariant] = []
-    for category, relation, kind, variables in specs:
-        if len(found) >= caps["invariants"]:
-            break
+    for category, kind, relation, predicate, involved in specs:
+        declarations = tuple(dict.fromkeys(item.declaration_id for item in involved))
+        symbols = tuple(dict.fromkeys(item.symbol for item in involved))
         found.append(
             CandidateInvariant(
-                f"inv:{category}:{','.join(variables)}",
+                f"inv:{category}:{contract}:{','.join(symbols)}",
                 kind,
                 relation,
+                _operations_for(programs, source_file, contract, set(declarations)),
+                symbols,
                 (),
-                variables,
-                (),
-                (),
+                (relation,),
                 "name-heuristic",
                 "candidate",
                 "low",
                 (
                     "candidate invariant, not a proof",
                     "variable role is a name heuristic, not a type proof",
+                    "scoped to the declaring contract",
                 ),
+                declarations,
+                predicate,
+                predicate.unsupported,
+                predicate.representation_status,
+                contract,
+                source_file,
             )
         )
-    return tuple(found)
+    return found
 
 
 def _checks(
@@ -710,13 +893,28 @@ def _checks(
         function = _function_in(programs, transition.function_id)
         findings: tuple[AccountingAssessment, ...] | None = None
         for invariant in invariants:
-            if summary is None or function is None:
+            if (
+                invariant.contract
+                and function is not None
+                and invariant.contract != function.contract
+            ):
+                continue
+            home = _program_containing(programs, transition.function_id)
+            home_file = home.file if home is not None else transition.source_file
+            if invariant.source_file and home_file and invariant.source_file != home_file:
+                continue
+            if transition.status == "incomplete":
+                reason = transition.incomplete_reason or "transition is incomplete"
+                if function is not None and _loop_unmodeled(function):
+                    reason = _join_reason(reason, "loop-carried state is not modeled")
+                status, reason = "incomplete", reason
+            elif summary is None or function is None:
                 status, reason = "unknown", "function summary is unavailable"
-            elif summary.incomplete or transition.status == "incomplete":
-                status, reason = (
-                    "incomplete",
-                    transition.incomplete_reason or "transition is incomplete",
-                )
+            elif summary.incomplete:
+                reason = summary.incomplete_reason or "function summary is incomplete"
+                if function is not None and _loop_unmodeled(function):
+                    reason = _join_reason(reason, "loop-carried state is not modeled")
+                status, reason = "incomplete", reason
             else:
                 if findings is None:
                     program = _program_containing(programs, transition.function_id)
@@ -742,8 +940,10 @@ def _judge(
     summary: FunctionSummary,
     programs: Sequence[SemanticProgram],
 ) -> tuple[str, str]:
+    declared = set(invariant.declarations)
     touched = any(
-        item.symbol in invariant.state_variables and item.kind != "read"
+        (item.declaration_id in declared if declared else item.symbol in invariant.state_variables)
+        and item.kind != "read"
         for item in function.access_sites
     )
     external = bool(transition.external_calls)
@@ -757,7 +957,12 @@ def _judge(
     if not touched and not external and summary.placement_gaps == 0:
         if _internal_might_touch(programs, function, invariant, frozenset()):
             return "unknown", "an internal call may update the invariant variables"
-        return "preserved", "this transition does not write the invariant variables"
+        if _loop_unmodeled(function):
+            return "incomplete", "loop-carried state is not modeled"
+        return (
+            "non_interference_observed",
+            "no modeled write of these declarations was observed; this is not a proof",
+        )
     if not touched and external:
         return "unknown", "an external call may update the invariant variables"
     return "unknown", "the transition touches the invariant but no violation was established"
@@ -769,7 +974,12 @@ def _guard_verdict(
     relevant = [
         item
         for item in function.access_sites
-        if item.kind != "read" and item.symbol in invariant.state_variables
+        if item.kind != "read"
+        and (
+            item.declaration_id in invariant.declarations
+            if invariant.declarations
+            else item.symbol in invariant.state_variables
+        )
     ]
     if not relevant:
         return None
@@ -800,7 +1010,12 @@ def _internal_might_touch(
         if callee is None:
             return True
         if any(
-            item.symbol in invariant.state_variables and item.kind != "read"
+            (
+                item.declaration_id in invariant.declarations
+                if invariant.declarations
+                else item.symbol in invariant.state_variables
+            )
+            and item.kind != "read"
             for item in callee.access_sites
         ):
             return True
@@ -827,7 +1042,7 @@ def _paths(
         _single_paths(programs, flow, transition, checks, invariants, found, caps)
     edges = _resolved_edges(programs, transitions)
     if len(found) < caps["paths"]:
-        _multi_paths(by_id, edges, checks, found, caps)
+        _multi_paths(by_id, edges, checks, invariants, found, caps)
     if len(found) > caps["paths"]:
         found = found[: caps["paths"]]
         reason = "path limit reached"
@@ -870,6 +1085,7 @@ def _single_paths(
                 ),
                 "state read reaches a write after an external call",
                 depth=1,
+                cap=caps["depth"],
             )
         )
     summary = flow._summary(transition.function_id)
@@ -898,6 +1114,7 @@ def _single_paths(
                     ),
                     accounting.reason,
                     depth=1,
+                    cap=caps["depth"],
                     invariant_id=invariant,
                 )
             )
@@ -949,6 +1166,7 @@ def _oracle_paths(
                 ),
                 "oracle return reaches a security-sensitive write",
                 depth=1,
+                cap=caps["depth"],
                 assumptions=("no oracle validation was established",),
             )
         )
@@ -986,6 +1204,7 @@ def _delegate_paths(
                 ),
                 result.summary,
                 depth=1,
+                cap=caps["depth"],
                 assumptions=(f"target provenance is {result.provenance}",),
             )
         )
@@ -1019,6 +1238,7 @@ def _authority_paths(
                 ),
                 result.summary,
                 depth=1,
+                cap=caps["depth"],
             )
         )
 
@@ -1027,6 +1247,7 @@ def _multi_paths(
     by_id: dict[str, StateTransition],
     edges: list[dict[str, str]],
     checks: tuple[InvariantCheck, ...],
+    invariants: tuple[CandidateInvariant, ...],
     found: list[CandidatePath],
     caps: dict[str, int],
 ) -> None:
@@ -1049,13 +1270,14 @@ def _multi_paths(
             return
         current = chain[-1][0]
         if len(chain) >= 2 and current in property_ids:
-            _emit_chain(by_id, chain, checks, found, caps, complete=True, reason="")
+            _emit_chain(by_id, chain, checks, invariants, found, caps, complete=True, reason="")
         if len(chain) >= caps["depth"]:
             if children.get(current) and len(found) < caps["paths"]:
                 _emit_chain(
                     by_id,
                     chain,
                     checks,
+                    invariants,
                     found,
                     caps,
                     complete=False,
@@ -1078,6 +1300,7 @@ def _emit_chain(
     by_id: dict[str, StateTransition],
     chain: list[tuple[str, str]],
     checks: tuple[InvariantCheck, ...],
+    invariants: tuple[CandidateInvariant, ...],
     found: list[CandidatePath],
     caps: dict[str, int],
     *,
@@ -1106,27 +1329,43 @@ def _emit_chain(
     first = by_id.get(chain[0][0])
     if last is None or first is None:
         return
+    relationship = "truncated"
+    status = "incomplete"
+    path_reason = f"truncated exploration: {reason}" if reason else "truncated exploration"
+    path_id = "explore:" + ">".join(item[0] for item in chain)
     if complete:
+        shared = _shared_declarations(chain, by_id, checks, invariants)
         violated = [
             check.invariant_id
             for check in checks
             if check.transition_id == last.transition_id and check.status == "potential"
         ]
-        if len(violated) == 1:
-            steps.append(
-                _step(
-                    last,
-                    "violates-candidate-invariant",
-                    violated[0],
-                    last.function_id,
-                    last.writes,
-                    (),
+        path_id = "chain:" + ">".join(item[0] for item in chain)
+        if shared:
+            relationship = "connected"
+            status = "candidate"
+            path_reason = "shared declarations connect the chain to the candidate property"
+            steps.append(_step(last, "depends-on", shared[0], last.function_id, last.writes, ()))
+            if len(violated) == 1:
+                steps.append(
+                    _step(
+                        last,
+                        "violates-candidate-invariant",
+                        violated[0],
+                        last.function_id,
+                        last.writes,
+                        (),
+                    )
                 )
+        else:
+            relationship = "unknown"
+            status = "unknown"
+            path_reason = (
+                "unknown relationship: resolved calls reach a candidate "
+                "but no shared state was shown"
             )
-    path_id = "chain:" + ">".join(item[0] for item in chain)
     if any(item.path_id == path_id for item in found):
         return
-    status = "candidate" if complete else "incomplete"
     found.append(
         CandidatePath(
             path_id,
@@ -1140,10 +1379,12 @@ def _emit_chain(
             last.writes,
             first.conditions,
             last.assumptions,
-            f"depth<={caps['depth']}",
+            f"depth={len(chain)}; cap<={caps['depth']}",
             "complete" if complete else "partial",
-            "" if complete else reason,
-            "resolved call chain reaches a candidate property" if complete else reason,
+            "" if complete else path_reason,
+            path_reason,
+            "",
+            relationship,
         )
     )
 
@@ -1212,6 +1453,7 @@ def _path(
     depth: int,
     invariant_id: str = "",
     assumptions: tuple[str, ...] = (),
+    cap: int = MAX_DEPTH,
 ) -> CandidatePath:
     return CandidatePath(
         path_id,
@@ -1225,11 +1467,12 @@ def _path(
         tuple(dict.fromkeys(op for step in steps for op in step.operation_ids)),
         transition.conditions,
         tuple(dict.fromkeys((*transition.assumptions, *assumptions))),
-        f"depth<={MAX_DEPTH}",
+        f"depth=1; cap<={cap}",
         "complete",
         "",
         reason,
         invariant_id,
+        "intra-function",
     )
 
 
@@ -1286,6 +1529,118 @@ def _statement_for(function: SemanticFunction, start_byte: int) -> str:
     return ""
 
 
+def _identity_collisions(programs: Sequence[SemanticProgram]) -> set[str]:
+    """The same contract/function/line in two program objects is not one function."""
+    owners: dict[str, int] = {}
+    collided: set[str] = set()
+    for program in programs:
+        marker = id(program)
+        for function in program.functions:
+            previous = owners.get(function.identity)
+            if previous is None:
+                owners[function.identity] = marker
+                continue
+            if previous != marker:
+                collided.add(function.identity)
+    return collided
+
+
+def _collision_transition(function: SemanticFunction, home: SemanticProgram) -> StateTransition:
+    reason = "function identity collides across sources"
+    return StateTransition(
+        function.identity,
+        function.contract,
+        function.identity,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (reason,),
+        "parser",
+        (),
+        "incomplete",
+        reason,
+        source_file=home.file,
+    )
+
+
+def _operations_for(
+    programs: Sequence[SemanticProgram],
+    source_file: str,
+    contract: str,
+    declarations: set[str],
+) -> tuple[str, ...]:
+    found: list[str] = []
+    for program in programs:
+        if source_file and program.file != source_file:
+            continue
+        for function in program.functions:
+            if function.contract != contract:
+                continue
+            for access in function.access_sites:
+                if access.declaration_id in declarations:
+                    found.append(access.operation_id)
+    return tuple(dict.fromkeys(found))
+
+
+def _shared_declarations(
+    chain: list[tuple[str, str]],
+    by_id: dict[str, StateTransition],
+    checks: tuple[InvariantCheck, ...],
+    invariants: tuple[CandidateInvariant, ...],
+) -> tuple[str, ...]:
+    last = by_id.get(chain[-1][0])
+    if last is None:
+        return ()
+    wanted = {
+        check.invariant_id
+        for check in checks
+        if check.transition_id == last.transition_id and check.status == "potential"
+    }
+    property_decls: set[str] = set()
+    for invariant in invariants:
+        if invariant.invariant_id in wanted:
+            property_decls.update(invariant.declarations)
+    if not property_decls:
+        return ()
+    earlier: set[str] = set()
+    for function_id, _call in chain[:-1]:
+        transition = by_id.get(function_id)
+        if transition is None:
+            continue
+        earlier.update(
+            _operation_declaration(item) for item in (*transition.reads, *transition.writes)
+        )
+    earlier.discard("")
+    return tuple(sorted(earlier & property_decls))
+
+
+def _operation_declaration(operation_id: str) -> str:
+    parts = operation_id.rsplit(":", 2)
+    if len(parts) < 3:
+        return ""
+    return parts[0]
+
+
+def _repayment_reaches(summary: FunctionSummary, write: StateAccess) -> bool:
+    value_ids = [
+        value.identity
+        for value in summary.values
+        if value.provenance == "msg.value" or value.kind == "msg.value"
+    ]
+    return any(_forward(summary.edges, value_id, write.operation_id) for value_id in value_ids)
+
+
+def _loop_unmodeled(function: SemanticFunction) -> bool:
+    return bool(re.search(r"\b(for|while|do)\b", function.source or ""))
+
+
 def _has_inflow(function: SemanticFunction) -> bool:
     source = strip_comments(
         function.source or "",
@@ -1297,8 +1652,12 @@ def _has_inflow(function: SemanticFunction) -> bool:
     return any(site.callee in _INFLOW or bool(site.value) for site in function.call_sites)
 
 
-def _declared_roles(program: SemanticProgram) -> dict[str, str]:
-    return {item.symbol: role for item in program.declarations if (role := _role(item.symbol))}
+def _declared_roles(program: SemanticProgram, contract: str = "") -> dict[str, str]:
+    return {
+        item.symbol: role
+        for item in program.declarations
+        if (not contract or item.contract == contract) and (role := _role(item.symbol))
+    }
 
 
 def _role(symbol: str) -> str:
@@ -1401,12 +1760,15 @@ def _join_reason(left: str, right: str) -> str:
     return "; ".join(dict.fromkeys(parts))
 
 
-def _merge_flow(target: DataflowModel, extra: DataflowModel) -> None:
-    target.summaries.update(extra.summaries)
-    target.values.update(extra.values)
-    target.edges = tuple([*target.edges, *extra.edges])[
-        : extra.edges.__len__() + target.edges.__len__()
-    ]
+def _merge_flow(target: DataflowModel, extra: DataflowModel, collided: set[str]) -> None:
+    for key, summary in extra.summaries.items():
+        if key in collided or key in target.summaries:
+            continue
+        target.summaries[key] = summary
+    for key, value in extra.values.items():
+        if key not in target.values:
+            target.values[key] = value
+    target.edges = tuple([*target.edges, *extra.edges])
     if extra.incomplete_reason:
         target.incomplete_reason = _join_reason(target.incomplete_reason, extra.incomplete_reason)
         target.status = "partial"
