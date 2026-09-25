@@ -59,6 +59,9 @@ class FunctionSummary:
     cyclic: bool = False
     incomplete: bool = False
     incomplete_reason: str = ""
+    ordered_reads: tuple[tuple[int, str], ...] = ()
+    ordered_writes: tuple[tuple[int, str], ...] = ()
+    ordered_calls: tuple[tuple[int, str, str], ...] = ()
 
 
 @dataclass
@@ -69,6 +72,7 @@ class DataflowModel:
     edges: tuple[DependencyEdge, ...] = ()
     incomplete_reason: str = ""
     profile: str = "normal"
+    iterations: int = 0
 
     def origin(self, value_id: str) -> str:
         value = self.values.get(value_id)
@@ -94,25 +98,47 @@ class DataflowModel:
         return False
 
     def reads_before(self, function: str, call: str) -> tuple[str, ...]:
-        summary = self._summary(function)
-        if summary is None:
-            return ()
-        return summary.reads if call else summary.reads
+        return self.reads_before_call(function, call)
 
     def writes_after(self, function: str, call: str) -> tuple[str, ...]:
-        summary = self._summary(function)
-        if summary is None or not call:
-            return () if summary is None else summary.writes
-        return summary.writes
+        return self.writes_after_call(function, call)
 
-    def target_provenance(self, function: str) -> str:
+    def reads_before_call(self, function: str, call_id: str) -> tuple[str, ...]:
+        summary = self._summary(function)
+        order = self._call_order(summary, call_id)
+        if summary is None or order is None:
+            return ()
+        return tuple(path for index, path in summary.ordered_reads if index < order)
+
+    def writes_after_call(self, function: str, call_id: str) -> tuple[str, ...]:
+        summary = self._summary(function)
+        order = self._call_order(summary, call_id)
+        if summary is None or order is None:
+            return ()
+        return tuple(path for index, path in summary.ordered_writes if index > order)
+
+    def target_provenance(self, function: str, call_id: str = "") -> str:
         summary = self._summary(function)
         if summary is None:
             return "unknown"
-        for value in summary.values:
-            if value.kind == "delegatecall-target":
-                return value.provenance
+        matches = [
+            value
+            for value in summary.values
+            if value.kind == "delegatecall-target" and (not call_id or call_id in value.identity)
+        ]
+        if len(matches) == 1:
+            return matches[0].provenance
         return "unknown"
+
+    def _call_order(self, summary: FunctionSummary | None, call_id: str) -> int | None:
+        if summary is None or not call_id:
+            return None
+        found = [
+            index for index, callee, ident in summary.ordered_calls if call_id in {callee, ident}
+        ]
+        if len(found) != 1:
+            return None
+        return found[0]
 
     def authorization_path(self, function: str) -> str:
         summary = self._summary(function)
@@ -149,11 +175,16 @@ class DataflowModel:
     def _summary(self, function: str) -> FunctionSummary | None:
         if function in self.summaries:
             return self.summaries[function]
-        for summary in self.summaries.values():
-            if summary.identity.endswith(f".{function}") or summary.identity.split(":")[0].endswith(
-                function
-            ):
-                return summary
+        exact = [item for item in self.summaries.values() if item.identity == function]
+        if len(exact) == 1:
+            return exact[0]
+        named = [
+            item
+            for item in self.summaries.values()
+            if item.identity.split(":")[0].rsplit(".", 1)[-1] == function
+        ]
+        if len(named) == 1:
+            return named[0]
         return None
 
 
@@ -222,6 +253,22 @@ def _summarize(
 ) -> FunctionSummary:
     if function.identity in model.summaries and function.identity not in stack:
         return model.summaries[function.identity]
+    model.iterations += 1
+    if model.iterations > limits["iterations"] * max(1, limits["functions"]):
+        incomplete_summary = FunctionSummary(
+            function.identity,
+            function.reads,
+            function.writes,
+            (),
+            (),
+            (),
+            "unknown",
+            (),
+            incomplete=True,
+            incomplete_reason="fixed-point iteration limit reached",
+        )
+        model.summaries[function.identity] = incomplete_summary
+        return incomplete_summary
     cyclic = function.identity in stack
     incomplete = depth > limits["depth"] or cyclic
     reason = ""
@@ -231,8 +278,20 @@ def _summarize(
         reason = "call depth limit reached"
     values: list[FlowValue] = []
     edges: list[DependencyEdge] = []
+    if len(function.access_sites) > limits["blocks"]:
+        incomplete = True
+        reason = reason or "CFG block limit reached"
     if not incomplete:
         values, edges = _intraprocedural(function, limits)
+    ordered_reads = tuple(
+        (item.span.start_byte, item.path) for item in function.access_sites if item.kind != "write"
+    )
+    ordered_writes = tuple(
+        (item.span.start_byte, item.path) for item in function.access_sites if item.kind != "read"
+    )
+    ordered_calls = tuple(
+        (site.span.start_byte, site.callee, site.call_id) for site in function.call_sites
+    )
     for site in function.call_sites:
         if site.external:
             returned = FlowValue(
@@ -265,7 +324,7 @@ def _summarize(
                 provenance = _delegate_provenance(function, site.target)
                 values.append(
                     FlowValue(
-                        f"{function.identity}:delegate-target",
+                        f"{function.identity}:delegate-target:{site.call_id}",
                         "delegatecall-target",
                         provenance,
                         (site.target,),
@@ -306,6 +365,9 @@ def _summarize(
         cyclic=cyclic,
         incomplete=incomplete or bool(program.incomplete_reason),
         incomplete_reason=reason or program.incomplete_reason,
+        ordered_reads=ordered_reads,
+        ordered_writes=ordered_writes,
+        ordered_calls=ordered_calls,
     )
     model.summaries[function.identity] = summary
     model.edges = tuple([*model.edges, *edges])[: limits["edges"]]
@@ -368,12 +430,18 @@ def _intraprocedural(
 
 
 def _delegate_provenance(function: SemanticFunction, target: str) -> str:
-    if re.search(r"\b(msg\.sender|msg\.data|amount|input|data|target)\b", target):
-        return "attacker"
-    if target in function.reads or target in function.writes:
+    base = re.match(r"([A-Za-z_]\w*)", target.strip())
+    name = base.group(1) if base else ""
+    if "?" in target:
+        return "unknown"
+    if target.strip().endswith(")"):
+        return "derived"
+    if name in function.parameters or name in {"msg", "tx"}:
+        return "attacker" if name != "msg" else "attacker"
+    if name in function.reads or name in function.writes:
         return "state"
-    if re.fullmatch(r"(address\()?(0x[0-9a-fA-F]+|[A-Z]\w*)\)?", target):
-        return "state"
+    if re.fullmatch(r"0x[0-9a-fA-F]+", target.strip()):
+        return "trusted_constant"
     return "unknown"
 
 

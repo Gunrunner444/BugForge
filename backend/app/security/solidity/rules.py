@@ -1000,9 +1000,13 @@ def _with_semantics(
             item.metadata["compiler_ir"] = program.compiler_ir_status
         if program.incomplete_reason or flow.incomplete_reason:
             item.metadata["incomplete_reason"] = program.incomplete_reason or flow.incomplete_reason
-        if delegate:
-            function = str(item.metadata.get("function") or "")
-            item.metadata["target_provenance"] = flow.target_provenance(function)
+        function_name = str(item.metadata.get("function") or "")
+        matches = program.functions_named(function_name) if function_name else ()
+        if len(matches) == 1:
+            item.metadata["semantic_authorization"] = matches[0].authorization
+            item.metadata["analysis_origin"] = "semantic"
+        if delegate and len(matches) == 1:
+            item.metadata["target_provenance"] = flow.target_provenance(matches[0].identity)
     return observations
 
 

@@ -111,6 +111,35 @@ def new_lead(
     )
 
 
+def backfill_lead_relationships(
+    *,
+    related_ids: list[str],
+    evidence_ids: list[str],
+    observation_ids: list[str],
+    chain_ids: list[str],
+    hypothesis_ids: list[str] | None,
+    finding_ids: list[str] | None,
+    semantic_node_ids: list[str] | None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Move legacy hypothesis ids out of related_ids without inventing new links.
+
+    Phase 36 stored the hypothesis id in related_ids. Ids that already belong
+    to evidence, observations, chains, findings, or semantic nodes stay there.
+    """
+    hypotheses = list(hypothesis_ids or [])
+    findings = list(finding_ids or [])
+    semantic = list(semantic_node_ids or [])
+    occupied = (
+        set(evidence_ids) | set(observation_ids) | set(chain_ids) | set(findings) | set(semantic)
+    )
+    for item in related_ids:
+        if not item or item in occupied or item in hypotheses:
+            continue
+        hypotheses.append(item)
+        occupied.add(item)
+    return hypotheses, findings, semantic
+
+
 def _validate(lead: ResearchLead) -> None:
     if lead.status == "KILLED" and not lead.kill_reason.strip():
         raise ValueError("a killed lead requires a kill reason")
@@ -143,7 +172,15 @@ def lead_from_row(row: DBResearchLead) -> ResearchLead:
         observation_ids=list(row.observation_ids or []),
         related_ids=list(row.related_ids or []),
         chain_ids=list(row.chain_ids or []),
-        hypothesis_ids=list(getattr(row, "hypothesis_ids", None) or []),
+        hypothesis_ids=backfill_lead_relationships(
+            related_ids=list(row.related_ids or []),
+            evidence_ids=list(row.evidence_ids or []),
+            observation_ids=list(row.observation_ids or []),
+            chain_ids=list(row.chain_ids or []),
+            hypothesis_ids=list(getattr(row, "hypothesis_ids", None) or []),
+            finding_ids=list(getattr(row, "finding_ids", None) or []),
+            semantic_node_ids=list(getattr(row, "semantic_node_ids", None) or []),
+        )[0],
         finding_ids=list(getattr(row, "finding_ids", None) or []),
         semantic_node_ids=list(getattr(row, "semantic_node_ids", None) or []),
         updated_at=updated.isoformat(),

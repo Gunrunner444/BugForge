@@ -1,6 +1,16 @@
 rules:
-  - id: bugforge.local.placeholder
+  - id: bugforge.solidity.tx-origin
     languages: [solidity]
-    message: BugForge local ruleset. This rule does not fetch remote configuration.
+    message: Authorization compares tx.origin. This is untrusted static evidence.
+    severity: WARNING
+    pattern: tx.origin
+  - id: bugforge.solidity.delegatecall
+    languages: [solidity]
+    message: delegatecall is present. This is untrusted static evidence.
+    severity: WARNING
+    pattern: $T.delegatecall(...)
+  - id: bugforge.solidity.low-level-call
+    languages: [solidity]
+    message: Low-level call is present. This is untrusted static evidence.
     severity: INFO
-    pattern: BUGFORGE_SEMGREP_LOCAL_RULESET_UNUSED
+    pattern: $T.call(...)
