@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 
 from app.parsing.model import SyntaxEvent, SyntaxGraph
+from app.parsing.solidity_ir import SemanticProgram, build_semantic_program
 
 _ACCOUNTING = re.compile(
     r"\b(totalSupply|totalShares|totalAssets|totalDebt|cumulativeEarmarked|"
@@ -45,15 +46,17 @@ class MethodologyIssue:
     function: str
     contract: str
     summary: str
+    line: int = 0
 
 
 def analyze_methodology(graph: SyntaxGraph) -> list[MethodologyIssue]:
     if graph.language != "solidity":
         return []
+    program = build_semantic_program(graph)
     grouped = _functions_by_contract(graph)
     found: list[MethodologyIssue] = []
     for contract, functions in grouped.items():
-        found.extend(_accounting(contract, functions))
+        found.extend(_accounting(contract, functions, program))
         found.extend(_sibling_auth(contract, functions))
         found.extend(_boundaries(contract, functions))
         found.extend(_erc4626(contract, functions))
@@ -107,13 +110,23 @@ def _accounting_names(text: str) -> set[str]:
     return set(_ACCOUNTING.findall(text))
 
 
-def _accounting(contract: str, functions: list[SyntaxEvent]) -> list[MethodologyIssue]:
+def _ir_writes(program: SemanticProgram, event: SyntaxEvent, contract: str) -> set[str]:
+    name = _name(event)
+    for item in program.functions_named(name, contract):
+        if item.line == event.line:
+            return set(item.writes)
+    return set()
+
+
+def _accounting(
+    contract: str, functions: list[SyntaxEvent], program: SemanticProgram
+) -> list[MethodologyIssue]:
     family = [item for item in functions if _family_key(_name(item))]
     found: list[MethodologyIssue] = []
     for index, left in enumerate(family):
-        left_names = _accounting_names(left.text)
+        left_names = _accounting_names(left.text) | _ir_writes(program, left, contract)
         for right in family[index + 1 :]:
-            right_names = _accounting_names(right.text)
+            right_names = _accounting_names(right.text) | _ir_writes(program, right, contract)
             if len(left_names | right_names) < 2 or left_names == right_names:
                 continue
             short, short_names, long_names = (
@@ -134,6 +147,7 @@ def _accounting(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
                     f"`{contract}.{_name(short)}` updates {sorted(short_names)} and returns "
                     f"without the coupled writes {sorted(missing)} performed by its sibling. "
                     "This is potential evidence, not a confirmed accounting bug.",
+                    line=short.line,
                 )
             )
     return found
@@ -170,6 +184,7 @@ def _sibling_auth(contract: str, functions: list[SyntaxEvent]) -> list[Methodolo
                     f"`{contract}.{_name(event)}` is an external sibling of "
                     f"`{_name(protected[0])}` but does not repeat its authorization modifier. "
                     "This is potential evidence, not a confirmed access-control bug.",
+                    line=event.line,
                 )
             )
     return found
@@ -208,6 +223,7 @@ def _boundaries(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
                 f"`{contract}` compares `{key[0]}` and `{key[1]}` with both {sorted(ops)} "
                 "across sibling functions. An off-by-one at the boundary is possible. "
                 "This is potential evidence, not a confirmed boundary bug.",
+                line=event.line,
             )
         )
     return found
@@ -247,6 +263,7 @@ def _erc4626(contract: str, functions: list[SyntaxEvent]) -> list[MethodologyIss
                 f"`{contract}.{_name(event)}` converts assets and shares from totalSupply and "
                 "totalAssets without a virtual offset or minimum liquidity. A first deposit "
                 "can inflate the exchange rate. This is potential evidence, not a confirmed bug.",
+                line=event.line,
             )
         )
     return found
@@ -274,6 +291,7 @@ def _flash_spot(contract: str, functions: list[SyntaxEvent]) -> list[Methodology
                 f"`{contract}.{_name(event)}` prices a value transfer from a same-transaction "
                 "balance or reserve and does not consult a freshness-checked oracle. "
                 "A flash loan is not itself the bug. This is potential evidence, not a confirmed one.",
+                line=event.line,
             )
         )
     return found

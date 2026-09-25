@@ -33,12 +33,25 @@ class OobEvent:
 
 
 @dataclass
-class OobLedger:
-    """Correlation only. A provider may be attached later; none ships here."""
+class MockOobProvider(OobProvider):
+    """In-memory test provider. This is not interactsh."""
 
-    available: bool = False
+    name: str = "mock"
+
+    def available(self) -> bool:
+        return True
+
+
+@dataclass
+class OobLedger:
+    """Correlation only. Availability comes from the provider, not a bare flag."""
+
     provider: OobProvider = field(default_factory=OobProvider)
     events: dict[str, OobEvent] = field(default_factory=dict)
+
+    @property
+    def available(self) -> bool:
+        return self.provider.available()
 
     def mint(self, session_id: str, payload_id: str, hypothesis_id: str = "") -> OobEvent:
         if not self.available:

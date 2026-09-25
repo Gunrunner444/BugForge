@@ -28,7 +28,7 @@ from app.security_agent.prioritize import prioritize
 from app.security_agent.schemas import ResearchHypothesis
 from app.security_agent.states import ResearchMode
 from app.security_testing.engine import SecurityTestEngine
-from app.security_testing.oob import OobLedger
+from app.security_testing.oob import MockOobProvider, OobLedger
 from app.security_testing.process import ProcessOutcome, ProcessRunner
 from app.security_testing.safety import SafetyLimits
 
@@ -196,6 +196,7 @@ def test_implementation_storage_collision_behind_proxy(tmp_path: Path) -> None:
     pragma solidity ^0.8.20;
     contract CollisionProxy {
         address implementation;
+        function use(ImplV1 first, ImplV2 next) external { implementation = address(next); }
         fallback() external payable { implementation.delegatecall(msg.data); }
     }
     contract ImplV1 { uint256 value; }
@@ -263,16 +264,17 @@ def test_chain_stays_unverified_without_authoritative_evidence() -> None:
             ChainStep("value leaves", evidence_id="e2", evidence_tier="reproduced"),
         ),
     )
-    assert assess_chain(evidenced).status == "reproduced"
+    assert assess_chain(evidenced).status == "proposed"
     assert assess_chain(evidenced).verified is False
     verified = propose_chain(
         "c3",
         (
-            ChainStep("weak auth", evidence_id="e1", evidence_tier="verified"),
-            ChainStep("value leaves", evidence_id="e2", evidence_tier="verified"),
+            ChainStep("weak auth", evidence_id="fake", evidence_tier="verified"),
+            ChainStep("value leaves", evidence_id="also-fake", evidence_tier="verified"),
         ),
     )
-    assert assess_chain(verified).verified is True
+    assert assess_chain(verified).status == "proposed"
+    assert assess_chain(verified).verified is False
 
 
 def test_semgrep_dedupes_and_rejects_garbage() -> None:
@@ -289,7 +291,7 @@ def test_semgrep_dedupes_and_rejects_garbage() -> None:
     assert "untrusted" in hits[0].message.lower() or "UNTRUSTED" in hits[0].message
     with pytest.raises(ValueError):
         normalize_semgrep("not-json")
-    assert semgrep_available(binary="semgrep") is True
+    assert semgrep_available(binary="semgrep-not-installed-bugforge") is False
     missing = SemgrepAdapter(binary=None)
     if not semgrep_available():
         passive = missing.collect_passive_evidence(scope=None)  # type: ignore[arg-type]
@@ -302,9 +304,10 @@ def test_semgrep_dedupes_and_rejects_garbage() -> None:
 
 
 def test_oob_callback_cannot_cross_sessions() -> None:
-    ledger = OobLedger(available=False)
+    ledger = OobLedger()
+    assert ledger.available is False
     assert ledger.mint("s", "p").state == "UNAVAILABLE"
-    live = OobLedger(available=True)
+    live = OobLedger(provider=MockOobProvider())
     minted = live.mint("session-a", "payload-1")
     assert live.status(minted.correlation_id) == "WAITING"
     with pytest.raises(ValueError, match="session"):
@@ -325,6 +328,7 @@ def test_renamed_slot_collision_and_append_only(tmp_path: Path) -> None:
     pragma solidity ^0.8.20;
     contract CollisionProxy {
         address implementation;
+        function use(ImplV1 first, ImplV2 next) external { implementation = address(next); }
         fallback() external payable { implementation.delegatecall(msg.data); }
     }
     contract ImplV1 { uint256 value; }
@@ -334,6 +338,7 @@ def test_renamed_slot_collision_and_append_only(tmp_path: Path) -> None:
     pragma solidity ^0.8.20;
     contract CollisionProxy {
         address implementation;
+        function use(ImplV1 first, ImplV2 next) external { implementation = address(next); }
         fallback() external payable { implementation.delegatecall(msg.data); }
     }
     contract ImplV1 { uint256 value; }
@@ -460,17 +465,29 @@ async def test_research_session_restores_leads_for_the_planner(db_session) -> No
     assert rejected.verified is False
 
 
-def test_semgrep_local_scan_uses_runner_output() -> None:
-    missing = SemgrepAdapter().scan_local("/tmp/proj")
+def test_semgrep_local_scan_uses_runner_output(tmp_path: Path) -> None:
+    import sys
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    inside = root / "A.sol"
+    inside.write_text("contract A {}", encoding="utf-8")
+    missing = SemgrepAdapter().scan_local(str(inside), root=str(root))
     assert missing[0].kind is EvidenceKind.TOOL_STATUS
     assert missing[0].contributes_to_verification is False
-    ran = SemgrepAdapter(binary="semgrep", runner=_SemgrepRunner()).scan_local("/tmp/proj")
+    ran = SemgrepAdapter(binary=sys.executable, runner=_SemgrepRunner()).scan_local(
+        str(inside), root=str(root)
+    )
     assert ran[0].kind is EvidenceKind.STATIC_ANALYSIS
     assert ran[0].contributes_to_verification is False
-    refused = SemgrepAdapter(binary="semgrep", runner=_SemgrepRunner()).scan_local(
-        "https://example.test"
+    refused = SemgrepAdapter(binary=sys.executable, runner=_SemgrepRunner()).scan_local(
+        "https://example.test", root=str(root)
     )
     assert refused[0].metadata["state"] == "invalid_scope"
+    outside = SemgrepAdapter(binary=sys.executable, runner=_SemgrepRunner()).scan_local(
+        "/etc/passwd", root=str(root)
+    )
+    assert outside[0].metadata["state"] == "invalid_scope"
 
 
 def test_parser_still_reads_methodology_sources(tmp_path: Path) -> None:

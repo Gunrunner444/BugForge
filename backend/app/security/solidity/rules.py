@@ -25,6 +25,7 @@ from app.parsing.solidity_flow import (
     signature_replay_gap,
 )
 from app.parsing.solidity_guards import initializer_is_protected, reentrancy_guard_holds
+from app.parsing.solidity_ir import build_semantic_program
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
 from app.parsing.solidity_methodology import analyze_methodology
 from app.parsing.solidity_modifiers import resolve_modifier
@@ -410,7 +411,7 @@ class _MethodologyRule(_SolidityRule):
                 (
                     item
                     for item in graph.events
-                    if item.kind == "sol_function" and issue.function in item.text
+                    if item.kind == "sol_function" and _same_function(issue, item)
                 ),
                 None,
             )
@@ -972,7 +973,19 @@ def _reentrancy(
 
 
 def _functions(graph: SyntaxGraph) -> list[SyntaxEvent]:
-    return [event for event in graph.events if event.kind == "sol_function"]
+    """Functions the semantic IR can name. Identity is contract, name, and line."""
+    program = build_semantic_program(graph)
+    if program.status != "partial":
+        return [event for event in graph.events if event.kind == "sol_function"]
+    declared = {(item.contract, item.name, item.line) for item in program.functions}
+    found: list[SyntaxEvent] = []
+    for event in graph.events:
+        if event.kind != "sol_function":
+            continue
+        identity = (_fields(event.extra).get("contract", ""), _function_name(event), event.line)
+        if identity in declared:
+            found.append(event)
+    return found
 
 
 def _function_name(event: SyntaxEvent) -> str:
@@ -987,6 +1000,20 @@ def _function_name(event: SyntaxEvent) -> str:
     if stripped.startswith("fallback"):
         return "fallback"
     return ""
+
+
+def _same_function(issue: object, event: SyntaxEvent) -> bool:
+    """Match contract, exact name, and source line. Never a name prefix."""
+    name = _function_name(event)
+    contract = _fields(event.extra).get("contract", "")
+    issue_name = str(getattr(issue, "function", "") or "")
+    issue_contract = str(getattr(issue, "contract", "") or "")
+    issue_line = int(getattr(issue, "line", 0) or 0)
+    if name != issue_name:
+        return False
+    if issue_contract and contract and issue_contract != contract:
+        return False
+    return not issue_line or event.line == issue_line
 
 
 def _inside(graph: SyntaxGraph, function: SyntaxEvent) -> list[SyntaxEvent]:

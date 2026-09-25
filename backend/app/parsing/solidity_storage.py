@@ -669,26 +669,37 @@ def _unplaced_order(order: list[str], facts: dict[str, _ContractFacts]) -> list[
 
 
 def _record_comparisons(graph: SyntaxGraph, model: StorageModel) -> None:
-    delegate_contracts = {
-        _fields(event.extra).get("contract", "")
-        for event in graph.events
-        if event.kind == "sol_delegatecall"
-    }
     contracts = [name for name in model.order if name]
+    links, unresolved = _proxy_links(graph, contracts)
     notes: list[str] = []
-    for index, left_name in enumerate(contracts):
-        for right_name in contracts[index + 1 :]:
-            relationship = (
-                "proxy-implementation" if {left_name, right_name} & delegate_contracts else "layout"
+    for proxy, implementation in links:
+        if proxy not in contracts or implementation not in contracts:
+            continue
+        comparison = compare_storage_layouts(
+            model, model, proxy, implementation, "proxy-implementation"
+        )
+        model.comparisons.append(comparison)
+        if proxy in model.uncertain or implementation in model.uncertain:
+            model.ambiguities.append(
+                f"Layout for `{proxy}` and `{implementation}` is incomplete. No collision is claimed."
             )
-            comparison = compare_storage_layouts(model, model, left_name, right_name, relationship)
-            model.comparisons.append(comparison)
-            if comparison.compatible is False and relationship == "proxy-implementation":
-                notes.append(_incompatible_note(relationship, left_name, right_name, comparison))
-    if delegate_contracts:
-        implementations = [name for name in contracts if name not in delegate_contracts]
-        for index, left_name in enumerate(implementations):
-            for right_name in implementations[index + 1 :]:
+            continue
+        slot_note = _slot_type_collision(model, proxy, implementation)
+        if slot_note:
+            notes.append(slot_note)
+        elif comparison.compatible is False:
+            notes.append(
+                _incompatible_note("proxy-implementation", proxy, implementation, comparison)
+            )
+    by_proxy: dict[str, list[str]] = {}
+    for proxy, implementation in links:
+        by_proxy.setdefault(proxy, []).append(implementation)
+    for implementations in by_proxy.values():
+        unique = list(dict.fromkeys(implementations))
+        for index, left_name in enumerate(unique):
+            for right_name in unique[index + 1 :]:
+                if left_name not in contracts or right_name not in contracts:
+                    continue
                 comparison = compare_storage_layouts(
                     model, model, left_name, right_name, "implementation-upgrade"
                 )
@@ -702,15 +713,53 @@ def _record_comparisons(graph: SyntaxGraph, model: StorageModel) -> None:
                 slot_note = _slot_type_collision(model, left_name, right_name)
                 if slot_note:
                     notes.append(slot_note)
-                elif comparison.compatible is False and _shares_layout_name(
-                    model, left_name, right_name
-                ):
+                elif comparison.compatible is False and not comparison.appended:
                     notes.append(
                         _incompatible_note(
                             "implementation-upgrade", left_name, right_name, comparison
                         )
                     )
+    for proxy in unresolved:
+        model.ambiguities.append(
+            f"Delegatecall in `{proxy}` does not resolve to an implementation contract. "
+            "No collision is claimed."
+        )
     model.overlaps = list(dict.fromkeys(notes))
+
+
+def _proxy_links(
+    graph: SyntaxGraph, contracts: list[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Pair a proxy with implementations named in its delegatecall or assignments."""
+    named = [name for name in contracts if name]
+    links: list[tuple[str, str]] = []
+    unresolved: list[str] = []
+    for event in graph.events:
+        if event.kind != "sol_delegatecall":
+            continue
+        proxy = _fields(event.extra).get("contract", "")
+        if not proxy:
+            continue
+        mentioned = [
+            name
+            for name in named
+            if name != proxy and re.search(rf"\b{re.escape(name)}\b", graph.source)
+        ]
+        proxy_source = "\n".join(
+            item.text for item in graph.events if _fields(item.extra).get("contract", "") == proxy
+        )
+        resolved = [
+            name for name in mentioned if re.search(rf"\b{re.escape(name)}\b", proxy_source)
+        ]
+        if resolved:
+            links.extend((proxy, name) for name in resolved)
+            continue
+        others = [name for name in named if name != proxy]
+        if len(others) == 1:
+            links.append((proxy, others[0]))
+        else:
+            unresolved.append(proxy)
+    return links, unresolved
 
 
 def _slot_type_collision(model: StorageModel, left: str, right: str) -> str:
