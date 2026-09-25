@@ -134,7 +134,8 @@ def operation_guarded(function_text: str, operation: str) -> bool | None:
     """Whether ``operation`` is dominated by a resolved authorization check.
 
     None means the body could not be split, or the operation text was not found.
-    Callers must not treat None as safe.
+    Callers must not treat None as safe. This helper is path-wide. Prefer
+    :func:`operation_guard_at` when several occurrences share one path.
     """
     cfg = build_function_cfg(function_text)
     if not cfg.known or not operation:
@@ -146,6 +147,67 @@ def operation_guarded(function_text: str, operation: str) -> bool | None:
     if not guards:
         return False
     return all(_op_protected(cfg, op, guards) for op in ops)
+
+
+def node_ranges(
+    function_text: str, cfg: FunctionCfg | None = None
+) -> tuple[FunctionCfg, dict[int, tuple[int, int]]]:
+    """Map CFG nodes to offsets in ``function_text``.
+
+    A wrapping control node starts the next search inside its body so a nested
+    statement keeps its own range. Duplicate statement text is found in order.
+    Nodes that cannot be located are omitted. Callers must not guess a home.
+    """
+    graph = cfg if cfg is not None else build_function_cfg(function_text)
+    ranges: dict[int, tuple[int, int]] = {}
+    cursor = 0
+    for node in graph.nodes:
+        text = node.text.strip()
+        if not text:
+            continue
+        at = function_text.find(text, cursor)
+        if at < 0:
+            continue
+        ranges[int(node.node_id)] = (at, at + len(text))
+        brace = text.find("{")
+        if brace >= 0:
+            cursor = at + brace + 1
+        elif node.kind in {"if", "loop", "try"}:
+            # The braceless body is a later node still inside this statement.
+            cursor = at
+        else:
+            cursor = at + len(text)
+    return graph, ranges
+
+
+def node_at(ranges: dict[int, tuple[int, int]], offset: int) -> int | None:
+    """Return the tightest node whose range contains ``offset``."""
+    matches = [
+        (node_id, end - start) for node_id, (start, end) in ranges.items() if start <= offset < end
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[1], item[0]))
+    return matches[0][0]
+
+
+def operation_guard_at(function_text: str, local_offset: int) -> tuple[str, str]:
+    """Guard status and predicate for the statement at ``local_offset``.
+
+    Status is ``guarded``, ``unguarded``, or ``unknown``. Unknown means the
+    CFG or the statement placement could not be established. It is not safe.
+    """
+    cfg, ranges = node_ranges(function_text)
+    if not cfg.known:
+        return "unknown", ""
+    node_id = node_at(ranges, local_offset)
+    if node_id is None:
+        return "unknown", ""
+    guards = _tight_nodes(cfg, _is_auth_guard)
+    protecting = [guard for guard in guards if _guard_protects(cfg, guard, node_id)]
+    if not protecting:
+        return "unguarded", ""
+    return "guarded", cfg.nodes[protecting[0]].text.strip()
 
 
 def placeholder_is_guarded(body: str) -> bool:
@@ -306,6 +368,114 @@ def split_top_statements(body: str) -> list[str]:
         piece = body[start:index].strip()
         if piece:
             parts.append(piece)
+    return parts
+
+
+def nested_statements(text: str) -> list[tuple[int, str]]:
+    """Leaf statements and control headers, with offsets into ``text``.
+
+    An assignment inside a branch is its own statement. Classifying the whole
+    ``if`` as one expression would mark that assignment as a read.
+    """
+    return _nested_at(text, 0)
+
+
+def _nested_at(text: str, base: int) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    cursor = 0
+    for statement in split_top_statements(text):
+        at = text.find(statement, cursor)
+        if at < 0:
+            continue
+        cursor = at + len(statement)
+        found.extend(_expand_statement(statement, base + at))
+    return found
+
+
+def _expand_statement(statement: str, abs_at: int) -> list[tuple[int, str]]:
+    kind = _statement_kind(statement)
+    if kind not in {"if", "loop", "unchecked", "try"}:
+        return [(abs_at, statement)]
+    if "{" not in statement:
+        return _expand_braceless(statement, abs_at, kind)
+    found: list[tuple[int, str]] = []
+    for part_kind, offset, fragment in _split_top_braces(statement):
+        if part_kind == "body":
+            found.extend(_nested_at(fragment, abs_at + offset))
+            continue
+        stripped = fragment.strip()
+        if not stripped:
+            continue
+        found.append((abs_at + offset + fragment.find(stripped), stripped))
+    return found
+
+
+def _expand_braceless(statement: str, abs_at: int, kind: str) -> list[tuple[int, str]]:
+    if kind == "loop":
+        try:
+            header, body, _style = split_loop(statement)
+        except ValueError:
+            return [(abs_at, statement)]
+        found: list[tuple[int, str]] = []
+        if header:
+            found.append((abs_at + max(statement.find(header), 0), header))
+        if body.strip():
+            body_at = statement.find(body)
+            if body_at >= 0:
+                found.extend(_nested_at(body, abs_at + body_at))
+        return found or [(abs_at, statement)]
+    if kind != "if":
+        return [(abs_at, statement)]
+    match = re.match(r"if\b", statement)
+    if match is None:
+        return [(abs_at, statement)]
+    try:
+        end_paren = _consume_parens(statement, match.end())
+    except ValueError:
+        return [(abs_at, statement)]
+    header = statement[:end_paren].strip()
+    found = [(abs_at, header)] if header else []
+    then_body, else_body = _if_branches(statement)
+    search = end_paren
+    for body in (then_body, else_body or ""):
+        if not body or not body.strip() or body.strip() == statement:
+            continue
+        body_at = statement.find(body, search)
+        if body_at < 0:
+            body_at = statement.find(body)
+        if body_at < 0:
+            continue
+        found.extend(_expand_statement(body.strip(), abs_at + body_at))
+        search = body_at + len(body)
+    return found
+
+
+def _split_top_braces(statement: str) -> list[tuple[str, int, str]]:
+    parts: list[tuple[str, int, str]] = []
+    depth = 0
+    start = 0
+    body_start = 0
+    index = 0
+    while index < len(statement):
+        skipped = _skip_string_or_comment(statement, index)
+        if skipped is not None:
+            index = skipped
+            continue
+        char = statement[index]
+        if char == "{":
+            if depth == 0:
+                if index > start:
+                    parts.append(("code", start, statement[start:index]))
+                body_start = index + 1
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                parts.append(("body", body_start, statement[body_start:index]))
+                start = index + 1
+        index += 1
+    if depth == 0 and start < len(statement):
+        parts.append(("code", start, statement[start:]))
     return parts
 
 

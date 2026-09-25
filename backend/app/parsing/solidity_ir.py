@@ -67,6 +67,15 @@ class StateAccess:
     span: SourceSpanRef
     operation_id: str = ""
     guard_status: str = "unknown"
+    guard_predicate: str = ""
+    guard_dominates: str = "unknown"
+
+
+@dataclass(frozen=True)
+class ContractFact:
+    name: str
+    kind: str
+    bases: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -145,6 +154,7 @@ class SemanticProgram:
     declarations: tuple[StateDeclaration, ...] = ()
     compiler_profiles: tuple[dict[str, str], ...] = ()
     compiler_version: str = ""
+    contracts: tuple[ContractFact, ...] = ()
 
     def functions_named(self, name: str, contract: str = "") -> tuple[SemanticFunction, ...]:
         return tuple(
@@ -222,6 +232,7 @@ def build_semantic_program(
         declarations=tuple(declarations),
         compiler_profiles=profiles,
         compiler_version=version,
+        contracts=_contract_facts(graph),
     )
 
 
@@ -365,8 +376,9 @@ def _functions(
         visible = {symbol: decl for symbol, decl in state.items() if symbol not in shadowed}
         inside = _inside(graph, event)
         reads, writes, same, before, after = _effects(event.text, visible, inside)
-        accesses = _stamp_operation_guards(event.text, _accesses(graph, event, visible))
-        call_sites = _calls(graph, event, name, names, inside)
+        origin = event.span.start_byte if event.span else 0
+        accesses = _stamp_operation_guards(event.text, _accesses(graph, event, visible), origin)
+        call_sites = _calls(graph, event, name, names, inside, contract)
         low = tuple(
             sorted({site.callee for site in call_sites if site.callee in _LOW and site.external})
         )
@@ -424,14 +436,14 @@ def _effects(
     inside: list[SyntaxEvent],
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     del inside
-    from app.parsing.solidity_cfg import extract_body, split_top_statements
+    from app.parsing.solidity_cfg import extract_body, nested_statements
     from app.parsing.solidity_expr import occurrences
 
     reads: set[str] = set()
     writes: set[str] = set()
     same: set[str] = set()
     body = extract_body(text) or text
-    for statement in split_top_statements(body):
+    for _offset, statement in nested_statements(body):
         items = occurrences(statement, set(visible))
         statement_reads = {item.base for item in items if item.kind != "write"}
         statement_writes = {item.base for item in items if item.kind != "read"}
@@ -450,7 +462,7 @@ def _effects(
 def _accesses(
     graph: SyntaxGraph, function: SyntaxEvent, visible: dict[str, StateDeclaration]
 ) -> list[StateAccess]:
-    from app.parsing.solidity_cfg import extract_body, split_top_statements
+    from app.parsing.solidity_cfg import extract_body, nested_statements
     from app.parsing.solidity_expr import occurrences
 
     text = function.text
@@ -458,12 +470,7 @@ def _accesses(
     body = extract_body(text) or text
     body_at = text.find(body) if body else 0
     origin = function.span.start_byte if function.span else 0
-    cursor = 0
-    for statement in split_top_statements(body):
-        at = body.find(statement, cursor)
-        if at < 0:
-            at = cursor
-        cursor = at + len(statement)
+    for at, statement in nested_statements(body):
         for item in occurrences(statement, set(visible)):
             decl = visible.get(item.base)
             if decl is None:
@@ -498,16 +505,18 @@ def _accesses(
     return found
 
 
-def _stamp_operation_guards(text: str, accesses: list[StateAccess]) -> list[StateAccess]:
-    from app.parsing.solidity_cfg import operation_guarded
+def _stamp_operation_guards(
+    text: str, accesses: list[StateAccess], origin: int
+) -> list[StateAccess]:
+    from app.parsing.solidity_cfg import operation_guard_at
 
     stamped: list[StateAccess] = []
     for item in accesses:
         if item.kind == "read":
             stamped.append(item)
             continue
-        verdict = operation_guarded(text, item.path)
-        status = "guarded" if verdict is True else "unguarded" if verdict is False else "unknown"
+        status, predicate = operation_guard_at(text, item.span.start_byte - origin)
+        dominates = "yes" if status == "guarded" else "no" if status == "unguarded" else "unknown"
         stamped.append(
             StateAccess(
                 declaration_id=item.declaration_id,
@@ -522,9 +531,32 @@ def _stamp_operation_guards(text: str, accesses: list[StateAccess]) -> list[Stat
                 span=item.span,
                 operation_id=item.operation_id,
                 guard_status=status,
+                guard_predicate=predicate,
+                guard_dominates=dominates,
             )
         )
     return stamped
+
+
+def _contract_facts(graph: SyntaxGraph) -> tuple[ContractFact, ...]:
+    found: list[ContractFact] = []
+    for event in graph.events:
+        if event.kind != "sol_contract":
+            continue
+        fields = _extra(event)
+        bases: list[str] = []
+        for part in fields.get("bases", "").split(","):
+            match = re.match(r"\s*([A-Za-z_]\w*)", part)
+            if match:
+                bases.append(match.group(1))
+        found.append(
+            ContractFact(
+                event.text.strip(),
+                fields.get("kind", "contract") or "contract",
+                tuple(bases),
+            )
+        )
+    return tuple(found)
 
 
 def _same_source(file_path: str, source: str) -> bool:
@@ -539,6 +571,7 @@ def _calls(
     function_name: str,
     names: set[str],
     inside: list[SyntaxEvent],
+    contract: str,
 ) -> list[SemanticCall]:
     span = function.span
     found: list[SemanticCall] = []
@@ -563,6 +596,7 @@ def _calls(
                 site.span,
                 inside,
                 function.text,
+                contract,
             )
         )
     return found
@@ -576,6 +610,7 @@ def _classify_call(
     span: SourceSpan | None,
     inside: list[SyntaxEvent],
     function_text: str,
+    contract: str = "",
 ) -> SemanticCall:
     head = re.split(r"[\(\{]", qualified, maxsplit=1)[0].strip()
     target = head[: -len(callee)].rstrip(".") if callee and head.endswith(callee) else head
@@ -643,7 +678,7 @@ def _classify_call(
     elif "." not in head and callee:
         external = False
         call_type = "internal"
-        count = _overload_count(graph, callee)
+        count = _overload_count(graph, callee, contract)
         resolution = "resolved" if count == 1 else "unknown" if count > 1 else "unresolved"
     elif "." in head:
         call_type = "contract-typed"
@@ -674,11 +709,14 @@ def _classify_call(
     )
 
 
-def _overload_count(graph: SyntaxGraph, name: str) -> int:
+def _overload_count(graph: SyntaxGraph, name: str, contract: str = "") -> int:
+    """Count functions named ``name``. An empty contract counts every contract."""
     return sum(
         1
         for event in graph.events
-        if event.kind == "sol_function" and _function_name(event) == name
+        if event.kind == "sol_function"
+        and _function_name(event) == name
+        and (not contract or _extra(event).get("contract", "") == contract)
     )
 
 

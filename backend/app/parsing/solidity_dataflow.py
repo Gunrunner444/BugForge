@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from app.parsing.solidity_ir import SemanticFunction, SemanticProgram
+from app.parsing.solidity_ir import SemanticCall, SemanticFunction, SemanticProgram
 
 MAX_FUNCTIONS = 200
 MAX_BLOCKS = 80
@@ -64,6 +64,10 @@ class FunctionSummary:
     ordered_calls: tuple[tuple[int, str, str], ...] = ()
     may_read_before: tuple[tuple[str, str], ...] = ()
     may_write_after: tuple[tuple[str, str], ...] = ()
+    may_read_ops: tuple[tuple[str, str], ...] = ()
+    may_write_ops: tuple[tuple[str, str], ...] = ()
+    operations: tuple[tuple[str, str, str, int], ...] = ()
+    placement_gaps: int = 0
     cfg_iterations: int = 0
 
 
@@ -125,7 +129,8 @@ class DataflowModel:
         matches = [
             value
             for value in summary.values
-            if value.kind == "delegatecall-target" and (not call_id or call_id in value.identity)
+            if value.kind == "delegatecall-target"
+            and (not call_id or value.identity.endswith(":" + call_id))
         ]
         if len(matches) == 1:
             return matches[0].provenance
@@ -250,6 +255,13 @@ def _summarize(
     limits: dict[str, int],
     depth: int,
 ) -> FunctionSummary:
+    from app.parsing.solidity_value_flow import (
+        external_return,
+        intraprocedural,
+        resolve_call,
+        returned_reads,
+    )
+
     if function.identity in model.summaries and function.identity not in stack:
         return model.summaries[function.identity]
     cyclic = function.identity in stack
@@ -262,12 +274,26 @@ def _summarize(
     values: list[FlowValue] = []
     edges: list[DependencyEdge] = []
     cfg_iterations = 0
-    may_read_before: tuple[tuple[str, str], ...] = ()
-    may_write_after: tuple[tuple[str, str], ...] = ()
+    may_read: list[tuple[str, str]] = []
+    may_write: list[tuple[str, str]] = []
+    read_ops: list[tuple[str, str]] = []
+    write_ops: list[tuple[str, str]] = []
+    gaps = 0
     if not incomplete:
-        values, edges, may_read_before, may_write_after, cfg_iterations = _intraprocedural(
-            function, limits
-        )
+        (
+            values,
+            edges,
+            may_read_before,
+            may_write_after,
+            may_read_ops,
+            may_write_ops,
+            cfg_iterations,
+            gaps,
+        ) = intraprocedural(program, function, limits)
+        may_read = list(may_read_before)
+        may_write = list(may_write_after)
+        read_ops = list(may_read_ops)
+        write_ops = list(may_write_ops)
         if cfg_iterations < 0:
             incomplete = True
             reason = reason or "CFG block limit reached"
@@ -285,32 +311,23 @@ def _summarize(
     )
     for site in function.call_sites:
         if site.external:
-            returned = FlowValue(
-                f"{function.identity}:return:{site.callee}",
-                "external-return",
-                "oracle" if site.call_type == "oracle" else "external",
-                (site.target or site.callee,),
-                "",
-                function.identity,
-                (
-                    site.span.start_byte,
-                    site.span.end_byte,
-                    site.span.start_line,
-                    site.span.end_line,
-                ),
-            )
-            values.append(returned)
+            returned = external_return(function, site)
+            if returned.identity not in {item.identity for item in values}:
+                values.append(returned)
             if site.callback_potential:
-                values.append(
-                    FlowValue(
-                        f"{function.identity}:callback:{site.callee}",
-                        "callback",
-                        "external",
-                        (returned.identity,),
-                        "",
-                        function.identity,
+                callback_id = f"{function.identity}:callback:{site.call_id}"
+                if callback_id not in {item.identity for item in values}:
+                    values.append(
+                        FlowValue(
+                            callback_id,
+                            "callback",
+                            "external",
+                            (returned.identity,),
+                            "",
+                            function.identity,
+                            returned.span,
+                        )
                     )
-                )
             if site.call_type == "delegatecall":
                 provenance = _delegate_provenance(program, function, site.target)
                 values.append(
@@ -321,18 +338,32 @@ def _summarize(
                         (site.target,),
                         "",
                         function.identity,
+                        returned.span,
                     )
                 )
         elif depth < limits["depth"]:
-            callee = _resolve_internal(program, function, site.callee)
-            if callee is not None:
-                stack.append(function.identity)
-                child = _summarize(program, callee, model, stack, limits, depth + 1)
-                stack.pop()
-                edges.append(DependencyEdge(function.identity, child.identity, "internal-call"))
-                if child.cyclic or child.incomplete:
-                    incomplete = True
-                    reason = child.incomplete_reason or reason
+            resolution = resolve_call(program, function, site)
+            callee = (
+                _function_by_id(program, resolution.function_id)
+                if resolution.status == "resolved" and resolution.function_id
+                else None
+            )
+            if callee is None:
+                continue
+            stack.append(function.identity)
+            child = _summarize(program, callee, model, stack, limits, depth + 1)
+            stack.pop()
+            _anchor(values, function)
+            _anchor(values, callee)
+            edges.append(DependencyEdge(function.identity, child.identity, "internal-call"))
+            ret_id = f"{function.identity}:internal-return:{site.call_id}"
+            if any(item.identity == ret_id for item in values):
+                for read_id in returned_reads(callee):
+                    edges.append(DependencyEdge(read_id, ret_id, "return-value"))
+                _inherit_reads(function, callee, site, read_ops, may_read)
+            if child.cyclic or child.incomplete:
+                incomplete = True
+                reason = child.incomplete_reason or reason
     assets = _assets(function, values)
     for value in values:
         if len(model.values) >= limits["values"]:
@@ -340,6 +371,8 @@ def _summarize(
             reason = reason or "semantic node limit reached"
             break
         model.values[value.identity] = value
+    idents = {item.identity for item in values} | set(model.values)
+    edges = [edge for edge in edges if edge.source in idents and edge.sink in idents]
     if len(edges) > limits["edges"]:
         edges = edges[: limits["edges"]]
         incomplete = True
@@ -359,8 +392,15 @@ def _summarize(
         ordered_reads=ordered_reads,
         ordered_writes=ordered_writes,
         ordered_calls=ordered_calls,
-        may_read_before=may_read_before,
-        may_write_after=may_write_after,
+        may_read_before=tuple(may_read),
+        may_write_after=tuple(may_write),
+        may_read_ops=tuple(read_ops),
+        may_write_ops=tuple(write_ops),
+        operations=tuple(
+            (item.operation_id, item.path, item.kind, item.span.start_byte)
+            for item in function.access_sites
+        ),
+        placement_gaps=gaps,
         cfg_iterations=cfg_iterations,
     )
     model.summaries[function.identity] = summary
@@ -368,217 +408,55 @@ def _summarize(
     return summary
 
 
-def _intraprocedural(
-    function: SemanticFunction, limits: dict[str, int]
-) -> tuple[
-    list[FlowValue],
-    list[DependencyEdge],
-    tuple[tuple[str, str], ...],
-    tuple[tuple[str, str], ...],
-    int,
-]:
-    from app.parsing.solidity_cfg import build_function_cfg
-
-    values: list[FlowValue] = []
-    edges: list[DependencyEdge] = []
-    known: set[str] = set()
-    cfg = build_function_cfg(function.source or "")
-    if len(cfg.nodes) > limits["blocks"]:
-        return values, edges, (), (), -1
-    environments: dict[int, dict[str, str]] = {node.node_id: {} for node in cfg.nodes}
-    iterations = 0
-    for iterations in range(1, limits["iterations"] + 1):
-        changed = False
-        for node in cfg.nodes:
-            incoming: dict[str, str] = {}
-            for src, dst, _label in cfg.edges:
-                if dst == node.node_id:
-                    incoming.update(environments.get(src, {}))
-            outgoing = dict(incoming)
-            for match in re.finditer(
-                r"(?:uint\d*|int\d*|address|bool)\s+([A-Za-z_]\w*)\s*=\s*([^;]+)",
-                node.text,
-            ):
-                local, expr = match.group(1), match.group(2)
-                identity = f"{function.identity}:local:{local}:{node.node_id}"
-                names = re.findall(r"\b([A-Za-z_]\w*)\b", expr)
-                deps = tuple(incoming[name] for name in names if name in incoming)
-                state_deps = tuple(
-                    item.operation_id
-                    for item in function.access_sites
-                    if item.kind != "write" and item.symbol in names and item.path in expr
-                )
-                deps = tuple(dict.fromkeys((*deps, *state_deps)))
-                _add_value(
-                    values,
-                    known,
-                    identity,
-                    "local",
-                    _join_provenance(deps, values, expr, function),
-                    deps,
-                    function,
-                )
-                for dep in deps:
-                    edges.append(DependencyEdge(dep, identity, "local-dependency"))
-                outgoing[local] = identity
-            store = re.search(
-                r"\b([A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.\w+)?)\s*=\s*([A-Za-z_]\w*)\s*;",
-                node.text,
-            )
-            if store and store.group(2) in outgoing:
-                for item in function.access_sites:
-                    if item.kind != "read" and item.path == store.group(1):
-                        edges.append(
-                            DependencyEdge(
-                                outgoing[store.group(2)],
-                                item.operation_id,
-                                "local-to-state",
-                            )
-                        )
-            if outgoing != environments[node.node_id]:
-                environments[node.node_id] = outgoing
-                changed = True
-        if not changed:
-            break
-    for access in function.access_sites:
-        if len(values) >= limits["values"]:
-            break
-        _add_value(
-            values,
-            known,
-            access.operation_id,
-            access.kind,
-            "state",
-            (access.declaration_id,),
-            function,
-            (
-                access.span.start_byte,
-                access.span.end_byte,
-                access.span.start_line,
-                access.span.end_line,
-            ),
-        )
-        _add_value(values, known, access.declaration_id, "declaration", "state", (), function)
-        kind = "state-write" if access.kind != "read" else "state-read"
-        edges.append(DependencyEdge(access.declaration_id, access.operation_id, kind))
-    by_path: dict[str, list[str]] = {}
-    for access in function.access_sites:
-        by_path.setdefault(access.path, []).append(access.operation_id)
-    for access in function.access_sites:
-        if access.kind == "read":
-            continue
-        reads = [
-            item.operation_id
-            for item in function.access_sites
-            if item.path == access.path
-            and item.kind != "write"
-            and item.operation_id != access.operation_id
-        ]
-        for read_id in reads:
-            if abs(int(read_id.rsplit(":", 1)[-1] or 0) - access.span.start_byte) < 200:
-                edges.append(
-                    DependencyEdge(read_id, access.operation_id, "state-read-influences-write")
-                )
-    sender = f"{function.identity}:msg.sender:{function.line}"
-    _add_value(values, known, sender, "msg.sender", "attacker", (), function)
-    if function.authorization == "guarded":
-        guard = f"{function.identity}:authority:{function.line}"
-        _add_value(values, known, guard, "authority", "authority", (sender,), function)
-        edges.append(DependencyEdge(sender, guard, "authority"))
-    may_read: list[tuple[str, str]] = []
-    may_write: list[tuple[str, str]] = []
-    if cfg.known:
-        for site in function.call_sites:
-            call_node = _node_for_offset(cfg, function, site.span.start_byte)
-            if call_node is None:
-                continue
-            before = {
-                node.node_id for node in cfg.nodes if call_node in cfg.reachable_from(node.node_id)
-            }
-            after = cfg.reachable_from(call_node)
-            for access in function.access_sites:
-                home = _cfg_home(cfg, access.path, access.kind)
-                if home is None:
-                    continue
-                if access.kind != "write" and home in before and home != call_node:
-                    may_read.append((site.call_id, access.path))
-                if access.kind != "read" and home in after and home != call_node:
-                    may_write.append((site.call_id, access.path))
-    edges = [edge for edge in edges if edge.source in known and edge.sink in known]
-    del by_path
-    return values, edges, tuple(may_read), tuple(may_write), iterations
-
-
-def _add_value(
-    values: list[FlowValue],
-    known: set[str],
-    identity: str,
-    kind: str,
-    provenance: str,
-    deps: tuple[str, ...],
-    function: SemanticFunction,
-    span: tuple[int, int, int, int] = (0, 0, 0, 0),
-) -> None:
-    if identity in known:
+def _anchor(values: list[FlowValue], function: SemanticFunction) -> None:
+    if any(item.identity == function.identity for item in values):
         return
-    known.add(identity)
-    values.append(FlowValue(identity, kind, provenance, deps, "", function.identity, span))
+    values.append(FlowValue(function.identity, "function", "unknown", (), "", function.identity))
 
 
-def _expr_provenance(expr: str, function: SemanticFunction) -> str:
-    del expr, function
-    return "derived"
+def _function_by_id(program: SemanticProgram, identity: str) -> SemanticFunction | None:
+    for item in program.functions:
+        if item.identity == identity:
+            return item
+    return None
 
 
-def _join_provenance(
-    deps: tuple[str, ...], values: list[FlowValue], expr: str, function: SemanticFunction
-) -> str:
-    del expr, function
-    known = {item.identity: item.provenance for item in values}
-    found = {known[item] for item in deps if item in known}
-    if not found:
-        return "unknown" if deps else "derived"
-    if "attacker" in found:
-        return "attacker"
-    if "unknown" in found:
-        return "unknown"
-    if len(found) == 1:
-        return next(iter(found))
-    return "derived"
+def _inherit_reads(
+    function: SemanticFunction,
+    callee: SemanticFunction,
+    site: SemanticCall,
+    read_ops: list[tuple[str, str]],
+    may_read: list[tuple[str, str]],
+) -> None:
+    from app.parsing.solidity_cfg import node_at, node_ranges
+    from app.parsing.solidity_value_flow import returned_reads
 
-
-def _node_for_offset(cfg: object, function: SemanticFunction, start_byte: int) -> int | None:
-    source = function.source or ""
+    cfg, ranges = node_ranges(function.source or "")
+    if not cfg.known:
+        return
     base = function.span[0] if function.span else 0
-    local = start_byte - base
-    cursor = 0
-    for node in getattr(cfg, "nodes", []):
-        text = str(node.text).strip()
-        if not text:
+    internal_at = node_at(ranges, site.span.start_byte - base)
+    if internal_at is None:
+        return
+    read_ids = returned_reads(callee)
+    if not read_ids:
+        return
+    paths = {
+        item.operation_id: item.path
+        for item in callee.access_sites
+        if item.operation_id in set(read_ids)
+    }
+    for other in function.call_sites:
+        if not other.external or other.call_id == site.call_id:
             continue
-        at = source.find(text, cursor)
-        if at < 0:
+        call_at = node_at(ranges, other.span.start_byte - base)
+        if call_at is None or call_at == internal_at:
             continue
-        if at <= local < at + len(text) + 2:
-            return int(node.node_id)
-        cursor = at
-    return None
-
-
-def _cfg_home(cfg: object, path: str, kind: str) -> int | None:
-    nodes = getattr(cfg, "nodes", [])
-    candidates = [node for node in nodes if path in node.text]
-    assignment = re.compile(rf"{re.escape(path)}\s*(?:=|\+=|-=)")
-    if kind != "read":
-        writers = [node for node in candidates if assignment.search(node.text)]
-        if len(writers) == 1:
-            return int(writers[0].node_id)
-    readers = [node for node in candidates if not assignment.search(node.text)]
-    if len(readers) == 1:
-        return int(readers[0].node_id)
-    if len(candidates) == 1:
-        return int(candidates[0].node_id)
-    return None
+        if call_at not in cfg.reachable_from(internal_at):
+            continue
+        for read_id in read_ids:
+            read_ops.append((other.call_id, read_id))
+            may_read.append((other.call_id, paths.get(read_id, "")))
 
 
 def _has_loop(function: SemanticFunction) -> bool:
