@@ -75,6 +75,7 @@ class CompilerProjectModel:
     status: str
     tool: str = ""
     compiler_version: str = ""
+    compiler_profiles: tuple[dict[str, str], ...] = ()
     source_identity: str = ""
     configuration_identity: str = ""
     diagnostics: tuple[str, ...] = ()
@@ -187,8 +188,12 @@ def build_compiler_project(
     """Build a project compiler model from graphs already parsed for this scan."""
     sources, diagnostics, complete, unsupported, remappings = _bundle(repo_root, graphs)
     identity = _source_identity(sources)
+    build_config = _static_build_config(repo_root)
     config_identity = hashlib.sha256(
-        json.dumps({"remappings": remappings, "unsupported": unsupported}, sort_keys=True).encode()
+        json.dumps(
+            {"remappings": remappings, "unsupported": unsupported, "build": build_config},
+            sort_keys=True,
+        ).encode()
     ).hexdigest()
     language = solidity_language_facts("\n".join(sources.values()))
     language_dict = {
@@ -247,7 +252,10 @@ def build_compiler_project(
             ]
         else:
             parsed_groups = _compile_version_groups(sources, remappings, tool or "solc", repo_root)
-    except (OSError, TimeoutError, ValueError, subprocess.SubprocessError) as exc:
+    except ValueError as exc:
+        model = _replace(base, status="INCOMPLETE", detail=str(exc)[:400], complete=False)
+        return _store(cache, key, model)
+    except (OSError, TimeoutError, subprocess.SubprocessError) as exc:
         model = _replace(
             base,
             status="FAILED",
@@ -307,6 +315,15 @@ def build_compiler_project(
         complete=True,
         unsupported=tuple(unsupported),
         detail=parsed.detail,
+        compiler_profiles=tuple(
+            {
+                "version": item.compiler_version,
+                "tool": item.tool,
+                "status": item.status,
+                "ir": "available" if item.ir_available else "unavailable",
+            }
+            for item in parsed_groups
+        ),
     )
     return _store(cache, key, model)
 
@@ -507,6 +524,29 @@ def _resolve_import(
     return root / spec
 
 
+def _static_build_config(repo_root: Path) -> dict[str, str]:
+    """Read foundry.toml as text. Do not execute it."""
+    path = repo_root.resolve() / "foundry.toml"
+    config = {"optimizer": "", "optimizer_runs": "", "via_ir": "", "evm_version": "", "solc": ""}
+    if not path.is_file() or path.is_symlink():
+        return config
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return config
+    for key, pattern in (
+        ("optimizer", r"(?m)^\s*optimizer\s*=\s*(\w+)"),
+        ("optimizer_runs", r"(?m)^\s*optimizer_runs\s*=\s*(\d+)"),
+        ("via_ir", r"(?m)^\s*via_ir\s*=\s*(\w+)"),
+        ("evm_version", r'(?m)^\s*evm_version\s*=\s*"([^"]+)"'),
+        ("solc", r'(?m)^\s*solc\s*=\s*"([^"]+)"'),
+    ):
+        match = re.search(pattern, text)
+        if match:
+            config[key] = match.group(1)
+    return config
+
+
 def _static_limits(repo_root: Path) -> list[str]:
     notes: list[str] = []
     root = repo_root.resolve()
@@ -599,7 +639,7 @@ def _solc_remapping(raw: str) -> str:
 
 def _version_groups(
     sources: dict[str, str], remappings: list[str], root: Path
-) -> dict[str, dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], tuple[str, ...]]:
     """Group sources by the single exact compiler their import closure allows."""
     pairs: list[tuple[str, str]] = []
     for raw in remappings:
@@ -644,12 +684,13 @@ def _version_groups(
         return found
 
     assigned: dict[str, str] = {}
+    omitted: list[str] = []
     for path in sources:
         found = closure(path, set())
         if len(found) == 1:
             assigned[path] = next(iter(found))
-        elif not found:
-            assigned[path] = "0.8.34"
+        else:
+            omitted.append(path)
     groups: dict[str, dict[str, str]] = {}
     seen: set[tuple[str, str]] = set()
 
@@ -666,13 +707,15 @@ def _version_groups(
 
     for path, version in assigned.items():
         add(path, version)
-    return groups
+    return groups, tuple(omitted)
 
 
 def _compile_version_groups(
     sources: dict[str, str], remappings: list[str], tool: str, root: Path
 ) -> list[CompilerSemantics]:
-    groups = _version_groups(sources, remappings, root)
+    groups, omitted = _version_groups(sources, remappings, root)
+    if omitted:
+        raise ValueError("compiler groups omitted unresolved sources: " + ", ".join(omitted[:12]))
     parsed: list[CompilerSemantics] = []
     for version, group in sorted(groups.items()):
         if not group:
@@ -682,6 +725,8 @@ def _compile_version_groups(
             raise OSError(f"solc {version} is unavailable")
         raw = _host_runner_binary(json.dumps(project_standard_json(group, remappings)), binary)
         parsed_group = interpret_standard_json(raw, tool=tool)
+        if not parsed_group.compiler_version:
+            parsed_group = replace(parsed_group, compiler_version=version)
         if parsed_group.status != "AVAILABLE":
             parsed_group = replace(
                 parsed_group, detail=f"solc {version}: {parsed_group.detail}"[:400]
@@ -718,7 +763,9 @@ def _merge_compiler_groups(groups: list[CompilerSemantics]) -> CompilerSemantics
         "compiled pinned source groups separately",
         storage=storage,
         layouts=layouts,
-        compiler_version=first.compiler_version,
+        compiler_version=""
+        if len({item.compiler_version for item in groups}) > 1
+        else first.compiler_version,
         ir=ir,
         ir_available=any(item.ir_available for item in groups),
         ir_truncated=truncated,

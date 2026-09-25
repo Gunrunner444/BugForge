@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.security_agent import DBResearchLead
+from app.security_agent.prioritize import score_lead
 
 LEAD_STATUSES = frozenset(
     {"NEW", "ACTIVE", "BLOCKED", "KILLED", "PROMOTED", "REPRODUCED", "VERIFIED", "REPORTED"}
@@ -205,7 +206,7 @@ def lead_for_hypothesis(research: Any, hypothesis: Any) -> ResearchLead:
         getattr(hypothesis, "suggested_next_action", "") or existing.next_action
     )
     existing.evidence_ids = list(getattr(hypothesis, "supporting_evidence_ids", ()) or ())
-    existing.observation_ids = [related] if related else list(existing.observation_ids)
+    existing.related_ids = list(dict.fromkeys([*existing.related_ids, related]))
     _validate(existing)
     return existing
 
@@ -222,10 +223,15 @@ def planner_leads(
         if lead.status not in _OPEN:
             continue
         payload = lead.snapshot()
+        payload["score"] = score_lead(
+            impact=lead.priority if lead.priority in {"low", "medium", "high"} else "medium",
+            evidence="static" if lead.evidence_ids else "none",
+        )
         unresolved.append(payload)
         if stale_before is None or lead.status not in {"NEW", "ACTIVE", "BLOCKED"}:
             continue
         updated = _stamp(lead.updated_at) if lead.updated_at else stale_before
         if updated < stale_before:
             stale.append(payload)
+    unresolved.sort(key=lambda item: (-int(str(item["score"])), str(item["id"])))
     return {"unresolved": unresolved, "stale": stale}

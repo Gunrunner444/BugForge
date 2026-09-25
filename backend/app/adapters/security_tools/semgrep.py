@@ -10,6 +10,7 @@ import json
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.adapters.security_tools.base import SecurityToolAdapter, SecurityToolCapability
 from app.domain.evidence import Evidence, EvidenceKind
@@ -27,9 +28,25 @@ class SemgrepHit:
     message: str
 
 
+def _inside_root(path: str, root: str) -> bool:
+    try:
+        resolved = Path(path).resolve()
+        base = Path(root).resolve()
+    except OSError:
+        return False
+    if not base.is_dir():
+        return False
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        return False
+    return resolved == base or base in resolved.parents
+
+
 def semgrep_available(binary: str | None = None) -> bool:
     if binary:
-        return True
+        candidate = Path(binary)
+        return candidate.is_file() or shutil.which(binary) is not None
     return shutil.which("semgrep") is not None
 
 
@@ -156,9 +173,21 @@ class SemgrepAdapter(SecurityToolAdapter):
             ]
         return ()
 
-    def scan_local(self, path: str) -> list[Evidence]:
-        """Run Semgrep against one local path. Network targets are not accepted."""
+    def scan_local(self, path: str, *, root: str) -> list[Evidence]:
+        """Run Semgrep on one path inside the authorized repository root."""
         if "://" in path or path.startswith("//"):
+            self.last_result = ToolExecutionResult(
+                tool="semgrep", state=ToolExecutionState.INVALID_SCOPE
+            )
+            return [
+                Evidence(
+                    kind=EvidenceKind.TOOL_STATUS,
+                    source="semgrep",
+                    summary="semgrep invalid_scope",
+                    metadata={"state": "invalid_scope", "is_finding": False, "verified": False},
+                )
+            ]
+        if not _inside_root(path, root):
             self.last_result = ToolExecutionResult(
                 tool="semgrep", state=ToolExecutionState.INVALID_SCOPE
             )
@@ -187,7 +216,7 @@ class SemgrepAdapter(SecurityToolAdapter):
             ]
         command = str(binary or "semgrep")
         outcome = self._runner.run(
-            [command, "--json", "--quiet", path],
+            [command, "--json", "--quiet", "--config", "p/default", str(Path(path).resolve())],
             timeout=30,
         )
         if outcome.unavailable:

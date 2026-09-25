@@ -76,10 +76,11 @@ def follow_on(chain: ExploitChain, summary: str) -> str:
     if chain.verified:
         return ""
     head = chain.steps[0].summary if chain.steps else "the observation"
-    return (
+    chain.next_experiment = (
         f"What new attack becomes possible because `{head}` is true? "
         f"Next experiment: {summary}. This proposal is not evidence."
     )
+    return chain.next_experiment
 
 
 def reject_chain(chain: ExploitChain, reason: str) -> ExploitChain:
@@ -91,26 +92,84 @@ def reject_chain(chain: ExploitChain, reason: str) -> ExploitChain:
     return chain
 
 
+_NON_AUTHORITY = frozenset(
+    {
+        "ai_hypothesis",
+        "static_analysis",
+        "scanner_result",
+        "scanner_plan",
+        "tool_status",
+        "source_observation",
+        "replay",
+        "sandbox_execution",
+    }
+)
+
+
 def assess_chain(chain: ExploitChain) -> ExploitChain:
+    """Structural proposal only. Caller-supplied tiers are ignored."""
     if chain.status == "rejected":
         return chain
     missing = [step.summary for step in chain.steps if not step.evidence_id]
     chain.evidence_requirements = tuple(missing)
-    if missing:
-        chain.status = "proposed"
-        chain.next_experiment = f"Collect evidence for: {missing[0]}"
+    chain.status = "proposed"
+    chain.next_experiment = (
+        f"Collect evidence for: {missing[0]}"
+        if missing
+        else "Resolve evidence in the session graph"
+    )
+    return chain
+
+
+def verify_chain(session: Any, chain: ExploitChain) -> ExploitChain:
+    """Status comes from the session evidence graph, never from step.evidence_tier."""
+    if chain.status == "rejected":
         return chain
-    tiers = {step.evidence_tier for step in chain.steps}
-    if tiers == {"verified"}:
+    graph = getattr(session, "graph", None)
+    nodes = getattr(graph, "nodes", {}) if graph is not None else {}
+    session_id = str(getattr(session, "id", "") or "")
+    project_id = str(getattr(session, "project_id", "") or "")
+    ranks: list[str] = []
+    for step in chain.steps:
+        node = nodes.get(step.evidence_id) if step.evidence_id else None
+        if node is None:
+            ranks.append("missing")
+            continue
+        if str(getattr(node, "session_id", "") or "") != session_id:
+            ranks.append("foreign")
+            continue
+        if project_id and str(getattr(node, "project_id", "") or "") not in {"", project_id}:
+            ranks.append("foreign")
+            continue
+        provenance = str(getattr(node, "provenance", "") or "")
+        lifecycle = str((getattr(node, "extra", {}) or {}).get("lifecycle") or "")
+        if provenance in _NON_AUTHORITY or provenance == "":
+            ranks.append("static")
+            continue
+        if lifecycle == "verified" and provenance in {"execution", "reproduction"}:
+            ranks.append("verified")
+            continue
+        if provenance == "reproduction":
+            ranks.append("reproduced")
+            continue
+        ranks.append("static")
+    chain.evidence_requirements = tuple(
+        step.summary for step, rank in zip(chain.steps, ranks, strict=True) if rank != "verified"
+    )
+    if any(rank in {"missing", "foreign"} for rank in ranks):
+        chain.status = "proposed"
+        chain.next_experiment = "Evidence is missing or belongs to another session"
+        return chain
+    if all(rank == "verified" for rank in ranks):
         chain.status = "verified"
         chain.next_experiment = ""
         return chain
-    if tiers == {"reproduced"}:
+    if all(rank == "reproduced" for rank in ranks):
         chain.status = "reproduced"
-        chain.next_experiment = "Promote only with authoritative verified evidence"
+        chain.next_experiment = "Reproduction is not verification"
         return chain
-    chain.status = "evidenced"
-    chain.next_experiment = "Repeat the missing authoritative evidence"
+    chain.status = "static"
+    chain.next_experiment = "Static or scanner evidence cannot verify this chain"
     return chain
 
 
@@ -136,7 +195,9 @@ def chain_from_snapshot(payload: dict[str, Any]) -> ExploitChain:
         termination_reason=str(payload.get("termination_reason") or ""),
     )
     if chain.status == "rejected":
+        chain.status = "rejected"
         return chain
+    chain.status = "proposed"
     return assess_chain(chain)
 
 
