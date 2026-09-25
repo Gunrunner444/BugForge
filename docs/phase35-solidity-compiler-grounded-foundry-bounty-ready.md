@@ -46,6 +46,15 @@ The model is installed for the scan and cleared in `finally`. A later scan
 gets a new cache. The cache key is the source bundle, remappings, and compiler
 identity.
 
+The default caps stay 40 files, 200,000 bytes, 48 contracts, and 240 call
+edges. Optional settings can raise those caps without making them unlimited.
+When dependency inclusion is enabled, the bundle is the analyzed sources plus
+their import closure, and files past the cap are omitted and keep the model
+`INCOMPLETE`. Exact `pragma solidity =x.y.z` files are compiled with that
+`solc`. A dynamic `calldataload` whose argument is not a numeric literal, and
+whose block does not contain `calldatasize`, is reported as potential Yul
+structure. A literal offset such as `calldataload(0)` is not that pattern.
+
 ## Version, selectors, storage, and Yul
 
 `solidity_language_facts` is the only version interpreter. A property is known

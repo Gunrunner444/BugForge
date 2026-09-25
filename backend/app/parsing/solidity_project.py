@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
+import subprocess
 from collections.abc import Callable
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from app.core.paths import safe_join
@@ -25,6 +28,28 @@ from app.parsing.solidity_version import solidity_language_facts
 
 _MAX_FILES = 40
 _MAX_BYTES = 200_000
+_EXTRA_SKIP = {"test", "tests", "script", "scripts", "mock", "mocks", "audits"}
+
+
+def _max_files() -> int:
+    from app.core.config import get_settings
+
+    return int(getattr(get_settings(), "solidity_project_max_files", _MAX_FILES) or _MAX_FILES)
+
+
+def _max_bytes() -> int:
+    from app.core.config import get_settings
+
+    return int(getattr(get_settings(), "solidity_project_max_bytes", _MAX_BYTES) or _MAX_BYTES)
+
+
+def _include_dependencies() -> bool:
+    from app.core.config import get_settings
+
+    return bool(getattr(get_settings(), "solidity_project_include_dependencies", False))
+
+
+_IMPORT_RE = re.compile(r"""import\s+(?:[^"']+\s+from\s+)?["']([^"']+)["']""")
 _SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -133,14 +158,19 @@ def resolve_analysis_source(
 
 def project_standard_json(sources: dict[str, str], remappings: list[str]) -> dict[str, object]:
     """Standard JSON for the bounded source bundle. No model-supplied flags."""
+    from app.core.config import get_settings
+
+    selected = ["storageLayout", "evm.methodIdentifiers"]
+    if bool(getattr(get_settings(), "solidity_compiler_emit_ir", True)):
+        selected.insert(1, "ir")
     return {
         "language": "Solidity",
         "sources": {path: {"content": text} for path, text in sorted(sources.items())},
         "settings": {
-            "remappings": list(remappings),
+            "remappings": [_solc_remapping(item) for item in remappings],
             "outputSelection": {
                 "*": {
-                    "*": ["storageLayout", "ir", "evm.methodIdentifiers"],
+                    "*": selected,
                     "": ["ast"],
                 }
             },
@@ -207,17 +237,35 @@ def build_compiler_project(
             ),
         )
         return _store(cache, key, model)
-    compile_runner = runner or _host_runner
     try:
-        raw = compile_runner(json.dumps(project_standard_json(sources, remappings)))
-    except (OSError, TimeoutError, ValueError) as exc:
+        if runner is not None:
+            parsed_groups = [
+                interpret_standard_json(
+                    runner(json.dumps(project_standard_json(sources, remappings))),
+                    tool=tool or "solc",
+                )
+            ]
+        else:
+            parsed_groups = _compile_version_groups(sources, remappings, tool or "solc", repo_root)
+    except (OSError, TimeoutError, ValueError, subprocess.SubprocessError) as exc:
         model = _replace(
             base,
             status="FAILED",
             detail=f"compiler invocation failed: {exc}"[:400],
         )
         return _store(cache, key, model)
-    parsed = interpret_standard_json(raw, tool=tool or "solc")
+    if any(item.status != "AVAILABLE" for item in parsed_groups):
+        failed = next(item for item in parsed_groups if item.status != "AVAILABLE")
+        model = _replace(
+            base,
+            status="INCOMPLETE"
+            if any(item.status == "AVAILABLE" for item in parsed_groups)
+            else "FAILED",
+            detail=failed.detail[:400],
+            tool=failed.tool or tool,
+        )
+        return _store(cache, key, model)
+    parsed = _merge_compiler_groups(parsed_groups)
     if parsed.status != "AVAILABLE":
         model = _replace(
             base, status="FAILED", detail=parsed.detail[:400], tool=parsed.tool or tool
@@ -338,15 +386,32 @@ def _bundle(
             diagnostics.append(f"empty source: {relative or public}")
             continue
         sources[relative] = text
+    file_limit = _max_files()
+    byte_limit = _max_bytes()
     total = sum(len(item.encode("utf-8")) for item in sources.values())
+    if len(sources) > file_limit or total > byte_limit:
+        complete = False
+        diagnostics.append("required source bundle limit reached")
+        return sources, diagnostics, complete, unsupported, remappings
     root = repo_root.resolve()
-    if root.is_dir():
+    omitted = 0
+    # Import closure is the relevant dependency set. A repository-wide search
+    # would spend the same budget on files the production sources never import.
+    if _include_dependencies() and root.is_dir():
+        sources, total, omitted, complete = _close_imports(
+            root,
+            sources,
+            remappings,
+            file_limit,
+            byte_limit,
+            total,
+            omitted,
+            diagnostics,
+            complete,
+        )
+    elif root.is_dir():
         for path in sorted(root.rglob("*.sol")):
-            if len(sources) >= _MAX_FILES or total >= _MAX_BYTES:
-                complete = False
-                diagnostics.append("source bundle limit reached")
-                break
-            if any(part in _SKIP_DIRS for part in path.parts):
+            if any(part in _SKIP_DIRS or part in _EXTRA_SKIP for part in path.parts):
                 continue
             if path.is_symlink():
                 diagnostics.append(f"skipped symlink: {path.name}")
@@ -366,13 +431,80 @@ def _bundle(
                 complete = False
                 continue
             size = len(text.encode("utf-8"))
-            if total + size > _MAX_BYTES:
-                complete = False
-                diagnostics.append("source bundle limit reached")
-                break
+            if len(sources) >= file_limit or total + size > byte_limit:
+                omitted += 1
+                continue
             sources[relative] = text
             total += size
+    if omitted:
+        diagnostics.append(f"omitted {omitted} optional sources outside the bounded bundle")
     return sources, diagnostics, complete, unsupported, remappings
+
+
+def _close_imports(
+    root: Path,
+    sources: dict[str, str],
+    remappings: list[str],
+    file_limit: int,
+    byte_limit: int,
+    total: int,
+    omitted: int,
+    diagnostics: list[str],
+    complete: bool,
+) -> tuple[dict[str, str], int, int, bool]:
+    """Add the import closure of the bundled sources, still inside the file and byte caps."""
+    pairs: list[tuple[str, str]] = []
+    for raw in remappings:
+        if "=" not in raw:
+            continue
+        prefix, target = raw.split("=", 1)
+        pairs.append((prefix, target))
+    pairs.sort(key=lambda item: len(item[0]), reverse=True)
+    queue = list(sources)
+    while queue:
+        relative = queue.pop()
+        origin = root / relative
+        for spec in _IMPORT_RE.findall(sources.get(relative, "")):
+            candidate = _resolve_import(root, origin, spec, pairs)
+            if candidate is None or not candidate.is_file():
+                diagnostics.append(f"unresolved import: {spec}")
+                complete = False
+                continue
+            try:
+                imported = candidate.resolve().relative_to(root).as_posix()
+            except ValueError:
+                diagnostics.append(f"rejected import: {spec}")
+                complete = False
+                continue
+            if imported in sources or _contains_symlink(root, imported):
+                continue
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                diagnostics.append(f"missing import: {imported}")
+                complete = False
+                continue
+            size = len(text.encode("utf-8"))
+            if len(sources) >= file_limit or total + size > byte_limit:
+                omitted += 1
+                complete = False
+                diagnostics.append(f"omitted import over limit: {imported}")
+                continue
+            sources[imported] = text
+            total += size
+            queue.append(imported)
+    return sources, total, omitted, complete
+
+
+def _resolve_import(
+    root: Path, origin: Path, spec: str, remappings: list[tuple[str, str]]
+) -> Path | None:
+    for prefix, target in remappings:
+        if spec.startswith(prefix):
+            return root / target / spec[len(prefix) :]
+    if spec.startswith("."):
+        return origin.parent / spec
+    return root / spec
 
 
 def _static_limits(repo_root: Path) -> list[str]:
@@ -421,6 +553,8 @@ def _compiler_tool() -> tuple[str, bool]:
     enabled = bool(get_settings().solidity_host_compiler)
     if shutil.which("solc"):
         return "solc", enabled
+    if enabled and _solc_binary("0.8.34"):
+        return "solc", True
     if shutil.which("forge"):
         return "forge", False
     return "", False
@@ -430,6 +564,168 @@ def _host_runner(payload: str) -> str:
     from app.parsing.solidity_compiler import run_solc_standard_json
 
     return run_solc_standard_json(payload)
+
+
+def _pinned_version(text: str) -> str:
+    match = re.search(r"(?m)^[ \t]*pragma[ \t]+solidity[ \t]*=[ \t]*(0\.\d+\.\d+)", text)
+    if match:
+        return match.group(1)
+    return "0.8.34"
+
+
+def _solc_binary(version: str) -> str | None:
+    named = shutil.which(f"solc-{version}")
+    if named:
+        return named
+    candidates = (
+        Path.home() / "Library" / "Application Support" / "svm" / version / f"solc-{version}",
+        Path.home() / ".svm" / version / f"solc-{version}",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("solc")
+
+
+def _solc_remapping(raw: str) -> str:
+    """Keep a directory remapping from concatenating onto the next path segment."""
+    if "=" not in raw:
+        return raw
+    prefix, target = raw.split("=", 1)
+    if prefix.endswith("/") and target and not target.endswith("/"):
+        target = target + "/"
+    return f"{prefix}={target}"
+
+
+def _version_groups(
+    sources: dict[str, str], remappings: list[str], root: Path
+) -> dict[str, dict[str, str]]:
+    """Group sources by the single exact compiler their import closure allows."""
+    pairs: list[tuple[str, str]] = []
+    for raw in remappings:
+        if "=" not in raw:
+            continue
+        prefix, target = raw.split("=", 1)
+        pairs.append((prefix, target))
+    pairs.sort(key=lambda item: len(item[0]), reverse=True)
+    pin_re = re.compile(r"(?m)^[ \t]*pragma[ \t]+solidity[ \t]*=[ \t]*(0\.\d+\.\d+)")
+    pins = {
+        path: (match.group(1) if (match := pin_re.search(text)) else "")
+        for path, text in sources.items()
+    }
+    imported: dict[str, list[str]] = {path: [] for path in sources}
+    root = root.resolve()
+    for path, text in sources.items():
+        origin = root / path
+        for spec in _IMPORT_RE.findall(text):
+            candidate = _resolve_import(root, origin, spec, pairs)
+            if candidate is None:
+                continue
+            try:
+                relative = candidate.resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if relative in sources:
+                imported[path].append(relative)
+    memo: dict[str, set[str]] = {}
+
+    def closure(path: str, stack: set[str]) -> set[str]:
+        if path in memo:
+            return memo[path]
+        found: set[str] = set()
+        if pins.get(path):
+            found.add(pins[path])
+        stack.add(path)
+        for nxt in imported.get(path, []):
+            if nxt not in stack:
+                found |= closure(nxt, stack)
+        stack.remove(path)
+        memo[path] = found
+        return found
+
+    assigned: dict[str, str] = {}
+    for path in sources:
+        found = closure(path, set())
+        if len(found) == 1:
+            assigned[path] = next(iter(found))
+        elif not found:
+            assigned[path] = "0.8.34"
+    groups: dict[str, dict[str, str]] = {}
+    seen: set[tuple[str, str]] = set()
+
+    def add(path: str, version: str) -> None:
+        key = (path, version)
+        if key in seen or path not in sources:
+            return
+        seen.add(key)
+        groups.setdefault(version, {})[path] = sources[path]
+        for nxt in imported.get(path, []):
+            other = assigned.get(nxt)
+            if other == version or (other == "0.8.34" and not pins.get(nxt)):
+                add(nxt, version)
+
+    for path, version in assigned.items():
+        add(path, version)
+    return groups
+
+
+def _compile_version_groups(
+    sources: dict[str, str], remappings: list[str], tool: str, root: Path
+) -> list[CompilerSemantics]:
+    groups = _version_groups(sources, remappings, root)
+    parsed: list[CompilerSemantics] = []
+    for version, group in sorted(groups.items()):
+        if not group:
+            continue
+        binary = _solc_binary(version)
+        if not binary:
+            raise OSError(f"solc {version} is unavailable")
+        raw = _host_runner_binary(json.dumps(project_standard_json(group, remappings)), binary)
+        parsed_group = interpret_standard_json(raw, tool=tool)
+        if parsed_group.status != "AVAILABLE":
+            parsed_group = replace(
+                parsed_group, detail=f"solc {version}: {parsed_group.detail}"[:400]
+            )
+        parsed.append(parsed_group)
+    return parsed
+
+
+def _host_runner_binary(payload: str, binary: str) -> str:
+    from app.parsing.solidity_compiler import run_solc_standard_json
+
+    return run_solc_standard_json(payload, binary=binary)
+
+
+def _merge_compiler_groups(groups: list[CompilerSemantics]) -> CompilerSemantics:
+    first = groups[0]
+    if len(groups) == 1:
+        return first
+    layouts: list[dict[str, str]] = []
+    selectors: list[dict[str, str]] = []
+    storage: list[dict[str, str]] = []
+    ir_parts: list[str] = []
+    for item in groups:
+        layouts.extend(item.layouts)
+        selectors.extend(item.selectors)
+        storage.extend(item.storage)
+        if item.ir:
+            ir_parts.append(item.ir)
+    ir = "\n".join(ir_parts)
+    truncated = any(item.ir_truncated for item in groups)
+    return CompilerSemantics(
+        "AVAILABLE",
+        first.tool,
+        "compiled pinned source groups separately",
+        storage=storage,
+        layouts=layouts,
+        compiler_version=first.compiler_version,
+        ir=ir,
+        ir_available=any(item.ir_available for item in groups),
+        ir_truncated=truncated,
+        ast_available=any(item.ast_available for item in groups),
+        selectors=selectors,
+        language=dict(first.language),
+    )
 
 
 def _source_identity(sources: dict[str, str]) -> str:

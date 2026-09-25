@@ -190,25 +190,33 @@ def _host_compiler_enabled() -> bool:
     return bool(get_settings().solidity_host_compiler)
 
 
-def run_solc_standard_json(payload: str) -> str:
+def run_solc_standard_json(payload: str, *, binary: str = "solc") -> str:
     """Developer-only host solc. The default research path does not call this."""
     import os
     import subprocess
 
+    from app.core.config import get_settings
+
     if not _host_compiler_enabled():
         raise OSError("host compiler execution is disabled")
+    settings = get_settings()
+    timeout = int(getattr(settings, "solidity_compiler_timeout_seconds", 20) or 20)
     completed = subprocess.run(
-        ["solc", "--standard-json"],
+        [binary, "--standard-json"],
         input=payload,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=timeout,
         check=False,
         env={"PATH": os.environ.get("PATH", "")},
         preexec_fn=_limit_compiler_process,
     )
     stdout = completed.stdout or ""
-    if len(stdout) > _MAX_COMPILER_OUTPUT:
+    output_limit = int(
+        getattr(settings, "solidity_compiler_max_output", _MAX_COMPILER_OUTPUT)
+        or _MAX_COMPILER_OUTPUT
+    )
+    if len(stdout) > output_limit:
         raise ValueError("compiler output exceeded the bound")
     if not stdout:
         raise ValueError((completed.stderr or "solc produced no JSON")[:400])
@@ -218,8 +226,14 @@ def run_solc_standard_json(payload: str) -> str:
 def _limit_compiler_process() -> None:
     import resource
 
-    limit = 512 * 1024 * 1024
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    from app.core.config import get_settings
+
+    megabytes = int(getattr(get_settings(), "solidity_compiler_memory_mb", 512) or 512)
+    limit = megabytes * 1024 * 1024
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (OSError, ValueError):
+        return
 
 
 def _run_solc_standard_json(source: str) -> str:
@@ -396,7 +410,19 @@ def _parse_standard_json(raw: str, tool: str) -> CompilerSemantics:
     if isinstance(errors, list) and any(
         isinstance(item, dict) and item.get("severity") == "error" for item in errors
     ):
-        return CompilerSemantics("FAILED", tool, "compiler reported an error")
+        message = next(
+            (
+                str(
+                    item.get("formattedMessage")
+                    or item.get("message")
+                    or "compiler reported an error"
+                )
+                for item in errors
+                if isinstance(item, dict) and item.get("severity") == "error"
+            ),
+            "compiler reported an error",
+        )
+        return CompilerSemantics("FAILED", tool, f"compiler reported an error: {message}"[:400])
     storage: list[dict[str, str]] = []
     layouts: list[dict[str, str]] = []
     selectors: list[dict[str, str]] = []

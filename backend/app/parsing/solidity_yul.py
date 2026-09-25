@@ -151,6 +151,7 @@ def analyze_yul(graph: SyntaxGraph) -> YulModel:
                 break
             if re.search(r"\bassembly\b", block):
                 _trace(model, "nested assembly", False)
+            _note_unbounded_calldata(block, model, seen_hostile)
             _walk_block(
                 block,
                 constants,
@@ -749,6 +750,22 @@ def _unbalanced(model: YulModel, kind: str) -> None:
 
 def _trace(model: YulModel, summary: str, known: bool) -> None:
     model.traces.append(YulTrace(summary, known))
+
+
+def _note_unbounded_calldata(block: str, model: YulModel, seen: set[str]) -> None:
+    """Flag a dynamic ``calldataload`` that the block never bounds with ``calldatasize``.
+
+    A numeric offset such as ``calldataload(0)`` is not this pattern. A later
+    ``calldatasize`` check in the same block keeps the load unknown rather than hostile.
+    """
+    if re.search(r"\bcalldatasize\s*\(", block):
+        return
+    for match in re.finditer(r"\bcalldataload\s*\(\s*([^)]*)\)", block):
+        argument = " ".join(match.group(1).split())
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)", argument):
+            continue
+        _hostile(model, seen, "unbounded calldata load")
+        return
 
 
 def _hostile(model: YulModel, seen: set[str], summary: str) -> None:
