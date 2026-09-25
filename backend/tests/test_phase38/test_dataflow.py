@@ -184,7 +184,7 @@ def test_internal_call_is_represented(tmp_path: Path) -> None:
     )
     flow = analyze_dataflow(program)
     assert flow.reachable_functions("withdraw")
-    assert flow.status == "partial"
+    assert flow.status == "available"
 
 
 def test_delegatecall_target_provenance(tmp_path: Path) -> None:
