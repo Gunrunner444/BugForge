@@ -36,6 +36,9 @@ class ResearchLead:
     observation_ids: list[str] = field(default_factory=list)
     related_ids: list[str] = field(default_factory=list)
     chain_ids: list[str] = field(default_factory=list)
+    hypothesis_ids: list[str] = field(default_factory=list)
+    finding_ids: list[str] = field(default_factory=list)
+    semantic_node_ids: list[str] = field(default_factory=list)
     updated_at: str = ""
 
     def snapshot(self) -> dict[str, object]:
@@ -53,6 +56,9 @@ class ResearchLead:
             "observation_ids": list(self.observation_ids),
             "related_ids": list(self.related_ids),
             "chain_ids": list(self.chain_ids),
+            "hypothesis_ids": list(self.hypothesis_ids),
+            "finding_ids": list(self.finding_ids),
+            "semantic_node_ids": list(self.semantic_node_ids),
             "updated_at": self.updated_at,
         }
 
@@ -137,6 +143,9 @@ def lead_from_row(row: DBResearchLead) -> ResearchLead:
         observation_ids=list(row.observation_ids or []),
         related_ids=list(row.related_ids or []),
         chain_ids=list(row.chain_ids or []),
+        hypothesis_ids=list(getattr(row, "hypothesis_ids", None) or []),
+        finding_ids=list(getattr(row, "finding_ids", None) or []),
+        semantic_node_ids=list(getattr(row, "semantic_node_ids", None) or []),
         updated_at=updated.isoformat(),
     )
 
@@ -161,6 +170,9 @@ async def save_lead(session: AsyncSession, lead: ResearchLead) -> ResearchLead:
     row.observation_ids = list(lead.observation_ids)
     row.related_ids = list(lead.related_ids)
     row.chain_ids = list(lead.chain_ids)
+    row.hypothesis_ids = list(lead.hypothesis_ids)
+    row.finding_ids = list(lead.finding_ids)
+    row.semantic_node_ids = list(lead.semantic_node_ids)
     row.updated_at = _stamp(lead.updated_at)
     await session.flush()
     return lead
@@ -184,7 +196,7 @@ def lead_for_hypothesis(research: Any, hypothesis: Any) -> ResearchLead:
         (
             item
             for item in research.leads
-            if isinstance(item, ResearchLead) and related and related in item.related_ids
+            if isinstance(item, ResearchLead) and related and related in item.hypothesis_ids
         ),
         None,
     )
@@ -199,14 +211,14 @@ def lead_for_hypothesis(research: Any, hypothesis: Any) -> ResearchLead:
             hypothesis=str(getattr(hypothesis, "title", "") or ""),
             priority=str(getattr(hypothesis, "severity", "") or "medium"),
         )
-        existing.related_ids.append(related)
+        existing.hypothesis_ids.append(related)
         research.leads.append(existing)
     existing.status = "ACTIVE"
     existing.next_action = str(
         getattr(hypothesis, "suggested_next_action", "") or existing.next_action
     )
     existing.evidence_ids = list(getattr(hypothesis, "supporting_evidence_ids", ()) or ())
-    existing.related_ids = list(dict.fromkeys([*existing.related_ids, related]))
+    existing.hypothesis_ids = list(dict.fromkeys([*existing.hypothesis_ids, related]))
     _validate(existing)
     return existing
 

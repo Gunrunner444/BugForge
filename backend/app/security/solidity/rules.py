@@ -135,6 +135,8 @@ class _SolidityRule(SecurityRule):
                 "contract": fields.get("contract", ""),
                 "function": fields.get("function", ""),
                 "status": "potential",
+                "analysis_origin": "parser",
+                "semantic_status": "unknown",
             },
         )
 
@@ -144,7 +146,7 @@ class ReentrancyRule(_SolidityRule):
     vulnerability_class = VulnerabilityClass.REENTRANCY
 
     def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
-        return _reentrancy(self, graph, hooks_only=False)
+        return _with_semantics(graph, _reentrancy(self, graph, hooks_only=False))
 
 
 class CallbackReentrancyRule(_SolidityRule):
@@ -191,7 +193,7 @@ class UncheckedCallRule(_SolidityRule):
                             f"The {kind} success value is not checked on this path.",
                         )
                     )
-        return found
+        return _with_semantics(graph, found)
 
 
 class ArbitraryDelegatecallRule(_SolidityRule):
@@ -237,7 +239,7 @@ class ArbitraryDelegatecallRule(_SolidityRule):
                     detail + " This is potential evidence, not a confirmed call.",
                 )
             )
-        return found
+        return _with_semantics(graph, found, delegate=True)
 
 
 class MissingAuthorizationRule(_SolidityRule):
@@ -269,7 +271,7 @@ class MissingAuthorizationRule(_SolidityRule):
                     f"{name} changes privileged state or transfers value without a check that dominates that operation.",
                 )
             )
-        return found
+        return _with_semantics(graph, found)
 
 
 class DowncastRule(_SolidityRule):
@@ -368,7 +370,7 @@ class SignatureReplayRule(_SolidityRule):
                     gap + " This is potential evidence, not a confirmed replay.",
                 )
             )
-        return found
+        return _with_semantics(graph, found)
 
 
 class InitializerRule(_SolidityRule):
@@ -426,11 +428,17 @@ class AccountingDesyncRule(_MethodologyRule):
     issue_id = "sol.accounting_desync"
     vulnerability_class = VulnerabilityClass.BUSINESS_LOGIC
 
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        return _with_semantics(graph, super()._check(graph))
+
 
 class SiblingAuthRule(_MethodologyRule):
     rule_id = "sol.sibling_auth"
     issue_id = "sol.sibling_auth"
     vulnerability_class = VulnerabilityClass.AUTHORIZATION
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        return _with_semantics(graph, super()._check(graph))
 
 
 class BoundaryRule(_MethodologyRule):
@@ -501,7 +509,7 @@ class StorageCollisionRule(_SolidityRule):
         if anchor is not None and model.storage is not None:
             for note in model.storage.overlaps:
                 found.append(self._obs(graph, anchor, "Proxy storage collision indicator", note))
-        return found
+        return _with_semantics(graph, found)
 
 
 class UnboundedLoopRule(_SolidityRule):
@@ -686,7 +694,7 @@ class SignatureDomainRule(_SolidityRule):
                     gap + " This is potential evidence, not a confirmed signature flaw.",
                 )
             )
-        return found
+        return _with_semantics(graph, found)
 
 
 class SelfdestructRule(_SolidityRule):
@@ -969,7 +977,33 @@ def _reentrancy(
                     )
                 )
                 break
-    return found
+    return _with_semantics(graph, found)
+
+
+def _with_semantics(
+    graph: SyntaxGraph,
+    observations: list[SecurityObservation],
+    *,
+    delegate: bool = False,
+) -> list[SecurityObservation]:
+    """Attach semantic/dataflow origin. Parser fallback is labeled, not treated as compiler fact."""
+    from app.parsing.solidity_dataflow import analyze_dataflow
+
+    program = build_semantic_program(graph)
+    flow = analyze_dataflow(program)
+    origin = "semantic" if program.functions else "parser"
+    for item in observations:
+        item.metadata["analysis_origin"] = origin
+        item.metadata["semantic_status"] = program.status
+        item.metadata["dataflow_status"] = flow.status
+        if program.compiler_ir_status != "available":
+            item.metadata["compiler_ir"] = program.compiler_ir_status
+        if program.incomplete_reason or flow.incomplete_reason:
+            item.metadata["incomplete_reason"] = program.incomplete_reason or flow.incomplete_reason
+        if delegate:
+            function = str(item.metadata.get("function") or "")
+            item.metadata["target_provenance"] = flow.target_provenance(function)
+    return observations
 
 
 def _functions(graph: SyntaxGraph) -> list[SyntaxEvent]:

@@ -6,6 +6,7 @@ and never a verified finding. Results dedupe on rule id, path, and line.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Sequence
@@ -41,6 +42,18 @@ def _inside_root(path: str, root: str) -> bool:
     except ValueError:
         return False
     return resolved == base or base in resolved.parents
+
+
+def local_ruleset() -> Path:
+    return Path(__file__).with_name("semgrep_rules.yaml")
+
+
+def ruleset_identity() -> tuple[str, str]:
+    path = local_ruleset()
+    if not path.is_file():
+        return "missing", ""
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return "bugforge-local-1", digest
 
 
 def semgrep_available(binary: str | None = None) -> bool:
@@ -214,9 +227,38 @@ class SemgrepAdapter(SecurityToolAdapter):
                     metadata={"state": "tool_unavailable", "is_finding": False, "verified": False},
                 )
             ]
+        rules_path = local_ruleset()
+        version_name, rules_hash = ruleset_identity()
+        if not rules_path.is_file():
+            self.last_result = ToolExecutionResult(
+                tool="semgrep",
+                state=ToolExecutionState.TOOL_UNAVAILABLE,
+                detail="local ruleset missing",
+            )
+            return [
+                Evidence(
+                    kind=EvidenceKind.TOOL_STATUS,
+                    source="semgrep",
+                    summary="semgrep ruleset_missing",
+                    metadata={
+                        "state": "tool_unavailable",
+                        "ruleset": "missing",
+                        "is_finding": False,
+                        "verified": False,
+                    },
+                )
+            ]
         command = str(binary or "semgrep")
         outcome = self._runner.run(
-            [command, "--json", "--quiet", "--config", "p/default", str(Path(path).resolve())],
+            [
+                command,
+                "--json",
+                "--quiet",
+                "--metrics=off",
+                "--config",
+                str(rules_path),
+                str(Path(path).resolve()),
+            ],
             timeout=30,
         )
         if outcome.unavailable:
@@ -234,7 +276,8 @@ class SemgrepAdapter(SecurityToolAdapter):
         version = wrap_untrusted("semgrep", (outcome.stderr or "semgrep")[:120])
         evidence = self.ingest_json(outcome.stdout or "{}")
         for item in evidence:
-            item.metadata["ruleset"] = "semgrep-json"
+            item.metadata["ruleset"] = version_name
+            item.metadata["ruleset_sha256"] = rules_hash
             item.metadata["tool_version"] = version
         return evidence
 

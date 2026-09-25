@@ -1,0 +1,6 @@
+rules:
+  - id: bugforge.local.placeholder
+    languages: [solidity]
+    message: BugForge local ruleset. This rule does not fetch remote configuration.
+    severity: INFO
+    pattern: BUGFORGE_SEMGREP_LOCAL_RULESET_UNUSED

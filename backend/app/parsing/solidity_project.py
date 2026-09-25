@@ -157,25 +157,38 @@ def resolve_analysis_source(
         return "missing", relative, ""
 
 
-def project_standard_json(sources: dict[str, str], remappings: list[str]) -> dict[str, object]:
+def project_standard_json(
+    sources: dict[str, str],
+    remappings: list[str],
+    build: dict[str, str] | None = None,
+) -> dict[str, object]:
     """Standard JSON for the bounded source bundle. No model-supplied flags."""
     from app.core.config import get_settings
 
     selected = ["storageLayout", "evm.methodIdentifiers"]
     if bool(getattr(get_settings(), "solidity_compiler_emit_ir", True)):
         selected.insert(1, "ir")
+    settings: dict[str, object] = {
+        "remappings": [_solc_remapping(item) for item in remappings],
+        "outputSelection": {
+            "*": {
+                "*": selected,
+                "": ["ast"],
+            }
+        },
+    }
+    chosen = build or {}
+    if chosen.get("optimizer") in {"true", "false"}:
+        runs = int(chosen.get("optimizer_runs") or "200")
+        settings["optimizer"] = {"enabled": chosen["optimizer"] == "true", "runs": runs}
+    if chosen.get("via_ir") in {"true", "false"}:
+        settings["viaIR"] = chosen["via_ir"] == "true"
+    if chosen.get("evm_version"):
+        settings["evmVersion"] = chosen["evm_version"]
     return {
         "language": "Solidity",
         "sources": {path: {"content": text} for path, text in sorted(sources.items())},
-        "settings": {
-            "remappings": [_solc_remapping(item) for item in remappings],
-            "outputSelection": {
-                "*": {
-                    "*": selected,
-                    "": ["ast"],
-                }
-            },
-        },
+        "settings": settings,
     }
 
 
@@ -246,12 +259,14 @@ def build_compiler_project(
         if runner is not None:
             parsed_groups = [
                 interpret_standard_json(
-                    runner(json.dumps(project_standard_json(sources, remappings))),
+                    runner(json.dumps(project_standard_json(sources, remappings, build_config))),
                     tool=tool or "solc",
                 )
             ]
         else:
-            parsed_groups = _compile_version_groups(sources, remappings, tool or "solc", repo_root)
+            parsed_groups = _compile_version_groups(
+                sources, remappings, tool or "solc", repo_root, build_config
+            )
     except ValueError as exc:
         model = _replace(base, status="INCOMPLETE", detail=str(exc)[:400], complete=False)
         return _store(cache, key, model)
@@ -320,7 +335,13 @@ def build_compiler_project(
                 "version": item.compiler_version,
                 "tool": item.tool,
                 "status": item.status,
-                "ir": "available" if item.ir_available else "unavailable",
+                "ir": "truncated"
+                if item.ir_truncated
+                else "available"
+                if item.ir_available
+                else "unavailable",
+                "ast": "available" if item.ast_available else "unavailable",
+                "sources": item.language.get("sources", ""),
             }
             for item in parsed_groups
         ),
@@ -638,7 +659,10 @@ def _solc_remapping(raw: str) -> str:
 
 
 def _version_groups(
-    sources: dict[str, str], remappings: list[str], root: Path
+    sources: dict[str, str],
+    remappings: list[str],
+    root: Path,
+    build: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, str]], tuple[str, ...]]:
     """Group sources by the single exact compiler their import closure allows."""
     pairs: list[tuple[str, str]] = []
@@ -705,15 +729,38 @@ def _version_groups(
             if other == version or (other == "0.8.34" and not pins.get(nxt)):
                 add(nxt, version)
 
+    pinned_solc = (build or {}).get("solc", "")
+    if pinned_solc:
+        for path in list(omitted):
+            if not pins.get(path):
+                assigned[path] = pinned_solc
+                omitted.remove(path)
+    changed = True
+    while changed:
+        changed = False
+        for path, version in list(assigned.items()):
+            for nxt in imported.get(path, []):
+                if nxt in assigned:
+                    continue
+                if pins.get(nxt) and pins[nxt] != version:
+                    continue
+                assigned[nxt] = version
+                if nxt in omitted:
+                    omitted.remove(nxt)
+                changed = True
     for path, version in assigned.items():
         add(path, version)
-    return groups, tuple(omitted)
+    return groups, tuple(dict.fromkeys(omitted))
 
 
 def _compile_version_groups(
-    sources: dict[str, str], remappings: list[str], tool: str, root: Path
+    sources: dict[str, str],
+    remappings: list[str],
+    tool: str,
+    root: Path,
+    build: dict[str, str] | None = None,
 ) -> list[CompilerSemantics]:
-    groups, omitted = _version_groups(sources, remappings, root)
+    groups, omitted = _version_groups(sources, remappings, root, build)
     if omitted:
         raise ValueError("compiler groups omitted unresolved sources: " + ", ".join(omitted[:12]))
     parsed: list[CompilerSemantics] = []
@@ -723,8 +770,11 @@ def _compile_version_groups(
         binary = _solc_binary(version)
         if not binary:
             raise OSError(f"solc {version} is unavailable")
-        raw = _host_runner_binary(json.dumps(project_standard_json(group, remappings)), binary)
+        raw = _host_runner_binary(
+            json.dumps(project_standard_json(group, remappings, build)), binary
+        )
         parsed_group = interpret_standard_json(raw, tool=tool)
+        parsed_group.language["sources"] = ",".join(sorted(group))
         if not parsed_group.compiler_version:
             parsed_group = replace(parsed_group, compiler_version=version)
         if parsed_group.status != "AVAILABLE":
