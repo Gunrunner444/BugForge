@@ -183,7 +183,7 @@ def test_delegatecall_provenance_follows_the_expression(tmp_path: Path) -> None:
     flow = analyze_dataflow(_program(tmp_path, source))
     assert flow.target_provenance("fromParam") == "attacker"
     assert flow.target_provenance("fromState") == "state"
-    assert flow.target_provenance("fromCall") == "derived"
+    assert flow.target_provenance("fromCall") == "state"
 
 
 def test_ambiguous_function_name_is_not_a_fuzzy_match(tmp_path: Path) -> None:

@@ -121,6 +121,7 @@ class SemanticFunction:
     guard: GuardFact | None = None
     constraints: tuple[str, ...] = ()
     parameters: tuple[str, ...] = ()
+    source: str = ""
 
     @property
     def identity(self) -> str:
@@ -411,6 +412,7 @@ def _functions(
                 guard=guard,
                 constraints=_constraints(event.text),
                 parameters=tuple(sorted(_param_names(event.text))),
+                source=event.text,
             )
         )
     return found, len(events), reason
