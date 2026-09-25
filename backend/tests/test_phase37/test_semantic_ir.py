@@ -56,20 +56,20 @@ def test_chain_status_follows_graph_provenance() -> None:
         provenance="reproduction",
         summary="reproduced",
         node_id="e1",
-        extra={"lifecycle": "reproduced"},
+        extra={"outcome": "reproduced", "reproduced": "true", "lifecycle": "verified"},
     )
     graph.add(
         kind="reproduction",
         provenance="reproduction",
         summary="reproduced",
         node_id="e2",
-        extra={"lifecycle": "reproduced"},
+        extra={"outcome": "reproduced", "reproduced": "true", "lifecycle": "verified"},
     )
     chain = propose_chain("c", (ChainStep("a", evidence_id="e1"), ChainStep("b", evidence_id="e2")))
     assert verify_chain(_Session(graph), chain).status == "reproduced"
     graph.nodes["e1"].extra["lifecycle"] = "verified"
     graph.nodes["e2"].extra["lifecycle"] = "verified"
-    assert verify_chain(_Session(graph), chain).status == "verified"
+    assert verify_chain(_Session(graph), chain).status == "reproduced"
     other = EvidenceGraph(session_id="other", project_id="p")
     other.add(
         kind="reproduction",
@@ -186,5 +186,6 @@ def test_lead_observation_ids_are_not_hypothesis_ids() -> None:
 
     updated = lead_for_hypothesis(Session(), Hypothesis())
     assert updated.observation_ids == []
-    assert "hyp" in updated.related_ids
+    assert updated.hypothesis_ids == ["hyp"]
+    assert "hyp" not in updated.related_ids
     assert updated.evidence_ids == ["e1"]

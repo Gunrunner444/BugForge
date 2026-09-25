@@ -132,6 +132,7 @@ def test_proxy_overlap_is_slot_based_not_name_based(tmp_path: Path) -> None:
     contract Impl { uint256 value; }
     contract Proxy {
         address implementation;
+        function use(Impl next) external { implementation = address(next); }
         fallback() external payable { implementation.delegatecall(msg.data); }
     }
     """
@@ -465,6 +466,7 @@ def test_compatible_proxy_layout_is_not_a_collision(tmp_path: Path) -> None:
     contract Proxy {
         address implementation;
         uint256 adminValue;
+        function use(Impl next) external { implementation = address(next); }
         fallback() external payable { implementation.delegatecall(msg.data); }
     }
     contract Impl {

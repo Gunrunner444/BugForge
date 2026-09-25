@@ -121,6 +121,41 @@ def assess_chain(chain: ExploitChain) -> ExploitChain:
     return chain
 
 
+def _rank_step(session: Any, evidence_id: str, node: Any, session_id: str, project_id: str) -> str:
+    """Use the domain lifecycle. A caller-supplied lifecycle string is ignored."""
+    del session_id
+    from app.domain.evidence import Evidence, EvidenceKind
+    from app.domain.lifecycle_policy import (
+        independent_verification_items,
+        positive_reproduction,
+    )
+
+    for finding in getattr(session, "findings", []) or []:
+        if not getattr(finding, "is_verified", False):
+            continue
+        if evidence_id not in {str(getattr(finding, "id", ""))}:
+            continue
+        items = getattr(getattr(finding, "evidence", None), "items", ())
+        if independent_verification_items(items, project_id=project_id):
+            return "verified"
+    extra = dict(getattr(node, "extra", {}) or {})
+    extra.pop("lifecycle", None)
+    provenance = str(getattr(node, "provenance", "") or "")
+    if provenance in _NON_AUTHORITY or provenance == "":
+        return "static"
+    if provenance != "reproduction":
+        return "static"
+    evidence = Evidence(
+        kind=EvidenceKind.REPRODUCTION,
+        source=str(getattr(node, "source", "") or "reproduction"),
+        summary=str(getattr(node, "summary", "") or "reproduction"),
+        metadata={key: str(value) for key, value in extra.items()},
+    )
+    if positive_reproduction(evidence):
+        return "reproduced"
+    return "static"
+
+
 def verify_chain(session: Any, chain: ExploitChain) -> ExploitChain:
     """Status comes from the session evidence graph, never from step.evidence_tier."""
     if chain.status == "rejected":
@@ -141,18 +176,7 @@ def verify_chain(session: Any, chain: ExploitChain) -> ExploitChain:
         if project_id and str(getattr(node, "project_id", "") or "") not in {"", project_id}:
             ranks.append("foreign")
             continue
-        provenance = str(getattr(node, "provenance", "") or "")
-        lifecycle = str((getattr(node, "extra", {}) or {}).get("lifecycle") or "")
-        if provenance in _NON_AUTHORITY or provenance == "":
-            ranks.append("static")
-            continue
-        if lifecycle == "verified" and provenance in {"execution", "reproduction"}:
-            ranks.append("verified")
-            continue
-        if provenance == "reproduction":
-            ranks.append("reproduced")
-            continue
-        ranks.append("static")
+        ranks.append(_rank_step(session, step.evidence_id, node, session_id, project_id))
     chain.evidence_requirements = tuple(
         step.summary for step, rank in zip(chain.steps, ranks, strict=True) if rank != "verified"
     )

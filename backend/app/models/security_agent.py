@@ -441,6 +441,9 @@ class DBResearchLead(Base):
     observation_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     related_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     chain_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    hypothesis_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    finding_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    semantic_node_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )

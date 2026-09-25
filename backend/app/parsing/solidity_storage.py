@@ -754,11 +754,7 @@ def _proxy_links(
         if resolved:
             links.extend((proxy, name) for name in resolved)
             continue
-        others = [name for name in named if name != proxy]
-        if len(others) == 1:
-            links.append((proxy, others[0]))
-        else:
-            unresolved.append(proxy)
+        unresolved.append(proxy)
     return links, unresolved
 
 

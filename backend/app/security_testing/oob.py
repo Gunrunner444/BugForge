@@ -16,6 +16,7 @@ class OobProvider:
     """Optional callback transport. This build has no network provider."""
 
     name: str = "none"
+    kind: str = "none"
 
     def available(self) -> bool:
         return False
@@ -34,12 +35,18 @@ class OobEvent:
 
 @dataclass
 class MockOobProvider(OobProvider):
-    """In-memory test provider. This is not interactsh."""
+    """In-memory test provider. This is not interactsh and is not a production backend."""
 
     name: str = "mock"
+    kind: str = "mock"
 
     def available(self) -> bool:
         return True
+
+
+def production_provider() -> OobProvider:
+    """Production correlation has no callback network in this build."""
+    return OobProvider(name="none", kind="none")
 
 
 @dataclass
