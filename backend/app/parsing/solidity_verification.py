@@ -191,10 +191,14 @@ def request_for(
         path.reason,
         path.conditions,
         path.assumptions,
-        model.compiler_version or "unspecified",
+        (
+            specification.compiler_config
+            if specification is not None and specification.compiler_config
+            else (model.compiler_version or "unspecified")
+        ),
         encoded=False,
         specification_hash=specification.specification_hash if specification else "",
-        encoding_status=capability if capability == "supported" else "unsupported",
+        encoding_status=(capability if capability == "semantically_supported" else "unsupported"),
         proof_scope=specification.proof_scope if specification else "",
     )
 
@@ -270,7 +274,10 @@ def run_smt(
                 tool="smt",
                 bound=False,
             )
-        runner = _solc_runner
+
+        def runner(text: str, planned: tuple[str, ...] = generated.command) -> tuple[int, str, str]:
+            return _solc_runner(text, planned)
+
     try:
         code, stdout, stderr = runner(generated.harness)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -646,21 +653,24 @@ def _project_note(project_root: str) -> str:
     )
 
 
-def _solc_runner(harness: str) -> tuple[int, str, str]:
+def _solc_runner(harness: str, command: tuple[str, ...] = ()) -> tuple[int, str, str]:
     binary = shutil.which("solc")
     if not binary:
         return 127, "", "solc is not installed"
+    flags = (
+        list(command[:-1])
+        if command
+        else [
+            "--model-checker-engine",
+            "chc",
+            "--model-checker-show-proved-safe",
+        ]
+    )
     with tempfile.TemporaryDirectory(prefix="bugforge-smt-") as directory:
         path = Path(directory) / "Harness.sol"
         path.write_text(harness, encoding="utf-8")
         completed = subprocess.run(
-            [
-                binary,
-                "--model-checker-engine",
-                "chc",
-                "--model-checker-show-proved-safe",
-                str(path),
-            ],
+            [binary, *flags, str(path)],
             check=False,
             capture_output=True,
             text=True,

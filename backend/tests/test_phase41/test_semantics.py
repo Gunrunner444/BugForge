@@ -339,9 +339,9 @@ def test_cross_contract_resolution_is_not_guessed(tmp_path: Path) -> None:
         if item.depth == 2 and any(step.relation == "invokes" for step in item.steps)
     ]
     assert chain
-    assert {item.status for item in chain} == {"unknown"}
-    assert all(item.relationship == "unknown" for item in chain)
-    assert all("unknown relationship" in item.reason for item in chain)
+    assert {item.status for item in chain} == {"reachable"}
+    assert all(item.relationship == "reachable" for item in chain)
+    assert all("reachable only" in item.reason for item in chain)
 
 
 def test_candidate_steps_are_structured_and_authority_is_operation_specific(tmp_path: Path) -> None:
@@ -595,31 +595,57 @@ def test_paths_never_claim_verification(tmp_path: Path) -> None:
 
 
 def test_same_function_identity_in_two_sources_is_not_merged(tmp_path: Path) -> None:
-    source = """
-    pragma solidity ^0.8.20;
-    contract Vault {
-        uint256 totalSupply;
-        function mint() external { totalSupply = totalSupply + 1; }
-    }
-    """
+    left_source = """pragma solidity ^0.8.20;
+contract Vault {
+    uint256 totalSupply;
+    uint256 balances;
+    function mint() external { totalSupply = totalSupply + 1; }
+}
+"""
+    right_source = """pragma solidity ^0.8.19;
+contract Vault {
+    uint256 totalSupply;
+    uint256 balances;
+    function mint() external { totalSupply = totalSupply + 1; balances = balances + 1; }
+}
+"""
     reset_syntax_registry()
     reset_plugin_catalog()
-    left = build_semantic_program(parse_source("solidity", tmp_path / "left.sol", source))
-    right = build_semantic_program(parse_source("solidity", tmp_path / "right.sol", source))
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    left_path = one / "Vault.sol"
+    right_path = two / "Vault.sol"
+    left_path.write_text(left_source, encoding="utf-8")
+    right_path.write_text(right_source, encoding="utf-8")
+    left = build_semantic_program(parse_source("solidity", left_path, left_source))
+    right = build_semantic_program(parse_source("solidity", right_path, right_source))
+    left.compiler_version = "0.8.20"
+    right.compiler_version = "0.8.19"
     model = analyze_state_transitions(left, also=(right,))
     assert model.status == "partial"
-    assert "function identity collision across sources" in model.incomplete_reason
-    mint = [item for item in model.transitions if item.function_id.startswith("Vault.mint")]
-    assert len(mint) == 2
-    assert {item.status for item in mint} == {"incomplete"}
-    assert {item.source_file for item in mint} == {
-        str(tmp_path / "left.sol"),
-        str(tmp_path / "right.sol"),
-    }
-    assert not any(
-        item.status == "potential" and item.transition_id.startswith("Vault.mint")
+    assert "namespaced" in model.incomplete_reason
+    assert model.compiler_version == "mixed"
+    mints = [item for item in model.transitions if item.function_id.startswith("Vault.mint")]
+    assert len(mints) == 2
+    assert len({item.transition_id for item in mints}) == 2
+    assert len({item.source_identity for item in mints}) == 2
+    assert all(item.transition_id.startswith(item.source_identity) for item in mints)
+    assert {item.source_file for item in mints} == {str(left_path), str(right_path)}
+    left_mint = next(item for item in mints if item.source_file == str(left_path))
+    right_mint = next(item for item in mints if item.source_file == str(right_path))
+    assert any(
+        item.transition_id == left_mint.transition_id
+        and item.status == "potential"
+        and item.invariant_id.startswith("inv:supply-balance:")
         for item in model.checks
     )
+    assert not any(
+        item.transition_id == right_mint.transition_id and item.status == "potential"
+        for item in model.checks
+    )
+    assert len({item.invariant_id for item in model.invariants if item.category == "equality"}) == 2
 
 
 def test_same_variable_name_does_not_merge_contracts(tmp_path: Path) -> None:
@@ -673,6 +699,29 @@ def test_mapping_sum_is_not_an_exact_formula(tmp_path: Path) -> None:
     assert "mapping aggregation is not encoded" in equality.unsupported
 
 
+def test_shared_unrelated_state_is_not_a_security_path(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 totalSupply;
+        uint256 balances;
+        uint256 scratch;
+        function a() external { scratch = 1; b(); }
+        function b() external { uint256 seen = scratch; c(); }
+        function c() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    model = analyze_state_transitions(_program(tmp_path, source))
+    related = next(
+        item
+        for item in model.paths
+        if item.path_id.startswith("chain:") and item.function_ids[0].startswith("Vault.a")
+    )
+    assert related.relationship == "semantically_related"
+    assert related.status == "reachable"
+    assert related.status != "candidate"
+
+
 def test_multi_step_requires_shared_state(tmp_path: Path) -> None:
     source = """
     pragma solidity ^0.8.20;
@@ -704,11 +753,12 @@ def test_multi_step_requires_shared_state(tmp_path: Path) -> None:
         and item.function_ids[-1].startswith("Vault.w")
     )
     assert connected.status == "candidate"
-    assert connected.relationship == "connected"
+    assert connected.relationship == "candidate_security_path"
+    assert connected.invariant_id.startswith("inv:")
     assert any(step.relation == "depends-on" for step in connected.steps)
-    assert unrelated.status == "unknown"
-    assert unrelated.relationship == "unknown"
-    assert "unknown relationship" in unrelated.reason
+    assert unrelated.status == "reachable"
+    assert unrelated.relationship == "reachable"
+    assert "reachable only" in unrelated.reason
     assert not any(step.relation == "violates-candidate-invariant" for step in unrelated.steps)
 
 
@@ -752,8 +802,8 @@ def test_depth_counts_transitions_and_the_bound_is_partial(tmp_path: Path) -> No
         and item.function_ids[0].startswith("Vault.a")
         and item.function_ids[-1].startswith("Vault.d")
     ]
-    assert depth2 and depth2[0].status == "unknown"
-    assert depth3 and depth3[0].status == "unknown"
+    assert depth2 and depth2[0].status == "reachable"
+    assert depth3 and depth3[0].status == "reachable"
     assert depth4 and depth4[0].status == "candidate"
     assert depth4[0].completeness == "complete"
     assert depth4[0].bound == f"depth=4; cap<={MAX_DEPTH}"

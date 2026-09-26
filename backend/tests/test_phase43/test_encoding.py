@@ -6,6 +6,8 @@ is installed. A live tool test is skipped when the binary is absent.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -17,10 +19,15 @@ from app.domain.lifecycle_policy import independent_verification_items, positive
 from app.parsing.engine import parse_source, reset_syntax_registry
 from app.parsing.solidity_ir import build_semantic_program
 from app.parsing.solidity_spec import (
+    ASSERTION_MARKER,
+    _call_plan,
     binds,
     capability_matrix,
+    configuration_hash,
+    function_signature,
     generate_forge_artifact,
     generate_smt_artifact,
+    observed_configuration,
     parse_forge_bound,
     parse_smt_bound,
     specify,
@@ -43,7 +50,7 @@ pragma solidity ^0.8.20;
 contract Vault {
     uint256 public totalSupply;
     uint256 public balances;
-    function mint() external {
+    function mint() public {
         totalSupply = totalSupply + 1;
     }
 }
@@ -54,7 +61,7 @@ pragma solidity ^0.8.20;
 contract Vault {
     uint256 public totalSupply;
     uint256 public balances;
-    function mint() external {
+    function mint() public {
         totalSupply = totalSupply + 1;
         balances = balances + 1;
     }
@@ -80,8 +87,15 @@ def _encoded_spec(tmp_path: Path, source: str = _EQUALITY):
 
 def test_capability_matrix_matches_the_encoder() -> None:
     matrix = capability_matrix()
-    assert matrix["equality-scalar"] == {"smt": "supported", "foundry": "supported"}
-    assert matrix["monotonic-increment"] == {"smt": "supported", "foundry": "supported"}
+    assert matrix["equality-scalar"] == {
+        "smt": "semantically_supported",
+        "foundry": "semantically_supported",
+    }
+    assert matrix["monotonic-increment"] == {
+        "smt": "semantically_supported",
+        "foundry": "semantically_supported",
+    }
+    assert "verified_capable" not in {level for row in matrix.values() for level in row.values()}
     assert matrix["equality-mapping-sum"]["smt"] == "unsupported"
     assert matrix["asset-share"]["smt"] == "unsupported"
     assert matrix["erc4626-conservation"]["foundry"] == "unsupported"
@@ -90,8 +104,8 @@ def test_capability_matrix_matches_the_encoder() -> None:
 
 def test_scalar_equality_harness_contains_the_predicate(tmp_path: Path) -> None:
     _program_obj, text, _model, path, spec = _encoded_spec(tmp_path)
-    assert spec.smt == "supported"
-    assert spec.foundry == "supported"
+    assert spec.smt == "semantically_supported"
+    assert spec.foundry == "semantically_supported"
     assert spec.proof_scope == "contract-copy-harness"
     assert spec.predicate_lhs == "totalSupply"
     assert spec.predicate_rhs == "balances"
@@ -136,7 +150,7 @@ def test_only_a_named_smt_result_is_authoritative(tmp_path: Path) -> None:
         artifact=artifact,
         runner=lambda _harness: (
             0,
-            f"Info: {artifact.token} proved safe.",
+            f"Harness.sol:{artifact.assert_line}:1: Info: {artifact.token} proved safe.",
             "",
         ),
     )
@@ -152,7 +166,10 @@ def test_only_a_named_smt_result_is_authoritative(tmp_path: Path) -> None:
         artifact=artifact,
         runner=lambda _harness: (
             1,
-            f"Warning: CHC: Assertion violation happens here.\nCounterexample:\n{artifact.token}\n",
+            (
+                f"Harness.sol:{artifact.assert_line}:1: Warning: CHC: Assertion violation "
+                f"happens here.\nCounterexample:\n{artifact.token}\n"
+            ),
             "",
         ),
     )
@@ -233,7 +250,7 @@ def test_unsupported_property_has_no_assertion(tmp_path: Path) -> None:
     contract Vault {
         uint256 totalSupply;
         mapping(address => uint256) balances;
-        function mint() external { totalSupply = totalSupply + 1; }
+        function mint() public { totalSupply = totalSupply + 1; }
     }
     """
     program, text = _program(tmp_path, source)
@@ -376,3 +393,223 @@ def test_live_forge_replay(tmp_path: Path) -> None:
         assert result.bound is True
         assert result.counterexample is not None
         assert spec.specification_hash in result.counterexample.raw_artifact
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _rewrite_manifest(artifact, **changes):
+    manifest = json.loads(artifact.manifest)
+    manifest.update(changes)
+    text = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return replace(artifact, manifest=text, manifest_digest=_digest(text))
+
+
+def test_visibility_and_value_limit_encoding(tmp_path: Path) -> None:
+    """Simulated. An encoded SMT harness must not call an external function internally."""
+    external = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 public totalSupply;
+        uint256 public balances;
+        function mint() external { totalSupply = totalSupply + 1; }
+    }
+    """
+    program, text = _program(tmp_path, external, "External.sol")
+    model = analyze_state_transitions(program)
+    path = next(item for item in model.paths if item.path_id.startswith("accounting:"))
+    spec = specify(path, model, program)
+    assert spec.smt == "unsupported"
+    assert spec.foundry == "semantically_supported"
+    smt = generate_smt_artifact(spec, text)
+    forge = generate_forge_artifact(spec, text)
+    assert smt.encoding_status == "unsupported"
+    assert "mint();" not in smt.harness
+    assert "this.mint()" not in smt.harness
+    assert forge.encoding_status == "encoded"
+    assert "target.mint();" in forge.harness
+    lied = replace(spec, smt="semantically_supported")
+    assert generate_smt_artifact(lied, text).encoding_status == "unsupported"
+
+    internal = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 public totalSupply;
+        uint256 public balances;
+        function mint() internal { totalSupply = totalSupply + 1; }
+    }
+    """
+    program, text = _program(tmp_path, internal, "Internal.sol")
+    model = analyze_state_transitions(program)
+    path = next(item for item in model.paths if item.path_id.startswith("accounting:"))
+    spec = specify(path, model, program)
+    assert spec.smt == "semantically_supported"
+    assert spec.foundry == "unsupported"
+    assert "mint();" in generate_smt_artifact(spec, text).harness
+    assert generate_forge_artifact(spec, text).encoding_status == "unsupported"
+
+    private = internal.replace("internal", "private")
+    program, text = _program(tmp_path, private, "Private.sol")
+    model = analyze_state_transitions(program)
+    path = next(item for item in model.paths if item.path_id.startswith("accounting:"))
+    spec = specify(path, model, program)
+    assert spec.smt == "semantically_supported"
+    assert spec.foundry == "unsupported"
+
+    sender = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 public totalSupply;
+        uint256 public balances;
+        function mint() public {
+            require(msg.sender != address(0));
+            totalSupply = totalSupply + 1;
+        }
+    }
+    """
+    program, text = _program(tmp_path, sender, "Sender.sol")
+    model = analyze_state_transitions(program)
+    path = next(item for item in model.paths if item.path_id.startswith("accounting:"))
+    spec = specify(path, model, program)
+    assert spec.smt == "semantically_supported"
+    assert spec.foundry == "unsupported"
+    assert "this.mint()" not in generate_smt_artifact(spec, text).harness
+
+    view = function_signature(
+        "contract Vault { function peek() public view returns (uint256) { return 1; } }",
+        "Vault",
+        "peek",
+    )
+    assert view is not None
+    assert view["visibility"] == "public"
+    assert view["parameterless"] is True
+    payable = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 public totalSupply;
+        function mint() public payable { totalSupply = totalSupply + msg.value; }
+    }
+    """
+    smt_ok, forge_ok, notes = _call_plan(payable, "Vault", ("Vault.mint:1",))
+    assert smt_ok is False
+    assert forge_ok is False
+    assert any("msg.value" in note for note in notes)
+
+
+def test_generated_assertion_ignores_source_asserts(tmp_path: Path) -> None:
+    source = """
+    pragma solidity ^0.8.20;
+    contract Vault {
+        uint256 public totalSupply;
+        uint256 public balances;
+        function mint() public {
+            assert(totalSupply >= 0);
+            totalSupply = totalSupply + 1;
+        }
+    }
+    """
+    _program_obj, text, _model, _path, spec = _encoded_spec(tmp_path, source)
+    artifact = generate_smt_artifact(spec, text)
+    assert artifact.encoding_status == "encoded"
+    marker = f"// {ASSERTION_MARKER} {spec.specification_hash}"
+    lines = artifact.harness.splitlines()
+    assert lines[artifact.assert_line - 2].strip() == marker
+    assert "assert(totalSupply == balances);" in lines[artifact.assert_line - 1]
+    assert "assert(totalSupply >= 0);" in artifact.harness
+    assert lines[artifact.assert_line - 1] != "            assert(totalSupply >= 0);"
+    request = bridge(_program_obj, analyze_state_transitions(_program_obj)).requests[0]
+    overflow = run_smt(
+        request,
+        text,
+        specification=spec,
+        artifact=artifact,
+        runner=lambda _harness: (
+            0,
+            "Warning: CHC: Overflow happens here.\nHarness.sol:4:1: Warning: CHC: proved.",
+            "",
+        ),
+    )
+    assert overflow.status == "unknown"
+    source_assert = run_smt(
+        request,
+        text,
+        specification=spec,
+        artifact=artifact,
+        runner=lambda _harness: (
+            1,
+            "Harness.sol:6:13: Warning: CHC: Assertion violation happens here.",
+            "",
+        ),
+    )
+    assert source_assert.status == "unknown"
+
+
+def test_every_manifest_field_is_bound(tmp_path: Path) -> None:
+    _program_obj, text, _model, _path, spec = _encoded_spec(tmp_path)
+    artifact = generate_smt_artifact(spec, text)
+    assert binds(artifact, spec, text)[0]
+    replacements = {
+        "specification_hash": "0" * 64,
+        "source_digest": "1" * 64,
+        "source_id": "other.sol",
+        "source_identity": "abcd",
+        "project_id": "2" * 64,
+        "compiler_config": "3" * 64,
+        "compiler_observed": '{"compiler_version":"9.9.9"}',
+        "contract": "Other",
+        "function_ids": ["other"],
+        "operation_ids": ["other"],
+        "invariant_id": "inv:other",
+        "path_id": "path:other",
+        "predicate": {"lhs": "x", "rhs": "y", "subject": "", "type": "other"},
+        "declaration_ids": ["other"],
+        "state_variables": ["other"],
+        "proof_scope": "other",
+        "tool": "other",
+        "command": ["other"],
+        "encoding_status": "unsupported",
+        "token": "other",
+        "fail_token": "other",
+        "assertion_id": "other",
+        "schema": "other",
+        "harness_digest": "4" * 64,
+        "assert_line": artifact.assert_line + 5,
+        "verification_id": "ver:other",
+    }
+    for key, value in replacements.items():
+        tampered = _rewrite_manifest(artifact, **{key: value})
+        ok, reason = binds(tampered, spec, text)
+        assert ok is False, key
+        assert reason, key
+    digest_lie = replace(artifact, manifest_digest="5" * 64)
+    assert binds(digest_lie, spec, text)[1] == "manifest digest mismatch"
+
+
+def test_compiler_configuration_is_not_only_a_version(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    source_dir = root / "src"
+    source_dir.mkdir(parents=True)
+    (root / "foundry.toml").write_text(
+        '[profile.default]\nsrc = "src"\nsolc = "0.8.20"\noptimizer = true\nevm_version = "cancun"\n',
+        encoding="utf-8",
+    )
+    (root / "remappings.txt").write_text("lib/=lib/\n", encoding="utf-8")
+    source = _EQUALITY.strip() + "\n"
+    path = source_dir / "Vault.sol"
+    path.write_text(source, encoding="utf-8")
+    program, text = _program(tmp_path, source, "ignored.sol")
+    program.file = str(path)
+    model = analyze_state_transitions(program)
+    model.compiler_version = "0.8.20"
+    candidate = next(item for item in model.paths if item.path_id.startswith("accounting:"))
+    spec = specify(candidate, model, program)
+    observed = json.loads(spec.compiler_observed)
+    assert observed["compiler_version"] == "0.8.20"
+    assert observed["solc"] == "0.8.20"
+    assert observed["optimizer"] == "true"
+    assert observed["evm_version"] == "cancun"
+    assert "remappings" in observed
+    assert "via_ir" not in observed
+    assert spec.compiler_config == configuration_hash(observed_configuration(str(path), "0.8.20"))
+    assert spec.compiler_config != "0.8.20"

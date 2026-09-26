@@ -13,14 +13,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.parsing.comments import strip_comments
 from app.parsing.solidity_ir import SemanticProgram
+from app.parsing.solidity_project import _read_remappings, _static_build_config
 from app.parsing.solidity_state_transitions import (
     AbstractPredicate,
     CandidatePath,
     TransitionModel,
 )
 
-SCHEMA = "phase43.1"
+SCHEMA = "phase43.2"
+ASSERTION_MARKER = "BUGFORGE_ASSERTION"
+_LEVELS = ("unsupported", "syntactically_supported", "semantically_supported", "verified_capable")
 MAX_HARNESS = 16_000
 MAX_SEQUENCE = 8
 MAX_ACTORS = 4
@@ -28,9 +32,9 @@ MAX_ATTEMPTS = 8
 SMT_TIMEOUT_SECONDS = 30
 FORGE_TIMEOUT_SECONDS = 60
 _MATRIX = {
-    "equality-scalar": {"smt": "supported", "foundry": "supported"},
+    "equality-scalar": {"smt": "semantically_supported", "foundry": "semantically_supported"},
     "equality-mapping-sum": {"smt": "unsupported", "foundry": "unsupported"},
-    "monotonic-increment": {"smt": "supported", "foundry": "supported"},
+    "monotonic-increment": {"smt": "semantically_supported", "foundry": "semantically_supported"},
     "asset-share": {"smt": "unsupported", "foundry": "unsupported"},
     "authorization": {"smt": "unsupported", "foundry": "unsupported"},
     "reentrancy": {"smt": "unsupported", "foundry": "unsupported"},
@@ -40,6 +44,9 @@ _MATRIX = {
     "reserve": {"smt": "unsupported", "foundry": "unsupported"},
     "pause": {"smt": "unsupported", "foundry": "unsupported"},
     "erc4626-conservation": {"smt": "unsupported", "foundry": "unsupported"},
+    "external-function-smt": {"smt": "unsupported", "foundry": "semantically_supported"},
+    "private-function-foundry": {"smt": "semantically_supported", "foundry": "unsupported"},
+    "msg-value": {"smt": "unsupported", "foundry": "unsupported"},
     "unspecified": {"smt": "unsupported", "foundry": "unsupported"},
 }
 
@@ -72,6 +79,9 @@ class VerificationSpecification:
     proof_scope: str
     specification_hash: str
     unsupported: tuple[str, ...] = ()
+    compiler_observed: str = ""
+    project_id: str = ""
+    source_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,9 @@ class GeneratedArtifact:
     proof_scope: str
     command: tuple[str, ...]
     schema: str = SCHEMA
+    assertion_id: str = ""
+    project_id: str = ""
+    source_id: str = ""
 
 
 def bounds() -> dict[str, int]:
@@ -106,7 +119,17 @@ def bounds() -> dict[str, int]:
 
 
 def capability_matrix() -> dict[str, dict[str, str]]:
-    return {key: dict(value) for key, value in _MATRIX.items()}
+    """Strongest level this encoder can claim without a live compiler run.
+
+    ``verified_capable`` is not in this table. It is recorded only after the
+    installed compiler accepts a preflight-valid harness.
+    """
+    matrix = {key: dict(value) for key, value in _MATRIX.items()}
+    for row in matrix.values():
+        for level in row.values():
+            if level not in _LEVELS or level == "verified_capable":
+                raise RuntimeError(level)
+    return matrix
 
 
 def source_text(program: SemanticProgram) -> str:
@@ -135,13 +158,19 @@ def specify(
         extra_unsupported = (*unsupported, "transaction sequence was truncated")
     variables = invariant.state_variables if invariant else ()
     declarations = invariant.declarations if invariant else ()
-    compiler = model.compiler_version or "unspecified"
+    observed = observed_configuration(program.file, model.compiler_version or "")
+    compiler = configuration_hash(observed)
+    project = project_identity(program.file)
+    source_identity = _digest(f"{program.file}\n{source}")[:16]
     source_digest = _digest(source)
     payload = {
         "assumptions": path.assumptions,
         "category": invariant.category if invariant else path.path_id,
         "compiler": compiler,
+        "compiler_observed": observed,
         "contract": contract,
+        "project": project,
+        "source_identity": source_identity,
         "declarations": declarations,
         "foundry": foundry,
         "functions": sequence,
@@ -183,6 +212,9 @@ def specify(
         scope,
         spec_hash,
         extra_unsupported,
+        json.dumps(observed, sort_keys=True, separators=(",", ":")),
+        project,
+        source_identity,
     )
 
 
@@ -194,41 +226,43 @@ def generate_smt_artifact(spec: VerificationSpecification, source: str) -> Gener
         "--model-checker-engine",
         "chc",
         "--model-checker-show-proved-safe",
+        "--model-checker-targets",
+        f"{spec.contract}:{token}",
         "Harness.sol",
     )
-    if spec.smt != "supported":
+    if spec.smt != "semantically_supported":
         plain = _unsupported_harness(spec, "smt")
         return _artifact(spec, source, plain, "smt", "unsupported", token, fail_token, 0, command)
     encoded = _encoded_smt_harness(spec, source, token)
-    if encoded is None or "assert(true)" in encoded or len(encoded) > MAX_HARNESS:
+    line = _assert_line(encoded or "", spec.specification_hash)
+    accepted, _note = preflight_harness(spec, source, encoded or "", "smt")
+    if encoded is None or not accepted or line == 0:
         plain = _unsupported_harness(spec, "smt")
         return _artifact(spec, source, plain, "smt", "unsupported", token, fail_token, 0, command)
-    harness = encoded
-    return _artifact(
-        spec, source, harness, "smt", "encoded", token, fail_token, _assert_line(harness), command
-    )
+    return _artifact(spec, source, encoded, "smt", "encoded", token, fail_token, line, command)
 
 
 def generate_forge_artifact(spec: VerificationSpecification, source: str) -> GeneratedArtifact:
     token = f"bugforge_{spec.specification_hash[:8]}"
     fail_token = f"bugforge-fail:{spec.specification_hash}"
-    if spec.foundry != "supported":
+    if spec.foundry != "semantically_supported":
         plain = _unsupported_harness(spec, "forge")
         return _artifact(spec, source, plain, "forge", "unsupported", token, fail_token, 0, ())
     encoded = _encoded_forge_harness(spec, source, fail_token)
-    if (
-        encoded is None
-        or len(encoded) > MAX_HARNESS
-        or "assert(true)" in encoded
-        or "assertTrue(true)" in encoded
-    ):
+    line = _assert_line(encoded or "", spec.specification_hash)
+    accepted, _note = preflight_harness(spec, source, encoded or "", "forge")
+    if encoded is None or not accepted or line == 0:
         plain = _unsupported_harness(spec, "forge")
         return _artifact(spec, source, plain, "forge", "unsupported", token, fail_token, 0, ())
-    harness = encoded
-    command = ("forge", "test", "--match-contract", "BugforgeReplay")
-    return _artifact(
-        spec, source, harness, "forge", "encoded", token, fail_token, _assert_line(harness), command
+    command = (
+        "forge",
+        "test",
+        "--match-contract",
+        "BugforgeReplay",
+        "--match-path",
+        "test/BugforgeReplay.t.sol",
     )
+    return _artifact(spec, source, encoded, "forge", "encoded", token, fail_token, line, command)
 
 
 def foundry_root(start: str) -> str:
@@ -278,23 +312,78 @@ def binds(
         return False, "manifest path mismatch"
     if manifest.get("invariant_id") != spec.invariant_id:
         return False, "manifest property mismatch"
+    if _digest(artifact.manifest) != artifact.manifest_digest:
+        return False, "manifest digest mismatch"
+    if manifest.get("compiler_config") != spec.compiler_config:
+        return False, "manifest compiler mismatch"
+    if manifest.get("compiler_observed") != spec.compiler_observed:
+        return False, "manifest compiler observation mismatch"
+    if manifest.get("source_identity") != spec.source_identity:
+        return False, "manifest source identity mismatch"
+    if manifest.get("assert_line") != artifact.assert_line:
+        return False, "manifest assertion line mismatch"
+    if manifest.get("verification_id") != artifact.verification_id:
+        return False, "manifest verification mismatch"
+    if manifest.get("source_id") != spec.source_id:
+        return False, "manifest source identity mismatch"
+    if manifest.get("project_id") != spec.project_id:
+        return False, "manifest project mismatch"
+    if manifest.get("predicate") != _manifest_predicate(spec):
+        return False, "manifest predicate mismatch"
+    if tuple(manifest.get("declaration_ids") or ()) != spec.declaration_ids:
+        return False, "manifest declaration mismatch"
+    if tuple(manifest.get("state_variables") or ()) != spec.state_variables:
+        return False, "manifest state variable mismatch"
+    if manifest.get("proof_scope") != spec.proof_scope:
+        return False, "manifest proof scope mismatch"
+    if manifest.get("tool") != artifact.tool:
+        return False, "manifest tool mismatch"
+    if tuple(manifest.get("command") or ()) != artifact.command:
+        return False, "manifest command mismatch"
+    if manifest.get("encoding_status") != artifact.encoding_status:
+        return False, "manifest encoding mismatch"
+    if manifest.get("token") != artifact.token:
+        return False, "manifest token mismatch"
+    if manifest.get("fail_token") != artifact.fail_token:
+        return False, "manifest fail token mismatch"
+    if manifest.get("assertion_id") != artifact.assertion_id:
+        return False, "manifest assertion mismatch"
+    if artifact.assertion_id != f"{spec.specification_hash}:{artifact.assert_line}":
+        return False, "assertion identity mismatch"
+    if artifact.token != f"bugforge_{spec.specification_hash[:8]}":
+        return False, "token mismatch"
+    if artifact.fail_token != f"bugforge-fail:{spec.specification_hash}":
+        return False, "fail token mismatch"
+    if artifact.assert_line != _assert_line(artifact.harness, spec.specification_hash):
+        return False, "assertion line mismatch"
+    if artifact.project_id != spec.project_id:
+        return False, "project identity mismatch"
+    if artifact.source_id != spec.source_id:
+        return False, "source identity mismatch"
+    if artifact.tool not in {"smt", "forge"}:
+        return False, "tool mismatch"
+    if artifact.tool == "smt" and artifact.command[:1] != ("solc",):
+        return False, "smt command mismatch"
+    if artifact.tool == "forge" and artifact.command[:1] != ("forge",):
+        return False, "forge command mismatch"
+    marker = f"{ASSERTION_MARKER} {spec.specification_hash}"
+    if artifact.harness.count(marker) != 1:
+        return False, "assertion marker is not unique"
     if spec.specification_hash not in artifact.harness:
         return False, "harness does not contain the specification hash"
-    if artifact.encoding_status == "encoded" and "assert(true)" in artifact.harness:
-        return False, "encoded harness contains a trivial assertion"
-    if artifact.encoding_status == "encoded" and "assertTrue(true)" in artifact.harness:
+    if "assert(true)" in artifact.harness or "assertTrue(true)" in artifact.harness:
         return False, "encoded harness contains a trivial assertion"
     return True, ""
 
 
 def parse_smt_bound(stdout: str, stderr: str, artifact: GeneratedArtifact) -> str:
-    """Accept a proof or counterexample only inside a stanza that names this artifact."""
+    """Accept a result only when it names this generated function and assert line."""
     text = f"{stdout}\n{stderr}"
     if not text.strip():
         return "unknown"
     if re.search(r"time-?out|timed out|out of resources", text, re.IGNORECASE):
         return "timeout"
-    relevant = _relevant_stanzas(text, artifact)
+    relevant = _bound_windows(text, artifact)
     if re.search(r"assertion violation|counterexample", relevant, re.IGNORECASE):
         return "counterexample"
     if re.search(r"\bproved\b", relevant, re.IGNORECASE):
@@ -306,19 +395,17 @@ def parse_smt_bound(stdout: str, stderr: str, artifact: GeneratedArtifact) -> st
     return "unknown"
 
 
-def _relevant_stanzas(text: str, artifact: GeneratedArtifact) -> str:
-    """Keep a few lines around the artifact token or its assert line.
-
-    A diagnostic that merely shares a compiler log with the harness is not
-    evidence for this property.
-    """
+def _bound_windows(text: str, artifact: GeneratedArtifact) -> str:
+    """A window counts only when it contains both the function token and the assert line."""
+    if not artifact.token or not artifact.assert_line:
+        return ""
     lines = text.splitlines()
-    marker = f":{artifact.assert_line}:" if artifact.assert_line else ""
+    marker = f":{artifact.assert_line}:"
     kept: list[str] = []
-    for index, line in enumerate(lines):
-        if artifact.token in line or (marker and marker in line):
-            start = max(0, index - 3)
-            kept.extend(lines[start : index + 4])
+    for index in range(len(lines)):
+        window = "\n".join(lines[max(0, index - 3) : index + 4])
+        if artifact.token in window and marker in window:
+            kept.append(window)
     return "\n".join(kept)
 
 
@@ -327,7 +414,10 @@ def parse_forge_bound(text: str, artifact: GeneratedArtifact) -> str:
         return "unknown"
     if re.search(r"time-?out|timed out", text, re.IGNORECASE):
         return "timeout"
-    if re.search(r"Compiler run failed|Error \(", text):
+    if re.search(
+        r"Compiler run failed|Setup failed|SolcError|Failed to resolve|Error \(",
+        text,
+    ):
         return "failed"
     failed = re.search(r"\[FAIL|Suite result: FAILED|Test result: FAILED", text, re.IGNORECASE)
     if failed and artifact.fail_token in text:
@@ -345,33 +435,45 @@ def _capabilities(
         return "unsupported", "unsupported", "none", ("no predicate",)
     if "mapping aggregation" in " ".join(predicate.unsupported):
         return "unsupported", "unsupported", "none", predicate.unsupported
-    callable_seq = _sequence_in_contract(function_ids, contract) and (
-        _parameterless_name_in(source, function_ids) is not None
-    )
+    smt_calls, forge_calls, call_notes = _call_plan(source, contract, function_ids)
+    same_contract = _sequence_in_contract(function_ids, contract)
     if predicate.predicate_type == "equality" and predicate.representation_status == "exact":
         readable = _state_names_in(source, contract, (predicate.lhs, predicate.rhs))
-        smt_ok = callable_seq and readable and not _has_import(source)
-        forge_ok = smt_ok and _forge_can_read(source, contract, predicate)
-        notes = () if smt_ok else ("the transition cannot be called and read back",)
-        scope = "contract-copy-harness" if smt_ok else "none"
+        smt_ok = same_contract and smt_calls and readable and not _has_import(source)
+        forge_ok = (
+            same_contract
+            and forge_calls
+            and readable
+            and not _has_import(source)
+            and _forge_can_read(source, contract, predicate)
+        )
+        notes = call_notes if not (smt_ok and forge_ok) else ()
+        if not notes and not smt_ok and not forge_ok:
+            notes = ("the transition cannot be called and read back",)
+        scope = "contract-copy-harness" if smt_ok or forge_ok else "none"
         return (
-            "supported" if smt_ok else "unsupported",
-            "supported" if forge_ok else "unsupported",
+            "semantically_supported" if smt_ok else "unsupported",
+            "semantically_supported" if forge_ok else "unsupported",
             scope,
             notes,
         )
     if (
         predicate.predicate_type == "monotonic"
-        and callable_seq
+        and same_contract
         and _increment_in(source, predicate.subject)
         and _state_names_in(source, contract, (predicate.subject,))
         and not _has_import(source)
+        and (smt_calls or forge_calls)
     ):
-        forge_ok = _public_names(source, (predicate.subject,))
-        note = ("the property is the state value after the calls compared with the value before",)
+        note = (
+            "the property is the state value after the calls compared with the value before",
+            *call_notes,
+        )
         return (
-            "supported",
-            "supported" if forge_ok else "unsupported",
+            "semantically_supported" if smt_calls else "unsupported",
+            "semantically_supported"
+            if forge_calls and _public_names(source, (predicate.subject,))
+            else "unsupported",
             "contract-copy-harness",
             note,
         )
@@ -456,18 +558,199 @@ def _increment_in(source: str, symbol: str) -> bool:
     return re.search(pattern, source) is not None
 
 
+def observed_configuration(source_id: str, compiler_version: str) -> dict[str, object]:
+    """Settings that were actually present. Missing settings are omitted, not invented."""
+    observed: dict[str, object] = {}
+    if compiler_version:
+        observed["compiler_version"] = compiler_version
+    root = foundry_root(source_id)
+    if not root:
+        return observed
+    build = _static_build_config(Path(root))
+    for key, value in build.items():
+        if value:
+            observed[key] = value
+    remappings, notes = _read_remappings(Path(root))
+    if remappings:
+        observed["remappings"] = remappings
+    if notes:
+        observed["remapping_notes"] = notes
+    toml = Path(root) / "foundry.toml"
+    if toml.is_file() and not toml.is_symlink():
+        observed["foundry_toml_digest"] = _digest(
+            toml.read_text(encoding="utf-8", errors="replace")
+        )
+    if (Path(root) / "src").is_dir():
+        observed["src"] = "src"
+    return observed
+
+
+def configuration_hash(observed: dict[str, object]) -> str:
+    if not observed:
+        return "unspecified"
+    return _digest(json.dumps(observed, sort_keys=True, separators=(",", ":")))
+
+
+def project_identity(source_id: str) -> str:
+    root = foundry_root(source_id)
+    if root:
+        toml = Path(root) / "foundry.toml"
+        text = toml.read_text(encoding="utf-8", errors="replace") if toml.is_file() else ""
+        return _digest(f"foundry\n{text}")
+    return _digest(f"file\n{source_id}")
+
+
+def function_signature(source: str, contract: str, name: str) -> dict[str, object] | None:
+    body = _contract_body(source, contract)
+    if body is None or not name:
+        return None
+    pattern = re.compile(
+        rf"function\s+{re.escape(name)}\s*\((?P<args>[^)]*)\)\s*(?P<tail>[^{{;]*)",
+        re.MULTILINE,
+    )
+    match = pattern.search(body)
+    if match is None:
+        return None
+    tail = match.group("tail")
+    visibility = "public"
+    for word in ("external", "public", "internal", "private"):
+        if re.search(rf"\b{word}\b", tail):
+            visibility = word
+            break
+    start = body.find("{", match.end())
+    end = _close_brace(body, start) if start >= 0 else -1
+    function_text = body[match.start() : end] if end > 0 else tail
+    stripped = strip_comments(function_text, line_comment="//", block_comment=("/*", "*/"))
+    return {
+        "name": name,
+        "parameterless": match.group("args").strip() == "",
+        "visibility": visibility,
+        "payable": bool(re.search(r"\bpayable\b", tail)),
+        "uses_sender": "msg.sender" in stripped,
+        "uses_value": "msg.value" in stripped or bool(re.search(r"\bpayable\b", tail)),
+    }
+
+
+def _call_plan(
+    source: str, contract: str, function_ids: tuple[str, ...]
+) -> tuple[bool, bool, tuple[str, ...]]:
+    if not function_ids:
+        return False, False, ("the transition cannot be called and read back",)
+    notes: list[str] = []
+    smt_ok = True
+    forge_ok = True
+    for function_id in function_ids:
+        name = function_id.split(":")[0].split(".")[-1]
+        fact = function_signature(source, contract, name)
+        if fact is None or not fact["parameterless"]:
+            return False, False, ("the transition cannot be called and read back",)
+        if fact["uses_value"]:
+            return False, False, ("msg.value is not part of the specification",)
+        if fact["visibility"] == "external":
+            smt_ok = False
+            notes.append("an external function cannot be called internally")
+        if fact["visibility"] in {"internal", "private"}:
+            forge_ok = False
+            notes.append("a private or internal function cannot be called from another contract")
+        if fact["uses_sender"]:
+            forge_ok = False
+            notes.append("the foundry caller would be the test contract")
+    return smt_ok, forge_ok, tuple(dict.fromkeys(notes))
+
+
+def _internal_call_names(
+    source: str, contract: str, function_ids: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    smt_ok, _forge_ok, _notes = _call_plan(source, contract, function_ids)
+    if not smt_ok:
+        return None
+    return tuple(function_id.split(":")[0].split(".")[-1] for function_id in function_ids)
+
+
+def _external_call_names(
+    source: str, contract: str, function_ids: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    _smt_ok, forge_ok, _notes = _call_plan(source, contract, function_ids)
+    if not forge_ok:
+        return None
+    return tuple(function_id.split(":")[0].split(".")[-1] for function_id in function_ids)
+
+
+def _assertion_block(spec: VerificationSpecification, expression: str) -> str:
+    return f"        // {ASSERTION_MARKER} {spec.specification_hash}\n        {expression}\n"
+
+
+def preflight_harness(
+    spec: VerificationSpecification, source: str, harness: str, tool: str
+) -> tuple[bool, str]:
+    """Structural checks. They do not prove the harness compiles."""
+    if not harness or len(harness) > MAX_HARNESS:
+        return False, "harness is empty or too large"
+    if not spec.specification_hash or not spec.predicate_type:
+        return False, "specification is empty"
+    if "assert(true)" in harness or "assertTrue(true)" in harness:
+        return False, "trivial assertion"
+    if _digest(source) != spec.source_digest:
+        return False, "source digest mismatch"
+    if f"// compiler_config: {spec.compiler_config}" not in harness:
+        return False, "compiler configuration mismatch"
+    if harness.count(f"// BUGFORGE_VERIFICATION_SPEC {spec.specification_hash}") != 1:
+        return False, "specification metadata is not unique"
+    marker = f"{ASSERTION_MARKER} {spec.specification_hash}"
+    if harness.count(marker) != 1:
+        return False, "assertion marker is not unique"
+    if harness.count(f"function bugforge_{spec.specification_hash[:8]}") != 1 and tool == "smt":
+        return False, "generated function is not unique"
+    if f"contract {spec.contract}" not in harness:
+        return False, "target contract is absent"
+    if tool == "smt" and _internal_call_names(source, spec.contract, spec.sequence) is None:
+        return False, "calls are not visibility-safe"
+    if tool == "forge" and _external_call_names(source, spec.contract, spec.sequence) is None:
+        return False, "calls are not visibility-safe"
+    line = _assert_line(harness, spec.specification_hash)
+    if line == 0:
+        return False, "generated assertion is absent"
+    text = harness.splitlines()[line - 1]
+    if tool == "smt":
+        if (
+            spec.predicate_type == "equality"
+            and f"assert({spec.predicate_lhs} == {spec.predicate_rhs})" not in text
+        ):
+            return False, "predicate is not the generated assertion"
+        if spec.predicate_type == "monotonic" and "assert(next > previous)" not in text:
+            return False, "predicate is not the generated assertion"
+        if "this." in harness.split("function bugforge_")[-1]:
+            return False, "external message call was substituted"
+    if tool == "forge":
+        if f'"{spec.specification_hash}"' not in text and spec.specification_hash not in text:
+            return False, "fail token is not the generated check"
+        if f"new {spec.contract}()" not in harness:
+            return False, "target is not deployed"
+    return True, ""
+
+
+def _manifest_predicate(spec: VerificationSpecification) -> dict[str, str]:
+    return {
+        "lhs": spec.predicate_lhs,
+        "rhs": spec.predicate_rhs,
+        "subject": spec.predicate_subject,
+        "type": spec.predicate_type,
+    }
+
+
 def _encoded_smt_harness(spec: VerificationSpecification, source: str, token: str) -> str | None:
-    names = _parameterless_names(source, spec.sequence)
-    if not names or len(names) != len(spec.sequence):
+    names = _internal_call_names(source, spec.contract, spec.sequence)
+    if names is None:
         return None
     calls = "\n        ".join(f"{name}();" for name in names)
     if spec.predicate_type == "monotonic" and spec.predicate_subject:
+        expression = "assert(next > previous);"
         injected = (
             f"function {token}() external {{\n"
             f"        uint256 previous = {spec.predicate_subject};\n"
             f"        {calls}\n"
             f"        uint256 next = {spec.predicate_subject};\n"
-            "        assert(next > previous);\n"
+            f"{_assertion_block(spec, expression)}"
             "    }\n"
         )
     elif (
@@ -475,13 +758,16 @@ def _encoded_smt_harness(spec: VerificationSpecification, source: str, token: st
         and re.fullmatch(r"[A-Za-z_]\w*", spec.predicate_lhs or "")
         and re.fullmatch(r"[A-Za-z_]\w*", spec.predicate_rhs or "")
     ):
+        expression = f"assert({spec.predicate_lhs} == {spec.predicate_rhs});"
         injected = (
             f"function {token}() external {{\n"
             f"        {calls}\n"
-            f"        assert({spec.predicate_lhs} == {spec.predicate_rhs});\n"
+            f"{_assertion_block(spec, expression)}"
             "    }\n"
         )
     else:
+        return None
+    if "this." in injected:
         return None
     copied = _inject(source, spec.contract, injected)
     if copied is None:
@@ -492,22 +778,22 @@ def _encoded_smt_harness(spec: VerificationSpecification, source: str, token: st
 def _encoded_forge_harness(
     spec: VerificationSpecification, source: str, fail_token: str
 ) -> str | None:
-    names = _parameterless_names(source, spec.sequence)
-    if not names or len(names) != len(spec.sequence) or not spec.contract:
+    names = _external_call_names(source, spec.contract, spec.sequence)
+    if names is None or not spec.contract:
         return None
     calls = "\n        ".join(f"target.{item}();" for item in names)
     if spec.predicate_type == "equality" and spec.predicate_lhs and spec.predicate_rhs:
-        body = (
-            f"{calls}\n"
-            f"        if (target.{spec.predicate_lhs}() != target.{spec.predicate_rhs}()) "
+        expression = (
+            f"if (target.{spec.predicate_lhs}() != target.{spec.predicate_rhs}()) "
             f'revert("{fail_token}");'
         )
+        body = f"{calls}\n{_assertion_block(spec, expression)}"
     elif spec.predicate_type == "monotonic" and spec.predicate_subject:
+        expression = f'if (target.{spec.predicate_subject}() <= previous) revert("{fail_token}");'
         body = (
             f"uint256 previous = target.{spec.predicate_subject}();\n"
             f"        {calls}\n"
-            f"        if (target.{spec.predicate_subject}() <= previous) "
-            f'revert("{fail_token}");'
+            f"{_assertion_block(spec, expression)}"
         )
     else:
         return None
@@ -584,6 +870,7 @@ def _header(spec: VerificationSpecification, tool: str) -> str:
         f"// candidate_id: {spec.path_id}\n"
         f"// property_id: {spec.invariant_id}\n"
         f"// source_digest: {spec.source_digest}\n"
+        f"// compiler_config: {spec.compiler_config}\n"
         f"// proof_scope: {spec.proof_scope}\n"
         f"// tool: {tool}\n"
         "// Generated verification harness. Not production source.\n"
@@ -604,11 +891,15 @@ def _artifact(
     harness_digest = _digest(harness)
     verification_id = f"ver:{spec.path_id}"
     source_digest = _digest(source)
+    assertion_id = f"{spec.specification_hash}:{assert_line}" if assert_line else ""
     manifest_body = {
         "assert_line": assert_line,
+        "assertion_id": assertion_id,
         "command": command,
         "compiler_config": spec.compiler_config,
+        "compiler_observed": spec.compiler_observed,
         "contract": spec.contract,
+        "declaration_ids": spec.declaration_ids,
         "encoding_status": encoding_status,
         "fail_token": fail_token,
         "function_ids": spec.function_ids,
@@ -616,10 +907,15 @@ def _artifact(
         "invariant_id": spec.invariant_id,
         "operation_ids": spec.operation_ids,
         "path_id": spec.path_id,
+        "predicate": _manifest_predicate(spec),
+        "project_id": spec.project_id,
         "proof_scope": spec.proof_scope,
         "schema": SCHEMA,
         "source_digest": source_digest,
+        "source_id": spec.source_id,
+        "source_identity": spec.source_identity,
         "specification_hash": spec.specification_hash,
+        "state_variables": spec.state_variables,
         "token": token,
         "tool": tool,
         "verification_id": verification_id,
@@ -641,6 +937,9 @@ def _artifact(
         assert_line,
         spec.proof_scope,
         command,
+        assertion_id=assertion_id,
+        project_id=spec.project_id,
+        source_id=spec.source_id,
     )
 
 
@@ -657,11 +956,20 @@ def _predicate_payload(predicate: AbstractPredicate | None) -> dict[str, str]:
     }
 
 
-def _assert_line(harness: str) -> int:
-    for index, line in enumerate(harness.splitlines(), start=1):
-        if "assert(" in line:
-            return index
-    return 0
+def _assert_line(harness: str, specification_hash: str) -> int:
+    """Return the line after the unique generated marker. Source asserts do not count."""
+    marker = f"// {ASSERTION_MARKER} {specification_hash}"
+    lines = harness.splitlines()
+    hits = [index for index, line in enumerate(lines) if line.strip() == marker]
+    if len(hits) != 1:
+        return 0
+    following = hits[0] + 1
+    if following >= len(lines):
+        return 0
+    text = lines[following]
+    if "assert(" not in text and "revert(" not in text:
+        return 0
+    return following + 1
 
 
 def _digest(text: str) -> str:

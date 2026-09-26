@@ -15,7 +15,7 @@ and a `VerificationRequest`. Every queued result is `not_requested`.
 The request records the path, invariant, contract, function, compiler
 version from the transition model (or `unspecified`), assumptions, path
 conditions, the specification hash, and the specification's SMT capability
-(`supported` or `unsupported`). Building the queue does not run a tool.
+(`semantically_supported` or `unsupported`). Building the queue does not run a tool.
 If more candidate paths exist than the attempt cap, `BridgeResult.truncated`
 is `verification attempt limit reached`.
 

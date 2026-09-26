@@ -92,7 +92,7 @@ FALSE_NEGATIVES = (
         "phase": "41",
         "vulnerability_class": "identity",
         "fixture": "two-sources-same-contract-function-line",
-        "corrected_behavior": "the shared identity is incomplete and the summaries are not merged",
+        "corrected_behavior": "the shared identity is namespaced and the summaries are not merged",
         "reason": "contract name, function name, and line are not unique across sources",
     },
     {
@@ -106,7 +106,7 @@ FALSE_NEGATIVES = (
         "phase": "41",
         "vulnerability_class": "path",
         "fixture": "call-chain-without-shared-state",
-        "corrected_behavior": "the chain status is unknown and records an unknown relationship",
+        "corrected_behavior": "the chain status is reachable and records a reachable relationship",
         "reason": "reachability of a candidate function is not influence",
     },
     {
@@ -150,6 +150,34 @@ FALSE_NEGATIVES = (
         "fixture": "unsupported-property",
         "corrected_behavior": "the harness contains no assertion and the status is unsupported",
         "reason": "a comment is not a predicate",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "smt",
+        "fixture": "external-function-internal-call",
+        "corrected_behavior": "an external function is not encoded as an internal call",
+        "reason": "mint() is not a valid call to an external function",
+    },
+    {
+        "phase": "43",
+        "vulnerability_class": "smt",
+        "fixture": "preexisting-assert",
+        "corrected_behavior": "binding uses the generated assertion marker, not the first assert",
+        "reason": "a source assertion is not the candidate property",
+    },
+    {
+        "phase": "44",
+        "vulnerability_class": "replay",
+        "fixture": "compile-or-setup-failure",
+        "corrected_behavior": "compile and setup failures stay non-reproductions",
+        "reason": "a broken harness is not the candidate property failing",
+    },
+    {
+        "phase": "44",
+        "vulnerability_class": "replay",
+        "fixture": "simulated-fail-token",
+        "corrected_behavior": "a simulated runner cannot return reproduced",
+        "reason": "pasted tool text is not execution",
     },
 )
 
@@ -244,7 +272,7 @@ def test_candidate_path_is_not_reproduced(tmp_path: Path) -> None:
 def test_false_negative_registry() -> None:
     assert FALSE_NEGATIVES[0]["corrected_behavior"]
     for item in FALSE_NEGATIVES:
-        assert item["phase"] in {"41", "42", "43"}
+        assert item["phase"] in {"41", "42", "43", "44"}
         assert item["vulnerability_class"]
         assert item["fixture"]
         assert item["corrected_behavior"]

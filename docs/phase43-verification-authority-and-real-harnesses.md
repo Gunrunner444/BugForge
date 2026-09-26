@@ -34,9 +34,9 @@ particular target:
 
 | Property | SMT | Foundry |
 | --- | --- | --- |
-| scalar equality | supported | supported |
+| scalar equality | semantically_supported | semantically_supported |
 | mapping-sum equality | unsupported | unsupported |
-| monotonic increment | supported | supported |
+| monotonic increment | semantically_supported | semantically_supported |
 | asset/share | unsupported | unsupported |
 | authorization | unsupported | unsupported |
 | reentrancy | unsupported | unsupported |
@@ -44,43 +44,67 @@ particular target:
 | allowance, debt, reserve, pause | unsupported | unsupported |
 | ERC-4626 conservation | unsupported | unsupported |
 
-A per-specification capability is narrower than the catalog. Scalar equality
-is `supported` for SMT only when every function in the path is a
-parameterless function of the invariant's contract, the contract source has
-no `import`, and both sides are state names in that contract. Foundry also
-requires those names to be `public`, because the replay contract calls the
-generated getters. Monotonic increment adds the requirement that the source
-contains `subject += 1` or `subject = subject + 1`. Anything else is
-`unsupported`. `partially_supported` is not used as an encoding status.
+`verified_capable` is not a catalog cell. It would require a live compiler
+to accept a preflight-valid harness, and this process does not record that
+from a unit test. A per-specification capability is narrower than the
+catalog. Levels are `unsupported`, `syntactically_supported`,
+`semantically_supported`, and `verified_capable`. The static encoder stops
+at `semantically_supported`.
+
+Scalar equality is `semantically_supported` for SMT only when every function
+is parameterless, belongs to the invariant's contract, is `public`,
+`internal`, or `private`, does not use `msg.value`, the source has no
+`import`, and both sides are state names in that contract. An `external`
+function is not called as `mint()` and is not rewritten to `this.mint()`,
+because that would be a different message call. Foundry uses `target.f()`
+only for `public` or `external` functions that do not use `msg.sender` or
+`msg.value`, and only when the compared names are `public`. Monotonic
+increment adds the requirement that the source contains `subject += 1` or
+`subject = subject + 1`. Anything else is `unsupported`. `encoded` means
+the preflight accepted the harness. It does not mean `solc` compiled it.
 
 ## Harness
 
 `generate_smt_artifact` and `generate_forge_artifact` return a
-`GeneratedArtifact`. `encoding_status` is `encoded` only when the harness
-contains a real check and is within 16_000 characters.
+`GeneratedArtifact`. `encoding_status` is `encoded` only when preflight
+accepts the harness. Preflight checks the contract, one generated function,
+one assertion marker, the predicate text, visibility-safe calls, the source
+digest, and the compiler configuration line. It does not compile the file.
+A failing preflight returns `unsupported` and is not executed as evidence.
 
 The SMT harness copies the target contract and injects
-`function bugforge_<hash8>() external`. For equality the body calls each
-path function and then `assert(lhs == rhs)`. For monotonicity it records
-the subject, calls the path functions, and then `assert(next > previous)`.
+`function bugforge_<hash8>() external`. Calls inside that function are
+internal (`name();`) and only for `public`, `internal`, or `private`
+functions. The line immediately before the assertion is:
+
+```text
+// BUGFORGE_ASSERTION <specification hash>
+assert(...)
+```
+
+A source `assert` does not count. For monotonicity the body records the
+subject, calls the path functions, and then `assert(next > previous)`.
 The copy is the proof scope `contract-copy-harness`. It is not a proof of
-the protocol, of other functions, or of external calls.
+the protocol.
 
 The Foundry harness appends `contract BugforgeReplay` to the same source.
-It deploys the target with `new Contract()`, calls the path functions, and
-reverts with `bugforge-fail:<specification hash>` when the equality or the
-monotonic comparison fails. It does not import `forge-std` and it does not
-call `assertTrue(true)`.
+It deploys the target with `new Contract()`, calls `target.f()` for each
+public or external path function, and reverts with
+`bugforge-fail:<specification hash>` on the line after the same marker.
+It does not import `forge-std` and it does not call `assertTrue(true)`.
 
-An unsupported harness contains the specification hash and no `assert`.
+An unsupported harness contains the specification hash and no generated
+assertion marker.
 
-The manifest is canonical JSON. It records the schema `phase43.1`,
-specification hash, source digest, harness digest, compiler config, contract,
-path id, invariant id, function ids, operation ids, encoding status, proof
-scope, token, fail token, assert line, and command. `binds` requires all of
-those to match the specification and the harness bytes. A modified harness,
-source, contract, path, operations, property, or compiler config fails the
-bind. A matching banner is not enough.
+The manifest schema is `phase43.2`. It is canonical JSON. `binds` compares
+every security field with the specification and the artifact, and requires
+`digest(manifest) == manifest_digest`. Editing a field and recomputing the
+digest still fails, because the field no longer matches the specification.
+The compiler configuration is the hash of the settings that were actually
+present: compiler version, and, when a `foundry.toml` is found, optimizer,
+via IR, EVM version, `solc`, remappings, the toml digest, and `src` if that
+directory exists. Missing settings are omitted. The hash is not the version
+string. `unspecified` means nothing was observed.
 
 ## SMT execution
 
@@ -88,21 +112,22 @@ When the artifact is encoded and `binds` succeeds, `run_smt` invokes the
 `solc` on `PATH`:
 
 ```text
-solc --model-checker-engine chc --model-checker-show-proved-safe Harness.sol
+solc --model-checker-engine chc --model-checker-show-proved-safe --model-checker-targets Contract:bugforge_<hash8> Harness.sol
 ```
 
-The timeout is 30 seconds. BMC is not selected. The recorded compiler config
-is the transition model's version string. The invoked binary is whatever
-`solc` is on `PATH`; a version mismatch is written into the diagnostics and
-is not treated as the project's compiler. If `solc` is absent, an encoded
-run is `unavailable`. Static candidate generation still runs.
+The timeout is 30 seconds. BMC is not selected. The invoked binary is
+whatever `solc` is on `PATH`. A version mismatch is written into the
+diagnostics and is not treated as the project's compiler. If `solc` is
+absent, an encoded run is `unavailable`. Static candidate generation still
+runs.
 
-`parse_smt_bound` splits the compiler text into blank-line stanzas. A stanza
-counts only when it contains the injected function token or `:<assert line>:`.
-Inside those stanzas, assertion-violation or counterexample wording is
-`counterexample`, and `proved` is `proved_safe`. The same words in another
-stanza stay `unknown`. Timeout, unsupported, and `Error:` are classified
-separately. Exit code 0 is not a proof.
+`parse_smt_bound` keeps a window of a few lines only when that window
+contains both the injected function token and `:<assert line>:`. Inside
+those windows, assertion-violation or counterexample wording is
+`counterexample`, and `proved` is `proved_safe`. The same words beside
+another assertion, an overflow warning, or no line number stay `unknown`.
+Timeout and unsupported wording are classified separately. Exit code 0 is
+not a proof.
 
 `proved_safe` means the encoded assertion in the contract copy was reported
 proved. It does not mean the protocol is secure. External calls are not
@@ -131,9 +156,12 @@ SMT can still run when `solc` is present. Semgrep output is not fabricated.
 
 `reproduced` requires `parse_forge_bound` to see both a Forge failure
 (`[FAIL`, `Suite result: FAILED`, or `Test result: FAILED`) and
-`bugforge-fail:<specification hash>`. A failing stub, a stale harness, or a
-failure for another test stays `unknown`. A passing suite stays `unknown`.
-A passing run is not a proof.
+`bugforge-fail:<specification hash>`. Compiler, setup, and dependency
+errors are `failed` even if the log echoes the token. A failing stub, a
+stale harness, or a failure for another test stays `unknown`. A passing
+suite stays `unknown`. A passing run is not a proof. Project-aware replay
+of imports and multi-transaction sequences is Phase 44, not this isolated
+harness.
 
 The Phase 43 unit tests that feed runner output are simulated. They do not
 show that `solc` or `forge` executed. Live tests are skipped when the binary
