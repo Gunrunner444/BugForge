@@ -991,10 +991,15 @@ def _with_semantics(
 
     program = build_semantic_program(graph)
     flow = analyze_dataflow(program)
+    from app.parsing.solidity_state_transitions import analyze_state_transitions
+
+    transitions = analyze_state_transitions(program)
     origin = "semantic" if program.functions else "parser"
     for item in observations:
         item.metadata["analysis_origin"] = origin
         item.metadata["semantic_status"] = program.status
+        item.metadata["transition_status"] = transitions.status
+        item.metadata["verification_status"] = "not_requested"
         item.metadata["dataflow_status"] = flow.status
         if program.compiler_ir_status != "available":
             item.metadata["compiler_ir"] = program.compiler_ir_status
@@ -1009,8 +1014,21 @@ def _with_semantics(
             from app.parsing.solidity_cross_dataflow import analyze_reentrancy
 
             item.metadata["property_status"] = analyze_reentrancy(
-                program, matches[0].identity
+                program, matches[0].identity, flow
             ).status
+            related = [
+                path
+                for path in transitions.paths
+                if matches[0].identity in path.function_ids and path.status == "candidate"
+            ]
+            if related:
+                item.metadata["candidate_path_status"] = related[0].status
+                item.metadata["candidate_path_id"] = related[0].path_id
+            checks = [
+                check for check in transitions.checks if check.transition_id == matches[0].identity
+            ]
+            if checks:
+                item.metadata["invariant_status"] = checks[0].status
         if delegate and len(matches) == 1:
             item.metadata["target_provenance"] = flow.target_provenance(matches[0].identity)
     return observations
