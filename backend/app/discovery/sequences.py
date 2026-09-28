@@ -15,6 +15,7 @@ from app.parsing.solidity_arguments import (
     combine,
     derive_from_state,
 )
+from app.parsing.solidity_identity import function_name_for
 from app.parsing.solidity_ir import SemanticFunction, SemanticProgram
 from app.parsing.solidity_spec import VerificationSpecification, function_signature
 from app.parsing.solidity_state_transitions import CandidatePath
@@ -52,6 +53,8 @@ class PlannedCall:
     direction: str
     assumptions: tuple[str, ...]
     score: int
+    contract: str = ""
+    function_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,7 @@ def _base_sequence(
     bounds: ExplorationBounds,
     observations: tuple[StateObservation, ...],
 ) -> PlannedSequence | None:
-    names = _function_names(path)
+    names = _function_names(path, program, source, spec.contract)
     if not names or len(names) > bounds.max_sequence_length:
         return None
     calls: list[PlannedCall] = []
@@ -240,6 +243,8 @@ def _call_from_fact(
         direction,
         tuple(assumptions),
         score,
+        contract=str(fact.get("contract", "")),
+        function_identity=str(fact.get("identity", "")),
     )
 
 
@@ -291,7 +296,8 @@ def _prerequisite(
     for function in program.functions:
         if function.contract != spec.contract:
             continue
-        if function.name in _function_names(path):
+        known = _function_names(path, program, source, spec.contract) or ()
+        if function.name in known:
             continue
         writes = {item.operation_id for item in function.access_sites if item.kind != "read"}
         if not writes:
@@ -305,12 +311,15 @@ def _prerequisite(
     return None
 
 
-def _function_names(path: CandidatePath) -> tuple[str, ...]:
+def _function_names(
+    path: CandidatePath, program: SemanticProgram | None, source: str, contract: str
+) -> tuple[str, ...] | None:
     names: list[str] = []
     for function_id in path.function_ids:
-        name = function_id.split(":")[0].split(".")[-1]
-        if name:
-            names.append(name)
+        name = function_name_for(function_id, program=program, source=source, contract=contract)
+        if not name:
+            return None
+        names.append(name)
     return tuple(names)
 
 
@@ -413,11 +422,23 @@ def refine_actions(observation_kind: str, established: frozenset[str]) -> tuple[
     return tuple(name for name in _REFINEMENTS.get(observation_kind, ()) if name in established)
 
 
+@dataclass(frozen=True)
+class AbstractHypothesis:
+    """A research note. It is not an executable call."""
+
+    action: str
+    reason: str
+    executable: bool
+
+
 def economic_mutations(
     sequence: PlannedSequence,
     *,
     bounds: ExplorationBounds | None,
     established: frozenset[str],
+    source: str = "",
+    contract: str = "",
+    program: SemanticProgram | None = None,
 ) -> tuple[PlannedSequence, ...]:
     """Bounded mutations. A request for a larger budget is clamped."""
     active = clamp_bounds(bounds)
@@ -455,7 +476,9 @@ def economic_mutations(
     )
     for name, origin in inserts:
         if name in established and len(sequence.calls) < active.max_sequence_length:
-            produced.append(_prefix(sequence, name, origin))
+            prefixed = _prefix(sequence, name, origin, source, contract, program)
+            if prefixed is not None:
+                produced.append(prefixed)
     if "deposit" in established or "mint" in established:
         produced.append(_retarget(sequence, sequence.calls + sequence.calls[:1], "repeat"))
     unique: list[PlannedSequence] = []
@@ -477,9 +500,42 @@ def _replace_amount(sequence: PlannedSequence, literal: str, provenance: str) ->
     return _retarget(sequence, (call, *sequence.calls[1:]), f"amount-{provenance}")
 
 
-def _prefix(sequence: PlannedSequence, name: str, origin: str) -> PlannedSequence:
-    stub = PlannedCall(name, sequence.calls[0].actor, (), "0", "unknown", ("economic mutation",), 0)
-    return _retarget(sequence, (stub, *sequence.calls), origin)
+def action_hypothesis(
+    name: str, *, source: str, contract: str, program: SemanticProgram | None
+) -> AbstractHypothesis:
+    """An action name is a hypothesis until a signature and arguments exist."""
+    fact = function_signature(source, contract, name, program) if source and contract else None
+    if fact is None:
+        return AbstractHypothesis(name, "no callable signature was established", False)
+    types = fact.get("parameter_types")
+    if isinstance(types, tuple) and types and combine(tuple(str(item) for item in types)) is None:
+        return AbstractHypothesis(name, "arguments cannot be constructed", False)
+    return AbstractHypothesis(name, "signature and arguments are established", True)
+
+
+def _prefix(
+    sequence: PlannedSequence,
+    name: str,
+    origin: str,
+    source: str,
+    contract: str,
+    program: SemanticProgram | None,
+) -> PlannedSequence | None:
+    hypothesis = action_hypothesis(name, source=source, contract=contract, program=program)
+    if not hypothesis.executable:
+        return None
+    fact = function_signature(source, contract, name, program)
+    if fact is None:
+        return None
+    call = _call_from_fact(fact, sequence.calls[0].actor, 0, program)
+    if call is None:
+        return None
+    if fact.get("parameter_types") and not call.arguments:
+        return None
+    call = replace(
+        call, contract=contract, function_identity=str(fact.get("identity", call.function_identity))
+    )
+    return _retarget(sequence, (call, *sequence.calls), origin)
 
 
 def _retarget(

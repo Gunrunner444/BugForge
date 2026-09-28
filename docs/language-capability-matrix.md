@@ -149,13 +149,17 @@ version it allows agrees. Compiler IR is availability, not an interpreter.
 Foundry exploratory tests run inside a disposable project when `forge` is
 installed, and are `UNAVAILABLE` when it is not. Phase 45 sequence exploration
 and optional ItyFuzz are `LIMITED`: ItyFuzz is `UNAVAILABLE` unless Docker and
-`security_agent_ityfuzz_image` are configured. A host binary is not a fallback.
-A campaign without local `.abi` and `.bin` files is `UNSUPPORTED`, and a
-public fork or RPC request is rejected. ItyFuzz stdout is fuzzing evidence,
-not a reproduction. Phase 46 economic statuses stay
+a local `security_agent_ityfuzz_image` are configured. A host binary is not a
+fallback, and a missing local image is not executed. A campaign without local
+`.abi` and `.bin` files is `UNSUPPORTED`, and a public fork or RPC request is
+rejected. ItyFuzz stdout is fuzzing evidence, not a reproduction, and a trace
+is not an executable seed. Phase 46 economic statuses stay
 `potential_positive_delta`, `potential_loss`, `invariant_violation`,
 `balanced`, `non_profitable`, `unknown`, `unsupported`, or `incomplete`.
+Those calculations are `economic_observation` evidence and cannot verify a
+finding. Phase 47 protocol paths are candidates. Unknown calls stay unknown.
 See
-[phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md)
+[phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md),
+[phase46-economic-defi-analysis.md](phase46-economic-defi-analysis.md),
 and
-[phase46-economic-defi-analysis.md](phase46-economic-defi-analysis.md).
+[phase47-protocol-wide-cross-contract-analysis.md](phase47-protocol-wide-cross-contract-analysis.md).

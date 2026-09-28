@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.domain.evidence import Evidence, EvidenceKind
 from app.parsing.comments import strip_comments
 from app.parsing.solidity_arguments import parameter_types, preferred_literal
+from app.parsing.solidity_identity import function_name_for
 from app.parsing.solidity_ir import SemanticProgram
 from app.parsing.solidity_project import _read_remappings
 from app.parsing.solidity_spec import (
@@ -682,7 +683,11 @@ def _steps(
     caller = "user" if not actors or actors[0].identity == "owner" else actors[0].identity
     steps: list[TransactionStep] = []
     for index, function_id in enumerate(path.function_ids):
-        name = function_id.split(":")[0].split(".")[-1]
+        name = function_name_for(
+            function_id, program=program, source=source, contract=spec.contract
+        )
+        if not name:
+            return None, "a sequence function was not found"
         fact = function_signature(source, spec.contract, name, program)
         if fact is None:
             return None, "a sequence function was not found"

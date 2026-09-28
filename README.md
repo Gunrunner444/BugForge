@@ -67,6 +67,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 44 | Project-aware bounded replay in a controlled sandbox | ✅ Implemented |
 | Phase 45 | Bounded stateful exploit-sequence discovery | ✅ Implemented |
 | Phase 46 | Economic and DeFi observations on bounded sequences | ✅ Implemented |
+| Phase 47 | Protocol-wide cross-contract security analysis | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -115,8 +116,9 @@ Later Solidity work is also on `main`:
 [docs/phase43-verification-authority-and-real-harnesses.md](docs/phase43-verification-authority-and-real-harnesses.md),
 [docs/phase44-project-aware-stateful-verification.md](docs/phase44-project-aware-stateful-verification.md),
 [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
+[docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 and
-[docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md).
+[docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md).
 Foundry, Slither, Echidna, Medusa, Halmos, Wake, and ItyFuzz are optional.
 A missing tool is unavailable and does not invent a result. Economic analysis
 does not verify a finding.
@@ -396,8 +398,12 @@ Phase 45 searches bounded transaction sequences and can optionally run local
 ItyFuzz inside a configured Docker image. A sequence is not a finding.
 ItyFuzz is not the authority layer. Phase 46 records economic observations
 on those sequences. A positive asset delta is not a confirmed exploit.
-See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md)
-and [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md).
+Phase 47 builds a bounded protocol interaction graph across contracts.
+An edge exists only when the relationship was established. A graph path is
+not an exploit and not verification.
+See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
+[docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
+and [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md).
 
 ### Security testing roadmap
 
@@ -417,7 +423,7 @@ and [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis
 | 44 | Project-aware bounded replay. Default execution is Docker Forge (`forge-sandbox`) | Implemented |
 | 45 | Stateful exploit-sequence discovery and optional sandboxed ItyFuzz | Implemented |
 | 46 | Economic and DeFi observations: deltas, oracles, vaults, AMMs, lending | Implemented |
-| 47 | Protocol-wide cross-contract exploitation | Not started |
+| 47 | Protocol-wide cross-contract security analysis and bounded path discovery | Implemented |
 | 48 | Runtime, fork, and differential validation | Not started |
 | 49 | Adaptive multi-engine research orchestration | Not started |
 | 50 | Production bounty-research workflow | Not started |

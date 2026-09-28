@@ -302,9 +302,25 @@ def test_erc4626_rounding_relationship() -> None:
 
 
 def test_erc4626_preview_execution_discrepancy() -> None:
-    result = preview_discrepancy(preview=10, executed=9, established=frozenset({"erc4626-preview"}))
-    assert result.status == OracleStatus.INVARIANT_VIOLATION.value
-    assert "not an exploit" in result.assumptions[0]
+    unspecified = preview_discrepancy(
+        preview=10, executed=9, established=frozenset({"erc4626-preview"})
+    )
+    assert unspecified.status == OracleStatus.UNKNOWN.value
+    deposit = preview_discrepancy(
+        preview=10,
+        executed=9,
+        established=frozenset({"erc4626-preview"}),
+        operation="previewDeposit",
+    )
+    assert deposit.status == OracleStatus.INVARIANT_VIOLATION.value
+    assert "not automatically exploitable" in deposit.assumptions[0]
+    conservative = preview_discrepancy(
+        preview=9,
+        executed=10,
+        established=frozenset({"erc4626-preview"}),
+        operation="previewDeposit",
+    )
+    assert conservative.status == OracleStatus.INCOMPLETE.value
 
 
 def test_fee_on_transfer_discrepancy() -> None:
@@ -375,6 +391,7 @@ def test_lending_debt_matches_repayment() -> None:
         collateral_after=20,
         health="healthy",
         liquidated=False,
+        debt_semantics="repayment-only",
     )
     assert result.status == OracleStatus.BALANCED.value
     unpaid = lending_transition(
@@ -386,7 +403,7 @@ def test_lending_debt_matches_repayment() -> None:
         health="healthy",
         liquidated=False,
     )
-    assert unpaid.status == OracleStatus.INVARIANT_VIOLATION.value
+    assert unpaid.status == OracleStatus.INCOMPLETE.value
 
 
 def test_liquidation_state_transition() -> None:
@@ -500,6 +517,7 @@ def test_ityfuzz_runs_only_in_the_controlled_sandbox(tmp_path: Path, monkeypatch
     assert ItyFuzzEngine().availability() is EngineAvailability.UNAVAILABLE
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._sandbox_image", lambda: "ityfuzz:local")
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._docker_present", lambda: True)
+    monkeypatch.setattr("app.adapters.discovery.ityfuzz._local_image", lambda: True)
     from app.discovery.process import ProcessResult
 
     monkeypatch.setattr(
@@ -544,7 +562,8 @@ def test_ityfuzz_output_is_never_fabricated() -> None:
     assert stats.coverage["percent"] == "12.5"
     real = parse_ityfuzz_output(_BANNER)
     assert real.findings[0].description.startswith("[Fund Loss]")
-    assert "[Sender]" in real.minimized
+    assert real.minimized == ""
+    assert "[Sender]" in real.diagnostic
 
 
 def test_ityfuzz_output_is_fuzzing_evidence(tmp_path: Path) -> None:

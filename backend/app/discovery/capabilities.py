@@ -18,6 +18,7 @@ class EngineCapability(StrEnum):
     BUILD = "build"
     TEST_EXECUTION = "test_execution"
     ECONOMIC_SIMULATION = "economic_simulation"
+    CROSS_CONTRACT_ANALYSIS = "cross_contract_analysis"
 
 
 class EngineAvailability(StrEnum):

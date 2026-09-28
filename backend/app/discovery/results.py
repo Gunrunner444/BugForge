@@ -55,6 +55,7 @@ class DynamicResult:
     oracle_kind: str = ""
     findings: tuple[DynamicFinding, ...] = ()
     metadata: dict[str, str] = field(default_factory=dict)
+    economic_evidence: object | None = None
 
     def __post_init__(self) -> None:
         self.stdout = redact_text(self.stdout)
@@ -91,6 +92,8 @@ class DynamicResult:
                 "timestamp": self.timestamp,
                 "oracle": self.oracle_explanation,
                 "oracle_kind": self.oracle_kind,
+                "economic_bound": str(self.metadata.get("bound", "false")),
+                "observation_class": self.metadata.get("observation_class", ""),
                 "crash": self.crash,
                 "assertion": self.assertion,
                 "sanitizer": self.sanitizer,
@@ -124,6 +127,8 @@ def _evidence_kind(result: DynamicResult) -> EvidenceKind:
         and result.findings
     ):
         return EvidenceKind.FUZZING
+    if result.oracle_kind == "economic" or result.metadata.get("evidence_class") == "economic":
+        return EvidenceKind.ECONOMIC_OBSERVATION
     if result.executed and result.status is ResultStatus.INGESTED:
         return EvidenceKind.SCANNER if result.findings else EvidenceKind.FUZZING
     if result.executed and _coverage_available(result.coverage):

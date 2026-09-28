@@ -74,6 +74,7 @@ class ItyFuzzParse:
     minimized: str
     limitation: str
     coverage: dict[str, str]
+    diagnostic: str = ""
 
 
 class ItyFuzzEngine(ExternalDiscoveryEngine):
@@ -102,7 +103,7 @@ class ItyFuzzEngine(ExternalDiscoveryEngine):
         )
 
     def availability(self) -> EngineAvailability:
-        if _sandbox_image() and _docker_present():
+        if _sandbox_image() and _docker_present() and _local_image():
             return EngineAvailability.AVAILABLE
         return EngineAvailability.UNAVAILABLE
 
@@ -121,7 +122,7 @@ class ItyFuzzEngine(ExternalDiscoveryEngine):
             executed=False,
             provenance="sandbox",
             oracle_explanation=(
-                "ItyFuzz requires Docker and security_agent_ityfuzz_image; "
+                "ItyFuzz requires Docker and a local security_agent_ityfuzz_image; "
                 "host ityfuzz is not started and no image is pulled"
             ),
             metadata={
@@ -189,6 +190,36 @@ class ItyFuzzEngine(ExternalDiscoveryEngine):
 def ityfuzz_command() -> list[str]:
     """Argv for the container. The glob is one argument; ItyFuzz interprets it."""
     return ["ityfuzz", "evm", "-t", "/bugforge-output/artifacts/*"]
+
+
+def parse_ityfuzz_streams(stdout: str, stderr: str) -> ItyFuzzParse:
+    """Keep a finding that appears in either stream. A trace is not an executable seed."""
+    parts: list[ItyFuzzParse] = []
+    if stdout.strip():
+        parts.append(parse_ityfuzz_output(stdout))
+    if stderr.strip():
+        parts.append(parse_ityfuzz_output(stderr))
+    if not parts:
+        return parse_ityfuzz_output("")
+    findings: list[DynamicFinding] = []
+    seen: set[str] = set()
+    coverage: dict[str, str] = {}
+    diagnostics: list[str] = []
+    chosen = parts[0]
+    for item in parts:
+        coverage.update(item.coverage)
+        if item.diagnostic:
+            diagnostics.append(item.diagnostic)
+        if item.findings and not chosen.findings:
+            chosen = item
+        for finding in item.findings:
+            if finding.title in seen:
+                continue
+            seen.add(finding.title)
+            findings.append(finding)
+    status = ResultStatus.INTERESTING if findings else chosen.status
+    limitation = "" if findings else chosen.limitation
+    return ItyFuzzParse(status, tuple(findings), "", limitation, coverage, "\n".join(diagnostics))
 
 
 def parse_ityfuzz_output(text: str) -> ItyFuzzParse:
@@ -263,7 +294,15 @@ def _from_banner(text: str, coverage: dict[str, str]) -> ItyFuzzParse:
         description=description[:500],
         status="potential",
     )
-    return ItyFuzzParse(ResultStatus.INTERESTING, (finding,), trace, "", coverage)
+    if trace:
+        description = f"{description} trace: {trace[:240]}".strip()
+        finding = DynamicFinding(
+            detector_id="ityfuzz",
+            title=title[:180],
+            description=description[:500],
+            status="potential",
+        )
+    return ItyFuzzParse(ResultStatus.INTERESTING, (finding,), "", "", coverage, trace)
 
 
 def _json_document(text: str) -> bool:
@@ -303,7 +342,7 @@ def _ingested(
         campaign_id=request.campaign_id,
         status=parsed.status,
         executed=False,
-        minimized_input=parsed.minimized,
+        minimized_input="",
         findings=parsed.findings,
         coverage=dict(parsed.coverage),
         stdout=raw[:4000],
@@ -344,7 +383,7 @@ def _from_process(
             provenance="ityfuzz",
             metadata=_metadata(engine, request, None),
         )
-    parsed = parse_ityfuzz_output(proc.stdout or proc.stderr)
+    parsed = parse_ityfuzz_streams(proc.stdout or "", proc.stderr or "")
     return DynamicResult(
         engine=engine.engine_id,
         engine_version=engine.version(),
@@ -359,7 +398,7 @@ def _from_process(
         exit_code=proc.return_code,
         stdout=(proc.stdout or "")[:4000],
         stderr=(proc.stderr or "")[:2000],
-        minimized_input=parsed.minimized,
+        minimized_input="",
         findings=parsed.findings,
         coverage=dict(parsed.coverage),
         provenance="ityfuzz",
@@ -385,6 +424,8 @@ def _metadata(
         "source_snapshot": request.extra.get("source_snapshot", ""),
         "compiler_configuration": request.extra.get("compiler_configuration", ""),
         "oracle_type": "found-vulnerabilities" if parsed and parsed.findings else "",
+        "diagnostic_trace": (parsed.diagnostic[:500] if parsed else ""),
+        "executable_input": "false",
         "structured": "true" if parsed and not parsed.limitation else "false",
     }
 
@@ -436,6 +477,12 @@ def _sandbox_image() -> str:
 
 def _docker_present() -> bool:
     return shutil.which("docker") is not None
+
+
+def _local_image() -> bool:
+    from app.execution.docker_executor import local_image_present
+
+    return local_image_present(_sandbox_image())
 
 
 def _artifact_dir(request: AnalysisRequest) -> Path | None:

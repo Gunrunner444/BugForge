@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.parsing.comments import strip_comments
+from app.parsing.solidity_identity import declared_name, function_name_for
 from app.parsing.solidity_ir import SemanticProgram
 from app.parsing.solidity_project import _read_remappings, _static_build_config
 from app.parsing.solidity_state_transitions import (
@@ -438,7 +439,10 @@ def _capabilities(
         return "unsupported", "unsupported", "none", ("no predicate",)
     if "mapping aggregation" in " ".join(predicate.unsupported):
         return "unsupported", "unsupported", "none", predicate.unsupported
-    smt_calls, forge_calls, call_notes = _call_plan(source, contract, function_ids, program)
+    semantic_program = program if isinstance(program, SemanticProgram) else None
+    smt_calls, forge_calls, call_notes = _call_plan(
+        source, contract, function_ids, semantic_program
+    )
     same_contract = _sequence_in_contract(function_ids, contract)
     if predicate.predicate_type == "equality" and predicate.representation_status == "exact":
         readable = _state_names_in(source, contract, (predicate.lhs, predicate.rhs))
@@ -503,8 +507,8 @@ def _sequence_in_contract(function_ids: tuple[str, ...], contract: str) -> bool:
     if not function_ids or not contract:
         return False
     for function_id in function_ids:
-        head = function_id.split(":")[0]
-        if "." not in head or head.split(".")[0] != contract:
+        parsed = declared_name(function_id)
+        if parsed is None or parsed[0] != contract:
             return False
     return True
 
@@ -651,6 +655,7 @@ def _signature_from_program(program: object, contract: str, name: str) -> dict[s
         "uses_value": "msg.value" in stripped or payable,
         "provenance": "parser",
         "identity": getattr(function, "identity", ""),
+        "contract": contract,
     }
 
 
@@ -688,6 +693,8 @@ def _regex_signature(source: str, contract: str, name: str) -> dict[str, object]
         "uses_sender": "msg.sender" in stripped,
         "uses_value": "msg.value" in stripped or payable,
         "provenance": "regex",
+        "contract": contract,
+        "identity": "",
     }
 
 
@@ -695,7 +702,7 @@ def _call_plan(
     source: str,
     contract: str,
     function_ids: tuple[str, ...],
-    program: object | None = None,
+    program: SemanticProgram | None = None,
 ) -> tuple[bool, bool, tuple[str, ...]]:
     if not function_ids:
         return False, False, ("the transition cannot be called and read back",)
@@ -703,7 +710,9 @@ def _call_plan(
     smt_ok = True
     forge_ok = True
     for function_id in function_ids:
-        name = function_id.split(":")[0].split(".")[-1]
+        name = function_name_for(function_id, program=program, source=source, contract=contract)
+        if not name:
+            return False, False, ("the transition cannot be called and read back",)
         fact = function_signature(source, contract, name, program)
         if fact is None or not fact["parameterless"]:
             return False, False, ("the transition cannot be called and read back",)
@@ -727,7 +736,7 @@ def _internal_call_names(
     smt_ok, _forge_ok, _notes = _call_plan(source, contract, function_ids)
     if not smt_ok:
         return None
-    return tuple(function_id.split(":")[0].split(".")[-1] for function_id in function_ids)
+    return _resolved_names(source, contract, function_ids)
 
 
 def _external_call_names(
@@ -736,7 +745,19 @@ def _external_call_names(
     _smt_ok, forge_ok, _notes = _call_plan(source, contract, function_ids)
     if not forge_ok:
         return None
-    return tuple(function_id.split(":")[0].split(".")[-1] for function_id in function_ids)
+    return _resolved_names(source, contract, function_ids)
+
+
+def _resolved_names(
+    source: str, contract: str, function_ids: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    names: list[str] = []
+    for function_id in function_ids:
+        name = function_name_for(function_id, program=None, source=source, contract=contract)
+        if not name:
+            return None
+        names.append(name)
+    return tuple(names)
 
 
 def _assertion_block(spec: VerificationSpecification, expression: str) -> str:
@@ -874,8 +895,14 @@ def _encoded_forge_harness(
 def _parameterless_names(source: str, function_ids: tuple[str, ...]) -> tuple[str, ...]:
     names: list[str] = []
     for function_id in function_ids:
-        name = function_id.split(":")[0].split(".")[-1]
-        if re.search(rf"function\s+{re.escape(name)}\s*\(\s*\)", source):
+        parsed = declared_name(function_id)
+        if parsed is None:
+            continue
+        contract, name = parsed
+        if function_name_for(function_id, program=None, source=source, contract=contract) != name:
+            continue
+        body = _contract_body(source, contract) or ""
+        if re.search(rf"function\s+{re.escape(name)}\s*\(\s*\)", body):
             names.append(name)
     return tuple(names)
 

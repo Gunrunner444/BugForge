@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import subprocess
 import time
 from pathlib import Path
 
@@ -36,6 +37,25 @@ from app.execution.base import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_PYTHON_IMAGE = "python:3.12-slim"
+
+
+def local_image_present(image: str) -> bool:
+    """True when Docker already has this image. This does not pull and does not run a target."""
+    cleaned = image.strip()
+    if not cleaned or any(mark in cleaned for mark in ("\n", "\x00", ";")):
+        return False
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", cleaned],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
+
+
 _MAX_ARTIFACT_NAME = 128
 _MAX_ARTIFACT_BYTES = 65_536
 

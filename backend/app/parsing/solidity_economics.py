@@ -7,8 +7,12 @@ status. Cross-asset value is computed only from an explicit conversion.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from enum import StrEnum
+
+_UINT256 = 2**256
+_INTEGER = re.compile(r"[+-]?\d+")
 
 _FORBIDDEN = frozenset(
     {"safe", "verified", "proved", "exploited", "confirmed", "profitable", "unprofitable"}
@@ -41,6 +45,29 @@ def canonical_status(status: str) -> str:
     if status in _FORBIDDEN or status not in _ALLOWED:
         return OracleStatus.UNKNOWN.value
     return status
+
+
+def parse_integer(raw: object, *, signed: bool = False) -> int | None:
+    """Parse one integer. Malformed, negative, or overflow-like input is unknown."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not _INTEGER.fullmatch(text):
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if value < 0 and not signed:
+        return None
+    if abs(value) >= _UINT256:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -124,9 +151,76 @@ class EconomicEvidence:
     environment: str
     source_snapshot: str
     compiler_configuration: str
+    contract: str = ""
+    function_identity: str = ""
+    observation_class: str = "economic-calculation"
+    bound: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", canonical_status(self.status))
+
+
+_OBSERVATION_CLASSES = frozenset(
+    {
+        "runtime-observation",
+        "externally-supplied",
+        "static-semantic",
+        "economic-calculation",
+    }
+)
+_BINDING_FIELDS = (
+    "project",
+    "target",
+    "sequence_id",
+    "source_snapshot",
+    "compiler_configuration",
+    "contract",
+    "engine",
+    "tool_version",
+    "environment",
+    "initial_state",
+    "final_state",
+)
+
+
+def bind_economic_evidence(
+    evidence: EconomicEvidence, *, runtime_established: bool = False
+) -> EconomicEvidence:
+    """Downgrade observations that are not bound. Caller text is not runtime evidence."""
+    kind = evidence.observation_class
+    if kind not in _OBSERVATION_CLASSES:
+        kind = "externally-supplied"
+    if kind == "runtime-observation" and not runtime_established:
+        kind = "externally-supplied"
+    missing = [name for name in _BINDING_FIELDS if not str(getattr(evidence, name) or "").strip()]
+    if evidence.function_identity == "" and evidence.contract == "":
+        missing.append("contract")
+    if not evidence.actors or not evidence.tokens:
+        missing.append("actor-or-token")
+    if not evidence.source_locations:
+        missing.append("source_locations")
+    if evidence.deltas and not evidence.transaction_indexes:
+        missing.append("transaction_indexes")
+    assumptions = evidence.assumptions
+    status = evidence.status
+    bound = False
+    if missing:
+        status = OracleStatus.INCOMPLETE.value
+        note = "caller-supplied values are not runtime evidence"
+        if note not in assumptions:
+            assumptions = (*assumptions, note)
+    else:
+        bound = True
+        note = "an economic calculation is not verification"
+        if note not in assumptions:
+            assumptions = (*assumptions, note)
+    return replace(
+        evidence,
+        observation_class=kind,
+        bound=bound,
+        status=canonical_status(status),
+        assumptions=assumptions,
+    )
 
 
 def snapshot_of(*quantities: Quantity, snapshot_id: str, caller: str = "") -> EconomicSnapshot:
@@ -199,7 +293,13 @@ def apply_conversion(amount: int | None, source: Conversion | None, token: str) 
         return None
     if source is None or source.kind == ConversionKind.UNSUPPORTED.value:
         return None
-    if source.from_token != token or source.numerator is None or not source.denominator:
+    if (
+        source.from_token != token
+        or source.numerator is None
+        or source.numerator < 0
+        or source.denominator is None
+        or source.denominator <= 0
+    ):
         return None
     return amount * source.numerator // source.denominator
 
@@ -288,6 +388,8 @@ def erc4626_rounding(
             OracleStatus.UNSUPPORTED.value,
             "ERC-4626 deposit semantics were not established",
         )
+    if assets < 0 or total_assets < 0 or supply < 0:
+        return EconomicResult(OracleStatus.UNKNOWN.value, "a negative vault quantity is unknown")
     if total_assets == 0 or supply == 0 or assets == 0:
         return EconomicResult(
             OracleStatus.INCOMPLETE.value,
@@ -308,24 +410,67 @@ def erc4626_rounding(
     )
 
 
+# preview MUST be no more than the exact share or asset amount.
+_PREVIEW_AT_MOST = frozenset(
+    {"previewDeposit", "previewRedeem", "convertToShares", "convertToAssets"}
+)
+# preview MUST be no fewer than the exact asset amount.
+_PREVIEW_AT_LEAST = frozenset({"previewMint", "previewWithdraw"})
+
+
 def preview_discrepancy(
     *,
     preview: int,
     executed: int,
     established: frozenset[str],
+    operation: str = "",
 ) -> EconomicResult:
-    if "erc4626-preview" not in established:
+    """Compare one ERC-4626 preview with execution. Direction depends on the operation."""
+    if "erc7540" in established or "async-vault" in established:
+        return EconomicResult(
+            OracleStatus.UNSUPPORTED.value,
+            "asynchronous vault semantics are outside ordinary ERC-4626 assumptions",
+        )
+    if "erc4626-preview" not in established and operation not in established:
         return EconomicResult(
             OracleStatus.UNSUPPORTED.value,
             "preview semantics were not established",
         )
+    if preview < 0 or executed < 0:
+        return EconomicResult(OracleStatus.UNKNOWN.value, "a negative preview quantity is unknown")
+    if operation not in _PREVIEW_AT_MOST and operation not in _PREVIEW_AT_LEAST:
+        return EconomicResult(
+            OracleStatus.UNKNOWN.value,
+            "the preview operation is not established; a numeric mismatch is not an invariant",
+        )
+    assumptions = ("a directional mismatch is not automatically exploitable",)
+    relation = operation
     if preview == executed:
-        return EconomicResult(OracleStatus.BALANCED.value, "preview matches execution")
+        return EconomicResult(
+            OracleStatus.BALANCED.value,
+            f"{operation} matches execution",
+            assumptions,
+            relation=relation,
+        )
+    if operation in _PREVIEW_AT_MOST and preview > executed:
+        return EconomicResult(
+            OracleStatus.INVARIANT_VIOLATION.value,
+            f"{operation} exceeds the executed amount",
+            assumptions,
+            relation=relation,
+        )
+    if operation in _PREVIEW_AT_LEAST and preview < executed:
+        return EconomicResult(
+            OracleStatus.INVARIANT_VIOLATION.value,
+            f"{operation} is below the executed amount",
+            assumptions,
+            relation=relation,
+        )
     return EconomicResult(
-        OracleStatus.INVARIANT_VIOLATION.value,
-        "preview and execution differ",
-        ("candidate discrepancy; not an exploit confirmation",),
-        relation="preview/execution",
+        OracleStatus.INCOMPLETE.value,
+        f"{operation} is conservative relative to execution",
+        assumptions,
+        relation=relation,
     )
 
 
@@ -376,34 +521,73 @@ def fee_on_transfer(
     accounted: int | None,
     semantics: str,
 ) -> EconomicResult:
-    if semantics == "unknown":
+    """Require a sender decrease and a receiver increase. A function name is not semantics."""
+    if semantics in {"", "unknown"}:
         return EconomicResult(
             OracleStatus.UNKNOWN.value,
             "token transfer semantics are unknown; amount sent is not assumed received",
         )
+    if semantics in {"custom", "unsupported"}:
+        return EconomicResult(
+            OracleStatus.UNSUPPORTED.value,
+            "custom transfer behavior is unsupported",
+        )
     if semantics not in {"fee-on-transfer", "exact"}:
         return EconomicResult(OracleStatus.UNSUPPORTED.value, "transfer semantics are unsupported")
-    received = receiver_delta if receiver_delta >= 0 else None
-    sent = abs(sender_delta)
-    if received is None:
-        return EconomicResult(OracleStatus.UNKNOWN.value, "receiver delta is unknown")
-    fee = sent - received
-    if semantics == "exact" and (fee != 0 or (accounted is not None and accounted != received)):
+    if requested < 0:
+        return EconomicResult(OracleStatus.UNKNOWN.value, "a negative requested amount is unknown")
+    if sender_delta >= 0 or receiver_delta <= 0:
+        return EconomicResult(
+            OracleStatus.UNKNOWN.value,
+            "a sender decrease must be negative and a receiver increase must be positive",
+            ("a reversed delta is not a transfer observation",),
+            relation="transfer-direction",
+        )
+    sent = -sender_delta
+    received = receiver_delta
+    assumptions = ("candidate fee observation; not an exploit confirmation",)
+    if semantics == "exact":
+        accounted_ok = accounted is None or accounted == requested
+        if sent == requested and received == requested and accounted_ok:
+            return EconomicResult(
+                OracleStatus.BALANCED.value,
+                "exact transfer matches requested, sender decrease, receiver increase, and accounted",
+                relation="exact-transfer",
+            )
         return EconomicResult(
             OracleStatus.INVARIANT_VIOLATION.value,
-            "exact-transfer accounting differs from the observed balance delta",
-            ("candidate discrepancy; not an exploit confirmation",),
+            "exact-transfer quantities are inconsistent",
+            assumptions,
+            relation="exact-transfer",
+        )
+    if received > sent:
+        return EconomicResult(
+            OracleStatus.UNKNOWN.value,
+            "the receiver increase exceeds the sender decrease",
+            assumptions,
             relation="fee-on-transfer",
         )
+    fee = sent - received
     if accounted is not None and accounted != received:
         return EconomicResult(
             OracleStatus.INVARIANT_VIOLATION.value,
             f"accounted {accounted} differs from received {received}; requested {requested}; fee {fee}",
-            ("candidate fee-on-transfer discrepancy; not an exploit confirmation",),
+            assumptions,
+            relation="fee-on-transfer",
+        )
+    if sent != requested:
+        return EconomicResult(
+            OracleStatus.INCOMPLETE.value,
+            "the requested amount does not match the sender decrease",
+            assumptions,
             relation="fee-on-transfer",
         )
     if fee == 0:
-        return EconomicResult(OracleStatus.BALANCED.value, "sender and receiver deltas match")
+        return EconomicResult(
+            OracleStatus.BALANCED.value,
+            "sender decrease and receiver increase match the requested amount",
+            relation="fee-on-transfer",
+        )
     return EconomicResult(
         OracleStatus.POTENTIAL_LOSS.value,
         f"observed fee {fee} on requested {requested}",
@@ -511,38 +695,16 @@ def lending_transition(
     collateral_after: int | None,
     health: str,
     liquidated: bool,
+    debt_semantics: str = "unknown",
+    principal: int | None = None,
+    interest: int | None = None,
+    protocol_fee: int | None = None,
+    bad_debt: int | None = None,
 ) -> EconomicResult:
+    """Reconcile debt only when the protocol semantics name every debt-changing term."""
     if debt_before is None or debt_after is None:
         return EconomicResult(OracleStatus.UNKNOWN.value, "debt is unknown")
     assumptions = ("candidate accounting observation; not confirmation",)
-    if debt_after < debt_before and repayment is None:
-        return EconomicResult(
-            OracleStatus.INVARIANT_VIOLATION.value,
-            "debt decreased without a modeled repayment",
-            assumptions,
-            relation="debt/repayment",
-        )
-    if repayment is not None and debt_before - repayment != debt_after:
-        return EconomicResult(
-            OracleStatus.INVARIANT_VIOLATION.value,
-            "debt change differs from the modeled repayment",
-            assumptions,
-            relation="debt/repayment",
-        )
-    if (
-        collateral_before is not None
-        and collateral_after is not None
-        and collateral_before != collateral_after
-        and debt_before == debt_after
-        and repayment is None
-        and not liquidated
-    ):
-        return EconomicResult(
-            OracleStatus.INCOMPLETE.value,
-            "collateral changed without a corresponding debt change",
-            assumptions,
-            relation="collateral/debt",
-        )
     if liquidated and health == "unknown":
         return EconomicResult(
             OracleStatus.UNKNOWN.value, "liquidation health is unknown", assumptions
@@ -561,14 +723,76 @@ def lending_transition(
             assumptions,
             relation="bad-debt",
         )
-    if repayment is not None and debt_before - repayment == debt_after:
+    if (
+        collateral_before is not None
+        and collateral_after is not None
+        and collateral_before != collateral_after
+        and not liquidated
+        and debt_semantics not in {"repayment-only", "with-interest"}
+    ):
         return EconomicResult(
-            OracleStatus.BALANCED.value,
-            "debt decreased by the modeled repayment",
+            OracleStatus.INCOMPLETE.value,
+            "collateral movement is not a debt invariant by itself",
+            assumptions,
+            relation="collateral/debt",
+        )
+    if debt_semantics == "repayment-only":
+        if repayment is None or principal is not None or interest is not None:
+            return EconomicResult(
+                OracleStatus.INCOMPLETE.value,
+                "repayment-only reconciliation is missing a required term",
+                assumptions,
+                relation="debt/repayment",
+            )
+        if debt_before - repayment == debt_after:
+            return EconomicResult(
+                OracleStatus.BALANCED.value,
+                "debt changed only by the established repayment",
+                assumptions,
+                relation="debt/repayment",
+            )
+        return EconomicResult(
+            OracleStatus.INVARIANT_VIOLATION.value,
+            "debt change differs from the established repayment-only relation",
+            assumptions,
             relation="debt/repayment",
         )
+    if debt_semantics == "with-interest":
+        parts = (principal, repayment, interest, protocol_fee, bad_debt)
+        if any(part is None for part in parts):
+            return EconomicResult(
+                OracleStatus.INCOMPLETE.value,
+                "interest, fees, principal, repayment, or bad debt was not established",
+                assumptions,
+                relation="debt/components",
+            )
+        assert principal is not None and repayment is not None
+        assert interest is not None and protocol_fee is not None and bad_debt is not None
+        expected = principal + interest + protocol_fee - repayment - bad_debt
+        if expected == debt_after:
+            return EconomicResult(
+                OracleStatus.BALANCED.value,
+                "debt matches principal, interest, fees, repayment, and bad debt",
+                assumptions,
+                relation="debt/components",
+            )
+        return EconomicResult(
+            OracleStatus.INVARIANT_VIOLATION.value,
+            "debt does not match the established component relation",
+            assumptions,
+            relation="debt/components",
+        )
+    if debt_before != debt_after or repayment is not None or liquidated:
+        return EconomicResult(
+            OracleStatus.INCOMPLETE.value,
+            "debt reconciliation is incomplete until every debt-changing operation is established",
+            assumptions,
+            relation="debt/unknown",
+        )
     return EconomicResult(
-        OracleStatus.BALANCED.value, "no contradictory lending relation was established"
+        OracleStatus.INCOMPLETE.value,
+        "no established lending relation covers this transition",
+        assumptions,
     )
 
 

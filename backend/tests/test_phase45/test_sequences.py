@@ -129,8 +129,11 @@ def test_ityfuzz_missing_executable_is_unavailable(tmp_path: Path, monkeypatch) 
 def test_ityfuzz_version_detection(monkeypatch) -> None:
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._sandbox_image", lambda: "ityfuzz:local")
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._docker_present", lambda: True)
+    monkeypatch.setattr("app.adapters.discovery.ityfuzz._local_image", lambda: False)
     engine = ItyFuzzEngine()
     assert engine.version() == "ityfuzz-stdout-v1"
+    assert engine.availability() is EngineAvailability.UNAVAILABLE
+    monkeypatch.setattr("app.adapters.discovery.ityfuzz._local_image", lambda: True)
     assert engine.availability() is EngineAvailability.AVAILABLE
 
 
@@ -155,7 +158,8 @@ def test_normalized_minimized_sequence() -> None:
     parsed = parse_ityfuzz_output(text)
     assert parsed.status is ResultStatus.INTERESTING
     assert parsed.findings[0].status == "potential"
-    assert "[Sender]" in parsed.minimized
+    assert parsed.minimized == ""
+    assert "[Sender]" in parsed.diagnostic
     assert "8.254 ETH" in parsed.findings[0].description
     assert parsed.limitation == ""
     assert exploration_authority(parsed.status) == "interesting"
@@ -166,6 +170,7 @@ def test_ityfuzz_timeout(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._sandbox_image", lambda: "ityfuzz:local")
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._docker_present", lambda: True)
+    monkeypatch.setattr("app.adapters.discovery.ityfuzz._local_image", lambda: True)
     monkeypatch.setattr(
         "app.adapters.discovery.ityfuzz._execute_campaign",
         lambda *_args: ProcessResult(False, True, None, "", "timed out", True),
@@ -188,6 +193,7 @@ def test_ityfuzz_timeout(tmp_path: Path, monkeypatch) -> None:
 def test_network_and_fork_are_rejected(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._sandbox_image", lambda: "ityfuzz:local")
     monkeypatch.setattr("app.adapters.discovery.ityfuzz._docker_present", lambda: True)
+    monkeypatch.setattr("app.adapters.discovery.ityfuzz._local_image", lambda: True)
     called: list[str] = []
     monkeypatch.setattr(
         "app.adapters.discovery.ityfuzz._execute_campaign",

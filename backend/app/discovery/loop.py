@@ -29,6 +29,11 @@ def choose_next(
     static_known: bool,
 ) -> ResearchAction:
     """Pick a complementary capability. The choice is not a confirmation."""
+    if observation.uncertainty == "cross-contract":
+        return ResearchAction(
+            "cross_contract_analysis",
+            "cross-contract graph or state-flow evidence is missing",
+        )
     if observation.uncertainty == "economic":
         return ResearchAction(
             "economic_simulation",

@@ -35,6 +35,7 @@ class EvidenceKind(StrEnum):
     HTTP_RESPONSE = "http_response"
     TEST_FAILURE = "test_failure"
     REPLAY = "replay"
+    ECONOMIC_OBSERVATION = "economic_observation"
 
 
 class EvidenceProvenance(StrEnum):
@@ -62,6 +63,8 @@ class EvidenceProvenance(StrEnum):
     REPLAY = "replay"
     # Generated exploratory code inside Docker. Not live verification.
     SANDBOX_EXECUTION = "sandbox_execution"
+    # In-process economic calculation. Not live verification.
+    ECONOMIC_OBSERVATION = "economic_observation"
 
 
 # Provenance that can back a verified finding. AI text and sandbox runs are excluded.
@@ -100,6 +103,7 @@ _KIND_TO_PROVENANCE: dict[EvidenceKind, EvidenceProvenance] = {
     EvidenceKind.LOG: EvidenceProvenance.LOG,
     EvidenceKind.SCREENSHOT: EvidenceProvenance.SCREENSHOT,
     EvidenceKind.REPLAY: EvidenceProvenance.REPLAY,
+    EvidenceKind.ECONOMIC_OBSERVATION: EvidenceProvenance.ECONOMIC_OBSERVATION,
 }
 
 

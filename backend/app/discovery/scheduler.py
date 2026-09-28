@@ -62,6 +62,7 @@ class DiscoveryScheduler:
     corpus: DiscoveryCorpus = field(default_factory=DiscoveryCorpus)
     feedback: SchedulerFeedback = field(default_factory=SchedulerFeedback)
     _coverage_seen: dict[str, float] = field(default_factory=dict)
+    engines_started: int = 0
 
     def select(self, request: AnalysisRequest) -> list[ScheduleDecision]:
         order = _engine_order_for(request, self.feedback)
@@ -76,7 +77,7 @@ class DiscoveryScheduler:
                 )
                 continue
             decision = self._decide(engine, request)
-            if decision.action == "run" and selected >= self.max_engines:
+            if decision.action == "run" and selected + self.engines_started >= self.max_engines:
                 decision = ScheduleDecision(
                     engine.engine_id, "skip", "campaign budget exhausted", decision.capability
                 )
@@ -91,6 +92,9 @@ class DiscoveryScheduler:
         for decision in self.select(request):
             if decision.action != "run":
                 continue
+            if self.engines_started >= self.max_engines:
+                continue
+            self.engines_started += 1
             engine = by_id[decision.engine_id]
             if EngineCapability.STATIC_ANALYSIS in engine.capabilities():
                 result = engine.analyze_target(request)
@@ -143,11 +147,15 @@ class DiscoveryScheduler:
                 )
         if result.assertion:
             self.feedback.assertion_failures += 1
-        if result.engine == "ityfuzz" and result.minimized_input:
+        if (
+            result.engine == "ityfuzz"
+            and result.minimized_input
+            and result.metadata.get("executable_input") == "verified"
+        ):
             self.corpus.add(
                 result.minimized_input,
                 source=SeedSource.ITYFUZZ,
-                reason="ityfuzz sequence",
+                reason="verified executable ityfuzz input",
                 language=request.language,
                 target=request.target,
                 project=str(request.repo_root),
@@ -210,21 +218,25 @@ class DiscoveryScheduler:
         rule_id: str = "",
     ) -> AnalysisRequest:
         """Turn a static location into the next research request."""
-        difficult = self.feedback.stagnating or self.feedback.difficult
+        difficult = self.feedback.stagnating or self.feedback.difficult or repo_root.difficult
+        extra = dict(repo_root.extra)
+        extra["rule_id"] = rule_id
+        extra["source"] = "static_finding"
         return AnalysisRequest(
             repo_root=repo_root.repo_root,
             language=repo_root.language,
-            target=function or contract or file_path,
+            target=function or contract or repo_root.target or file_path,
             files=repo_root.files,
-            contract=contract,
-            function=function,
-            source_file=file_path,
+            contract=contract or repo_root.contract,
+            function=function or repo_root.function,
+            source_file=file_path or repo_root.source_file,
             difficult=difficult,
             framework=repo_root.framework,
             has_harness=repo_root.has_harness,
-            campaign_id=rule_id,
+            campaign_id=repo_root.campaign_id or rule_id,
+            match_test=repo_root.match_test,
             corpus=self.corpus,
-            extra={"rule_id": rule_id, "source": "static_finding"},
+            extra=extra,
         )
 
     def _decide(self, engine: DiscoveryEngine, request: AnalysisRequest) -> ScheduleDecision:
@@ -339,6 +351,9 @@ class DiscoveryScheduler:
         for decision in self.plan_followup(request):
             if decision.action != "run":
                 continue
+            if self.engines_started >= self.max_engines:
+                continue
+            self.engines_started += 1
             engine = by_id[decision.engine_id]
             extra = dict(request.extra)
             if decision.engine_id == "foundry" and self.corpus.by_source(
@@ -375,9 +390,13 @@ class DiscoveryScheduler:
 
 
 def coverage_key(result: DynamicResult, request: AnalysisRequest) -> str:
-    """Isolate coverage by project, target, source, function, campaign, engine, and mode."""
+    """Isolate coverage by project, source snapshot, compiler, target, and engine."""
+    project = request.extra.get("project_id", "") or str(request.repo_root)
     return "\n".join(
         (
+            project,
+            request.extra.get("source_snapshot", ""),
+            request.extra.get("compiler_configuration", ""),
             str(request.repo_root),
             request.target,
             request.source_file,
@@ -400,6 +419,8 @@ def missing_capability(request: AnalysisRequest, feedback: SchedulerFeedback) ->
     stalled = feedback.stagnating or feedback.difficult or request.difficult
     if _economic_requested(request) and "economic_simulation" not in exercised:
         return "economic_simulation"
+    if _protocol_requested(request) and "cross_contract_analysis" not in exercised:
+        return "cross_contract_analysis"
     if stalled and "symbolic_execution" not in exercised:
         return "symbolic_execution"
     static_known = request.extra.get("source") == "static_finding" or bool(request.campaign_id)
@@ -416,6 +437,10 @@ def missing_capability(request: AnalysisRequest, feedback: SchedulerFeedback) ->
 
 def _economic_requested(request: AnalysisRequest) -> bool:
     return request.extra.get("economic") == "true" or request.extra.get("source") == "economic"
+
+
+def _protocol_requested(request: AnalysisRequest) -> bool:
+    return request.extra.get("protocol") == "true" or request.extra.get("source") == "protocol"
 
 
 def _capability_label(engine_id: str) -> str:
@@ -439,6 +464,8 @@ def _engine_order_for(request: AnalysisRequest, feedback: SchedulerFeedback) -> 
     needed = missing_capability(request, feedback)
     if needed == "economic_simulation":
         return ("bugforge-economic", *[item for item in base if item != "bugforge-economic"])
+    if needed == "cross_contract_analysis":
+        return base
     if needed == "test_execution":
         return ("foundry", *[item for item in base if item != "foundry"])
     if needed not in {"fuzzing", "symbolic_execution"}:

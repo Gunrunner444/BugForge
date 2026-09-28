@@ -496,18 +496,21 @@ Program/scope/report state is persisted. Human approval is an operator
 token bound to payload, evidence, and scope hashes — not a free-form
 `operator` string.
 
-Phases 41–46 are on `main`. There is no phase branch and no stacked phase
+Phases 41–47 are on `main`. There is no phase branch and no stacked phase
 pull request. ItyFuzz runs only in Docker when `security_agent_ityfuzz_image`
-is already present. Replay uses the `forge-sandbox` execution identity when
-that controlled Foundry run is bound. Phase 46 economic analysis is
-in-process and does not verify a finding. See
+is already present locally. Replay uses the `forge-sandbox` execution identity
+when that controlled Foundry run is bound. Phase 46 economic analysis is
+in-process and does not verify a finding. Phase 47 adds a bounded protocol
+graph. An unresolved call stays unresolved, and a graph path is not
+verification. See
 [phase41-solidity-state-transition-exploit-paths.md](phase41-solidity-state-transition-exploit-paths.md),
 [phase42-solidity-verification-bridge.md](phase42-solidity-verification-bridge.md),
 [phase43-verification-authority-and-real-harnesses.md](phase43-verification-authority-and-real-harnesses.md),
 [phase44-project-aware-stateful-verification.md](phase44-project-aware-stateful-verification.md),
 [phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md),
+[phase46-economic-defi-analysis.md](phase46-economic-defi-analysis.md),
 and
-[phase46-economic-defi-analysis.md](phase46-economic-defi-analysis.md).
+[phase47-protocol-wide-cross-contract-analysis.md](phase47-protocol-wide-cross-contract-analysis.md).
 
 ## What remains operator-dependent
 

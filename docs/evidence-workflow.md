@@ -34,7 +34,10 @@ only when the execution identity is `forge` or `forge-sandbox`, the environment
 is the real target, the harness and every binding match, and the candidate
 fail token matched. A simulated runner cannot take that path. `verified` is
 unchanged: a reproduced observation is not a mathematical proof. An economic
-oracle status is not a vulnerability conclusion.
+oracle status is not a vulnerability conclusion. Economic observations use
+`economic_observation` provenance, which is outside the live verification set.
+A protocol-graph candidate is not reproduction or verification. An ItyFuzz
+trace is diagnostic text, not an executable corpus seed.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

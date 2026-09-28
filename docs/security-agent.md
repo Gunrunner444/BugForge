@@ -59,7 +59,10 @@ replay does not start host `forge`. It requires Docker and a local image in
 `security_agent_replay_image`, with the network disabled. That path is
 `forge-sandbox`. A missing image is unavailable, not a host run. ItyFuzz
 requires `security_agent_ityfuzz_image` and does not fall back to a host
-binary. Phase 46 economic analysis stays in-process. The model still cannot
+binary. A configured image that is not present locally leaves ItyFuzz
+unavailable. Phase 46 economic analysis stays in-process and cannot turn
+caller-supplied numbers into runtime evidence. Phase 47 protocol analysis
+reads local semantic facts and does not open a public RPC. The model still cannot
 supply the command, Docker flags, Foundry flags, or network access. The generic
 identical-call guard does not classify exploratory retries; the exploratory
 engine does. Live smart-contract testing requires an explicit target manifest

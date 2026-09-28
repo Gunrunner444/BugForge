@@ -32,11 +32,11 @@ BugForge passes. They do not call a model, and compiler output cannot mark a
 finding verified. A target manifest does not grant live smart-contract testing
 unless that asset and mode are explicit. Cursor cannot flip that switch.
 `live_hackerone` stays on the existing operator path and is not started by
-the MCP tools. Phase 45 sequence exploration, ItyFuzz, replay, and Phase 46
-economic analysis are deterministic BugForge code. They do not call Grok,
-xAI, OpenAI, or Anthropic. A planner request cannot raise their budgets.
-`llm_invoked` stays false. Work continues on `main` only: no phase branch
-and no stacked phase pull request.
+the MCP tools. Phase 45 sequence exploration, ItyFuzz, replay, Phase 46
+economic analysis, and Phase 47 protocol-graph analysis are deterministic
+BugForge code. They do not call Grok, xAI, OpenAI, or Anthropic. A planner
+request cannot raise their budgets. `llm_invoked` stays false. Work continues
+on `main` only: no phase branch and no stacked phase pull request.
 
 ## Who decides what
 
