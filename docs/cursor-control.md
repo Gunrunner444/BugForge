@@ -32,7 +32,10 @@ BugForge passes. They do not call a model, and compiler output cannot mark a
 finding verified. A target manifest does not grant live smart-contract testing
 unless that asset and mode are explicit. Cursor cannot flip that switch.
 `live_hackerone` stays on the existing operator path and is not started by
-the MCP tools.
+the MCP tools. Phase 45 sequence exploration, ItyFuzz, and replay are
+deterministic BugForge code. They do not call a model, and a planner request
+cannot raise their budgets. Work continues on `main` only: no phase branch
+and no stacked phase pull request.
 
 ## Who decides what
 

@@ -27,7 +27,10 @@ a verified finding, and a sandbox pass is not a safe result. A compiler
 failure is recorded as a toolchain failure and does not support a hypothesis.
 The graph links the hypothesis to the test (`motivates`) and the test to the
 attempt (`executes`). Support or contradiction of the hypothesis stays
-potential. Replay of a generated test uses the original bytes or does not run.
+potential. Replay of a generated test uses the original bytes or does not run. An ItyFuzz
+candidate and a generated transaction sequence are not reproductions. A passing
+campaign is not proof of safety. Only the existing bound Foundry reproduction
+path can record `REPRODUCED`, and a sandbox or simulated run cannot take it.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

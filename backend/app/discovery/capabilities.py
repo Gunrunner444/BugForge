@@ -36,3 +36,4 @@ class ResultStatus(StrEnum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     TOOL_FAILURE = "tool_failure"
+    UNSUPPORTED = "unsupported"

@@ -151,7 +151,9 @@ def specify(
     contract = (
         invariant.contract if invariant else (path.contract_ids[0] if path.contract_ids else "")
     )
-    smt, foundry, scope, unsupported = _capabilities(predicate, source, contract, path.function_ids)
+    smt, foundry, scope, unsupported = _capabilities(
+        predicate, source, contract, path.function_ids, program
+    )
     sequence = path.function_ids[:MAX_SEQUENCE]
     extra_unsupported = unsupported
     if len(path.function_ids) > MAX_SEQUENCE:
@@ -430,12 +432,13 @@ def _capabilities(
     source: str,
     contract: str,
     function_ids: tuple[str, ...],
+    program: object | None = None,
 ) -> tuple[str, str, str, tuple[str, ...]]:
     if predicate is None:
         return "unsupported", "unsupported", "none", ("no predicate",)
     if "mapping aggregation" in " ".join(predicate.unsupported):
         return "unsupported", "unsupported", "none", predicate.unsupported
-    smt_calls, forge_calls, call_notes = _call_plan(source, contract, function_ids)
+    smt_calls, forge_calls, call_notes = _call_plan(source, contract, function_ids, program)
     same_contract = _sequence_in_contract(function_ids, contract)
     if predicate.predicate_type == "equality" and predicate.representation_status == "exact":
         readable = _state_names_in(source, contract, (predicate.lhs, predicate.rhs))
@@ -600,7 +603,58 @@ def project_identity(source_id: str) -> str:
     return _digest(f"file\n{source_id}")
 
 
-def function_signature(source: str, contract: str, name: str) -> dict[str, object] | None:
+def function_signature(
+    source: str,
+    contract: str,
+    name: str,
+    program: object | None = None,
+) -> dict[str, object] | None:
+    """Parser facts win when a semantic program contains the function."""
+    if program is not None:
+        parsed = _signature_from_program(program, contract, name)
+        if parsed is not None:
+            return parsed
+    return _regex_signature(source, contract, name)
+
+
+def _signature_from_program(program: object, contract: str, name: str) -> dict[str, object] | None:
+    functions = getattr(program, "functions", ())
+    matches = [
+        item
+        for item in functions
+        if getattr(item, "contract", "") == contract and getattr(item, "name", "") == name
+    ]
+    if len(matches) != 1:
+        return None
+    function = matches[0]
+    header = (getattr(function, "source", "") or "").split("{", 1)[0]
+    from app.parsing.solidity_arguments import parameter_types
+
+    types = parameter_types(header)
+    if types is None:
+        return None
+    visibility = getattr(function, "visibility", "") or "public"
+    mutability = getattr(function, "mutability", "") or ""
+    stripped = strip_comments(
+        getattr(function, "source", "") or "",
+        line_comment="//",
+        block_comment=("/*", "*/"),
+    )
+    payable = mutability == "payable" or "payable" in mutability.split()
+    return {
+        "name": name,
+        "parameterless": not types,
+        "parameter_types": types,
+        "visibility": visibility,
+        "payable": payable,
+        "uses_sender": "msg.sender" in stripped,
+        "uses_value": "msg.value" in stripped or payable,
+        "provenance": "parser",
+        "identity": getattr(function, "identity", ""),
+    }
+
+
+def _regex_signature(source: str, contract: str, name: str) -> dict[str, object] | None:
     body = _contract_body(source, contract)
     if body is None or not name:
         return None
@@ -621,18 +675,27 @@ def function_signature(source: str, contract: str, name: str) -> dict[str, objec
     end = _close_brace(body, start) if start >= 0 else -1
     function_text = body[match.start() : end] if end > 0 else tail
     stripped = strip_comments(function_text, line_comment="//", block_comment=("/*", "*/"))
+    from app.parsing.solidity_arguments import parameter_types
+
+    types = parameter_types(f"function {name}({match.group('args')})")
+    payable = bool(re.search(r"\bpayable\b", tail))
     return {
         "name": name,
         "parameterless": match.group("args").strip() == "",
+        "parameter_types": types or (),
         "visibility": visibility,
-        "payable": bool(re.search(r"\bpayable\b", tail)),
+        "payable": payable,
         "uses_sender": "msg.sender" in stripped,
-        "uses_value": "msg.value" in stripped or bool(re.search(r"\bpayable\b", tail)),
+        "uses_value": "msg.value" in stripped or payable,
+        "provenance": "regex",
     }
 
 
 def _call_plan(
-    source: str, contract: str, function_ids: tuple[str, ...]
+    source: str,
+    contract: str,
+    function_ids: tuple[str, ...],
+    program: object | None = None,
 ) -> tuple[bool, bool, tuple[str, ...]]:
     if not function_ids:
         return False, False, ("the transition cannot be called and read back",)
@@ -641,7 +704,7 @@ def _call_plan(
     forge_ok = True
     for function_id in function_ids:
         name = function_id.split(":")[0].split(".")[-1]
-        fact = function_signature(source, contract, name)
+        fact = function_signature(source, contract, name, program)
         if fact is None or not fact["parameterless"]:
             return False, False, ("the transition cannot be called and read back",)
         if fact["uses_value"]:

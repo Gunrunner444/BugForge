@@ -74,6 +74,7 @@ def run_command(
     cwd: Path,
     timeout: float = 30,
     stdin: str = "",
+    env: dict[str, str] | None = None,
 ) -> ProcessResult:
     if not argv or "/" in argv[0] or argv[0].startswith("."):
         name = argv[0] if argv else "command"
@@ -104,7 +105,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_env(),
+            env=_env() if env is None else env,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = (

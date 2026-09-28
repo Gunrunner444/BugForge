@@ -359,6 +359,14 @@ Repository analysis, test runner, static analysis, AI debugging, test
 generation, reproduction, repair, verification, GitHub integration, and
 autonomous discovery. That work is the **debugging** product.
 
+Development is on `main` only. Do not open a phase branch or a stacked phase
+pull request. Cursor uses the current `main` checkout and commits there after
+validation.
+
+Phase 45 searches bounded transaction sequences and can optionally run local
+ItyFuzz. A sequence is not a finding. ItyFuzz is not the authority layer.
+See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md).
+
 ### Security testing roadmap
 
 | Phase | What it actually does |

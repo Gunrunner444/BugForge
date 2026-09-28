@@ -18,8 +18,11 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from app.core.config import get_settings
 from app.domain.evidence import Evidence, EvidenceKind
 from app.parsing.comments import strip_comments
+from app.parsing.solidity_arguments import parameter_types, preferred_literal
+from app.parsing.solidity_ir import SemanticProgram
 from app.parsing.solidity_project import _read_remappings
 from app.parsing.solidity_spec import (
     ASSERTION_MARKER,
@@ -27,22 +30,13 @@ from app.parsing.solidity_spec import (
     VerificationSpecification,
     foundry_root,
     function_signature,
+    observed_configuration,
 )
 from app.parsing.solidity_state_transitions import CandidatePath
 from app.security_testing.exploratory import prepare_foundry_workspace
 
 SCHEMA = "phase44.1"
 MAX_TX = 4
-_LITERALS = {
-    "uint": "1",
-    "uint256": "1",
-    "uint8": "1",
-    "int": "1",
-    "int256": "1",
-    "address": "address(1)",
-    "bool": "true",
-    "bytes32": "bytes32(0)",
-}
 _SECRET_LINE = re.compile(r"(?i)(api[_-]?key|mnemonic|private[_-]?key|secret|password|etherscan)")
 _IMPORT = re.compile(r"""import\s+(?:[^'"]+?\s+from\s+)?["'](?P<path>[^"']+)["']""")
 
@@ -146,6 +140,7 @@ def sequence_limit(requested: int | None = None) -> int:
 
 
 def dependency_identity(source_id: str) -> str:
+    """Hash replay inputs. Imported sources count. ``.env`` and secret lines do not."""
     root = foundry_root(source_id)
     if not root:
         return "none"
@@ -153,9 +148,23 @@ def dependency_identity(source_id: str) -> str:
     toml = Path(root) / "foundry.toml"
     remappings = Path(root) / "remappings.txt"
     if toml.is_file() and not toml.is_symlink():
-        parts.append(toml.read_text(encoding="utf-8", errors="replace"))
+        parts.append("foundry.toml\n" + _toml_without_secrets(toml))
     if remappings.is_file() and not remappings.is_symlink():
-        parts.append(remappings.read_text(encoding="utf-8", errors="replace"))
+        parts.append("remappings\n" + remappings.read_text(encoding="utf-8", errors="replace"))
+    observed = {
+        key: value
+        for key, value in observed_configuration(source_id, "").items()
+        if key != "compiler_version"
+    }
+    if observed:
+        parts.append("compiler\n" + json.dumps(observed, sort_keys=True, separators=(",", ":")))
+    for path in _imported_sources(source_id, root):
+        parts.append(
+            "import\n"
+            + path.relative_to(Path(root).resolve()).as_posix()
+            + "\n"
+            + path.read_text(encoding="utf-8", errors="replace")
+        )
     if not parts:
         return "none"
     return _digest("dependency\n" + "\n".join(parts))
@@ -167,6 +176,7 @@ def prepare_replay(
     source: str,
     *,
     limit: int | None = None,
+    program: SemanticProgram | None = None,
 ) -> tuple[TransactionSequence, ReplayArtifact]:
     """Build a bounded sequence and a harness. This does not execute it."""
     bound = sequence_limit(limit)
@@ -261,7 +271,7 @@ def prepare_replay(
             "constructor arguments are not established",
         )
     reentrant = path.path_id.startswith("reentrancy:")
-    steps, step_reason = _steps(path, spec, source, actors, reentrant=reentrant)
+    steps, step_reason = _steps(path, spec, source, actors, reentrant=reentrant, program=program)
     if steps is None:
         return _unsupported(blank, spec, source, dependency, "none", "unsupported", step_reason)
     if reentrant and not _callback_supported(source, spec.contract, steps[0].function):
@@ -450,16 +460,27 @@ def run_replay(
         return _result(sequence, artifact, "unknown", "not_attempted", False, (note,))
     execution = "simulated"
     if runner is None:
-        if not shutil.which("forge"):
+        blocked = blocked_network(artifact.harness)
+        if blocked:
+            return _result(
+                sequence,
+                artifact,
+                "unsupported",
+                "not_attempted",
+                False,
+                (blocked,),
+            )
+        problem = sandbox_requirement()
+        if problem:
             return _result(
                 sequence,
                 artifact,
                 "unavailable",
                 "not_attempted",
                 False,
-                ("forge is not installed",),
+                (problem,),
             )
-        execution = "forge"
+        execution = "sandbox"
 
         source_id = spec.source_id
 
@@ -593,7 +614,15 @@ def _sequence(
         "setup": [(item.kind, item.call) for item in setup],
         "spec": spec.specification_hash,
         "steps": [
-            (item.index, item.contract, item.function, item.caller, item.arguments, item.call)
+            (
+                item.index,
+                item.contract,
+                item.function,
+                item.caller,
+                item.arguments,
+                item.value,
+                item.call,
+            )
             for item in steps
         ],
     }
@@ -624,10 +653,10 @@ def _actors(path: CandidatePath) -> tuple[Actor, ...]:
     if path.path_id.startswith("changes-authority") or "authorization" in path.path_id:
         return (
             Actor(
-                "owner",
-                "address(0x0A11E)",
-                ("owner",),
-                "authorization candidate",
+                "user",
+                "address(1)",
+                ("caller",),
+                "owner is not impersonated; privileged state was not established",
             ),
         )
     return (Actor("user", "address(1)", ("caller",), "ordinary caller"),)
@@ -640,25 +669,37 @@ def _steps(
     actors: tuple[Actor, ...],
     *,
     reentrant: bool,
+    program: SemanticProgram | None = None,
 ) -> tuple[tuple[TransactionStep, ...] | None, str]:
-    caller = actors[0].identity if actors else "user"
+    caller = "user" if not actors or actors[0].identity == "owner" else actors[0].identity
     steps: list[TransactionStep] = []
     for index, function_id in enumerate(path.function_ids):
         name = function_id.split(":")[0].split(".")[-1]
-        fact = function_signature(source, spec.contract, name)
+        fact = function_signature(source, spec.contract, name, program)
         if fact is None:
             return None, "a sequence function was not found"
         if fact["visibility"] not in {"public", "external"}:
             return None, "a private or internal function cannot be called from the replay contract"
-        if fact["uses_value"]:
-            return None, "msg.value is not part of the replay specification"
-        if fact["uses_sender"] and not reentrant:
-            return None, "the replay caller would be the test contract"
-        arguments = _arguments(source, spec.contract, name)
+        arguments = _arguments(fact)
         if arguments is None:
             return None, "argument generation is not sound for this signature"
         rendered = ", ".join(arguments)
-        call = f"target.{name}({rendered})"
+        assumptions = list(spec.assumptions)
+        value = "0"
+        if fact["uses_sender"] and not reentrant:
+            assumptions.append(
+                "msg.sender is the explicit user actor; this is not proof of authorization"
+            )
+        if fact["payable"]:
+            value = "1"
+            call = f"target.{name}{{value: {value}}}({rendered})"
+            assumptions.append(
+                "transaction value is inbound from the actor; further economic setup is unsupported"
+            )
+        elif fact["uses_value"]:
+            return None, "msg.value use is unsupported for this non-payable function"
+        else:
+            call = f"target.{name}({rendered})"
         steps.append(
             TransactionStep(
                 index,
@@ -666,12 +707,12 @@ def _steps(
                 name,
                 caller,
                 arguments,
-                "0",
+                value,
                 spec.preconditions,
                 spec.state_variables,
                 spec.postconditions,
                 (function_id,),
-                spec.assumptions,
+                tuple(assumptions),
                 call,
             )
         )
@@ -680,29 +721,14 @@ def _steps(
     return tuple(steps), ""
 
 
-def _arguments(source: str, contract: str, name: str) -> tuple[str, ...] | None:
-    body = _contract_body(source, contract)
-    if body is None:
-        return None
-    match = re.search(
-        rf"function\s+{re.escape(name)}\s*\((?P<args>[^)]*)\)",
-        body,
-    )
-    if match is None:
-        return None
-    raw = match.group("args").strip()
-    if not raw:
-        return ()
+def _arguments(fact: dict[str, object]) -> tuple[str, ...] | None:
+    types = fact.get("parameter_types")
+    if not isinstance(types, tuple):
+        header = str(fact.get("name", "f"))
+        types = parameter_types(header) or ()
     literals: list[str] = []
-    for part in _split_args(raw):
-        tokens = [
-            token
-            for token in part.replace("memory", " ").replace("calldata", " ").split()
-            if token != "payable"
-        ]
-        if len(tokens) < 2:
-            return None
-        literal = _LITERALS.get(tokens[0])
+    for type_name in types:
+        literal = preferred_literal(str(type_name))
         if literal is None:
             return None
         literals.append(literal)
@@ -971,10 +997,39 @@ def _result(
     )
 
 
+def blocked_network(text: str) -> str:
+    """Reject public RPC, fork, and filesystem cheats before any process starts."""
+    from app.security_testing.exploratory import _BLOCKED_CHEATS
+
+    for pattern, reason in _BLOCKED_CHEATS:
+        if re.search(pattern, text):
+            return reason
+    if re.search(r"(?i)(https?://|eth_rpc|fork-url|etherscan|infura|alchemy)", text):
+        return "BLOCKED network fork"
+    return ""
+
+
+def sandbox_requirement() -> str:
+    """Empty when a local Docker image can run forge. Host forge is never the fallback."""
+    image = get_settings().security_agent_replay_image.strip()
+    if shutil.which("docker") is None:
+        return "sandboxed replay requires Docker; host forge is not started"
+    if not image:
+        return (
+            "sandboxed replay requires a local Foundry image; "
+            "host forge is not started and no image is pulled"
+        )
+    return ""
+
+
 def _execute(harness: str, artifact: ReplayArtifact, source_id: str) -> tuple[int, str, str]:
-    binary = shutil.which("forge")
-    if not binary:
-        return 127, "", "forge is not installed"
+    blocked = blocked_network(harness)
+    if blocked:
+        return 2, "", blocked
+    problem = sandbox_requirement()
+    if problem:
+        return 127, "", problem
+    image = get_settings().security_agent_replay_image.strip()
     with tempfile.TemporaryDirectory(prefix="bugforge-replay-") as directory:
         if artifact.mode == "project":
             root = foundry_root(source_id)
@@ -993,35 +1048,86 @@ def _execute(harness: str, artifact: ReplayArtifact, source_id: str) -> tuple[in
             destination = project / "test" / "BugforgeReplay.t.sol"
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(harness, encoding="utf-8")
-            cwd = project
         else:
-            cwd = Path(directory)
-            (cwd / "foundry.toml").write_text(
+            project = Path(directory) / "project"
+            project.mkdir(parents=True, exist_ok=True)
+            (project / "foundry.toml").write_text(
                 '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = []\n',
                 encoding="utf-8",
             )
-            (cwd / "src").mkdir()
-            test_dir = cwd / "test"
+            (project / "src").mkdir()
+            test_dir = project / "test"
             test_dir.mkdir()
             (test_dir / "BugforgeReplay.t.sol").write_text(harness, encoding="utf-8")
-        completed = subprocess.run(
-            [
-                binary,
-                "test",
-                "--match-contract",
-                "BugforgeReplay",
-                "--match-path",
-                "test/BugforgeReplay.t.sol",
-                "--root",
-                str(cwd),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=FORGE_TIMEOUT_SECONDS,
-            cwd=cwd,
-        )
-    return completed.returncode, completed.stdout or "", completed.stderr or ""
+        return _run_in_docker(image, Path(directory))
+
+
+def _run_in_docker(image: str, scratch: Path) -> tuple[int, str, str]:
+    """Forge inside Docker with the network off. This is not a host execution."""
+    import asyncio
+
+    from app.execution.base import ExecutionConfig
+    from app.execution.docker_executor import DockerTestExecutor
+
+    config = ExecutionConfig(
+        command=[
+            "forge",
+            "test",
+            "--offline",
+            "--root",
+            "/bugforge-output/project",
+            "--match-contract",
+            "BugforgeReplay",
+            "--match-path",
+            "test/BugforgeReplay.t.sol",
+            "--out",
+            "/bugforge-output/out",
+            "--cache-path",
+            "/bugforge-output/cache",
+        ],
+        working_directory=str(scratch),
+        timeout_seconds=FORGE_TIMEOUT_SECONDS,
+        memory_limit_mb=512,
+        cpu_limit=1.0,
+        environment={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        allow_network=False,
+        output_dir=str(scratch),
+    )
+    if config.allow_network:
+        return 2, "", "BLOCKED network fork"
+    result = asyncio.run(DockerTestExecutor(image).execute(config))
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(config.command, FORGE_TIMEOUT_SECONDS)
+    return result.exit_code or 0, result.stdout, result.stderr
+
+
+def _imported_sources(source_id: str, root: str) -> tuple[Path, ...]:
+    if not source_id or not Path(source_id).is_file():
+        return ()
+    text = Path(source_id).read_text(encoding="utf-8", errors="replace")
+    pending = list(_imports(text))
+    seen: list[Path] = []
+    known: set[str] = set()
+    while pending and len(seen) < 32:
+        imported = pending.pop(0)
+        resolved = _resolve_import(source_id, imported, root)
+        if not resolved or resolved in known:
+            continue
+        path = Path(resolved)
+        if path.name == ".env" or path.suffix != ".sol":
+            continue
+        known.add(resolved)
+        seen.append(path)
+        nested = _imports(path.read_text(encoding="utf-8", errors="replace"))
+        pending.extend(nested)
+    seen.sort(key=lambda item: item.as_posix())
+    return tuple(seen)
+
+
+def _toml_without_secrets(path: Path) -> str:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [line for line in lines if not _SECRET_LINE.search(line)]
+    return "\n".join(kept)
 
 
 def _copy_has_target(project: Path, root: str, source_id: str) -> bool:

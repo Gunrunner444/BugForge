@@ -147,4 +147,9 @@ and
 Phase 35 version facts come from one helper. A pragma is known only when every
 version it allows agrees. Compiler IR is availability, not an interpreter.
 Foundry exploratory tests run inside a disposable project when `forge` is
-installed, and are `UNAVAILABLE` when it is not.
+installed, and are `UNAVAILABLE` when it is not. Phase 45 sequence exploration
+and optional ItyFuzz are `LIMITED`: a missing `ityfuzz` binary is
+`UNAVAILABLE`, a campaign without local `.abi` and `.bin` files is
+`UNSUPPORTED`, and a public fork or RPC request is rejected. ItyFuzz output
+is a candidate, not a reproduction. See
+[phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md).

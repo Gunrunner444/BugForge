@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     # Operator attests that the image already contains pytest. BugForge does not pip install.
     security_agent_exploratory_pytest_ready: bool = False
     security_agent_exploratory_python_image: str = ""
+    # Local image that already contains forge. Empty means replay stays unavailable.
+    # BugForge does not pull an image and does not fall back to host forge.
+    security_agent_replay_image: str = ""
     # Developer-only. The default research path does not execute host solc.
     solidity_host_compiler: bool = False
     # Bounded project-analysis profile. Defaults match the original scan limits.

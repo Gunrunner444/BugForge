@@ -6,11 +6,8 @@ failure is not a reproduction, and a passing run is not a proof.
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import replace
 from pathlib import Path
-
-import pytest
 
 from app.domain.evidence import EvidenceKind
 from app.parsing.engine import parse_source, reset_syntax_registry
@@ -431,24 +428,12 @@ def test_unsupported_plan_does_not_call_the_runner(tmp_path: Path) -> None:
     assert result.execution == "not_attempted"
 
 
-@pytest.mark.skipif(shutil.which("forge") is None, reason="forge is not installed")
 def test_live_forge_project_replay(tmp_path: Path) -> None:
-    """Real forge, when installed. Absence of this run is not a live result."""
+    """Host forge is not the sandbox. A missing image stays unavailable."""
     program, text, model = _model(tmp_path, _FAILING)
     path = _accounting(model)
     spec = specify(path, model, program)
     result = run_replay(path, spec, text)
-    assert result.execution == "forge"
-    assert result.status in {
-        "reproduced",
-        "executed_no_violation",
-        "compile_failed",
-        "setup_failed",
-        "unavailable",
-        "timeout",
-        "unknown",
-        "candidate_violation",
-    }
-    if result.status == "reproduced":
-        assert result.bound is True
-        assert spec.specification_hash in result.stdout + result.stderr
+    assert result.execution == "not_attempted"
+    assert result.status == "unavailable"
+    assert "host forge is not started" in " ".join(result.diagnostics)

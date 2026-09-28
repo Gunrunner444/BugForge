@@ -36,9 +36,12 @@ _SOLIDITY_ORDER = (
     "foundry",
     "echidna",
     "medusa",
+    "ityfuzz",
     "halmos",
     "wake",
 )
+_STATIC_ENGINES = frozenset({"bugforge-static", "slither", "wake"})
+_RUNTIME_FRONT = ("ityfuzz", "echidna", "medusa", "foundry", "halmos")
 _LANGUAGE_ORDER: dict[str, tuple[str, ...]] = {
     "solidity": _SOLIDITY_ORDER,
     "c": ("bugforge-static", "native-fuzz", "sanitizer"),
@@ -60,7 +63,7 @@ class DiscoveryScheduler:
     _coverage_seen: dict[str, float] = field(default_factory=dict)
 
     def select(self, request: AnalysisRequest) -> list[ScheduleDecision]:
-        order = _LANGUAGE_ORDER.get(request.language, ("bugforge-static",))
+        order = _engine_order_for(request, self.feedback)
         by_id = {engine.engine_id: engine for engine in self.engines}
         decisions: list[ScheduleDecision] = []
         selected = 0
@@ -98,7 +101,7 @@ class DiscoveryScheduler:
 
     def note_result(self, result: DynamicResult, request: AnalysisRequest) -> None:
         self.feedback.rounds += 1
-        increased = self._coverage_increased(result)
+        increased = self._coverage_increased(result, request)
         if increased is True:
             self.feedback.new_coverage = True
             self.feedback.stagnating = False
@@ -109,6 +112,12 @@ class DiscoveryScheduler:
                     reason="coverage-increasing input",
                     language=request.language,
                     target=request.target,
+                    project=str(request.repo_root),
+                    source_snapshot=request.extra.get("source_snapshot", ""),
+                    compiler_configuration=request.extra.get("compiler_configuration", ""),
+                    engine=result.engine,
+                    engine_version=result.engine_version,
+                    campaign=request.campaign_id,
                 )
         elif increased is False and result.executed:
             self.feedback.stagnating = True
@@ -121,9 +130,29 @@ class DiscoveryScheduler:
                     reason="crashing input",
                     language=request.language,
                     target=request.target,
+                    project=str(request.repo_root),
+                    source_snapshot=request.extra.get("source_snapshot", ""),
+                    compiler_configuration=request.extra.get("compiler_configuration", ""),
+                    engine=result.engine,
+                    engine_version=result.engine_version,
+                    campaign=request.campaign_id,
                 )
         if result.assertion:
             self.feedback.assertion_failures += 1
+        if result.engine == "ityfuzz" and result.minimized_input:
+            self.corpus.add(
+                result.minimized_input,
+                source=SeedSource.ITYFUZZ,
+                reason="ityfuzz sequence",
+                language=request.language,
+                target=request.target,
+                project=str(request.repo_root),
+                source_snapshot=request.extra.get("source_snapshot", ""),
+                compiler_configuration=request.extra.get("compiler_configuration", ""),
+                engine=result.engine,
+                engine_version=result.engine_version,
+                campaign=request.campaign_id,
+            )
         if result.minimized_input and result.metadata.get("seed_source") == "symbolic":
             self.corpus.add(
                 result.minimized_input,
@@ -131,6 +160,12 @@ class DiscoveryScheduler:
                 reason="symbolic counterexample",
                 language=request.language,
                 target=request.target,
+                project=str(request.repo_root),
+                source_snapshot=request.extra.get("source_snapshot", ""),
+                compiler_configuration=request.extra.get("compiler_configuration", ""),
+                engine=result.engine,
+                engine_version=result.engine_version,
+                campaign=request.campaign_id,
             )
         if (
             self.feedback.rounds >= self.max_rounds
@@ -139,7 +174,7 @@ class DiscoveryScheduler:
         ):
             self.feedback.difficult = True
 
-    def _coverage_increased(self, result: DynamicResult) -> bool | None:
+    def _coverage_increased(self, result: DynamicResult, request: AnalysisRequest) -> bool | None:
         """True, false, or unknown. Unknown never counts as new coverage.
 
         An explicit tool comparison wins. Otherwise a percent is compared only
@@ -155,8 +190,8 @@ class DiscoveryScheduler:
             current = float(raw)
         except ValueError:
             return None
-        previous = self._coverage_seen.get(result.engine)
-        self._coverage_seen[result.engine] = current
+        previous = self._coverage_seen.get(coverage_key(result, request))
+        self._coverage_seen[coverage_key(result, request)] = current
         if previous is None:
             return None
         return current > previous
@@ -333,6 +368,40 @@ class DiscoveryScheduler:
             results.append(result)
             self.note_result(result, targeted)
         return results
+
+
+def coverage_key(result: DynamicResult, request: AnalysisRequest) -> str:
+    """Isolate coverage by project, target, source, function, campaign, engine, and mode."""
+    return "\n".join(
+        (
+            str(request.repo_root),
+            request.target,
+            request.source_file,
+            request.function,
+            request.contract,
+            request.campaign_id,
+            result.engine,
+            request.extra.get("mode", ""),
+        )
+    )
+
+
+def _engine_order_for(request: AnalysisRequest, feedback: SchedulerFeedback) -> tuple[str, ...]:
+    base = _LANGUAGE_ORDER.get(request.language, ("bugforge-static",))
+    if request.language != "solidity":
+        return base
+    static_known = request.extra.get("source") == "static_finding" or bool(request.campaign_id)
+    stalled = feedback.stagnating or feedback.difficult or request.difficult
+    if not static_known and not stalled:
+        return base
+    runtime = [item for item in base if item not in _STATIC_ENGINES]
+    front = ("halmos", *_RUNTIME_FRONT) if stalled else _RUNTIME_FRONT
+    ordered: list[str] = []
+    for engine_id in (*front, *runtime):
+        if engine_id not in ordered and engine_id in runtime:
+            ordered.append(engine_id)
+    ordered.extend(item for item in base if item in _STATIC_ENGINES)
+    return tuple(ordered)
 
 
 def campaign_stopped(results: list[DynamicResult], *, limit: int) -> bool:

@@ -26,6 +26,7 @@ from app.parsing.solidity_dataflow import (
     FunctionSummary,
     analyze_dataflow,
 )
+from app.parsing.solidity_defi import _token_calls
 from app.parsing.solidity_ir import (
     SemanticFunction,
     SemanticProgram,
@@ -184,6 +185,15 @@ class InvariantCheck:
     transition_id: str
     status: str
     reason: str
+
+
+@dataclass(frozen=True)
+class AssetMovement:
+    """One observed movement. Unknown is not an inflow."""
+
+    kind: str
+    detail: str
+    provenance: str
 
 
 @dataclass(frozen=True)
@@ -355,7 +365,7 @@ def _transition(
     assumptions: list[str] = []
     resolutions: list[str] = []
     for site in function.call_sites:
-        resolution = _resolve_site(programs, function, site)
+        resolution, _callee_source = _resolve_in_program(programs, home, function, site)
         resolutions.append(f"{site.call_id}:{resolution.status}:{resolution.reason}")
         if resolution.status != "resolved":
             assumptions.append(f"{site.call_id} {resolution.reason}".strip())
@@ -1413,7 +1423,7 @@ def _emit_chain(
             len(chain),
             tuple(steps),
             tuple(item[0] for item in chain),
-            tuple(item[0] for item in chain),
+            tuple(by_id[item[0]].function_id for item in chain if item[0] in by_id),
             tuple(by_id[item[0]].contract for item in chain if item[0] in by_id),
             tuple(item[1] for item in chain if item[1]),
             last.writes,
@@ -1432,25 +1442,85 @@ def _emit_chain(
 def _resolved_edges(
     programs: Sequence[SemanticProgram], transitions: tuple[StateTransition, ...]
 ) -> list[dict[str, str]]:
-    known = {item.function_id for item in transitions}
+    """Caller and callee are source-aware transition ids, not bare function identities."""
     edges: list[dict[str, str]] = []
     for program in programs:
+        source = _source_identity(program)
         for function in program.functions:
-            if function.identity not in known:
+            caller = _transition_key(transitions, source, function.identity)
+            if not caller:
                 continue
             for site in sorted(function.call_sites, key=lambda item: item.span.start_byte):
-                resolution = _resolve_site(programs, function, site)
-                if resolution.status == "resolved" and resolution.function_id in known:
-                    edges.append(
-                        {
-                            "caller": function.identity,
-                            "callee": resolution.function_id,
-                            "call_id": site.call_id,
-                            "status": resolution.status,
-                        }
-                    )
+                resolution, callee_source = _resolve_in_program(programs, program, function, site)
+                if resolution.status != "resolved" or not resolution.function_id:
+                    continue
+                callee = _transition_key(transitions, callee_source, resolution.function_id)
+                if not callee:
+                    continue
+                edges.append(
+                    {
+                        "caller": caller,
+                        "callee": callee,
+                        "call_id": site.call_id,
+                        "status": resolution.status,
+                    }
+                )
     edges.sort(key=lambda item: (item["caller"], item["call_id"], item["callee"]))
     return edges
+
+
+def _transition_key(
+    transitions: Sequence[StateTransition], source_identity: str, function_identity: str
+) -> str:
+    scoped = [
+        item.transition_id
+        for item in transitions
+        if item.function_id == function_identity and item.source_identity == source_identity
+    ]
+    if len(scoped) == 1:
+        return scoped[0]
+    unique = [item.transition_id for item in transitions if item.function_id == function_identity]
+    if len(unique) == 1 and (not source_identity or unique):
+        only = next(item for item in transitions if item.transition_id == unique[0])
+        if not source_identity or only.source_identity == source_identity:
+            return unique[0]
+    return ""
+
+
+def _resolve_in_program(
+    programs: Sequence[SemanticProgram],
+    home: SemanticProgram,
+    function: SemanticFunction,
+    site: object,
+) -> tuple[CallResolution, str]:
+    """Resolve a call from the caller's program. A colliding name in another source loses."""
+    home_source = _source_identity(home)
+    resolution = resolve_call(home, function, site)
+    if resolution.status == "resolved" and resolution.function_id:
+        if any(item.identity == resolution.function_id for item in home.functions):
+            return resolution, home_source
+    target = str(getattr(site, "target", "") or "").strip()
+    callee = str(getattr(site, "callee", "") or "")
+    if not target:
+        return resolution, ""
+    facts = [fact for program in programs for fact in program.contracts if fact.name == target]
+    if any(fact.kind == "interface" for fact in facts):
+        return CallResolution("unknown", reason="interface call is not an implementation"), ""
+    named = [
+        (program, item)
+        for program in programs
+        for item in program.functions
+        if item.contract == target and item.name == callee
+    ]
+    if len(named) == 1:
+        program, item = named[0]
+        return (
+            CallResolution("resolved", item.identity, "contract-typed"),
+            _source_identity(program),
+        )
+    if len(named) > 1:
+        return CallResolution("unknown", reason="external callee is ambiguous"), ""
+    return resolution, ""
 
 
 def _resolve_site(
@@ -1674,15 +1744,47 @@ def _loop_unmodeled(function: SemanticFunction) -> bool:
     return bool(re.search(r"\b(for|while|do)\b", function.source or ""))
 
 
-def _has_inflow(function: SemanticFunction) -> bool:
+def asset_movements(function: SemanticFunction) -> tuple[AssetMovement, ...]:
+    """Direction relative to the executing contract. An outbound value call is not an inflow."""
     source = strip_comments(
         function.source or "",
         line_comment="//",
         block_comment=("/*", "*/"),
     )
-    if "msg.value" in source:
-        return True
-    return any(site.callee in _INFLOW or bool(site.value) for site in function.call_sites)
+    found: list[AssetMovement] = []
+    received = re.sub(r"\{[^{}]*\bvalue\s*:[^{}]*\}", " ", source)
+    if "msg.value" in received:
+        found.append(AssetMovement("inbound-eth", "msg.value", "call-value"))
+    for site in function.call_sites:
+        if site.value or site.call_type in {"send", "transfer"}:
+            found.append(
+                AssetMovement(
+                    "outbound-eth",
+                    site.value or site.call_type,
+                    "call-site",
+                )
+            )
+    for call in _token_calls(source, function.name, {}, {}, {}, set()):
+        if call.method not in {"transfer", "transferFrom", "safeTransfer", "safeTransferFrom"}:
+            continue
+        if call.direction == "in":
+            found.append(AssetMovement("inbound-token", call.text, "phase31-token-call"))
+        elif call.direction == "out":
+            found.append(AssetMovement("outbound-token", call.text, "phase31-token-call"))
+        else:
+            found.append(AssetMovement("unknown", call.text, "token-direction-unknown"))
+    classified = {site.call_id for site in function.call_sites if site.call_type == "token"}
+    for site in function.call_sites:
+        if site.call_id in classified or site.value or site.call_type in {"send", "transfer"}:
+            continue
+        if not site.external or site.call_type in {"internal", "this", "inherited"}:
+            continue
+        found.append(AssetMovement("unknown", site.call_id or site.callee, "external-call"))
+    return tuple(found)
+
+
+def _has_inflow(function: SemanticFunction) -> bool:
+    return any(item.kind in {"inbound-eth", "inbound-token"} for item in asset_movements(function))
 
 
 def _declared_roles(program: SemanticProgram, contract: str = "") -> dict[str, str]:

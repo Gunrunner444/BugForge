@@ -12,3 +12,12 @@
 No source file from that repository was copied into BugForge. Methodology ideas (accounting desynchronization, sibling-function comparison, boundary checks, ERC-4626 inflation, flash-loan-aware spot pricing, lead status, and chain planning) were reimplemented against BugForge's syntax graph, evidence model, and research tables. The MIT copyright notice is recorded here because the methodology was consulted. BugForge's own license continues to cover the new code.
 
 Referenced third-party tools and wordlists in Agentic-Bug-Hunter were not copied.
+
+## fuzzland/ityfuzz
+
+- Source repository: https://github.com/fuzzland/ityfuzz
+- BugForge destination: none copied
+- Reuse type: optional external executable
+- Integration: `app/adapters/discovery/ityfuzz.py` invokes a local `ityfuzz` binary when the operator has installed it. Public RPC and fork campaigns are rejected. A missing binary produces no findings.
+
+BugForge does not vendor ItyFuzz source and does not relicense it. The upstream project states its own license. The adapter records that the executable is third-party.

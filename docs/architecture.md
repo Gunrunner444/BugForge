@@ -496,6 +496,11 @@ Program/scope/report state is persisted. Human approval is an operator
 token bound to payload, evidence, and scope hashes — not a free-form
 `operator` string.
 
+Phase 45 adds bounded transaction-sequence exploration on `main`. There is no
+phase branch. ItyFuzz is an optional local executable and is not an authority.
+Replay runs only in Docker when a local Foundry image is configured. See
+[phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md).
+
 ## What remains operator-dependent
 
 - Real ZAP/Nuclei/Playwright/Qwen binaries (optional; CI uses fakes)

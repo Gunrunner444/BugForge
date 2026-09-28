@@ -18,6 +18,9 @@ class SeedSource(StrEnum):
     CRASH = "crash"
     INTERESTING = "interesting"
     MINIMIZED = "minimized"
+    STATE_TRANSITION = "state_transition"
+    ITYFUZZ = "ityfuzz"
+    OPERATOR = "operator"
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,12 @@ class Seed:
     preview: str
     language: str = ""
     target: str = ""
+    project: str = ""
+    source_snapshot: str = ""
+    compiler_configuration: str = ""
+    engine: str = ""
+    engine_version: str = ""
+    campaign: str = ""
 
     def snapshot(self) -> dict[str, str]:
         return {
@@ -39,6 +48,12 @@ class Seed:
             "preview": self.preview,
             "language": self.language,
             "target": self.target,
+            "project": self.project,
+            "source_snapshot": self.source_snapshot,
+            "compiler_configuration": self.compiler_configuration,
+            "engine": self.engine,
+            "engine_version": self.engine_version,
+            "campaign": self.campaign,
         }
 
 
@@ -55,6 +70,12 @@ class DiscoveryCorpus:
         language: str = "",
         target: str = "",
         seed_id: str = "",
+        project: str = "",
+        source_snapshot: str = "",
+        compiler_configuration: str = "",
+        engine: str = "",
+        engine_version: str = "",
+        campaign: str = "",
     ) -> Seed:
         digest = sha256(content.encode("utf-8")).hexdigest()
         for existing in self.seeds:
@@ -62,6 +83,10 @@ class DiscoveryCorpus:
                 existing.content_sha256 == digest
                 and existing.source is source
                 and existing.target == target
+                and existing.project == project
+                and existing.source_snapshot == source_snapshot
+                and existing.engine == engine
+                and existing.campaign == campaign
             ):
                 return existing
         redacted = redact_text(content)
@@ -74,12 +99,31 @@ class DiscoveryCorpus:
             preview=redacted[:180],
             language=language,
             target=target,
+            project=project,
+            source_snapshot=source_snapshot,
+            compiler_configuration=compiler_configuration,
+            engine=engine,
+            engine_version=engine_version,
+            campaign=campaign,
         )
         self.seeds.append(seed)
         return seed
 
     def by_source(self, source: SeedSource) -> tuple[Seed, ...]:
         return tuple(seed for seed in self.seeds if seed.source is source)
+
+    def for_binding(self, *, project: str, target: str, source_snapshot: str) -> tuple[Seed, ...]:
+        """Seeds for one project, target, and source snapshot. Another target is omitted."""
+        found = [
+            seed
+            for seed in self.seeds
+            if seed.project == project
+            and seed.target == target
+            and seed.source_snapshot == source_snapshot
+        ]
+        return tuple(
+            sorted(found, key=lambda item: (item.source.value, item.seed_id, item.content_sha256))
+        )
 
     def snapshot(self) -> dict[str, list[dict[str, str]]]:
         return {"seeds": [seed.snapshot() for seed in self.seeds]}
@@ -97,6 +141,12 @@ class DiscoveryCorpus:
                     preview=raw.get("preview", ""),
                     language=raw.get("language", ""),
                     target=raw.get("target", ""),
+                    project=raw.get("project", ""),
+                    source_snapshot=raw.get("source_snapshot", ""),
+                    compiler_configuration=raw.get("compiler_configuration", ""),
+                    engine=raw.get("engine", ""),
+                    engine_version=raw.get("engine_version", ""),
+                    campaign=raw.get("campaign", ""),
                 )
             )
         return corpus

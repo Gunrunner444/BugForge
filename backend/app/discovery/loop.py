@@ -1,0 +1,47 @@
+"""Interfaces for a later adaptive loop.
+
+Phase 45 records observation, uncertainty, and the next capability. It does
+not plan a campaign by itself and it does not raise a budget.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ResearchObservation:
+    uncertainty: str
+    evidence: str
+
+
+@dataclass(frozen=True)
+class ResearchAction:
+    capability: str
+    reason: str
+
+
+def choose_next(
+    observation: ResearchObservation,
+    *,
+    stalled: bool,
+    has_property: bool,
+    static_known: bool,
+) -> ResearchAction:
+    """Pick a complementary capability. The choice is not a confirmation."""
+    if observation.uncertainty in {"reachability", "stalled"} or stalled:
+        return ResearchAction(
+            "symbolic_execution",
+            "reachability stalled; symbolic execution is the next capability",
+        )
+    if has_property or observation.uncertainty == "property":
+        return ResearchAction(
+            "test_execution",
+            "a bounded property can be replayed",
+        )
+    if static_known or observation.uncertainty == "candidate":
+        return ResearchAction(
+            "fuzzing",
+            "a static candidate needs stateful exploration",
+        )
+    return ResearchAction("static_analysis", "no static candidate is known yet")
