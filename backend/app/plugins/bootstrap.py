@@ -48,6 +48,7 @@ def _register_security_testing(catalog: PluginCatalog) -> None:
 
 
 def _register_discovery(catalog: PluginCatalog) -> None:
+    from app.adapters.discovery.economic import EconomicEngine
     from app.adapters.discovery.external import (
         EchidnaEngine,
         FoundryEngine,
@@ -76,6 +77,11 @@ def _register_discovery(catalog: PluginCatalog) -> None:
     catalog.discovery_engines.register("wake", WakeEngine, description="Optional Wake")
     catalog.discovery_engines.register(
         "ityfuzz", ItyFuzzEngine, description="Optional local ItyFuzz exploration"
+    )
+    catalog.discovery_engines.register(
+        "bugforge-economic",
+        EconomicEngine,
+        description="In-process economic observations; not a protocol simulator",
     )
     catalog.discovery_engines.register("go-test", GoTestEngine, description="Go test and fuzz")
     catalog.discovery_engines.register("cargo-test", CargoTestEngine, description="Cargo test")

@@ -18,6 +18,7 @@ Referenced third-party tools and wordlists in Agentic-Bug-Hunter were not copied
 - Source repository: https://github.com/fuzzland/ityfuzz
 - BugForge destination: none copied
 - Reuse type: optional external executable
-- Integration: `app/adapters/discovery/ityfuzz.py` invokes a local `ityfuzz` binary when the operator has installed it. Public RPC and fork campaigns are rejected. A missing binary produces no findings.
+- Interface inspected: 2026-09-28, off-chain stdout (`ityfuzz evm -t <glob>`, `Found vulnerabilities`, Description, Trace, Stats, Coverage Summary). Documentation reference: https://docs.ityfuzz.rs/quickstart
+- Integration: `app/adapters/discovery/ityfuzz.py` runs that command inside Docker when `security_agent_ityfuzz_image` names an image the operator already has. Public RPC and fork campaigns are rejected. A missing image produces no findings. Host `ityfuzz` is not a fallback.
 
-BugForge does not vendor ItyFuzz source and does not relicense it. The upstream project states its own license. The adapter records that the executable is third-party.
+BugForge does not vendor ItyFuzz source, does not copy its tests, and does not relicense it. The upstream project states its own license. The adapter records that the executable is third-party. No benchmark repository is copied into BugForge.

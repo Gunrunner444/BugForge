@@ -50,6 +50,23 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 27 | Multi-engine discovery and Solidity analysis | ✅ Implemented |
 | Phase 28 | Discovery hardening and Solidity deep analysis | ✅ Implemented |
 | Phase 29 | CFG-aware Solidity analysis, runtime bridges, and protected CI | ✅ Implemented |
+| Phase 30 | Solidity semantic reinforcement | ✅ Implemented |
+| Phase 31 | DeFi semantic candidates: asset flow, vaults, oracles, lending, AMMs | ✅ Implemented |
+| Phase 32 | Proxy, storage, and upgradeability semantics | ✅ Implemented |
+| Phase 33 | Cross-contract exploratory testing | ✅ Implemented |
+| Phase 34 | Yul and compiler-IR exploratory hardening | ✅ Implemented |
+| Phase 35 | Compiler-grounded Foundry project analysis | ✅ Implemented |
+| Phase 36 | Agentic methodology gap review, reimplemented in BugForge | ✅ Implemented |
+| Phase 37 | Parser-backed semantic IR | ✅ Implemented |
+| Phase 38 | Semantic dataflow | ✅ Implemented |
+| Phase 39 | Path-sensitive dataflow | ✅ Implemented |
+| Phase 40 | Cross-contract security flow | ✅ Implemented |
+| Phase 41 | State-transition paths | ✅ Implemented |
+| Phase 42 | Verification bridge from a path to a specification | ✅ Implemented |
+| Phase 43 | Bound harnesses and verification authority | ✅ Implemented |
+| Phase 44 | Project-aware bounded replay in a controlled sandbox | ✅ Implemented |
+| Phase 45 | Bounded stateful exploit-sequence discovery | ✅ Implemented |
+| Phase 46 | Economic and DeFi observations on bounded sequences | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -70,8 +87,8 @@ Every full-analysis language has a syntax-aware **code quality** catalog,
 separate from **security** observations. Parser fallback is labeled
 `PROFILE_FALLBACK` and never advertised as AST. C# and Shell are full analysis
 languages. HTML, CSS/SCSS, and SQL have specialized analysis. Solidity has its own
-security and quality catalogs. Foundry, Slither, Echidna, Medusa, Halmos, and
-Wake are optional executables and do not invent results when they are absent.
+security and quality catalogs. Foundry, Slither, Echidna, Medusa, Halmos, Wake,
+and ItyFuzz are optional and do not invent results when they are absent.
 R, Scala, Dart, Lua, and Elixir remain detection-only. See
 [docs/polyglot-analysis.md](docs/polyglot-analysis.md),
 [docs/language-capability-matrix.md](docs/language-capability-matrix.md),
@@ -92,6 +109,17 @@ R, Scala, Dart, Lua, and Elixir remain detection-only. See
 [docs/phase26-polyglot-security-coverage.md](docs/phase26-polyglot-security-coverage.md), and
 [docs/phase27-multi-engine-solidity.md](docs/phase27-multi-engine-solidity.md), and
 [docs/phase28-solidity-deep-analysis.md](docs/phase28-solidity-deep-analysis.md).
+Later Solidity work is also on `main`:
+[docs/phase41-solidity-state-transition-exploit-paths.md](docs/phase41-solidity-state-transition-exploit-paths.md),
+[docs/phase42-solidity-verification-bridge.md](docs/phase42-solidity-verification-bridge.md),
+[docs/phase43-verification-authority-and-real-harnesses.md](docs/phase43-verification-authority-and-real-harnesses.md),
+[docs/phase44-project-aware-stateful-verification.md](docs/phase44-project-aware-stateful-verification.md),
+[docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
+and
+[docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md).
+Foundry, Slither, Echidna, Medusa, Halmos, Wake, and ItyFuzz are optional.
+A missing tool is unavailable and does not invent a result. Economic analysis
+does not verify a finding.
 
 Phase 2 adds:
 
@@ -359,13 +387,17 @@ Repository analysis, test runner, static analysis, AI debugging, test
 generation, reproduction, repair, verification, GitHub integration, and
 autonomous discovery. That work is the **debugging** product.
 
-Development is on `main` only. Do not open a phase branch or a stacked phase
+Development is on `main` only. There is no phase branch and no stacked phase
 pull request. Cursor uses the current `main` checkout and commits there after
-validation.
+validation. External tools are optional. An unavailable tool does not invent
+a result. Economic analysis does not automatically verify a finding.
 
 Phase 45 searches bounded transaction sequences and can optionally run local
-ItyFuzz. A sequence is not a finding. ItyFuzz is not the authority layer.
-See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md).
+ItyFuzz inside a configured Docker image. A sequence is not a finding.
+ItyFuzz is not the authority layer. Phase 46 records economic observations
+on those sequences. A positive asset delta is not a confirmed exploit.
+See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md)
+and [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md).
 
 ### Security testing roadmap
 
@@ -379,6 +411,16 @@ See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-
 | 6 | Guided `SecurityResearchAgent` planner. The AI cannot verify, approve, or submit |
 | 7 | Production tool execution through existing adapters, persisted evidence graph, session restore. ZAP/Nuclei/Playwright are live-capable **only when their binaries are present** |
 | 8 | Advanced research orchestrator, two-identity testing, replay, memory, checkpoints, evidence export. Live mode remains dry-run and human-controlled |
+| 9–29 | Workbench hardening, polyglot semantics, evidence lifecycle, and CFG-aware Solidity analysis | Implemented |
+| 30–40 | Solidity semantics: DeFi, proxies, compiler projects, semantic IR, and cross-contract flow | Implemented |
+| 41–43 | State-transition paths, verification bridge, and bound harnesses | Implemented |
+| 44 | Project-aware bounded replay. Default execution is Docker Forge (`forge-sandbox`) | Implemented |
+| 45 | Stateful exploit-sequence discovery and optional sandboxed ItyFuzz | Implemented |
+| 46 | Economic and DeFi observations: deltas, oracles, vaults, AMMs, lending | Implemented |
+| 47 | Protocol-wide cross-contract exploitation | Not started |
+| 48 | Runtime, fork, and differential validation | Not started |
+| 49 | Adaptive multi-engine research orchestration | Not started |
+| 50 | Production bounty-research workflow | Not started |
 
 In-memory `RateLimiter` is **per process**. Multiple API workers do not share
 a global per-target budget; production live mode should run one worker or

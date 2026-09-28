@@ -119,6 +119,8 @@ class DiscoveryEngine(ABC):
             return EngineCapability.FUZZING
         if EngineCapability.SYMBOLIC_EXECUTION in caps:
             return EngineCapability.SYMBOLIC_EXECUTION
+        if EngineCapability.ECONOMIC_SIMULATION in caps:
+            return EngineCapability.ECONOMIC_SIMULATION
         return EngineCapability.FUZZING
 
     def collect_results(self, request: AnalysisRequest) -> DynamicResult:

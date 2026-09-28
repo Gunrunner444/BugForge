@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     # Local image that already contains forge. Empty means replay stays unavailable.
     # BugForge does not pull an image and does not fall back to host forge.
     security_agent_replay_image: str = ""
+    # Local image that already contains ityfuzz. Empty means ItyFuzz stays unavailable.
+    # BugForge does not pull an image and does not fall back to a host binary.
+    security_agent_ityfuzz_image: str = ""
     # Developer-only. The default research path does not execute host solc.
     solidity_host_compiler: bool = False
     # Bounded project-analysis profile. Defaults match the original scan limits.

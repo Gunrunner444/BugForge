@@ -118,6 +118,12 @@ def _evidence_kind(result: DynamicResult) -> EvidenceKind:
         return EvidenceKind.FUZZING
     if result.assertion or oracle in {"assertion", "property", "invariant"}:
         return EvidenceKind.TEST_FAILURE
+    if (
+        result.metadata.get("evidence_class") == "fuzzing"
+        and result.status is ResultStatus.INTERESTING
+        and result.findings
+    ):
+        return EvidenceKind.FUZZING
     if result.executed and result.status is ResultStatus.INGESTED:
         return EvidenceKind.SCANNER if result.findings else EvidenceKind.FUZZING
     if result.executed and _coverage_available(result.coverage):

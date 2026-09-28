@@ -420,15 +420,23 @@ def classify_output(text: str, fail_token: str) -> str:
     return "unknown"
 
 
+# Host forge is not an identity. forge-sandbox is the Docker path.
+_FOUNDRY_EXECUTION = frozenset({"forge", "forge-sandbox"})
+
+
 def promote(status: str, *, execution: str, environment: str, bound: bool) -> str:
-    """Upgrade a candidate violation only for a bound real-target Foundry run."""
+    """Upgrade a candidate violation only for a bound controlled Foundry run.
+
+    A reproduced observation is an execution result. It is not a proof, and a
+    passing test is not evidence that the contract is safe.
+    """
     if status in {"proved_safe", "safe", "verified"}:
         return "unknown"
     if status == "reproduced":
         status = "candidate_violation"
     if (
         status == "candidate_violation"
-        and execution == "forge"
+        and execution in _FOUNDRY_EXECUTION
         and environment == "real-target"
         and bound
     ):
@@ -480,7 +488,7 @@ def run_replay(
                 False,
                 (problem,),
             )
-        execution = "sandbox"
+        execution = "forge-sandbox"
 
         source_id = spec.source_id
 
@@ -570,7 +578,7 @@ def replay_evidence(result: ReplayResult) -> Evidence:
     if (
         result.status == "reproduced"
         and result.bound
-        and result.execution == "forge"
+        and result.execution in _FOUNDRY_EXECUTION
         and result.environment == "real-target"
         and raw
     ):

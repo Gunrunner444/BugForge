@@ -85,7 +85,9 @@ class DiscoveryCorpus:
                 and existing.target == target
                 and existing.project == project
                 and existing.source_snapshot == source_snapshot
+                and existing.compiler_configuration == compiler_configuration
                 and existing.engine == engine
+                and existing.engine_version == engine_version
                 and existing.campaign == campaign
             ):
                 return existing
@@ -112,14 +114,31 @@ class DiscoveryCorpus:
     def by_source(self, source: SeedSource) -> tuple[Seed, ...]:
         return tuple(seed for seed in self.seeds if seed.source is source)
 
-    def for_binding(self, *, project: str, target: str, source_snapshot: str) -> tuple[Seed, ...]:
-        """Seeds for one project, target, and source snapshot. Another target is omitted."""
+    def for_binding(
+        self,
+        *,
+        project: str,
+        target: str,
+        source_snapshot: str,
+        compiler_configuration: str = "",
+        engine: str = "",
+        engine_version: str = "",
+    ) -> tuple[Seed, ...]:
+        """Return seeds that match the minimum safe binding.
+
+        The binding is project, target, source snapshot, compiler configuration,
+        engine, and engine version. A different campaign may still match. A
+        different compiler, engine, snapshot, target, or project does not.
+        """
         found = [
             seed
             for seed in self.seeds
             if seed.project == project
             and seed.target == target
             and seed.source_snapshot == source_snapshot
+            and seed.compiler_configuration == compiler_configuration
+            and seed.engine == engine
+            and seed.engine_version == engine_version
         ]
         return tuple(
             sorted(found, key=lambda item: (item.source.value, item.seed_id, item.content_sha256))

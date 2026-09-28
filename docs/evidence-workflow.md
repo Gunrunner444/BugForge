@@ -29,8 +29,12 @@ The graph links the hypothesis to the test (`motivates`) and the test to the
 attempt (`executes`). Support or contradiction of the hypothesis stays
 potential. Replay of a generated test uses the original bytes or does not run. An ItyFuzz
 candidate and a generated transaction sequence are not reproductions. A passing
-campaign is not proof of safety. Only the existing bound Foundry reproduction
-path can record `REPRODUCED`, and a sandbox or simulated run cannot take it.
+campaign is not proof of safety. A bound Foundry run can record `REPRODUCED`
+only when the execution identity is `forge` or `forge-sandbox`, the environment
+is the real target, the harness and every binding match, and the candidate
+fail token matched. A simulated runner cannot take that path. `verified` is
+unchanged: a reproduced observation is not a mathematical proof. An economic
+oracle status is not a vulnerability conclusion.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked
 to the hypothesis, have valid provenance, are not AI-only, considers

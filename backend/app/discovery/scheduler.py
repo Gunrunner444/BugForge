@@ -27,6 +27,7 @@ class SchedulerFeedback:
     assertion_failures: int = 0
     rounds: int = 0
     transitions: list[str] = field(default_factory=list)
+    exercised: list[str] = field(default_factory=list)
 
 
 # Preferred order. Later engines run only when budget and preconditions allow.
@@ -101,6 +102,9 @@ class DiscoveryScheduler:
 
     def note_result(self, result: DynamicResult, request: AnalysisRequest) -> None:
         self.feedback.rounds += 1
+        label = _capability_label(result.engine)
+        if label and label not in self.feedback.exercised:
+            self.feedback.exercised.append(label)
         increased = self._coverage_increased(result, request)
         if increased is True:
             self.feedback.new_coverage = True
@@ -386,16 +390,61 @@ def coverage_key(result: DynamicResult, request: AnalysisRequest) -> str:
     )
 
 
+def missing_capability(request: AnalysisRequest, feedback: SchedulerFeedback) -> str:
+    """Name the capability the current evidence still lacks.
+
+    Selection uses this gap. An engine is not chosen only because it appears
+    earlier in the historical list, and this function cannot raise a budget.
+    """
+    exercised = set(feedback.exercised)
+    stalled = feedback.stagnating or feedback.difficult or request.difficult
+    if _economic_requested(request) and "economic_simulation" not in exercised:
+        return "economic_simulation"
+    if stalled and "symbolic_execution" not in exercised:
+        return "symbolic_execution"
+    static_known = request.extra.get("source") == "static_finding" or bool(request.campaign_id)
+    if static_known and "fuzzing" not in exercised:
+        return "fuzzing"
+    if request.extra.get("property") == "encoded" and "test_execution" not in exercised:
+        return "test_execution"
+    if "static_analysis" not in exercised:
+        return "static_analysis"
+    if "fuzzing" not in exercised:
+        return "fuzzing"
+    return "static_analysis"
+
+
+def _economic_requested(request: AnalysisRequest) -> bool:
+    return request.extra.get("economic") == "true" or request.extra.get("source") == "economic"
+
+
+def _capability_label(engine_id: str) -> str:
+    if engine_id == "bugforge-economic":
+        return "economic_simulation"
+    if engine_id in {"ityfuzz", "echidna", "medusa"}:
+        return "fuzzing"
+    if engine_id == "halmos":
+        return "symbolic_execution"
+    if engine_id == "foundry":
+        return "test_execution"
+    if engine_id in _STATIC_ENGINES:
+        return "static_analysis"
+    return ""
+
+
 def _engine_order_for(request: AnalysisRequest, feedback: SchedulerFeedback) -> tuple[str, ...]:
     base = _LANGUAGE_ORDER.get(request.language, ("bugforge-static",))
     if request.language != "solidity":
         return base
-    static_known = request.extra.get("source") == "static_finding" or bool(request.campaign_id)
-    stalled = feedback.stagnating or feedback.difficult or request.difficult
-    if not static_known and not stalled:
+    needed = missing_capability(request, feedback)
+    if needed == "economic_simulation":
+        return ("bugforge-economic", *[item for item in base if item != "bugforge-economic"])
+    if needed == "test_execution":
+        return ("foundry", *[item for item in base if item != "foundry"])
+    if needed not in {"fuzzing", "symbolic_execution"}:
         return base
     runtime = [item for item in base if item not in _STATIC_ENGINES]
-    front = ("halmos", *_RUNTIME_FRONT) if stalled else _RUNTIME_FRONT
+    front = ("halmos", *_RUNTIME_FRONT) if needed == "symbolic_execution" else _RUNTIME_FRONT
     ordered: list[str] = []
     for engine_id in (*front, *runtime):
         if engine_id not in ordered and engine_id in runtime:

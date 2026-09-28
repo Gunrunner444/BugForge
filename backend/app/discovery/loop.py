@@ -29,6 +29,11 @@ def choose_next(
     static_known: bool,
 ) -> ResearchAction:
     """Pick a complementary capability. The choice is not a confirmation."""
+    if observation.uncertainty == "economic":
+        return ResearchAction(
+            "economic_simulation",
+            "an economic candidate has no asset-delta evidence",
+        )
     if observation.uncertainty in {"reachability", "stalled"} or stalled:
         return ResearchAction(
             "symbolic_execution",

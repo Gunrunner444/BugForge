@@ -7,6 +7,67 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class EconomicBenchmark:
+    fixture_id: str
+    economic_class: str
+    expected_transition: str
+    expected_relation: str
+    sequence_length: int | None
+    asset: str
+    expected_effect: str
+    expected_oracle: str
+    local_only: bool
+
+
+ECONOMIC_BENCHMARKS: tuple[EconomicBenchmark, ...] = (
+    EconomicBenchmark(
+        "damn-vulnerable-defi",
+        "defi",
+        "local fixture transition",
+        "asset delta",
+        None,
+        "local",
+        "candidate economic effect",
+        "potential_positive_delta",
+        True,
+    ),
+    EconomicBenchmark(
+        "erc4626-properties",
+        "erc4626",
+        "deposit to share conversion",
+        "assets/shares",
+        None,
+        "shares",
+        "rounding or inflation candidate",
+        "invariant_violation",
+        True,
+    ),
+    EconomicBenchmark(
+        "smartbugs-curated",
+        "mixed",
+        "curated local sample",
+        "unknown until a semantic model establishes one",
+        None,
+        "local",
+        "no automatic classification",
+        "unknown",
+        True,
+    ),
+    EconomicBenchmark(
+        "historical-defi-fixtures",
+        "historical",
+        "operator-supplied sequence",
+        "operator-supplied relation",
+        None,
+        "local",
+        "candidate observation",
+        "incomplete",
+        True,
+    ),
+)
+
+
+@dataclass(frozen=True)
 class BenchmarkFixture:
     fixture_id: str
     corpus: str

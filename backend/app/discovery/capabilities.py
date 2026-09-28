@@ -17,6 +17,7 @@ class EngineCapability(StrEnum):
     RESULTS_INGESTION = "results_ingestion"
     BUILD = "build"
     TEST_EXECUTION = "test_execution"
+    ECONOMIC_SIMULATION = "economic_simulation"
 
 
 class EngineAvailability(StrEnum):

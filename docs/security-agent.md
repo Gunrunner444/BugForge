@@ -56,8 +56,10 @@ a toolchain failure rather than a product bug. The Docker result uses
 Attempts are stored on the session and restored with it. Replay uses the exact
 test bytes, or it is refused when those bytes were not kept. Phase 45 candidate
 replay does not start host `forge`. It requires Docker and a local image in
-`security_agent_replay_image`, with the network disabled. A missing image is
-unavailable, not a host run. The model still cannot
+`security_agent_replay_image`, with the network disabled. That path is
+`forge-sandbox`. A missing image is unavailable, not a host run. ItyFuzz
+requires `security_agent_ityfuzz_image` and does not fall back to a host
+binary. Phase 46 economic analysis stays in-process. The model still cannot
 supply the command, Docker flags, Foundry flags, or network access. The generic
 identical-call guard does not classify exploratory retries; the exploratory
 engine does. Live smart-contract testing requires an explicit target manifest

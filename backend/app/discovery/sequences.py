@@ -62,6 +62,8 @@ class PlannedSequence:
     status: str
     assumptions: tuple[str, ...]
     origin: str
+    project: str = ""
+    target: str = ""
 
 
 def default_bounds() -> ExplorationBounds:
@@ -349,6 +351,147 @@ def _sequence_id(path_id: str, calls: tuple[PlannedCall, ...], origin: str) -> s
 
 def _tighten(requested: int, cap: int) -> int:
     return max(1, min(int(requested), cap))
+
+
+_ECONOMIC_ACTIONS = (
+    "deposit",
+    "mint",
+    "withdraw",
+    "redeem",
+    "transfer",
+    "transferFrom",
+    "approve",
+    "permit",
+    "donate",
+    "swap",
+    "addLiquidity",
+    "removeLiquidity",
+    "borrow",
+    "repay",
+    "liquidate",
+    "oracleRead",
+    "callback",
+    "flashBorrow",
+    "flashRepay",
+)
+
+_REFINEMENTS = {
+    "share_balance_changed": ("withdraw", "redeem"),
+    "reserve_changed": ("swap",),
+    "attacker_balance_increased": ("withdraw", "redeem", "swap"),
+}
+
+
+def established_actions(
+    source: str,
+    contract: str,
+    program: SemanticProgram | None,
+    established: frozenset[str],
+) -> tuple[str, ...]:
+    """Name an action only when that exact function and semantic are established."""
+    found: list[str] = []
+    for name in _ECONOMIC_ACTIONS:
+        if name not in established:
+            continue
+        fact = function_signature(source, contract, name, program)
+        if fact is None:
+            continue
+        found.append(name)
+    return tuple(found)
+
+
+def bind_sequence(sequence: PlannedSequence, *, project: str, target: str) -> PlannedSequence:
+    return replace(sequence, project=project, target=target)
+
+
+def sequence_bound(sequence: PlannedSequence, *, project: str, target: str) -> bool:
+    return sequence.project == project and sequence.target == target
+
+
+def refine_actions(observation_kind: str, established: frozenset[str]) -> tuple[str, ...]:
+    """Deterministic next actions. This does not call a model."""
+    return tuple(name for name in _REFINEMENTS.get(observation_kind, ()) if name in established)
+
+
+def economic_mutations(
+    sequence: PlannedSequence,
+    *,
+    bounds: ExplorationBounds | None,
+    established: frozenset[str],
+) -> tuple[PlannedSequence, ...]:
+    """Bounded mutations. A request for a larger budget is clamped."""
+    active = clamp_bounds(bounds)
+    if not sequence.calls:
+        return ()
+    produced: list[PlannedSequence] = []
+    first = sequence.calls[0]
+    if first.arguments:
+        for literal, provenance in (
+            ("0", "zero"),
+            ("1", "one"),
+            ("type(uint256).max", "max"),
+            ("1", "boundary"),
+        ):
+            produced.append(_replace_amount(sequence, literal, provenance))
+    if len(sequence.calls) > 1:
+        produced.append(_retarget(sequence, tuple(reversed(sequence.calls)), "reverse"))
+    actors = ("user", "attacker")
+    for actor in actors:
+        if actor != first.actor:
+            produced.append(
+                _retarget(
+                    sequence, (replace(first, actor=actor), *sequence.calls[1:]), f"actor-{actor}"
+                )
+            )
+            break
+    inserts = (
+        ("donate", "donation-before-conversion"),
+        ("swap", "swap-before-valuation"),
+        ("borrow", "borrow-before-liquidation"),
+        ("deposit", "deposit-before-withdraw"),
+        ("withdraw", "withdraw-before-deposit"),
+        ("approve", "approval-before-transferFrom"),
+        ("permit", "permit-before-transferFrom"),
+    )
+    for name, origin in inserts:
+        if name in established and len(sequence.calls) < active.max_sequence_length:
+            produced.append(_prefix(sequence, name, origin))
+    if "deposit" in established or "mint" in established:
+        produced.append(_retarget(sequence, sequence.calls + sequence.calls[:1], "repeat"))
+    unique: list[PlannedSequence] = []
+    seen: set[str] = set()
+    for item in produced:
+        if item.sequence_id in seen:
+            continue
+        seen.add(item.sequence_id)
+        unique.append(item)
+        if len(unique) >= active.max_mutations:
+            break
+    return tuple(unique)
+
+
+def _replace_amount(sequence: PlannedSequence, literal: str, provenance: str) -> PlannedSequence:
+    first = sequence.calls[0]
+    argument = replace(first.arguments[0], literal=literal, provenance=provenance)
+    call = replace(first, arguments=(argument, *first.arguments[1:]))
+    return _retarget(sequence, (call, *sequence.calls[1:]), f"amount-{provenance}")
+
+
+def _prefix(sequence: PlannedSequence, name: str, origin: str) -> PlannedSequence:
+    stub = PlannedCall(name, sequence.calls[0].actor, (), "0", "unknown", ("economic mutation",), 0)
+    return _retarget(sequence, (stub, *sequence.calls), origin)
+
+
+def _retarget(
+    sequence: PlannedSequence, calls: tuple[PlannedCall, ...], origin: str
+) -> PlannedSequence:
+    return replace(
+        sequence,
+        calls=calls,
+        origin=origin,
+        sequence_id=_sequence_id(sequence.path_id, calls, origin),
+        status="planned",
+    )
 
 
 def function_interest(function: SemanticFunction) -> int:
