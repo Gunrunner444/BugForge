@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.discovery.capabilities import EngineAvailability, EngineCapability
+from app.discovery.capabilities import CAPABILITY_ORDER, EngineAvailability, EngineCapability
 from app.discovery.corpus import DiscoveryCorpus
 from app.discovery.results import DynamicResult, not_implemented_result, unavailable_result
 
@@ -125,11 +125,28 @@ class DiscoveryEngine(ABC):
             return EngineCapability.CROSS_CONTRACT_ANALYSIS
         if mode == "fork" and EngineCapability.FORK_VALIDATION in caps:
             return EngineCapability.FORK_VALIDATION
-        if mode == "differential" and EngineCapability.DIFFERENTIAL_VALIDATION in caps:
+        if mode in {"differential", "replay"} and EngineCapability.DIFFERENTIAL_VALIDATION in caps:
             return EngineCapability.DIFFERENTIAL_VALIDATION
         if EngineCapability.RUNTIME_VALIDATION in caps:
             return EngineCapability.RUNTIME_VALIDATION
         return EngineCapability.FUZZING
+
+    def selected_capability(self, request: AnalysisRequest) -> EngineCapability:
+        """The capability the scheduler will actually exercise for this request.
+
+        It matches the operation `analyze_target` or `start_campaign` runs and it
+        never depends on set iteration order.
+        """
+        caps = self.capabilities()
+        if EngineCapability.STATIC_ANALYSIS in caps:
+            return EngineCapability.STATIC_ANALYSIS
+        chosen = self._campaign_capability(request)
+        if chosen in caps:
+            return chosen
+        for item in CAPABILITY_ORDER:
+            if item in caps:
+                return item
+        return EngineCapability.PLANNING_ONLY
 
     def collect_results(self, request: AnalysisRequest) -> DynamicResult:
         blocked = self._guard(request, EngineCapability.RESULTS_INGESTION, "collect_results")

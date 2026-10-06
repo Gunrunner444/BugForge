@@ -6,6 +6,7 @@ not call a model, open a network connection, or mark a finding verified.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.discovery.capabilities import EngineAvailability, EngineCapability, ResultStatus
@@ -15,7 +16,7 @@ from app.parsing.solidity_ir import SemanticProgram, build_semantic_program
 from app.parsing.solidity_protocol import (
     MAX_PROTOCOL_CONTRACTS,
     build_protocol_graph,
-    expand_paths,
+    expand_paths_report,
     protocol_evidence,
 )
 
@@ -76,15 +77,26 @@ def _analyze(engine: ProtocolEngine, request: AnalysisRequest) -> DynamicResult:
         compiler_configuration=request.extra.get("compiler_configuration", ""),
         sources=sources,
     )
-    paths = expand_paths(graph)
+    expansion = expand_paths_report(graph)
+    paths = expansion.paths
     evidence = protocol_evidence(
         graph,
-        path=paths[0].path_id if paths else "",
         sequence_id="",
         engines=(engine.engine_id,),
         environment="local",
         uncertainty="candidate",
+        paths=paths,
+        paths_truncated=expansion.truncated,
     )
+    metadata = _meta(
+        request,
+        status="candidate",
+        contracts=str(len(graph.nodes)),
+        paths=str(len(paths)),
+        observed=True,
+    )
+    metadata["path_ids"] = json.dumps(list(evidence.path_ids))
+    metadata["paths_truncated"] = str(expansion.truncated).lower()
     return DynamicResult(
         engine=engine.engine_id,
         engine_version=engine.version(),
@@ -99,13 +111,7 @@ def _analyze(engine: ProtocolEngine, request: AnalysisRequest) -> DynamicResult:
         provenance="protocol-analysis",
         oracle_explanation="protocol candidates are not verification",
         oracle_kind="protocol",
-        metadata=_meta(
-            request,
-            status="candidate",
-            contracts=str(len(graph.nodes)),
-            paths=str(len(paths)),
-            observed=True,
-        ),
+        metadata=metadata,
         protocol_evidence=evidence,
     )
 

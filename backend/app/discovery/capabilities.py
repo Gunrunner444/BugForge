@@ -24,6 +24,27 @@ class EngineCapability(StrEnum):
     DIFFERENTIAL_VALIDATION = "differential_validation"
 
 
+CAPABILITY_ORDER: tuple[EngineCapability, ...] = (
+    EngineCapability.STATIC_ANALYSIS,
+    EngineCapability.CROSS_CONTRACT_ANALYSIS,
+    EngineCapability.ECONOMIC_SIMULATION,
+    EngineCapability.RUNTIME_VALIDATION,
+    EngineCapability.FORK_VALIDATION,
+    EngineCapability.DIFFERENTIAL_VALIDATION,
+    EngineCapability.FUZZING,
+    EngineCapability.SYMBOLIC_EXECUTION,
+    EngineCapability.TEST_EXECUTION,
+    EngineCapability.PROPERTY_TESTING,
+    EngineCapability.INVARIANT_TESTING,
+    EngineCapability.COVERAGE_FEEDBACK,
+    EngineCapability.BUILD,
+    EngineCapability.SANITIZER_AWARE,
+    EngineCapability.RESULTS_INGESTION,
+    EngineCapability.PLANNING_ONLY,
+)
+"""Fixed preference used wherever one capability must be named from a set."""
+
+
 class EngineAvailability(StrEnum):
     UNAVAILABLE = "unavailable"
     AVAILABLE = "available"

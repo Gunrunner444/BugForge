@@ -47,11 +47,11 @@ from app.parsing.solidity_runtime import (
     event_proves_asset,
     failure_is_vulnerability,
     fork_identity,
-    local_command,
     metamorphic_expectation,
     network_allowed,
     parse_runtime_document,
     runtime_balance,
+    runtime_command,
     same_state,
     slots_equivalent,
     state_of,
@@ -294,12 +294,23 @@ def test_local_runtime_is_sandboxed_and_has_no_host_fallback(tmp_path: Path, mon
 
     def fake_execute(config):
         captured["config"] = config
+        manifest = json.loads(Path(config.command[2]).read_text(encoding="utf-8"))
+        document = json.loads(
+            _document(
+                _transaction(),
+                request_identity=manifest["request_identity"],
+                execution_id=manifest["execution_id"],
+                mode=manifest["mode"],
+                target=manifest["target"],
+            )
+        )
+        document["transactions"][0].pop("execution_id")
         return ExecutionResult(
             exit_code=0,
             stdout="",
             stderr="",
             duration_seconds=0.1,
-            artifact_contents={"runtime.json": _document(_transaction())},
+            artifact_contents={"runtime.json": json.dumps(document)},
         )
 
     monkeypatch.setattr(
@@ -319,12 +330,20 @@ def test_local_runtime_is_sandboxed_and_has_no_host_fallback(tmp_path: Path, mon
     assert result.executed is False
     assert result.status is ResultStatus.FAILED
     assert "config" not in captured
-    clean = engine.start_campaign(AnalysisRequest(tmp_path, "solidity", target="Vault"))
+    clean = engine.start_campaign(
+        AnalysisRequest(
+            tmp_path,
+            "solidity",
+            target="Vault",
+            extra={"sequence_id": "seq", "transaction_index": "0"},
+        )
+    )
     config = captured["config"]
     assert config.allow_network is False
     assert config.memory_limit_mb == 512
     assert config.cpu_limit == 1.0
-    assert config.command == local_command()
+    assert config.command[:2] == runtime_command(config.command[2])[:2]
+    assert config.command == runtime_command(config.command[2])
     assert "docker.sock" not in str(config.read_only_volumes)
     assert "http" not in " ".join(config.command)
     assert clean.executed is True
@@ -528,6 +547,9 @@ def test_differential_comparison_does_not_merge_states_or_verify(tmp_path: Path)
             compiler_configuration=left.compiler_configuration,
             runtime_configuration=left.runtime_configuration,
             sequence_id=left.sequence_id,
+            transaction_index=left.transaction_index,
+            contract=left.contract,
+            function_identity=left.function_identity,
             actor=left.actor,
             success="false",
             block_number=left.block_number,

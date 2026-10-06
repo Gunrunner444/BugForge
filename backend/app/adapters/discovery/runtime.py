@@ -3,11 +3,20 @@
 A missing image is unavailable. Host execution is not a fallback. The network
 stays disabled unless an operator has enabled a pinned fork. Results stay
 candidates or unknown and cannot mark a finding verified.
+
+Every execution is bound to an explicit request identity that travels to the
+sandbox in a read-only manifest file. The runtime must echo that identity, and
+an observation is attributed to the candidate only when the identity matches.
+The process exit status is authoritative: a document left by a failed process
+is never evidence.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
+from pathlib import Path
 
 from app.discovery.capabilities import EngineAvailability, EngineCapability, ResultStatus
 from app.discovery.engine import AnalysisRequest, DiscoveryEngine
@@ -16,13 +25,17 @@ from app.execution.base import ExecutionConfig, ExecutionResult
 from app.parsing.solidity_runtime import (
     SCHEMA,
     ForkIdentity,
+    ProcessOutcome,
     RuntimeObservation,
+    RuntimeRequest,
     clamp_runtime_executions,
     compare_executions,
     fork_identity,
-    local_command,
     network_allowed,
     parse_runtime_document,
+    process_outcome,
+    runtime_command,
+    select_observation,
 )
 
 _VERSION = "phase48"
@@ -30,6 +43,10 @@ _INTERFACE = SCHEMA
 _SECRET_KEYS = frozenset({"private_key", "mnemonic", "wallet", "secret"})
 _PUBLIC = ("http://", "https://", "alchemy", "infura", "fork_url")
 _MAX_PAIR = 2
+_MODES = frozenset({"local", "fork", "differential", "replay"})
+NETWORK_NONE = "none"
+NETWORK_CONTROLLED_FORK = "controlled-fork"
+_MANIFEST_NAME = "runtime-input.json"
 
 
 class RuntimeEngine(DiscoveryEngine):
@@ -65,8 +82,11 @@ class RuntimeEngine(DiscoveryEngine):
             return ""
         return _INTERFACE
 
+    def selected_capability(self, request: AnalysisRequest) -> EngineCapability:
+        return EngineCapability(_capability(runtime_mode(request)))
+
     def start_campaign(self, request: AnalysisRequest) -> DynamicResult:
-        mode = request.extra.get("mode", "local") or "local"
+        mode = runtime_mode(request)
         if mode == "fork":
             blocked = _fork_gate(self, request)
             if blocked is not None:
@@ -87,6 +107,9 @@ class RuntimeEngine(DiscoveryEngine):
     def analyze_target(self, request: AnalysisRequest) -> DynamicResult:
         return self.start_campaign(request)
 
+    def _campaign_capability(self, request: AnalysisRequest) -> EngineCapability:
+        return self.selected_capability(request)
+
     def _start_campaign(self, request: AnalysisRequest) -> DynamicResult:
         return _validate(self, request)
 
@@ -94,9 +117,22 @@ class RuntimeEngine(DiscoveryEngine):
         return _validate(self, request)
 
 
+def runtime_mode(request: AnalysisRequest) -> str:
+    """The requested mode. Unknown text stays unknown and is rejected later."""
+    explicit = request.extra.get("mode", "")
+    if explicit:
+        return explicit
+    source = request.extra.get("source", "")
+    if request.extra.get("fork") == "true" or source == "fork":
+        return "fork"
+    if request.extra.get("differential") == "true" or source == "differential":
+        return "differential"
+    return "local"
+
+
 def _validate(engine: RuntimeEngine, request: AnalysisRequest) -> DynamicResult:
-    mode = request.extra.get("mode", "local") or "local"
-    if mode not in {"local", "fork", "differential", "replay"}:
+    mode = runtime_mode(request)
+    if mode not in _MODES:
         return _status(
             engine,
             request,
@@ -114,7 +150,7 @@ def _validate(engine: RuntimeEngine, request: AnalysisRequest) -> DynamicResult:
             capability=_capability(mode),
             observation="unknown",
         )
-    if mode != "fork" and _public_network_requested(request):
+    if _public_network_requested(request):
         return _status(
             engine,
             request,
@@ -138,16 +174,29 @@ def _validate(engine: RuntimeEngine, request: AnalysisRequest) -> DynamicResult:
             capability=_capability(mode),
             observation="unavailable",
         )
+    spec = runtime_request(request, mode, identity)
+    absent = spec.missing()
+    if absent:
+        return _status(
+            engine,
+            request,
+            ResultStatus.UNSUPPORTED,
+            "the runtime request has no established " + " or ".join(absent),
+            capability=_capability(mode),
+            observation="incomplete",
+            binding="deterministic_identity_missing:" + ",".join(absent),
+            spec=spec,
+        )
     runs = _run_count(request, mode)
     allow_network = network_allowed(
-        mode=mode,
+        mode="fork" if mode == "fork" else "local",
         fork_enabled=_fork_enabled(),
         deterministic=bool(identity and identity.deterministic),
         requested_network=request.extra.get("network", ""),
     )
     observations: list[RuntimeObservation] = []
-    for index in range(runs):
-        observed = _execute_once(request, mode, allow_network, index, identity)
+    for run in range(runs):
+        observed = _execute_once(engine, request, spec, mode, allow_network, run, identity)
         if isinstance(observed, DynamicResult):
             return observed
         observations.append(observed)
@@ -161,24 +210,82 @@ def _validate(engine: RuntimeEngine, request: AnalysisRequest) -> DynamicResult:
                 "a comparison needs two executions inside the existing cap",
                 capability=_capability(mode),
                 observation="incomplete",
+                spec=spec,
             )
         reset = request.extra.get("state_reset", "") == "true"
         report = compare_executions(observations[0], observations[1], reset=reset)
-    return _ingested(engine, request, mode, observations, report, identity)
+    return _ingested(engine, request, mode, spec, observations, report, identity, allow_network)
+
+
+def runtime_request(
+    request: AnalysisRequest, mode: str, identity: ForkIdentity | None
+) -> RuntimeRequest:
+    """Collect only identity the request actually established. Nothing is inferred."""
+    extra = request.extra
+    underlying = "fork" if mode == "fork" else "local"
+    if identity is not None and mode == "fork":
+        chain_id, block, snapshot = (
+            identity.chain_id,
+            identity.block_number,
+            identity.state_snapshot,
+        )
+        reference = _fork_reference(identity)
+    else:
+        chain_id = extra.get("chain_id", "")
+        block = extra.get("block_number", "")
+        snapshot = extra.get("state_snapshot", "")
+        reference = ""
+    return RuntimeRequest(
+        mode=underlying,
+        capability=_capability(mode),
+        project=extra.get("project_id", ""),
+        source_snapshot=extra.get("source_snapshot", ""),
+        compiler_configuration=extra.get("compiler_configuration", ""),
+        runtime_configuration=extra.get("runtime_configuration", ""),
+        target=request.target,
+        contract=request.contract,
+        function_identity=extra.get("function_identity", ""),
+        deployment_address=extra.get("deployment_address", ""),
+        sequence_id=extra.get("sequence_id", ""),
+        transaction_index=extra.get("transaction_index", ""),
+        actor=extra.get("actor", ""),
+        chain_id=chain_id,
+        block_number=block,
+        state_snapshot=snapshot,
+        fork_reference=reference,
+    )
+
+
+def _fork_reference(identity: ForkIdentity) -> str:
+    blob = "|".join(
+        (identity.fork_source, identity.chain_id, identity.block_number, identity.state_snapshot)
+    )
+    return "fork-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def _execute_once(
+    engine: RuntimeEngine,
     request: AnalysisRequest,
+    spec: RuntimeRequest,
     mode: str,
     allow_network: bool,
-    index: int,
+    run: int,
     identity: ForkIdentity | None,
 ) -> RuntimeObservation | DynamicResult:
-    command = _command(mode, identity)
-    with tempfile.TemporaryDirectory(prefix="bugforge-runtime-") as directory:
+    capability = _capability(mode)
+    network = NETWORK_CONTROLLED_FORK if allow_network else NETWORK_NONE
+    source = identity.fork_source if identity is not None and mode == "fork" else ""
+    with (
+        tempfile.TemporaryDirectory(prefix="bugforge-runtime-in-") as input_dir,
+        tempfile.TemporaryDirectory(prefix="bugforge-runtime-") as directory,
+    ):
+        manifest = Path(input_dir) / _MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(spec.manifest(run, fork_source=source), sort_keys=True), encoding="utf-8"
+        )
         config = ExecutionConfig(
-            command=command,
-            working_directory=str(request.repo_root),
+            command=runtime_command(str(manifest)),
+            working_directory=input_dir,
             timeout_seconds=60,
             memory_limit_mb=512,
             cpu_limit=1.0,
@@ -188,29 +295,124 @@ def _execute_once(
             read_only_volumes={str(request.repo_root): "/bugforge-src"},
         )
         if config.allow_network != allow_network:
-            return _bare(request, "network disabled")
+            return _status(
+                engine,
+                request,
+                ResultStatus.FAILED,
+                "network disabled",
+                capability=capability,
+                observation="unknown",
+                spec=spec,
+            )
         result = _execute(config)
-        if result.timed_out:
-            return _bare(request, "the runtime timed out", ResultStatus.TIMEOUT)
         document = result.artifact_contents.get("runtime.json", "")
         parsed = parse_runtime_document(document) if document else None
-        if parsed is None:
-            return _bare(
-                request,
-                "the runtime output did not match bugforge-runtime-v1",
-                ResultStatus.UNSUPPORTED,
+        started = not (result.error_message and result.exit_code == -1 and not result.timed_out)
+        outcome = process_outcome(
+            started=started,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            document_valid=parsed is not None,
+        )
+        if outcome != ProcessOutcome.ACCEPTED.value or parsed is None:
+            return _process_failure(
+                engine, request, spec, capability, outcome, result, bool(document), network
             )
-        chosen = parsed[min(index, len(parsed) - 1)]
-        return chosen
+        selection = select_observation(parsed, spec, run=run)
+        if selection.observation is None or selection.status != "selected":
+            observation = (
+                "incomplete" if selection.status in {"not_found", "incomplete"} else "unknown"
+            )
+            return _status(
+                engine,
+                request,
+                ResultStatus.UNSUPPORTED,
+                "the runtime output does not answer the requested sequence and transaction",
+                capability=capability,
+                observation=observation,
+                executed=True,
+                network=network,
+                binding=f"{selection.status}:{selection.reason}",
+                exit_code=result.exit_code,
+                spec=spec,
+            )
+        return selection.observation
+
+
+def _process_failure(
+    engine: RuntimeEngine,
+    request: AnalysisRequest,
+    spec: RuntimeRequest,
+    capability: str,
+    outcome: str,
+    result: ExecutionResult,
+    document_present: bool,
+    network: str,
+) -> DynamicResult:
+    if outcome == ProcessOutcome.TIMEOUT.value:
+        return _status(
+            engine,
+            request,
+            ResultStatus.TIMEOUT,
+            "the runtime timed out",
+            capability=capability,
+            observation="incomplete",
+            executed=True,
+            network=network,
+            exit_code=result.exit_code,
+            spec=spec,
+        )
+    if outcome == ProcessOutcome.NOT_STARTED.value:
+        return _status(
+            engine,
+            request,
+            ResultStatus.FAILED,
+            "the runtime could not start",
+            capability=capability,
+            observation="unknown",
+            exit_code=result.exit_code,
+            spec=spec,
+        )
+    if outcome == ProcessOutcome.TOOL_FAILURE.value:
+        failed = _status(
+            engine,
+            request,
+            ResultStatus.TOOL_FAILURE,
+            "the runtime process failed; any document it left is diagnostic only",
+            capability=capability,
+            observation="unknown",
+            executed=True,
+            network=network,
+            exit_code=result.exit_code,
+            spec=spec,
+        )
+        failed.metadata["document_present"] = str(document_present).lower()
+        failed.metadata["document_attributed"] = "false"
+        failed.stderr = result.stderr[:500]
+        return failed
+    return _status(
+        engine,
+        request,
+        ResultStatus.UNSUPPORTED,
+        "the runtime output did not match bugforge-runtime-v1",
+        capability=capability,
+        observation="incomplete",
+        executed=True,
+        network=network,
+        exit_code=result.exit_code,
+        spec=spec,
+    )
 
 
 def _ingested(
     engine: RuntimeEngine,
     request: AnalysisRequest,
     mode: str,
+    spec: RuntimeRequest,
     observations: list[RuntimeObservation],
     report: object,
     identity: ForkIdentity | None,
+    allow_network: bool,
 ) -> DynamicResult:
     first = observations[0]
     classification = getattr(report, "classification", "")
@@ -227,7 +429,7 @@ def _ingested(
         and first.state_snapshot == identity.state_snapshot
     )
     local_pinned = (
-        mode == "local"
+        mode != "fork"
         and first.chain_id == "31337"
         and first.block_number == "1"
         and bool(first.state_snapshot)
@@ -238,13 +440,22 @@ def _ingested(
         observation=status,
         deterministic="true" if fork_pinned or local_pinned else "false",
         observed=True,
+        network=NETWORK_CONTROLLED_FORK if allow_network else NETWORK_NONE,
+        spec=spec,
     )
     metadata["executions"] = str(len(observations))
     metadata["vulnerability"] = "unknown"
     metadata["tool"] = first.tool
     metadata["tool_version"] = first.tool_version
     metadata["sequence_id"] = first.sequence_id
+    metadata["transaction_index"] = first.transaction_index
     metadata["state_snapshot"] = first.state_snapshot
+    metadata["transaction_success"] = first.success
+    metadata["transaction_outcome"] = {"true": "succeeded", "false": "reverted"}.get(
+        first.success, "unknown"
+    )
+    metadata["execution_ids"] = ",".join(item.execution_id for item in observations)
+    metadata["state_reset"] = "true" if request.extra.get("state_reset", "") == "true" else "false"
     if report is not None and classification:
         metadata["classification"] = str(classification)
         metadata["compared"] = (
@@ -278,47 +489,34 @@ def _status(
     capability: str,
     observation: str,
     deterministic: str = "",
+    executed: bool = False,
+    network: str = NETWORK_NONE,
+    binding: str = "",
+    exit_code: int | None = None,
+    spec: RuntimeRequest | None = None,
 ) -> DynamicResult:
+    metadata = _meta(
+        request,
+        capability=capability,
+        observation=observation,
+        deterministic=deterministic,
+        network=network,
+        spec=spec,
+    )
+    if binding:
+        metadata["binding"] = binding
     return DynamicResult(
         engine=engine.engine_id,
         engine_version=engine.version(),
         language=request.language,
         target=request.target,
         status=status,
-        executed=False,
-        provenance="sandbox",
-        oracle_explanation=explanation,
-        oracle_kind="" if status is not ResultStatus.INGESTED else "runtime",
-        metadata=_meta(
-            request,
-            capability=capability,
-            observation=observation,
-            deterministic=deterministic,
-        ),
-    )
-
-
-def _bare(
-    request: AnalysisRequest,
-    explanation: str,
-    status: ResultStatus = ResultStatus.FAILED,
-) -> DynamicResult:
-    return DynamicResult(
-        engine="bugforge-runtime",
-        language=request.language,
-        target=request.target,
-        status=status,
-        executed=False,
+        executed=executed,
+        exit_code=exit_code,
         provenance="sandbox",
         oracle_explanation=explanation,
         oracle_kind="",
-        metadata={
-            "verified": "false",
-            "vulnerability": "unknown",
-            "llm_invoked": "false",
-            "network": "none",
-            "observation_status": "unknown" if status is ResultStatus.FAILED else "incomplete",
-        },
+        metadata=metadata,
     )
 
 
@@ -329,27 +527,36 @@ def _meta(
     observation: str,
     deterministic: str,
     observed: bool = False,
+    network: str = NETWORK_NONE,
+    spec: RuntimeRequest | None = None,
 ) -> dict[str, str]:
     if not observed:
-        evidence_class = ""
+        evidence_class = "tool_status"
     elif capability == "differential_validation":
         evidence_class = "differential"
     else:
         evidence_class = "runtime"
-    return {
+    metadata = {
         "verified": "false",
         "vulnerability": "unknown",
         "capability": capability,
         "evidence_class": evidence_class,
         "observation_status": observation,
         "deterministic": deterministic,
-        "network": "none",
+        "network": network,
         "environment": "docker-sandbox",
         "project": request.extra.get("project_id", ""),
         "source_snapshot": request.extra.get("source_snapshot", ""),
         "compiler_configuration": request.extra.get("compiler_configuration", ""),
         "llm_invoked": "false",
     }
+    if spec is not None:
+        metadata["runtime_mode"] = spec.mode
+        metadata["request_identity"] = spec.identity_hash()
+        metadata["chain_id"] = spec.chain_id
+        metadata["fork_block"] = spec.block_number if spec.mode == "fork" else ""
+        metadata["fork_reference"] = spec.fork_reference
+    return metadata
 
 
 def _fork_gate(engine: RuntimeEngine, request: AnalysisRequest) -> DynamicResult | None:
@@ -418,26 +625,6 @@ def _secret_requested(request: AnalysisRequest) -> bool:
 def _public_network_requested(request: AnalysisRequest) -> bool:
     blob = " ".join(f"{key}={value}" for key, value in request.extra.items()).lower()
     return any(mark in blob for mark in _PUBLIC)
-
-
-def _command(mode: str, identity: ForkIdentity | None) -> list[str]:
-    if mode != "fork" or identity is None:
-        return local_command()
-    return [
-        "bugforge-runtime",
-        "--mode",
-        "fork",
-        "--chain-id",
-        identity.chain_id,
-        "--block",
-        identity.block_number,
-        "--state",
-        identity.state_snapshot,
-        "--fork-source",
-        identity.fork_source,
-        "--output",
-        "/bugforge-output/runtime.json",
-    ]
 
 
 def _execute(config: ExecutionConfig) -> ExecutionResult:

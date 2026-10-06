@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.discovery.capabilities import EngineAvailability, EngineCapability, ResultStatus
+from app.discovery.capabilities import (
+    CAPABILITY_ORDER,
+    EngineAvailability,
+    EngineCapability,
+    ResultStatus,
+)
 from app.discovery.corpus import DiscoveryCorpus, SeedSource
 from app.discovery.engine import AnalysisRequest, DiscoveryEngine
 from app.discovery.results import DynamicResult
@@ -288,7 +293,7 @@ class DiscoveryScheduler:
                 "not installed",
                 "",
             )
-        capability = next(iter(engine.capabilities()), EngineCapability.PLANNING_ONLY)
+        capability = capability_for(engine, request)
         return ScheduleDecision(engine.engine_id, "run", "selected", capability.value)
 
     def plan_followup(self, request: AnalysisRequest) -> list[ScheduleDecision]:
@@ -387,6 +392,20 @@ class DiscoveryScheduler:
             results.append(result)
             self.note_result(result, targeted)
         return results
+
+
+def capability_for(engine: DiscoveryEngine, request: AnalysisRequest) -> EngineCapability:
+    """Name one capability deterministically, even for a duck-typed engine."""
+    chooser = getattr(engine, "selected_capability", None)
+    if callable(chooser):
+        chosen = chooser(request)
+        if isinstance(chosen, EngineCapability):
+            return chosen
+    declared = engine.capabilities()
+    for item in CAPABILITY_ORDER:
+        if item in declared:
+            return item
+    return EngineCapability.PLANNING_ONLY
 
 
 def coverage_key(result: DynamicResult, request: AnalysisRequest) -> str:

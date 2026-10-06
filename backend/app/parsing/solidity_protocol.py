@@ -7,6 +7,8 @@ not a verification, a reproduction, or proof of safety.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 from app.discovery.sequences import (
@@ -211,6 +213,13 @@ class ProtocolPath:
     edges: tuple[str, ...]
     kinds: tuple[str, ...]
     status: str
+    stable_id: str = ""
+
+
+@dataclass(frozen=True)
+class PathExpansion:
+    paths: tuple[ProtocolPath, ...]
+    truncated: bool
 
 
 @dataclass(frozen=True)
@@ -255,6 +264,12 @@ class ProtocolEvidence:
     assumptions: tuple[str, ...]
     uncertainty: str
     status: str
+    paths: tuple[ProtocolPath, ...] = ()
+    paths_truncated: bool = False
+
+    @property
+    def path_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(item.stable_id or item.path_id for item in self.paths))
 
 
 def clamp_protocol_bounds(requested: ProtocolBounds | None) -> ProtocolBounds:
@@ -362,7 +377,15 @@ def expand_paths(
     Parallel edges between the same nodes stay distinct. Path identity includes
     those edge identities and is not rebuilt by searching for some A-to-B edge.
     """
+    return expand_paths_report(graph, bounds).paths
+
+
+def expand_paths_report(
+    graph: ProtocolGraph, bounds: ProtocolBounds | None = None
+) -> PathExpansion:
+    """Expand within the hard caps and say whether the cap hid further paths."""
     active = clamp_protocol_bounds(bounds)
+    limit = active.max_expansion
     by_source: dict[str, list[InteractionEdge]] = {}
     by_id: dict[str, InteractionEdge] = {}
     for edge in graph.edges:
@@ -375,7 +398,7 @@ def expand_paths(
     for origin in sorted(graph.nodes, key=lambda item: item.node_id):
         queue: list[tuple[tuple[str, ...], tuple[str, ...]]] = [((origin.node_id,), ())]
         seen.add(((origin.node_id,), ()))
-        while queue and len(found) < active.max_expansion:
+        while queue and len(found) <= limit:
             nodes, edge_ids = queue.pop(0)
             if len(edge_ids) >= active.max_edges:
                 continue
@@ -391,20 +414,35 @@ def expand_paths(
                     continue
                 seen.add((nxt_nodes, nxt_edges))
                 kinds = tuple(by_id[item].kind for item in nxt_edges)
+                path_id = "nodes:" + "->".join(nxt_nodes) + "|edges:" + ",".join(nxt_edges)
                 found.append(
                     ProtocolPath(
-                        "nodes:" + "->".join(nxt_nodes) + "|edges:" + ",".join(nxt_edges),
+                        path_id,
                         nxt_nodes,
                         nxt_edges,
                         kinds,
                         "candidate",
+                        path_stable_id(graph, path_id),
                     )
                 )
                 queue.append((nxt_nodes, nxt_edges))
-                if len(found) >= active.max_expansion:
+                if len(found) > limit:
                     break
-    found.sort(key=lambda item: item.path_id)
-    return tuple(found[: active.max_expansion])
+        if len(found) > limit:
+            break
+    truncated = len(found) > limit
+    kept = found[:limit]
+    kept.sort(key=lambda item: item.path_id)
+    return PathExpansion(tuple(kept), truncated)
+
+
+def path_stable_id(graph: ProtocolGraph, path_id: str) -> str:
+    """Identity from project, snapshot, compiler, and the ordered node and edge ids."""
+    blob = json.dumps(
+        [graph.project, graph.source_snapshot, graph.compiler_configuration, path_id],
+        separators=(",", ":"),
+    )
+    return "path-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
 
 
 def cross_flows(
@@ -596,7 +634,11 @@ def protocol_evidence(
     engines: tuple[str, ...] = (),
     environment: str = "local",
     uncertainty: str = "candidate",
+    paths: tuple[ProtocolPath, ...] = (),
+    paths_truncated: bool = False,
 ) -> ProtocolEvidence:
+    if not path and len(paths) == 1:
+        path = paths[0].path_id
     return ProtocolEvidence(
         graph.project,
         graph.source_snapshot,
@@ -613,6 +655,8 @@ def protocol_evidence(
         ("a cross-contract candidate is not verification",),
         uncertainty,
         "candidate",
+        paths,
+        paths_truncated,
     )
 
 
@@ -633,6 +677,9 @@ def protocol_domain_evidence(evidence: ProtocolEvidence) -> Evidence:
             "source_snapshot": evidence.source_snapshot,
             "compiler_configuration": evidence.compiler_configuration,
             "path": evidence.path,
+            "path_count": str(len(evidence.paths)),
+            "path_ids": json.dumps(list(evidence.path_ids)),
+            "paths_truncated": str(evidence.paths_truncated).lower(),
             "sequence_id": evidence.sequence_id,
             "environment": evidence.environment,
             "evidence_class": "protocol",

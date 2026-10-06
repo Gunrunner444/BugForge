@@ -87,7 +87,6 @@ class DynamicResult:
                 "seed_id": self.seed_id,
                 "status": self.status.value,
                 "executed": str(self.executed).lower(),
-                "verified": "false",
                 "contract": self.contract,
                 "function": self.function,
                 "provenance": self.provenance,
@@ -101,6 +100,7 @@ class DynamicResult:
                 "sanitizer": self.sanitizer,
                 **{key: str(value) for key, value in self.coverage.items()},
                 **self.metadata,
+                "verified": "false",
             },
         )
 
@@ -111,6 +111,8 @@ def _evidence_kind(result: DynamicResult) -> EvidenceKind:
     Assertion, property, symbolic, sanitizer, and crash observations stay
     distinguishable. A quiet log is only for an execution that has none of them.
     """
+    if result.metadata.get("evidence_class") == "tool_status":
+        return EvidenceKind.TOOL_STATUS
     oracle = result.oracle_kind
     symbolic = (
         oracle in {"symbolic", "counterexample"} or result.metadata.get("seed_source") == "symbolic"
