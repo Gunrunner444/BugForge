@@ -2,6 +2,7 @@ from app.models.analysis import Analysis, CodeEntity, ImportRecord, RepositoryFi
 from app.models.base import Base
 from app.models.debugging import AIModelCall, DebuggingHypothesis, DebuggingSession
 from app.models.discovery import AutonomousAnalysisRun, DiscoveryRun, RepositoryCandidate
+from app.models.discovery_orchestration import DBOrchestrationCampaign, DBOrchestrationDecision
 from app.models.finding import DBFinding
 from app.models.github import GitHubDelivery, GitHubRepository
 from app.models.hackerone import (
@@ -45,6 +46,8 @@ from app.models.verification import PatchVerification
 
 __all__ = [
     "Base",
+    "DBOrchestrationCampaign",
+    "DBOrchestrationDecision",
     "Project",
     "Analysis",
     "RepositoryFile",

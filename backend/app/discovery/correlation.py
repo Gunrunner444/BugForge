@@ -28,7 +28,7 @@ def correlate_results(results: list[DynamicResult]) -> list[RelatedObservation]:
         if not result.executed and result.provenance != "slither_json":
             continue
         for finding in result.findings:
-            family = _family(finding.detector_id)
+            family = detector_family(finding.detector_id)
             key = "|".join(
                 part.lower()
                 for part in (
@@ -62,7 +62,7 @@ def correlate_results(results: list[DynamicResult]) -> list[RelatedObservation]:
     return related
 
 
-def _family(detector_id: str) -> str:
+def detector_family(detector_id: str) -> str:
     text = detector_id.lower()
     if "reentr" in text:
         return "reentrancy"

@@ -21,6 +21,7 @@ class ScheduleDecision:
     action: str
     reason: str
     capability: str = ""
+    code: str = ""
 
 
 @dataclass
@@ -78,13 +79,19 @@ class DiscoveryScheduler:
             engine = by_id.get(engine_id)
             if engine is None:
                 decisions.append(
-                    ScheduleDecision(engine_id, "skip", "engine is not registered", "")
+                    ScheduleDecision(
+                        engine_id, "skip", "engine is not registered", "", "unregistered"
+                    )
                 )
                 continue
             decision = self._decide(engine, request)
             if decision.action == "run" and selected + self.engines_started >= self.max_engines:
                 decision = ScheduleDecision(
-                    engine.engine_id, "skip", "campaign budget exhausted", decision.capability
+                    engine.engine_id,
+                    "skip",
+                    "campaign budget exhausted",
+                    decision.capability,
+                    "budget",
                 )
             decisions.append(decision)
             if decision.action == "run":
@@ -251,6 +258,7 @@ class DiscoveryScheduler:
                 "skip",
                 f"does not support {request.language}",
                 "",
+                "language",
             )
         if engine.engine_id == "wake" and request.extra.get("include_wake") != "true":
             return ScheduleDecision(
@@ -258,6 +266,7 @@ class DiscoveryScheduler:
                 "skip",
                 "Wake stays optional unless this round asks for it",
                 EngineCapability.STATIC_ANALYSIS.value,
+                "optional",
             )
         if engine.engine_id in {"echidna", "medusa"} and not (
             request.function or request.contract or request.has_harness
@@ -267,6 +276,7 @@ class DiscoveryScheduler:
                 "skip",
                 "property and coverage fuzzing wait for a contract or harness target",
                 EngineCapability.PROPERTY_TESTING.value,
+                "target",
             )
         if engine.engine_id == "halmos" and not (request.difficult or self.feedback.difficult):
             return ScheduleDecision(
@@ -274,6 +284,7 @@ class DiscoveryScheduler:
                 "skip",
                 "symbolic testing waits until a target is hard to reach",
                 EngineCapability.SYMBOLIC_EXECUTION.value,
+                "symbolic_hint",
             )
         if (
             engine.engine_id == "foundry"
@@ -285,6 +296,7 @@ class DiscoveryScheduler:
                 "skip",
                 "no Foundry project or harness was detected",
                 EngineCapability.TEST_EXECUTION.value,
+                "framework",
             )
         if engine.availability() is not EngineAvailability.AVAILABLE:
             return ScheduleDecision(
@@ -292,9 +304,62 @@ class DiscoveryScheduler:
                 "skip",
                 "not installed",
                 "",
+                "unavailable",
             )
         capability = capability_for(engine, request)
-        return ScheduleDecision(engine.engine_id, "run", "selected", capability.value)
+        return ScheduleDecision(engine.engine_id, "run", "selected", capability.value, "selected")
+
+    def decide(self, engine_id: str, request: AnalysisRequest) -> ScheduleDecision:
+        """Apply the scheduler's own preconditions to one named engine. Nothing runs."""
+        engine = self._engine(engine_id)
+        if engine is None:
+            return ScheduleDecision(
+                engine_id, "skip", "engine is not registered", "", "unregistered"
+            )
+        return self._decide(engine, request)
+
+    def _engine(self, engine_id: str) -> DiscoveryEngine | None:
+        for engine in self.engines:
+            if engine.engine_id == engine_id:
+                return engine
+        return None
+
+    def run_engine(self, engine_id: str, request: AnalysisRequest) -> DynamicResult:
+        """Run exactly one named engine for an orchestrated round.
+
+        The caller has already chosen the capability. A run counts toward
+        `max_engines` only when the engine executed, and a spent campaign budget
+        refuses here too, so a second caller cannot exceed it.
+        """
+        engine = self._engine(engine_id)
+        if engine is None:
+            return DynamicResult(
+                engine=engine_id,
+                language=request.language,
+                target=request.target,
+                status=ResultStatus.UNSUPPORTED,
+                executed=False,
+                provenance="unregistered",
+                oracle_explanation="engine is not registered",
+            )
+        if self.engines_started >= self.max_engines:
+            return DynamicResult(
+                engine=engine_id,
+                language=request.language,
+                target=request.target,
+                status=ResultStatus.UNSUPPORTED,
+                executed=False,
+                provenance="budget_exhausted",
+                oracle_explanation="campaign budget exhausted",
+            )
+        if EngineCapability.STATIC_ANALYSIS in engine.capabilities():
+            result = engine.analyze_target(request)
+        else:
+            result = engine.start_campaign(request)
+        if result.executed:
+            self.engines_started += 1
+        self.note_result(result, request)
+        return result
 
     def plan_followup(self, request: AnalysisRequest) -> list[ScheduleDecision]:
         """Choose the next complementary engine from what the last round learned."""
@@ -392,6 +457,12 @@ class DiscoveryScheduler:
             results.append(result)
             self.note_result(result, targeted)
         return results
+
+
+def engine_rank(engine_id: str, language: str) -> int:
+    """Stable preference index for one engine. Unknown engines sort last."""
+    order = _LANGUAGE_ORDER.get(language, ())
+    return order.index(engine_id) if engine_id in order else len(order) + 1
 
 
 def capability_for(engine: DiscoveryEngine, request: AnalysisRequest) -> EngineCapability:

@@ -1,7 +1,9 @@
-"""Interfaces for a later adaptive loop.
+"""Single-step capability suggestion.
 
-Phase 45 records observation, uncertainty, and the next capability. It does
-not plan a campaign by itself and it does not raise a budget.
+`choose_next` names one capability from one observation. It plans nothing, it
+ignores budget and availability, and it cannot raise a limit. Adaptive,
+budgeted, persisted research is `app.discovery.orchestration` (Phase 49),
+which does not call this function.
 """
 
 from __future__ import annotations
