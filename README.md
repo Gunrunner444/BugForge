@@ -69,7 +69,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 46 | Economic and DeFi observations on bounded sequences | ✅ Implemented |
 | Phase 47 | Protocol-wide cross-contract security analysis | ✅ Implemented |
 | Phase 48 | Runtime, fork, and differential validation | ✅ Implemented |
-| Phase 49 | Adaptive multi-engine research orchestration | Not started |
+| Phase 49 | Adaptive multi-engine research orchestration | ✅ Implemented |
 | Phase 50 | Production bounty-research workflow | Not started |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
@@ -120,8 +120,10 @@ Later Solidity work is also on `main`:
 [docs/phase44-project-aware-stateful-verification.md](docs/phase44-project-aware-stateful-verification.md),
 [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
+[docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
+[docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
 and
-[docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md).
+[docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md).
 Foundry, Slither, Echidna, Medusa, Halmos, Wake, and ItyFuzz are optional.
 A missing tool is unavailable and does not invent a result. Economic analysis
 does not verify a finding.
@@ -409,10 +411,18 @@ observations and compares pinned executions. A runtime result, a fork result,
 and a differential difference stay candidates or unknown. They do not verify
 a finding. The runtime image is optional. A missing image is unavailable, and
 BugForge does not fall back to host execution or a public RPC.
+Phase 49 chooses which engine to run next from the evidence a campaign holds.
+It runs one engine per round, ranks candidates deterministically, reserves
+budget it can never raise, refuses duplicate work, records every decision, and
+persists its state so it can resume. It records contradictions without
+choosing a side, and "nothing found" is never proof of safety. It does not
+verify a finding, call a model, or grant an approval. Cursor remains the only
+AI controller.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
-and [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md).
+[docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
+and [docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md).
 
 ### Security testing roadmap
 
@@ -434,7 +444,7 @@ and [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-
 | 46 | Economic and DeFi observations: deltas, oracles, vaults, AMMs, lending | Implemented |
 | 47 | Protocol-wide cross-contract security analysis and bounded path discovery | Implemented |
 | 48 | Sandboxed runtime observations, pinned forks, and differential comparison | Implemented |
-| 49 | Adaptive multi-engine research orchestration | Not started |
+| 49 | Evidence-driven, bounded multi-engine research orchestration with persisted state and resume | Implemented |
 | 50 | Production bounty-research workflow | Not started |
 
 In-memory `RateLimiter` is **per process**. Multiple API workers do not share
