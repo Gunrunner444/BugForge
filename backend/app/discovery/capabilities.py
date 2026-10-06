@@ -19,6 +19,9 @@ class EngineCapability(StrEnum):
     TEST_EXECUTION = "test_execution"
     ECONOMIC_SIMULATION = "economic_simulation"
     CROSS_CONTRACT_ANALYSIS = "cross_contract_analysis"
+    RUNTIME_VALIDATION = "runtime_validation"
+    FORK_VALIDATION = "fork_validation"
+    DIFFERENTIAL_VALIDATION = "differential_validation"
 
 
 class EngineAvailability(StrEnum):

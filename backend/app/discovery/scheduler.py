@@ -106,7 +106,7 @@ class DiscoveryScheduler:
 
     def note_result(self, result: DynamicResult, request: AnalysisRequest) -> None:
         self.feedback.rounds += 1
-        label = _capability_label(result.engine)
+        label = _exercised_label(result)
         if label and label not in self.feedback.exercised:
             self.feedback.exercised.append(label)
         increased = self._coverage_increased(result, request)
@@ -421,6 +421,12 @@ def missing_capability(request: AnalysisRequest, feedback: SchedulerFeedback) ->
         return "economic_simulation"
     if _protocol_requested(request) and "cross_contract_analysis" not in exercised:
         return "cross_contract_analysis"
+    if _runtime_requested(request) and "runtime_validation" not in exercised:
+        return "runtime_validation"
+    if _fork_requested(request) and "fork_validation" not in exercised:
+        return "fork_validation"
+    if _differential_requested(request) and "differential_validation" not in exercised:
+        return "differential_validation"
     if stalled and "symbolic_execution" not in exercised:
         return "symbolic_execution"
     static_known = request.extra.get("source") == "static_finding" or bool(request.campaign_id)
@@ -443,9 +449,60 @@ def _protocol_requested(request: AnalysisRequest) -> bool:
     return request.extra.get("protocol") == "true" or request.extra.get("source") == "protocol"
 
 
+def _runtime_requested(request: AnalysisRequest) -> bool:
+    return request.extra.get("runtime") == "true" or request.extra.get("source") == "runtime"
+
+
+def _fork_requested(request: AnalysisRequest) -> bool:
+    return request.extra.get("fork") == "true" or request.extra.get("source") == "fork"
+
+
+def _differential_requested(request: AnalysisRequest) -> bool:
+    return (
+        request.extra.get("differential") == "true" or request.extra.get("source") == "differential"
+    )
+
+
+_CAPABILITY_LABELS = frozenset(
+    {
+        "economic_simulation",
+        "cross_contract_analysis",
+        "runtime_validation",
+        "fork_validation",
+        "differential_validation",
+        "static_analysis",
+        "fuzzing",
+        "symbolic_execution",
+        "test_execution",
+    }
+)
+
+
+def _exercised_label(result: DynamicResult) -> str:
+    """Unavailable, unsupported, and unexecuted failures are not evidence."""
+    ran = result.status in {
+        ResultStatus.INGESTED,
+        ResultStatus.INTERESTING,
+        ResultStatus.EXECUTED,
+    } or (
+        result.executed
+        and result.status in {ResultStatus.FAILED, ResultStatus.TIMEOUT, ResultStatus.TOOL_FAILURE}
+    )
+    if not ran:
+        return ""
+    named = result.metadata.get("capability", "")
+    if named in _CAPABILITY_LABELS:
+        return named
+    return _capability_label(result.engine)
+
+
 def _capability_label(engine_id: str) -> str:
     if engine_id == "bugforge-economic":
         return "economic_simulation"
+    if engine_id == "bugforge-protocol":
+        return "cross_contract_analysis"
+    if engine_id == "bugforge-runtime":
+        return "runtime_validation"
     if engine_id in {"ityfuzz", "echidna", "medusa"}:
         return "fuzzing"
     if engine_id == "halmos":
@@ -462,10 +519,15 @@ def _engine_order_for(request: AnalysisRequest, feedback: SchedulerFeedback) -> 
     if request.language != "solidity":
         return base
     needed = missing_capability(request, feedback)
-    if needed == "economic_simulation":
-        return ("bugforge-economic", *[item for item in base if item != "bugforge-economic"])
-    if needed == "cross_contract_analysis":
-        return base
+    specialized = {
+        "economic_simulation": "bugforge-economic",
+        "cross_contract_analysis": "bugforge-protocol",
+        "runtime_validation": "bugforge-runtime",
+        "fork_validation": "bugforge-runtime",
+        "differential_validation": "bugforge-runtime",
+    }.get(needed, "")
+    if specialized:
+        return (specialized, *[item for item in base if item != specialized])
     if needed == "test_execution":
         return ("foundry", *[item for item in base if item != "foundry"])
     if needed not in {"fuzzing", "symbolic_execution"}:

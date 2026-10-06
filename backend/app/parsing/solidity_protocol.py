@@ -17,6 +17,8 @@ from app.discovery.sequences import (
     clamp_bounds,
     describe_call,
 )
+from app.domain.evidence import Evidence, EvidenceKind
+from app.parsing.solidity_arguments import ArgumentCandidate, combine, parameter_types
 from app.parsing.solidity_economics import AssetDelta, EconomicResult, OracleStatus
 from app.parsing.solidity_identity import canonical_function_key
 from app.parsing.solidity_ir import SemanticCall, SemanticFunction, SemanticProgram
@@ -90,6 +92,39 @@ class EventLink:
     event: str
     function_identity: str
     declaration_id: str
+    provenance: str
+
+
+@dataclass(frozen=True)
+class PriceLink:
+    """Oracle value flowing through a computation into an asset operation.
+
+    Two calls in one function are not this link.
+    """
+
+    oracle_operation: str
+    computation_id: str
+    valuation_id: str
+    asset_operation: str
+    provenance: str
+    span: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class TrustBoundary:
+    """Evidence that a privileged operation can be triggered across a trust boundary.
+
+    A call into an authorized function is not enough.
+    """
+
+    caller_function: str
+    callee_function: str
+    call_id: str
+    caller_controlled: str
+    missing_authorization: str
+    privileged_callee: str
+    propagation: str
+    relationship: str
     provenance: str
 
 
@@ -270,6 +305,8 @@ def build_protocol_graph(
     storage_links: tuple[StorageLink, ...] = (),
     implementation_links: tuple[ImplementationLink, ...] = (),
     event_links: tuple[EventLink, ...] = (),
+    price_links: tuple[PriceLink, ...] = (),
+    trust_boundaries: tuple[TrustBoundary, ...] = (),
 ) -> ProtocolGraph:
     active = clamp_protocol_bounds(bounds)
     texts = sources or {}
@@ -288,7 +325,8 @@ def build_protocol_graph(
     edges.extend(_storage_edges(storage_links, functions))
     edges.extend(_proxy_edges(implementation_links, nodes, compiler_configuration))
     edges.extend(_event_edges(event_links, functions))
-    edges.extend(_price_edges(edges))
+    edges.extend(_authorization_edges(trust_boundaries, edges, functions))
+    edges.extend(_price_edges(edges, price_links))
     edges.sort(key=lambda item: (_PRIORITY.get(item.kind, 10), item.edge_id))
     if len(edges) > active.max_edges:
         edges = edges[: active.max_edges]
@@ -319,42 +357,50 @@ def build_protocol_graph(
 def expand_paths(
     graph: ProtocolGraph, bounds: ProtocolBounds | None = None
 ) -> tuple[ProtocolPath, ...]:
-    """Deterministic expansion. Stronger edge kinds are tried first."""
+    """Deterministic expansion that keeps the exact edge sequence.
+
+    Parallel edges between the same nodes stay distinct. Path identity includes
+    those edge identities and is not rebuilt by searching for some A-to-B edge.
+    """
     active = clamp_protocol_bounds(bounds)
     by_source: dict[str, list[InteractionEdge]] = {}
+    by_id: dict[str, InteractionEdge] = {}
     for edge in graph.edges:
         by_source.setdefault(edge.source, []).append(edge)
+        by_id[edge.edge_id] = edge
     for items in by_source.values():
         items.sort(key=lambda item: (_PRIORITY.get(item.kind, 10), item.edge_id))
     found: list[ProtocolPath] = []
+    seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
     for origin in sorted(graph.nodes, key=lambda item: item.node_id):
-        queue: list[tuple[str, ...]] = [(origin.node_id,)]
-        seen: set[tuple[str, ...]] = {(origin.node_id,)}
+        queue: list[tuple[tuple[str, ...], tuple[str, ...]]] = [((origin.node_id,), ())]
+        seen.add(((origin.node_id,), ()))
         while queue and len(found) < active.max_expansion:
-            current = queue.pop(0)
-            if len(current) - 1 >= active.max_edges:
+            nodes, edge_ids = queue.pop(0)
+            if len(edge_ids) >= active.max_edges:
                 continue
-            depth = _callback_depth(current, by_source)
-            for edge in by_source.get(current[-1], ()):
+            depth = sum(1 for item in edge_ids if by_id[item].kind == "callback")
+            for edge in by_source.get(nodes[-1], ()):
                 if edge.kind == "callback" and depth + 1 > active.max_callback_depth:
                     continue
-                nxt = (*current, edge.target)
-                if nxt in seen or len(set(nxt)) > active.max_contracts:
+                nxt_nodes = (*nodes, edge.target)
+                nxt_edges = (*edge_ids, edge.edge_id)
+                if (nxt_nodes, nxt_edges) in seen or len(set(nxt_nodes)) > active.max_contracts:
                     continue
-                if len(nxt) - 1 > active.max_edges:
+                if len(nxt_edges) > active.max_edges:
                     continue
-                seen.add(nxt)
-                kinds = _kinds(nxt, by_source)
+                seen.add((nxt_nodes, nxt_edges))
+                kinds = tuple(by_id[item].kind for item in nxt_edges)
                 found.append(
                     ProtocolPath(
-                        "->".join(nxt),
-                        nxt,
-                        tuple(item.edge_id for item in _path_edges(nxt, by_source)),
+                        "nodes:" + "->".join(nxt_nodes) + "|edges:" + ",".join(nxt_edges),
+                        nxt_nodes,
+                        nxt_edges,
                         kinds,
                         "candidate",
                     )
                 )
-                queue.append(nxt)
+                queue.append((nxt_nodes, nxt_edges))
                 if len(found) >= active.max_expansion:
                     break
     found.sort(key=lambda item: item.path_id)
@@ -385,50 +431,45 @@ def cross_flows(
 
 
 def plan_protocol_calls(
-    steps: tuple[tuple[str, str], ...],
+    steps: tuple[tuple[str, ...], ...],
     program: SemanticProgram | None,
     source: str,
     *,
     exploration: ExplorationBounds | None = None,
     protocol: ProtocolBounds | None = None,
+    programs: tuple[SemanticProgram, ...] = (),
+    sources: dict[str, str] | None = None,
 ) -> tuple[PlannedCall, ...] | None:
-    """Build calls only from established signatures. Missing arguments reject the plan."""
+    """Build calls only from established signatures. Missing arguments reject the plan.
+
+    A step is ``(contract, name)`` in one program, or ``(file, contract, selector)``
+    across programs. An unresolved or overloaded selector rejects the sequence.
+    """
     active = clamp_bounds(exploration)
     caps = clamp_protocol_bounds(protocol)
     if not steps or len(steps) > active.max_sequence_length:
         return None
-    if len({contract for contract, _name in steps}) > caps.max_contracts:
+    if len({_step_contract(step) for step in steps}) > caps.max_contracts:
         return None
     if active.max_executions > MAX_EXECUTIONS:
         return None
-    if program is None:
+    catalog = programs or ((program,) if program is not None else ())
+    if not catalog:
         return None
+    texts = dict(sources or {})
+    if program is not None and source and program.file not in texts:
+        texts[program.file] = source
     calls: list[PlannedCall] = []
-    for contract, name in steps:
-        call = describe_call(program, source, contract, name)
-        needs_arguments = _requires_arguments(source, contract, name, program)
-        if call is None or (call.arguments == () and needs_arguments):
+    for step in steps:
+        call = _resolve_protocol_step(step, catalog, texts, source, program)
+        if call is None:
             return None
-        fact = function_signature(source, contract, name, program)
-        identity = str(fact.get("identity", "")) if fact else ""
-        calls.append(
-            PlannedCall(
-                call.function,
-                call.actor,
-                call.arguments,
-                call.value,
-                call.direction,
-                call.assumptions,
-                call.score,
-                contract,
-                identity,
-            )
-        )
+        calls.append(call)
     return tuple(calls)
 
 
 def protocol_sequences(
-    steps: tuple[tuple[str, str], ...],
+    steps: tuple[tuple[str, ...], ...],
     program: SemanticProgram | None,
     source: str,
     *,
@@ -436,13 +477,24 @@ def protocol_sequences(
     protocol: ProtocolBounds | None = None,
     project: str = "",
     target: str = "",
+    programs: tuple[SemanticProgram, ...] = (),
+    sources: dict[str, str] | None = None,
 ) -> tuple[PlannedSequence, ...]:
-    calls = plan_protocol_calls(steps, program, source, exploration=exploration, protocol=protocol)
+    calls = plan_protocol_calls(
+        steps,
+        program,
+        source,
+        exploration=exploration,
+        protocol=protocol,
+        programs=programs,
+        sources=sources,
+    )
     if calls is None:
         return ()
     active = clamp_bounds(exploration)
     sequence = PlannedSequence(
-        "protocol:" + "|".join(f"{item.contract}.{item.function}" for item in calls),
+        "protocol:"
+        + "|".join(f"{item.contract}.{item.function_identity or item.function}" for item in calls),
         "protocol",
         calls,
         "planned",
@@ -455,14 +507,23 @@ def protocol_sequences(
 
 
 def separate_asset_deltas(deltas: tuple[AssetDelta, ...]) -> EconomicResult:
-    """Keep actors and tokens apart. A balance change is not profit or a vulnerability."""
-    seen: set[tuple[str, str, str]] = set()
+    """Keep actors, tokens, and states apart. A balance change is not profit."""
+    seen: set[tuple[str, str, str, str, str, str, str]] = set()
     for delta in deltas:
-        key = (delta.actor, delta.token, delta.kind)
+        index = "" if delta.transaction_index is None else str(delta.transaction_index)
+        key = (
+            delta.actor,
+            delta.token,
+            delta.kind,
+            index,
+            delta.snapshot,
+            delta.contract,
+            delta.source,
+        )
         if key in seen:
             return EconomicResult(
                 OracleStatus.UNKNOWN.value,
-                "two observations of the same actor and token were not merged",
+                "two observations of the same actor, token, and state were not merged",
             )
         seen.add(key)
     tokens = {item.token for item in deltas}
@@ -486,28 +547,43 @@ def correlate_modalities(
     transition_id: str,
     economic_status: str,
     trace: str,
+    static_operation: str = "",
+    runtime_operation: str = "",
+    transition_operation: str = "",
+    economic_operation: str = "",
+    overload_ambiguous: bool = False,
 ) -> ModalityCorrelation:
-    """Keep static, runtime, transition, and economic modalities separate."""
+    """Correlate modalities only when their operation identities are the same.
+
+    An event name, a bare function name, or an ambiguous overload does not match.
+    A match is still a candidate observation, not proof of the static property.
+    """
     assumptions = (
         "an event name is not proof",
         "a static relationship is not a runtime observation",
         "a runtime event is not source-code proof",
         "a caller-supplied trace is not executable input",
+        "an economic observation stays an observation",
     )
-    if not static_id and not runtime_event and not transition_id:
+    observed = candidate_status(economic_status) if economic_status else "unknown"
+    operations = (static_operation, runtime_operation, transition_operation)
+    matched = _operations_match(operations, economic_operation, overload_ambiguous)
+    if matched:
+        status = "candidate"
+    elif not static_id and not runtime_event and not transition_id and not any(operations):
         status = "unknown"
-    elif runtime_event and not static_id:
-        status = "incomplete"
     else:
         status = "incomplete"
     return ModalityCorrelation(
         static_id,
         runtime_event,
         transition_id,
-        candidate_status(economic_status) if economic_status else "unknown",
+        observed,
         "",
         status,
-        assumptions if trace or runtime_event or static_id else ("modalities stay separate",),
+        assumptions
+        if trace or runtime_event or static_id or any(operations)
+        else ("modalities stay separate",),
     )
 
 
@@ -537,6 +613,30 @@ def protocol_evidence(
         ("a cross-contract candidate is not verification",),
         uncertainty,
         "candidate",
+    )
+
+
+def protocol_domain_evidence(evidence: ProtocolEvidence) -> Evidence:
+    """Place a protocol candidate on the normal evidence lifecycle.
+
+    The record does not contribute to verification.
+    """
+    return Evidence(
+        kind=EvidenceKind.PROTOCOL_OBSERVATION,
+        source="bugforge-protocol",
+        summary="protocol candidate; not verification",
+        details=evidence.uncertainty,
+        metadata={
+            "verified": "false",
+            "status": "candidate",
+            "project": evidence.project,
+            "source_snapshot": evidence.source_snapshot,
+            "compiler_configuration": evidence.compiler_configuration,
+            "path": evidence.path,
+            "sequence_id": evidence.sequence_id,
+            "environment": evidence.environment,
+            "evidence_class": "protocol",
+        },
     )
 
 
@@ -595,12 +695,13 @@ def _nodes(
             if function.contract != contract:
                 continue
             types = _types(text, contract, function, program)
+            signature = "unresolved" if types is None else f"{function.name}({','.join(types)})"
             functions.append(
                 FunctionNode(
                     canonical_function_key(
                         function,
                         source_file=source_file,
-                        parameter_types=types,
+                        parameter_types=() if types is None else types,
                         project=project,
                         source_snapshot=source_snapshot,
                         compiler_configuration=compiler_configuration,
@@ -608,7 +709,7 @@ def _nodes(
                     node_id,
                     contract,
                     function.name,
-                    f"{function.name}({','.join(types)})",
+                    signature,
                     source_file,
                     function.line,
                     function.span,
@@ -620,32 +721,41 @@ def _nodes(
 
 def _types(
     source: str, contract: str, function: SemanticFunction, program: SemanticProgram
-) -> tuple[str, ...]:
-    if (
+) -> tuple[str, ...] | None:
+    """Types from this function's own header. Unknown stays unresolved."""
+    header = (function.source or "").split("{", 1)[0]
+    if "(" in header:
+        parsed = parameter_types(header)
+        if parsed is not None:
+            return parsed
+        return None
+    unique = (
         sum(
             1
             for item in program.functions
             if item.contract == contract and item.name == function.name
         )
-        != 1
-    ):
-        return ()
-    fact = function_signature(source, contract, function.name, program) if source else None
-    types = fact.get("parameter_types") if fact else ()
+        == 1
+    )
+    if not unique or not source:
+        return None
+    fact = function_signature(source, contract, function.name, program)
+    types = fact.get("parameter_types") if fact else None
     if isinstance(types, tuple):
         return tuple(str(item) for item in types)
-    return ()
+    return None
 
 
 def _contract_span(
     programs: tuple[SemanticProgram, ...], source_file: str, contract: str
 ) -> tuple[int, ...]:
+    """The contract declaration span. A function span is not a substitute."""
     for program in programs:
         if program.file != source_file:
             continue
-        spans = [item.span for item in program.functions if item.contract == contract and item.span]
-        if spans:
-            return spans[0]
+        for item in program.contracts:
+            if item.name == contract and item.span:
+                return item.span
     return (0, 0, 0, 0)
 
 
@@ -688,18 +798,6 @@ def _edges(
                         site.call_id,
                     )
                 )
-                if _authorization_edge(function, site, functions, target):
-                    edges.append(
-                        InteractionEdge(
-                            f"{caller.function_id}:{site.call_id}:authorization",
-                            caller.node_id,
-                            target,
-                            "authorization_dependency",
-                            "callee authorization is established; caller authorization is not",
-                            caller.function_id,
-                            site.call_id,
-                        )
-                    )
     return edges, unresolved
 
 
@@ -772,27 +870,53 @@ def _named_function(functions: list[FunctionNode], contract: str, name: str) -> 
     return matches[0]
 
 
-def _authorization_edge(
-    function: SemanticFunction,
-    site: SemanticCall,
+def _authorization_edges(
+    links: tuple[TrustBoundary, ...],
+    edges: list[InteractionEdge],
     functions: list[FunctionNode],
-    target: str,
-) -> bool:
-    if site.resolution not in _RESOLVED or function.authorization == "established":
-        return False
-    callee = [
-        item
-        for item in functions
-        if item.node_id == target
-        and item.name == site.callee
-        and item.contract != function.contract
-    ]
-    return len(callee) == 1 and _callee_authorized(callee[0], functions)
-
-
-def _callee_authorized(node: FunctionNode, functions: list[FunctionNode]) -> bool:
-    del functions
-    return node.authorization == "established"
+) -> list[InteractionEdge]:
+    """A trust-boundary hypothesis needs every required piece of evidence."""
+    by_call = {
+        (item.function_id, item.call_id): item
+        for item in edges
+        if item.function_id and item.call_id
+    }
+    by_function = {item.function_id: item for item in functions}
+    found: list[InteractionEdge] = []
+    for link in links:
+        if link.missing_authorization != "established" or link.privileged_callee != "established":
+            continue
+        if not all(
+            (
+                link.caller_controlled,
+                link.propagation,
+                link.relationship,
+                link.provenance,
+                link.call_id,
+                link.caller_function,
+                link.callee_function,
+            )
+        ):
+            continue
+        caller = by_function.get(link.caller_function)
+        callee = by_function.get(link.callee_function)
+        if caller is None or callee is None or caller.contract == callee.contract:
+            continue
+        call = by_call.get((caller.function_id, link.call_id))
+        if call is None or call.target != callee.node_id:
+            continue
+        found.append(
+            InteractionEdge(
+                f"{caller.function_id}:{link.call_id}:authorization",
+                caller.node_id,
+                callee.node_id,
+                "authorization_dependency",
+                link.provenance,
+                caller.function_id,
+                link.call_id,
+            )
+        )
+    return found
 
 
 def _unique_nodes(nodes: list[ContractNode]) -> dict[str, ContractNode]:
@@ -899,26 +1023,35 @@ def _event_edges(
     return edges
 
 
-def _price_edges(edges: list[InteractionEdge]) -> list[InteractionEdge]:
-    oracle = [item for item in edges if item.kind == "oracle_read"]
-    assets = [
-        item for item in edges if item.kind in {"token_transfer", "transfer_from", "asset_movement"}
-    ]
+def _price_edges(
+    edges: list[InteractionEdge], links: tuple[PriceLink, ...]
+) -> list[InteractionEdge]:
+    """A price edge requires oracle, computation, valuation, and asset evidence."""
+    by_id = {item.edge_id: item for item in edges}
+    assets = {"token_transfer", "transfer_from", "asset_movement"}
     found: list[InteractionEdge] = []
-    for left in oracle:
-        for right in assets:
-            if left.function_id and left.function_id == right.function_id:
-                found.append(
-                    InteractionEdge(
-                        f"price:{left.edge_id}:{right.edge_id}",
-                        left.target,
-                        right.target,
-                        "price_dependency",
-                        "same-function oracle read and asset call",
-                        left.function_id,
-                        left.call_id,
-                    )
-                )
+    for link in links:
+        if not link.computation_id or not link.valuation_id or not link.provenance or not link.span:
+            continue
+        if link.provenance == "same-function oracle read and asset call":
+            continue
+        oracle = by_id.get(link.oracle_operation)
+        asset = by_id.get(link.asset_operation)
+        if oracle is None or asset is None:
+            continue
+        if oracle.kind != "oracle_read" or asset.kind not in assets:
+            continue
+        found.append(
+            InteractionEdge(
+                f"price:{oracle.edge_id}:{asset.edge_id}:{link.computation_id}",
+                oracle.target,
+                asset.target,
+                "price_dependency",
+                link.provenance,
+                oracle.function_id,
+                link.computation_id,
+            )
+        )
     return found
 
 
@@ -1021,26 +1154,153 @@ def _node_by(nodes: list[ContractNode], source_file: str, contract: str) -> Cont
     return matches[0]
 
 
-def _callback_depth(nodes: tuple[str, ...], by_source: dict[str, list[InteractionEdge]]) -> int:
-    return sum(1 for item in _path_edges(nodes, by_source) if item.kind == "callback")
+def _operations_match(
+    operations: tuple[str, str, str], economic_operation: str, overload_ambiguous: bool
+) -> bool:
+    if overload_ambiguous or any(not item for item in operations):
+        return False
+    if len(set(operations)) != 1:
+        return False
+    identity = operations[0]
+    if "(" not in identity or "::" not in identity:
+        return False
+    return not economic_operation or economic_operation == identity
 
 
-def _path_edges(
-    nodes: tuple[str, ...], by_source: dict[str, list[InteractionEdge]]
-) -> list[InteractionEdge]:
-    found: list[InteractionEdge] = []
-    for left, right in zip(nodes, nodes[1:], strict=False):
-        match = next((item for item in by_source.get(left, ()) if item.target == right), None)
-        if match is not None:
-            found.append(match)
-    return found
+def _step_contract(step: tuple[str, ...]) -> str:
+    if len(step) >= 3:
+        return step[1]
+    return step[0] if step else ""
 
 
-def _kinds(nodes: tuple[str, ...], by_source: dict[str, list[InteractionEdge]]) -> tuple[str, ...]:
-    return tuple(item.kind for item in _path_edges(nodes, by_source))
+def _resolve_protocol_step(
+    step: tuple[str, ...],
+    catalog: tuple[SemanticProgram, ...],
+    texts: dict[str, str],
+    fallback_source: str,
+    fallback_program: SemanticProgram | None,
+) -> PlannedCall | None:
+    if len(step) == 2:
+        file_name, contract, selector = "", step[0], step[1]
+    elif len(step) == 3:
+        file_name, contract, selector = step
+    else:
+        return None
+    if not contract or not selector:
+        return None
+    chosen = _choose_program(catalog, file_name, contract)
+    if chosen is None:
+        return None
+    text = texts.get(chosen.file, "")
+    if not text and chosen is fallback_program:
+        text = fallback_source
+    function = _select_function(chosen, contract, selector)
+    if function is None:
+        return None
+    return _call_for_function(function, chosen, text)
 
 
-def _requires_arguments(source: str, contract: str, name: str, program: SemanticProgram) -> bool:
-    fact = function_signature(source, contract, name, program)
-    types = fact.get("parameter_types") if fact else ()
-    return isinstance(types, tuple) and bool(types)
+def _choose_program(
+    catalog: tuple[SemanticProgram, ...], file_name: str, contract: str
+) -> SemanticProgram | None:
+    if file_name:
+        matches = [item for item in catalog if _file_match(item.file, file_name)]
+    else:
+        matches = [
+            item
+            for item in catalog
+            if any(function.contract == contract for function in item.functions)
+            or any(fact.name == contract for fact in item.contracts)
+        ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _file_match(program_file: str, requested: str) -> bool:
+    left = program_file.replace("\\", "/").rstrip("/")
+    right = requested.replace("\\", "/").lstrip("./")
+    return left == right or left.endswith("/" + right)
+
+
+def _select_function(
+    program: SemanticProgram, contract: str, selector: str
+) -> SemanticFunction | None:
+    owned = [item for item in program.functions if item.contract == contract]
+    by_identity = [item for item in owned if item.identity == selector]
+    if len(by_identity) == 1:
+        return by_identity[0]
+    by_signature = [item for item in owned if _header_signature(item) == selector]
+    if len(by_signature) == 1:
+        return by_signature[0]
+    by_name = [item for item in owned if item.name == selector]
+    if len(by_name) == 1:
+        return by_name[0]
+    return None
+
+
+def _header_signature(function: SemanticFunction) -> str:
+    header = (function.source or "").split("{", 1)[0]
+    if "(" not in header:
+        return ""
+    types = parameter_types(header)
+    if types is None:
+        return ""
+    return f"{function.name}({','.join(types)})"
+
+
+def _call_for_function(
+    function: SemanticFunction, program: SemanticProgram, source: str
+) -> PlannedCall | None:
+    header = (function.source or "").split("{", 1)[0]
+    if "(" in header:
+        types = parameter_types(header)
+        if types is None:
+            return None
+        arguments: tuple[ArgumentCandidate, ...] = ()
+        if types:
+            rows = combine(types)
+            if not rows:
+                return None
+            arguments = rows[0]
+        return PlannedCall(
+            function.name,
+            "user",
+            arguments,
+            "0",
+            "unknown",
+            (
+                "actor is explicit and is not proof of authorization",
+                "a planned call is not a finding",
+            ),
+            0,
+            function.contract,
+            function.identity,
+        )
+    same_name = [
+        item
+        for item in program.functions
+        if item.contract == function.contract and item.name == function.name
+    ]
+    if len(same_name) != 1:
+        return None
+    fact = function_signature(source, function.contract, function.name, program)
+    if fact is None:
+        return None
+    parameter_type_names = fact.get("parameter_types")
+    if not isinstance(parameter_type_names, tuple):
+        return None
+    call = describe_call(program, source, function.contract, function.name)
+    if call is None or (parameter_type_names and not call.arguments):
+        return None
+    return PlannedCall(
+        call.function,
+        call.actor,
+        call.arguments,
+        call.value,
+        call.direction,
+        call.assumptions,
+        call.score,
+        function.contract,
+        str(fact.get("identity") or function.identity),
+    )

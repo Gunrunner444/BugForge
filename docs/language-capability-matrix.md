@@ -158,8 +158,14 @@ is not an executable seed. Phase 46 economic statuses stay
 `balanced`, `non_profitable`, `unknown`, `unsupported`, or `incomplete`.
 Those calculations are `economic_observation` evidence and cannot verify a
 finding. Phase 47 protocol paths are candidates. Unknown calls stay unknown.
+Phase 48 runtime validation is `UNAVAILABLE` unless Docker and a local
+`security_agent_runtime_image` exist. Output that is not `bugforge-runtime-v1`
+is `UNSUPPORTED`. A fork without operator configuration is `UNAVAILABLE`, and
+an unpinned fork is not deterministic. Runtime and differential evidence use
+`runtime_observation`, which cannot verify a finding.
 See
 [phase45-stateful-exploit-sequence-discovery.md](phase45-stateful-exploit-sequence-discovery.md),
 [phase46-economic-defi-analysis.md](phase46-economic-defi-analysis.md),
+[phase47-protocol-wide-cross-contract-analysis.md](phase47-protocol-wide-cross-contract-analysis.md),
 and
-[phase47-protocol-wide-cross-contract-analysis.md](phase47-protocol-wide-cross-contract-analysis.md).
+[phase48-runtime-fork-differential-validation.md](phase48-runtime-fork-differential-validation.md).

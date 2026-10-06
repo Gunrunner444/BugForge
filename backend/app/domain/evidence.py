@@ -36,6 +36,8 @@ class EvidenceKind(StrEnum):
     TEST_FAILURE = "test_failure"
     REPLAY = "replay"
     ECONOMIC_OBSERVATION = "economic_observation"
+    PROTOCOL_OBSERVATION = "protocol_observation"
+    RUNTIME_OBSERVATION = "runtime_observation"
 
 
 class EvidenceProvenance(StrEnum):
@@ -65,6 +67,10 @@ class EvidenceProvenance(StrEnum):
     SANDBOX_EXECUTION = "sandbox_execution"
     # In-process economic calculation. Not live verification.
     ECONOMIC_OBSERVATION = "economic_observation"
+    # Protocol-graph candidate. Not live verification.
+    PROTOCOL_OBSERVATION = "protocol_observation"
+    # Sandboxed runtime or differential observation. Not live verification.
+    RUNTIME_OBSERVATION = "runtime_observation"
 
 
 # Provenance that can back a verified finding. AI text and sandbox runs are excluded.
@@ -104,6 +110,8 @@ _KIND_TO_PROVENANCE: dict[EvidenceKind, EvidenceProvenance] = {
     EvidenceKind.SCREENSHOT: EvidenceProvenance.SCREENSHOT,
     EvidenceKind.REPLAY: EvidenceProvenance.REPLAY,
     EvidenceKind.ECONOMIC_OBSERVATION: EvidenceProvenance.ECONOMIC_OBSERVATION,
+    EvidenceKind.PROTOCOL_OBSERVATION: EvidenceProvenance.PROTOCOL_OBSERVATION,
+    EvidenceKind.RUNTIME_OBSERVATION: EvidenceProvenance.RUNTIME_OBSERVATION,
 }
 
 

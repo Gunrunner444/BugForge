@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     # Local image that already contains ityfuzz. Empty means ItyFuzz stays unavailable.
     # BugForge does not pull an image and does not fall back to a host binary.
     security_agent_ityfuzz_image: str = ""
+    # Local image for pinned runtime validation. Empty means runtime stays unavailable.
+    # BugForge does not pull an image and does not fall back to a host binary.
+    security_agent_runtime_image: str = ""
+    # Fork execution stays off unless an operator sets both of these. Request text cannot.
+    security_agent_fork_enabled: bool = False
+    security_agent_fork_source: str = ""
     # Developer-only. The default research path does not execute host solc.
     solidity_host_compiler: bool = False
     # Bounded project-analysis profile. Defaults match the original scan limits.

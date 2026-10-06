@@ -104,6 +104,10 @@ class AssetDelta:
     after: int | None
     delta: int | None
     known: str
+    transaction_index: int | None = None
+    snapshot: str = ""
+    contract: str = ""
+    source: str = ""
 
 
 @dataclass(frozen=True)

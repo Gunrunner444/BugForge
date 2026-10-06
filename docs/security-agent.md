@@ -62,7 +62,12 @@ requires `security_agent_ityfuzz_image` and does not fall back to a host
 binary. A configured image that is not present locally leaves ItyFuzz
 unavailable. Phase 46 economic analysis stays in-process and cannot turn
 caller-supplied numbers into runtime evidence. Phase 47 protocol analysis
-reads local semantic facts and does not open a public RPC. The model still cannot
+reads local semantic facts and does not open a public RPC. Phase 48 runtime
+validation uses `security_agent_runtime_image` inside the existing Docker
+executor. A missing image is unavailable. Host execution is not a fallback.
+Fork mode additionally requires `security_agent_fork_enabled` and
+`security_agent_fork_source`. Request text cannot turn the network on, and an
+unpinned block is not deterministic validation. The model still cannot
 supply the command, Docker flags, Foundry flags, or network access. The generic
 identical-call guard does not classify exploratory retries; the exploratory
 engine does. Live smart-contract testing requires an explicit target manifest

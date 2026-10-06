@@ -68,6 +68,9 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 45 | Bounded stateful exploit-sequence discovery | ✅ Implemented |
 | Phase 46 | Economic and DeFi observations on bounded sequences | ✅ Implemented |
 | Phase 47 | Protocol-wide cross-contract security analysis | ✅ Implemented |
+| Phase 48 | Runtime, fork, and differential validation | ✅ Implemented |
+| Phase 49 | Adaptive multi-engine research orchestration | Not started |
+| Phase 50 | Production bounty-research workflow | Not started |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -400,10 +403,16 @@ ItyFuzz is not the authority layer. Phase 46 records economic observations
 on those sequences. A positive asset delta is not a confirmed exploit.
 Phase 47 builds a bounded protocol interaction graph across contracts.
 An edge exists only when the relationship was established. A graph path is
-not an exploit and not verification.
+not an exploit and not verification. `bugforge-protocol` runs that analysis
+when cross-contract evidence is requested. Phase 48 records sandboxed runtime
+observations and compares pinned executions. A runtime result, a fork result,
+and a differential difference stay candidates or unknown. They do not verify
+a finding. The runtime image is optional. A missing image is unavailable, and
+BugForge does not fall back to host execution or a public RPC.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
-and [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md).
+[docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
+and [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md).
 
 ### Security testing roadmap
 
@@ -424,7 +433,7 @@ and [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protoco
 | 45 | Stateful exploit-sequence discovery and optional sandboxed ItyFuzz | Implemented |
 | 46 | Economic and DeFi observations: deltas, oracles, vaults, AMMs, lending | Implemented |
 | 47 | Protocol-wide cross-contract security analysis and bounded path discovery | Implemented |
-| 48 | Runtime, fork, and differential validation | Not started |
+| 48 | Sandboxed runtime observations, pinned forks, and differential comparison | Implemented |
 | 49 | Adaptive multi-engine research orchestration | Not started |
 | 50 | Production bounty-research workflow | Not started |
 

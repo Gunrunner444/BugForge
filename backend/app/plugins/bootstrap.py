@@ -58,6 +58,8 @@ def _register_discovery(catalog: PluginCatalog) -> None:
         WakeEngine,
     )
     from app.adapters.discovery.ityfuzz import ItyFuzzEngine
+    from app.adapters.discovery.protocol import ProtocolEngine
+    from app.adapters.discovery.runtime import RuntimeEngine
     from app.adapters.discovery.runtimes import (
         CargoTestEngine,
         GoTestEngine,
@@ -82,6 +84,16 @@ def _register_discovery(catalog: PluginCatalog) -> None:
         "bugforge-economic",
         EconomicEngine,
         description="In-process economic observations; not a protocol simulator",
+    )
+    catalog.discovery_engines.register(
+        "bugforge-protocol",
+        ProtocolEngine,
+        description="In-process protocol graph; not verification",
+    )
+    catalog.discovery_engines.register(
+        "bugforge-runtime",
+        RuntimeEngine,
+        description="Sandboxed runtime and differential observations",
     )
     catalog.discovery_engines.register("go-test", GoTestEngine, description="Go test and fuzz")
     catalog.discovery_engines.register("cargo-test", CargoTestEngine, description="Cargo test")

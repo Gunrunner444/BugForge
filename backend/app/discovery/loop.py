@@ -29,10 +29,25 @@ def choose_next(
     static_known: bool,
 ) -> ResearchAction:
     """Pick a complementary capability. The choice is not a confirmation."""
-    if observation.uncertainty == "cross-contract":
+    if observation.uncertainty in {"cross-contract", "protocol"}:
         return ResearchAction(
             "cross_contract_analysis",
-            "cross-contract graph or state-flow evidence is missing",
+            "protocol graph evidence is missing",
+        )
+    if observation.uncertainty == "runtime":
+        return ResearchAction(
+            "runtime_validation",
+            "runtime evidence is missing",
+        )
+    if observation.uncertainty == "fork":
+        return ResearchAction(
+            "fork_validation",
+            "fork-state evidence is missing",
+        )
+    if observation.uncertainty == "differential":
+        return ResearchAction(
+            "differential_validation",
+            "differential evidence is missing",
         )
     if observation.uncertainty == "economic":
         return ResearchAction(

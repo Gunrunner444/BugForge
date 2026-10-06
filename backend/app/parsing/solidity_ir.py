@@ -76,6 +76,7 @@ class ContractFact:
     name: str
     kind: str
     bases: tuple[str, ...]
+    span: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -538,6 +539,19 @@ def _stamp_operation_guards(
     return stamped
 
 
+def _declaration_span(span: SourceSpan | None) -> tuple[int, ...]:
+    if span is None:
+        return ()
+    return (
+        span.start_byte,
+        span.end_byte,
+        span.start_line,
+        span.start_column,
+        span.end_line,
+        span.end_column,
+    )
+
+
 def _contract_facts(graph: SyntaxGraph) -> tuple[ContractFact, ...]:
     found: list[ContractFact] = []
     for event in graph.events:
@@ -554,6 +568,7 @@ def _contract_facts(graph: SyntaxGraph) -> tuple[ContractFact, ...]:
                 event.text.strip(),
                 fields.get("kind", "contract") or "contract",
                 tuple(bases),
+                _declaration_span(event.span),
             )
         )
     return tuple(found)

@@ -307,7 +307,7 @@ def test_callback_and_authorization_are_not_labels() -> None:
     )
     graph = _graph(program)
     assert any(item.kind == "callback" for item in graph.edges)
-    assert any(item.kind == "authorization_dependency" for item in graph.edges)
+    assert all(item.kind != "authorization_dependency" for item in graph.edges)
     assert all(item.status == "candidate" for item in graph.hypotheses)
     assert candidate_status("verified") == "candidate"
     assert candidate_status("exploited") == "candidate"

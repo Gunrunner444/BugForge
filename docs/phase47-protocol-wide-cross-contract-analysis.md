@@ -12,7 +12,9 @@ OpenAI, Anthropic, or any other model. `llm_invoked` stays false.
 
 `build_protocol_graph` records contract nodes and interaction edges from
 parser facts. A node keeps the project, source snapshot, compiler
-configuration, source file, contract declaration, and span. An address is
+configuration, source file, contract declaration, and the declaration span.
+The span is the contract, interface, or library declaration. It is not the
+first function span. A missing declaration span stays empty. An address is
 stored only when the local analysis supplies one. The same Solidity name in
 two files is two nodes. A source identity and an address stay separate.
 
@@ -25,7 +27,14 @@ The kinds are external call, internal call, delegatecall, staticcall, token
 transfer, `transferFrom`, approval, permit, callback, oracle read, price
 dependency, storage dependency, authorization dependency, proxy
 implementation, and event-to-state. Every edge keeps its provenance. Two
-contracts are not linked because their names look alike.
+contracts are not linked because their names look alike. A price dependency
+is created only from a `PriceLink` that names the oracle edge, a computation,
+a valuation, the asset edge, a non-empty span, and provenance. Two calls in
+the same function do not create that edge. An authorization dependency is
+created only from a `TrustBoundary` with caller-controlled input, established
+missing caller authorization, an established privileged callee, cross-contract
+propagation, and a semantic relationship. A normal call into an authorized
+function is not that evidence.
 
 Unresolved and dynamic calls stay in `unresolved`. The graph does not invent
 a callee. Delegatecall is a different kind from an ordinary external call.
@@ -36,8 +45,10 @@ An unknown implementation stays unknown.
 ## Canonical identity
 
 Function identity is the parser function: project, source snapshot, compiler
-configuration, source file, contract, signature, line, and span. Overloads
-do not collapse to a shared name. Sequence and harness lookup use that
+configuration, source file, contract, signature, line, and span. The displayed
+signature comes from that function's own header, so `foo(uint256)` stays
+`foo(uint256)`. Overloads do not collapse to a shared name. A header that
+cannot be parsed stays `unresolved`. Sequence and harness lookup use that
 identity when a semantic program is present. Without a program, a name is
 accepted only when the contract declares it once. An ambiguous overload is
 not called.
@@ -68,11 +79,16 @@ Protocol sequences reuse the Phase 45 caps. `MAX_EXECUTIONS` stays 8 and
 `clamp_protocol_bounds` and `clamp_bounds` only tighten. A planner cannot
 raise them. Expansion is a deterministic breadth-first walk ordered by edge
 kind: storage, asset movement, oracle, callback, authorization, delegatecall,
-then ordinary calls. It is not a random walk.
+then ordinary calls. The walk keeps the exact edge-id sequence. Parallel
+edges between the same nodes stay distinct, and the path id includes those
+edge ids. It is not a random walk and it does not later search for some edge
+from A to B.
 
-`plan_protocol_calls` emits a call only when `function_signature` and the
-argument generator can build it. A missing or unsupported argument rejects
-the whole plan. There is no placeholder call.
+`plan_protocol_calls` emits a call only when the function signature and the
+argument generator can build it. A step may be `(contract, name)` in one
+program or `(file, contract, selector)` across programs. Each file is resolved
+from its own semantic program. A missing signature, an ambiguous overload, or
+an unsupported argument rejects the whole plan. There is no placeholder call.
 
 ## Actors
 
@@ -84,7 +100,9 @@ authorization. External callability is not attacker control.
 ## Economics
 
 Protocol deltas go through the hardened Phase 46 layer. Attacker, victim,
-and protocol amounts stay separated by actor and token. A second token
+and protocol amounts stay separated by actor, token, kind, transaction index,
+snapshot, contract, and source. Observations from different states are not
+treated as duplicates. A second token
 without an explicit conversion is `unknown`. No USD price is invented. A
 positive balance is not profit, and a loss is not a vulnerability. The
 evidence kind is `economic_observation`. It cannot verify a finding.
@@ -102,10 +120,14 @@ invariant violation.
 
 ## Events and traces
 
-`correlate_modalities` keeps static identity, runtime events, state
-transitions, and economic status in separate fields. An event name is not
-proof. A static edge is not a runtime observation. A runtime event is not
-source proof. A caller-supplied trace has an empty executable-input field.
+`correlate_modalities` matches static, runtime, and state-transition operation
+identities only when those identities are equal, unambiguous, and carry both
+a source marker and a signature. An event name is not a match. A bare function
+name is not a match when the overload or source file is ambiguous. A match
+stays a candidate. It does not prove the static property, and the economic
+status stays an observation. A caller-supplied trace has an empty
+executable-input field. A forbidden status such as `verified` is rewritten
+to `candidate`.
 
 ItyFuzz traces stay in stdout, stderr, and diagnostic metadata. They are not
 `minimized_input` and they are not discovery-corpus seeds. Stdout and stderr
@@ -116,11 +138,13 @@ or verification.
 
 `missing_capability` can report `cross_contract_analysis` when the request
 asks for protocol evidence and that capability has not been exercised.
-`choose_next` returns the same capability for `cross-contract` uncertainty.
-The default engine order does not change, and BugForge does not run every
-installed engine. This is not the Phase 49 orchestrator. Missing tools stay
-unavailable. Follow-up execution shares `max_engines` with the initial
-selection. `target_from_static` keeps project, snapshot, compiler, campaign,
+`bugforge-protocol` is registered for that capability and is prepended only
+then. `choose_next` returns the same capability for `cross-contract` or
+`protocol` uncertainty. The default engine order does not change, and
+BugForge does not run every installed engine. This is not the Phase 49
+orchestrator. Missing tools stay unavailable. An unavailable or unsupported
+result is not recorded as exercised evidence. Follow-up execution shares
+`max_engines` with the initial selection. `target_from_static` keeps project, snapshot, compiler, campaign,
 source file, target, contract, function, mode, and existing extra metadata.
 Coverage keys include project, source snapshot, and compiler configuration,
 so one build's coverage is not reused for another.
@@ -130,8 +154,10 @@ so one build's coverage is not reused for another.
 A protocol candidate carries project, source snapshot, compiler
 configuration, contracts, function identities, edges, path, sequence, actors,
 locations, engines, environment, assumptions, and uncertainty. Its status is
-`candidate`. It cannot mark itself verified, proved, reproduced, confirmed,
-safe, or exploited.
+`candidate`. The discovery engine places that candidate on the normal evidence
+lifecycle as `protocol_observation`. That provenance is not in the live
+verification set. It cannot mark itself verified, proved, reproduced,
+confirmed, safe, or exploited.
 
 Static analysis, economic calculation, ItyFuzz, a sequence plan, and a
 finished bounded expansion do not verify a vulnerability and do not prove
@@ -150,9 +176,9 @@ human approval, and evidence binding are unchanged.
 
 ## What remains unsupported
 
-- Phase 48 runtime, fork, and differential validation
 - Phase 49 adaptive multi-engine orchestration
 - Phase 50 production bounty workflow
+- Turning a protocol candidate into a runtime observation without a separate sandboxed execution
 - Arbitrary dynamic-dispatch callees
 - Treating a name match as a deployment or an address binding
 - Invented prices, merged actor balances, or profit from a positive delta

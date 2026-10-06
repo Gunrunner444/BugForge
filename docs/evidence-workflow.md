@@ -36,7 +36,12 @@ fail token matched. A simulated runner cannot take that path. `verified` is
 unchanged: a reproduced observation is not a mathematical proof. An economic
 oracle status is not a vulnerability conclusion. Economic observations use
 `economic_observation` provenance, which is outside the live verification set.
-A protocol-graph candidate is not reproduction or verification. An ItyFuzz
+A protocol-graph candidate is not reproduction or verification. Protocol
+observations use `protocol_observation` provenance, which is outside the live
+verification set. A sandboxed runtime trace, a pinned fork result, and a
+differential comparison use `runtime_observation` provenance, which is also
+outside that set. Equality of two runs is not proof of safety, and a
+divergence is not a vulnerability. An ItyFuzz
 trace is diagnostic text, not an executable corpus seed.
 
 `identify_missing_evidence()` checks that referenced IDs exist, are linked

@@ -56,6 +56,8 @@ class DynamicResult:
     findings: tuple[DynamicFinding, ...] = ()
     metadata: dict[str, str] = field(default_factory=dict)
     economic_evidence: object | None = None
+    protocol_evidence: object | None = None
+    runtime_evidence: object | None = None
 
     def __post_init__(self) -> None:
         self.stdout = redact_text(self.stdout)
@@ -129,6 +131,15 @@ def _evidence_kind(result: DynamicResult) -> EvidenceKind:
         return EvidenceKind.FUZZING
     if result.oracle_kind == "economic" or result.metadata.get("evidence_class") == "economic":
         return EvidenceKind.ECONOMIC_OBSERVATION
+    if result.oracle_kind == "protocol" or result.metadata.get("evidence_class") == "protocol":
+        return EvidenceKind.PROTOCOL_OBSERVATION
+    if result.oracle_kind in {"runtime", "differential"} or result.metadata.get(
+        "evidence_class"
+    ) in {
+        "runtime",
+        "differential",
+    }:
+        return EvidenceKind.RUNTIME_OBSERVATION
     if result.executed and result.status is ResultStatus.INGESTED:
         return EvidenceKind.SCANNER if result.findings else EvidenceKind.FUZZING
     if result.executed and _coverage_available(result.coverage):

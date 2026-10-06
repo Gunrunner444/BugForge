@@ -121,6 +121,14 @@ class DiscoveryEngine(ABC):
             return EngineCapability.SYMBOLIC_EXECUTION
         if EngineCapability.ECONOMIC_SIMULATION in caps:
             return EngineCapability.ECONOMIC_SIMULATION
+        if EngineCapability.CROSS_CONTRACT_ANALYSIS in caps:
+            return EngineCapability.CROSS_CONTRACT_ANALYSIS
+        if mode == "fork" and EngineCapability.FORK_VALIDATION in caps:
+            return EngineCapability.FORK_VALIDATION
+        if mode == "differential" and EngineCapability.DIFFERENTIAL_VALIDATION in caps:
+            return EngineCapability.DIFFERENTIAL_VALIDATION
+        if EngineCapability.RUNTIME_VALIDATION in caps:
+            return EngineCapability.RUNTIME_VALIDATION
         return EngineCapability.FUZZING
 
     def collect_results(self, request: AnalysisRequest) -> DynamicResult:
