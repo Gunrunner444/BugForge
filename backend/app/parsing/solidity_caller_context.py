@@ -433,18 +433,42 @@ def _trusted_intermediary(model: ResearchModel) -> list[SemanticCandidate]:
             continue
         state = model.state_vars(router.contract)
         for call in member_calls(router.body):
-            callee_contract = _callee_contract(model, router.contract, state, call.receiver)
-            if not callee_contract:
+            declared = _callee_contract(model, router.contract, state, call.receiver)
+            if not declared:
                 continue
-            for callee in model.functions_named(callee_contract, call.name):
-                if not callee.has_body or not callee.exposed:
-                    continue
-                if len(callee.params) != len(call.arguments):
-                    continue
-                candidate = _intermediary_candidate(model, router, call, callee)
-                if candidate is not None:
-                    found.append(candidate)
+            for callee_contract in _concrete_targets(model, declared, call.name):
+                for callee in model.functions_named(callee_contract, call.name):
+                    if not callee.has_body or not callee.exposed:
+                        continue
+                    if len(callee.params) != len(call.arguments):
+                        continue
+                    candidate = _intermediary_candidate(model, router, call, callee)
+                    if candidate is not None:
+                        found.append(candidate)
     return found
+
+
+MAX_INTERFACE_TARGETS = 4
+
+
+def _concrete_targets(model: ResearchModel, declared: str, name: str) -> tuple[str, ...]:
+    """The contract itself, or its concrete implementations when the type is an interface.
+
+    An interface-typed receiver says nothing about which code runs, so every
+    implementation with the called function is considered, bounded.
+    """
+    item = model.contracts.get(declared)
+    if item is None or not item.is_interface:
+        return (declared,)
+    found = [
+        other
+        for other in sorted(model.contracts)
+        if other != declared
+        and not model.contracts[other].is_interface
+        and (declared in model.bases_of(other) or model.functions_named(other, name))
+        and any(f.has_body for f in model.functions_named(other, name))
+    ]
+    return tuple(found[:MAX_INTERFACE_TARGETS])
 
 
 def _callee_contract(

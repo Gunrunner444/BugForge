@@ -42,7 +42,7 @@ contract SafeBridgeVault is EIP712Base {
         require(!used[digest], "used");
         require(ECDSA.recover(digest, sig) == signer, "bad signature");
         used[digest] = true;
-        token.transfer(recipient, amount);
+        require(token.transfer(recipient, amount), "transfer failed");
     }
 }
 
@@ -70,7 +70,7 @@ contract BoundMerkleDistributor {
         bytes32 leaf = keccak256(abi.encodePacked(index, account, amount));
         require(MerkleProof.verify(proof, root, leaf), "bad proof");
         claimed[index] = true;
-        token.transfer(account, amount);
+        require(token.transfer(account, amount), "transfer failed");
     }
 }
 

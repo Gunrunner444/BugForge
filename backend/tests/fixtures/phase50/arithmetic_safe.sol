@@ -25,7 +25,7 @@ contract CheckedBatchPayout {
         }
         require(total <= budget, "over budget");
         for (uint256 i = 0; i < to.length; i++) {
-            token.transfer(to[i], amounts[i]);
+            require(token.transfer(to[i], amounts[i]), "transfer failed");
         }
     }
 }
@@ -49,7 +49,7 @@ contract MultiplyFirst {
 
     function reward(address user, uint256 amount, uint256 total, uint256 pool) external {
         uint256 share = amount * pool / total;
-        token.transfer(user, share);
+        require(token.transfer(user, share), "transfer failed");
     }
 }
 
@@ -65,6 +65,6 @@ contract CeilVault {
         shares[msg.sender] -= burned;
         totalShares -= burned;
         totalAssets -= assets;
-        asset.transfer(msg.sender, assets);
+        require(asset.transfer(msg.sender, assets), "transfer failed");
     }
 }
