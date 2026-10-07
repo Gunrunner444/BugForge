@@ -223,7 +223,9 @@ class BountyManifest:
     ) -> ScopeDecision:
         """Explicit exclusion wins, an explicit inclusion is required, nothing is assumed."""
         if not any((contract, file, address)):
-            return ScopeDecision(ScopeStatus.UNKNOWN, "the target names no contract, file, or address")
+            return ScopeDecision(
+                ScopeStatus.UNKNOWN, "the target names no contract, file, or address"
+            )
         for asset in self.out_of_scope:
             if _matches(asset, contract, file, address, chain_id):
                 return ScopeDecision(
@@ -234,7 +236,9 @@ class BountyManifest:
         for asset in self.in_scope:
             if _matches(asset, contract, file, address, chain_id):
                 return ScopeDecision(
-                    ScopeStatus.IN_SCOPE, f"listed as in scope: {asset.kind} {asset.identifier}", asset
+                    ScopeStatus.IN_SCOPE,
+                    f"listed as in scope: {asset.kind} {asset.identifier}",
+                    asset,
                 )
         for deployment in self.deployments:
             if contract and deployment.contract_name == contract:

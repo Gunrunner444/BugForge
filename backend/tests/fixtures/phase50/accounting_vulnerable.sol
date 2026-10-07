@@ -32,6 +32,13 @@ contract DonationVault {
         shares[msg.sender] += minted;
         totalShares += minted;
     }
+
+    function redeem(uint256 shareAmount) external {
+        uint256 out = (shareAmount * asset.balanceOf(address(this))) / totalShares;
+        shares[msg.sender] -= shareAmount;
+        totalShares -= shareAmount;
+        require(asset.transfer(msg.sender, out), "transfer failed");
+    }
 }
 
 // Whatever is already in the contract becomes the caller's deposit.

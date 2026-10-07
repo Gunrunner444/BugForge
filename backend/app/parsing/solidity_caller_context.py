@@ -146,7 +146,9 @@ def _edge(
         sender = "preserved" if name == "delegatecall" else "this_contract"
         return ContextEdge(function.identity, f"self.{name}", mechanism, sender, line)
     if name in {"call", "staticcall"}:
-        return ContextEdge(function.identity, f"{target}.{name}", "low_level_call", "this_contract", line)
+        return ContextEdge(
+            function.identity, f"{target}.{name}", "low_level_call", "this_contract", line
+        )
     if name == "delegatecall":
         return ContextEdge(
             function.identity, f"{target}.delegatecall", "delegatecall", "preserved", line
@@ -164,7 +166,9 @@ def context_summary(model: ResearchModel) -> dict[str, bool]:
         "forwarder": bool(re.search(r"\bisTrustedForwarder\b|\b_msgSender\s*\(", text)),
         "self_call": bool(re.search(r"address\(this\)\s*\.\s*call\b|\bthis\.\w+\(", text)),
         "delegatecall": bool(re.search(r"\.\s*delegatecall\b", text)),
-        "eip7702": bool(re.search(r"\b0xef0100\b|\bauthorization_list\b|\bEIP7702|\bIAuthorized", text)),
+        "eip7702": bool(
+            re.search(r"\b0xef0100\b|\bauthorization_list\b|\bEIP7702|\bIAuthorized", text)
+        ),
     }
 
 
@@ -361,7 +365,9 @@ def _restricted(function: RFunction, receiver: str, destination: str) -> bool:
     text = function.body
     for match in re.finditer(r"\b(require|if|assert)\s*\(([^;]*)", text):
         condition = match.group(2)
-        if mentions(condition, destination) and re.search(rf"\b\w+\s*\[\s*{re.escape(destination)}\s*\]", condition):
+        if mentions(condition, destination) and re.search(
+            rf"\b\w+\s*\[\s*{re.escape(destination)}\s*\]", condition
+        ):
             return True
         if mentions(condition, destination) and re.search(r"(==|!=)", condition):
             return True
@@ -577,7 +583,9 @@ def _forwarded_sender_spoof(model: ResearchModel) -> list[SemanticCandidate]:
                     continue
                 if not call.arguments or not _controlled(call.arguments[0], tainted):
                     continue
-                if re.search(r"_contextSuffixLength|abi\.encodePacked\s*\([^;]*_msgSender", function.body):
+                if re.search(
+                    r"_contextSuffixLength|abi\.encodePacked\s*\([^;]*_msgSender", function.body
+                ):
                     continue
                 found.append(_spoof_candidate(function, sender_fn, uses[0], call.text, call.start))
     return found

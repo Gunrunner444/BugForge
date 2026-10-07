@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from app.discovery.orchestration.model import (
     ACTIONABLE,
     CapabilityNeed,
+    EvidenceItem,
     EvidenceQuality,
     NeedStatus,
     ResearchState,
@@ -34,7 +35,30 @@ W_DIFFERENTIAL = 45
 W_BASELINE = 100
 W_SUGGESTION = 10
 
-_CROSS_CONTRACT_FAMILIES = frozenset({"external_call", "reentrancy", "authorization"})
+_CROSS_CONTRACT_FAMILIES = frozenset(
+    {"external_call", "reentrancy", "authorization", "caller_context"}
+)
+_RESEARCH_FAMILIES = frozenset(
+    {
+        "caller_context",
+        "oracle_quality",
+        "message_binding",
+        "account_abstraction",
+        "balance_delta",
+        "arithmetic",
+    }
+)
+
+# Bounty research needs. Each runs once; none is raised by a weaker engine.
+W_BOUNTY_CONTEXT = 95
+W_CALLER_CONTEXT = 78
+W_ORACLE = 62
+W_PROOF = 61
+W_ACCOUNTING = 59
+W_VFCS = 57
+W_COMPILER_ADVISORY = 52
+W_COMPILER_DIFF = 44
+W_ACCOUNT_ABSTRACTION = 40
 
 
 @dataclass(frozen=True)
@@ -140,6 +164,9 @@ def assess(state: ResearchState, ctx: AssessContext) -> tuple[CapabilityNeed, ..
             Uncertainty.BASELINE,
         )
 
+    if ctx.extra.get("program_context"):
+        _bounty_needs(builder, candidates, families)
+
     if ctx.flag("protocol") or (families & _CROSS_CONTRACT_FAMILIES):
         builder.need(
             "cross_contract_analysis",
@@ -241,6 +268,54 @@ def assess(state: ResearchState, ctx: AssessContext) -> tuple[CapabilityNeed, ..
             )
             break
     return builder.build()
+
+
+def _bounty_needs(builder: _Builder, candidates: list[EvidenceItem], families: set[str]) -> None:
+    """Needs of a bounty campaign. They exist only when the request names a program."""
+    for capability, weight, reason in (
+        (
+            "bounty_context_analysis",
+            W_BOUNTY_CONTEXT,
+            "program scope and triage priority are missing",
+        ),
+        (
+            "caller_context_analysis",
+            W_CALLER_CONTEXT,
+            "caller-context flows have not been analyzed",
+        ),
+        ("oracle_quality_analysis", W_ORACLE, "oracle source quality has not been analyzed"),
+        ("proof_binding_analysis", W_PROOF, "proof and message binding has not been analyzed"),
+        (
+            "accounting_analysis",
+            W_ACCOUNTING,
+            "token accounting and arithmetic have not been analyzed",
+        ),
+        (
+            "account_abstraction_analysis",
+            W_ACCOUNT_ABSTRACTION,
+            "account abstraction has not been analyzed",
+        ),
+    ):
+        builder.need(capability, weight, Uncertainty.SEMANTIC_RESEARCH, reason)
+    builder.need(
+        "compiler_advisory_analysis",
+        W_COMPILER_ADVISORY,
+        Uncertainty.COMPILER,
+        "compiler advisories have not been matched against the build configuration",
+    )
+    builder.need(
+        "compiler_differential_validation",
+        W_COMPILER_DIFF,
+        Uncertainty.COMPILER,
+        "pipeline differences have not been compared",
+    )
+    if candidates and families & _RESEARCH_FAMILIES:
+        builder.need(
+            "vfcs_generation",
+            W_VFCS,
+            Uncertainty.UNEXERCISED,
+            "research candidates have no call-sequence plan",
+        )
 
 
 def actionable(needs: tuple[CapabilityNeed, ...]) -> tuple[CapabilityNeed, ...]:

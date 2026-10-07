@@ -77,9 +77,15 @@ def _entrypoint_known(model: ResearchModel, function: RFunction) -> bool | None:
         helper = model.function(function.contract, call.group(1))
         if helper is not None and helper.has_body:
             text += "\n" + helper.body
-    if re.search(r"msg\.sender[^;]*" + _ENTRYPOINT.pattern + "|" + _ENTRYPOINT.pattern + r"[^;]*msg\.sender", text, re.I):
+    if re.search(
+        r"msg\.sender[^;]*" + _ENTRYPOINT.pattern + "|" + _ENTRYPOINT.pattern + r"[^;]*msg\.sender",
+        text,
+        re.I,
+    ):
         return True
-    unresolved = any(base not in model.contracts for base in _declared_bases(model, function.contract))
+    unresolved = any(
+        base not in model.contracts for base in _declared_bases(model, function.contract)
+    )
     return None if unresolved else False
 
 
@@ -202,17 +208,19 @@ def _verification_in(
         if helper is not None and helper.has_body and helper is not function:
             candidates.append(helper)
     for item in candidates:
-        for match in re.finditer(r"\s*(?:(?:address\s+(\w+)\s*=\s*)|(?:\breturn\s+))?([^;]*)", item.body):
+        for match in re.finditer(
+            r"\s*(?:(?:address\s+(\w+)\s*=\s*)|(?:\breturn\s+))?([^;]*)", item.body
+        ):
             statement = match.group(0)
             if not _VERIFIERS.search(statement):
                 continue
             calls = member_calls(statement)
             expression = ""
-            for call in calls:
-                if call.name in {"recover", "tryRecover"} and call.arguments:
-                    expression = call.arguments[0]
-                elif call.name == "isValidSignature" and call.arguments:
-                    expression = call.arguments[0]
+            for verifier in calls:
+                if verifier.name in {"recover", "tryRecover"} and verifier.arguments:
+                    expression = verifier.arguments[0]
+                elif verifier.name == "isValidSignature" and verifier.arguments:
+                    expression = verifier.arguments[0]
             ec = re.search(r"\becrecover\s*\(\s*([^,]+),", statement)
             if ec:
                 expression = ec.group(1)
@@ -326,7 +334,9 @@ def _factory(model: ResearchModel, contract: str) -> list[SemanticCandidate]:
         if not re.search(r"\bcreate2\b|\bnew\s+\w+\s*\{\s*salt\s*:", function.body):
             continue
         owner_params = [p.name for p in function.params if p.type_name == "address" and p.name]
-        salt_params = [p.name for p in function.params if p.type_name in {"bytes32", "uint256"} and p.name]
+        salt_params = [
+            p.name for p in function.params if p.type_name in {"bytes32", "uint256"} and p.name
+        ]
         if not owner_params or not salt_params:
             continue
         salt_use = re.search(r"salt\s*:\s*([^}]+)\}|create2\s*\([^;]*", function.body)

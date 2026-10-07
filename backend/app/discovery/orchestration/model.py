@@ -224,6 +224,9 @@ class Uncertainty(StrEnum):
     SEED_FOLLOWUP = "seed_followup"
     DIVERGENCE = "divergence"
     CONTRADICTION = "contradiction"
+    PROGRAM_CONTEXT = "program_context"
+    SEMANTIC_RESEARCH = "semantic_research"
+    COMPILER = "compiler"
 
 
 class ResumeStatus(StrEnum):

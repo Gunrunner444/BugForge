@@ -62,8 +62,23 @@ def correlate_results(results: list[DynamicResult]) -> list[RelatedObservation]:
     return related
 
 
+_RESEARCH_PREFIXES = {
+    "caller_context": "caller_context",
+    "oracle": "oracle_quality",
+    "message": "message_binding",
+    "signature": "message_binding",
+    "aa": "account_abstraction",
+    "accounting": "balance_delta",
+    "arithmetic": "arithmetic",
+    "compiler_advisory": "compiler_advisory",
+}
+
+
 def detector_family(detector_id: str) -> str:
     text = detector_id.lower()
+    research = _RESEARCH_PREFIXES.get(text.split(".", 1)[0]) if "." in text else None
+    if research:
+        return research
     if "reentr" in text:
         return "reentrancy"
     if "tx.origin" in text or "auth" in text:

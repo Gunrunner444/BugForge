@@ -32,6 +32,18 @@ from app.discovery.orchestration.model import (
 from app.discovery.scheduler import DiscoveryScheduler, capability_for, engine_rank
 from app.discovery.sequences import MAX_EXECUTIONS
 
+RESEARCH_CAPABILITY_NAMES: tuple[str, ...] = (
+    "bounty_context_analysis",
+    "caller_context_analysis",
+    "oracle_quality_analysis",
+    "proof_binding_analysis",
+    "account_abstraction_analysis",
+    "accounting_analysis",
+    "compiler_advisory_analysis",
+    "compiler_differential_validation",
+    "vfcs_generation",
+)
+
 # Capability -> the request fields the orchestrator sets. Only "mode" is ever set.
 CAPABILITY_MODE: dict[str, str] = {
     "static_analysis": "",
@@ -45,11 +57,16 @@ CAPABILITY_MODE: dict[str, str] = {
     "runtime_validation": "local",
     "fork_validation": "fork",
     "differential_validation": "differential",
+    **{name: name for name in RESEARCH_CAPABILITY_NAMES},
 }
 ORCHESTRATABLE = frozenset(CAPABILITY_MODE)
 
 _RUNTIME_FAMILY = frozenset({"runtime_validation", "fork_validation", "differential_validation"})
-_NEEDS_SNAPSHOT = frozenset({"cross_contract_analysis", "economic_simulation"} | _RUNTIME_FAMILY)
+_NEEDS_SNAPSHOT = frozenset(
+    {"cross_contract_analysis", "economic_simulation", "compiler_differential_validation"}
+    | _RUNTIME_FAMILY
+)
+_NEEDS_SOURCES = frozenset(set(RESEARCH_CAPABILITY_NAMES) - {"bounty_context_analysis"})
 _NEEDS_TARGET = frozenset(
     {"fuzzing", "symbolic_execution", "test_execution", "property_testing", "invariant_testing"}
 )
@@ -61,6 +78,8 @@ _DEPENDS: dict[str, frozenset[str]] = {
     "runtime_validation": frozenset({"finding", "economic"}),
     "fork_validation": frozenset({"finding", "economic", "runtime"}),
     "differential_validation": frozenset({"finding", "economic", "runtime"}),
+    "vfcs_generation": frozenset({"finding"}),
+    "compiler_differential_validation": frozenset({"finding"}),
 }
 _SEEDED = frozenset({"fuzzing", "symbolic_execution", "test_execution"})
 _VOLATILE_EXTRA = frozenset({"campaign_id", "execution_id", "timestamp"})
@@ -173,6 +192,10 @@ def prerequisite(capability: str, request: AnalysisRequest, identity: CampaignId
         request.contract or request.function or request.source_file or request.has_harness
     ):
         return "identity:target"
+    if capability in _NEEDS_SOURCES and not (request.files or request.source_file):
+        return "identity:target"
+    if capability in RESEARCH_CAPABILITY_NAMES and not extra.get("program_context"):
+        return "identity:program_context"
     if capability in _NEEDS_SNAPSHOT:
         if not identity.source_snapshot:
             return "identity:source_snapshot"

@@ -120,7 +120,9 @@ def _pull_all(model: ResearchModel, function: RFunction) -> list[SemanticCandida
     if not function.exposed:
         return []
     state = model.contracts[function.contract].state_vars
-    tracked = [name for name, kind in state if kind.startswith("mapping") or kind.startswith("uint")]
+    tracked = [
+        name for name, kind in state if kind.startswith("mapping") or kind.startswith("uint")
+    ]
     if not tracked:
         return []
     from app.parsing.solidity_caller_context import has_sender_authorization
@@ -148,8 +150,13 @@ def _pull_all(model: ResearchModel, function: RFunction) -> list[SemanticCandida
                 line=function.line + function.body[: call.start].count("\n"),
                 contract=function.contract,
                 function=function.signature,
-                path=(f"{function.contract}.{function.signature} @{function.file}:{function.line}",),
-                facts=(("sent_expression", amount.strip()[:80]), ("tracked_state", ",".join(tracked[:4]))),
+                path=(
+                    f"{function.contract}.{function.signature} @{function.file}:{function.line}",
+                ),
+                facts=(
+                    ("sent_expression", amount.strip()[:80]),
+                    ("tracked_state", ",".join(tracked[:4])),
+                ),
                 observed=("absolute balance is sent", "the contract keeps its own accounting"),
                 missing=("a recorded entitlement for the amount sent",),
                 confidence="medium",
@@ -171,7 +178,9 @@ def _balance_as_deposit(model: ResearchModel, function: RFunction) -> list[Seman
             found.extend(_share_price(function, variable, match, tail))
             continue
         credit = _credited(tail, variable)
-        if not credit or re.search(rf"\b{_BALANCE}", tail[: tail.find(variable) if variable in tail else 0]):
+        if not credit or re.search(
+            rf"\b{_BALANCE}", tail[: tail.find(variable) if variable in tail else 0]
+        ):
             continue
         before = body[: match.start()]
         if re.search(_BALANCE, before):
@@ -190,8 +199,13 @@ def _balance_as_deposit(model: ResearchModel, function: RFunction) -> list[Seman
                 line=function.line + body[: match.start()].count("\n"),
                 contract=function.contract,
                 function=function.signature,
-                path=(f"{function.contract}.{function.signature} @{function.file}:{function.line}",),
-                facts=(("credited_expression", credit[:100]), ("balance_expression", expression.strip()[:80])),
+                path=(
+                    f"{function.contract}.{function.signature} @{function.file}:{function.line}",
+                ),
+                facts=(
+                    ("credited_expression", credit[:100]),
+                    ("balance_expression", expression.strip()[:80]),
+                ),
                 observed=("balanceOf(address(this)) is credited",),
                 missing=("subtraction of the previously recorded balance",),
                 confidence="medium",
@@ -247,7 +261,10 @@ def _unchecked_return(function: RFunction) -> list[SemanticCandidate]:
         before = body[: call.start]
         line_start = before.rfind(";") + 1
         lead = body[line_start : call.start]
-        if re.search(r"(require|assert|if|bool|=|return|&&|\|\|)\s*\(?\s*$", lead) or "(" in lead.strip():
+        if (
+            re.search(r"(require|assert|if|bool|=|return|&&|\|\|)\s*\(?\s*$", lead)
+            or "(" in lead.strip()
+        ):
             continue
         if call.receiver.strip() in {"payable", ""} or call.receiver.strip().startswith("payable"):
             continue
@@ -272,7 +289,9 @@ def _unchecked_return(function: RFunction) -> list[SemanticCandidate]:
                 line=function.line + body[: call.start].count("\n"),
                 contract=function.contract,
                 function=function.signature,
-                path=(f"{function.contract}.{function.signature} @{function.file}:{function.line}",),
+                path=(
+                    f"{function.contract}.{function.signature} @{function.file}:{function.line}",
+                ),
                 facts=(("ignored_call", call.text[:80]), ("accounting_effect", effect[:80])),
                 observed=("transfer result is not checked",),
                 missing=("require on the result, or SafeERC20",),

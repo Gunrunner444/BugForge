@@ -22,6 +22,15 @@ class EngineCapability(StrEnum):
     RUNTIME_VALIDATION = "runtime_validation"
     FORK_VALIDATION = "fork_validation"
     DIFFERENTIAL_VALIDATION = "differential_validation"
+    BOUNTY_CONTEXT_ANALYSIS = "bounty_context_analysis"
+    CALLER_CONTEXT_ANALYSIS = "caller_context_analysis"
+    ORACLE_QUALITY_ANALYSIS = "oracle_quality_analysis"
+    PROOF_BINDING_ANALYSIS = "proof_binding_analysis"
+    ACCOUNT_ABSTRACTION_ANALYSIS = "account_abstraction_analysis"
+    ACCOUNTING_ANALYSIS = "accounting_analysis"
+    COMPILER_ADVISORY_ANALYSIS = "compiler_advisory_analysis"
+    COMPILER_DIFFERENTIAL_VALIDATION = "compiler_differential_validation"
+    VFCS_GENERATION = "vfcs_generation"
 
 
 CAPABILITY_ORDER: tuple[EngineCapability, ...] = (
@@ -31,6 +40,15 @@ CAPABILITY_ORDER: tuple[EngineCapability, ...] = (
     EngineCapability.RUNTIME_VALIDATION,
     EngineCapability.FORK_VALIDATION,
     EngineCapability.DIFFERENTIAL_VALIDATION,
+    EngineCapability.BOUNTY_CONTEXT_ANALYSIS,
+    EngineCapability.CALLER_CONTEXT_ANALYSIS,
+    EngineCapability.ORACLE_QUALITY_ANALYSIS,
+    EngineCapability.PROOF_BINDING_ANALYSIS,
+    EngineCapability.ACCOUNT_ABSTRACTION_ANALYSIS,
+    EngineCapability.ACCOUNTING_ANALYSIS,
+    EngineCapability.COMPILER_ADVISORY_ANALYSIS,
+    EngineCapability.COMPILER_DIFFERENTIAL_VALIDATION,
+    EngineCapability.VFCS_GENERATION,
     EngineCapability.FUZZING,
     EngineCapability.SYMBOLIC_EXECUTION,
     EngineCapability.TEST_EXECUTION,

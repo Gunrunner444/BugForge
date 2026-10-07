@@ -1,6 +1,7 @@
-"""Phase 50 bounty-research layer.
+"""Phase 50 production bounty research workflow.
 
-This package extends the Phase 41-49 discovery and orchestration systems. It adds
-no controller, calls no model, and opens no network connection. Everything here is
-deterministic, bounded, identity-bound, and unable to mark a finding verified.
+Bounty manifest and scope, impact-first triage, call-sequence plans, compiler
+advisories and differentials, known-issue handling, and the deterministic report pack.
+Everything here is static or bounded local analysis; nothing verifies a finding,
+submits a report, or calls a model.
 """

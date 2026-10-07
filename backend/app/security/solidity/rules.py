@@ -13,6 +13,7 @@ from functools import lru_cache
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
 from app.parsing.model import SyntaxEvent, SyntaxGraph
+from app.parsing.solidity_account_abstraction import account_abstraction_present
 from app.parsing.solidity_cfg import (
     operation_guarded,
     placeholder_is_guarded,
@@ -32,7 +33,7 @@ from app.parsing.solidity_methodology import analyze_methodology
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
 from app.parsing.solidity_research import SemanticCandidate, build_research_model
-from app.parsing.solidity_research_suite import FAMILIES, account_abstraction_present
+from app.parsing.solidity_research_suite import FAMILIES
 from app.parsing.solidity_storage import analyze_storage
 from app.parsing.solidity_version import checked_arithmetic
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
@@ -1452,9 +1453,7 @@ def _research_rules() -> list[SecurityRule]:
 
 
 @lru_cache(maxsize=8)
-def _research_candidates(
-    path: str, source: str, family: str
-) -> tuple[SemanticCandidate, ...]:
+def _research_candidates(path: str, source: str, family: str) -> tuple[SemanticCandidate, ...]:
     model = build_research_model({path: source})
     if family == "account_abstraction" and not account_abstraction_present(model):
         return ()

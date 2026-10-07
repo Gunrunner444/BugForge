@@ -180,10 +180,16 @@ def _round_names(body: str) -> dict[str, str]:
 
 def _freshness(body: str, names: dict[str, str]) -> bool:
     updated = names.get("updatedAt", "")
-    if updated and re.search(rf"block\.timestamp[^;]*\b{updated}\b|\b{updated}\b[^;]*block\.timestamp", body):
+    if updated and re.search(
+        rf"block\.timestamp[^;]*\b{updated}\b|\b{updated}\b[^;]*block\.timestamp", body
+    ):
         return True
     return bool(
-        re.search(r"block\.timestamp\s*-\s*\w+[^;]*(<|<=|>|>=)\s*\w*(stale|heartbeat|maxAge|delay|MAX)", body, re.I)
+        re.search(
+            r"block\.timestamp\s*-\s*\w+[^;]*(<|<=|>|>=)\s*\w*(stale|heartbeat|maxAge|delay|MAX)",
+            body,
+            re.I,
+        )
     )
 
 
@@ -199,13 +205,18 @@ def _positivity(body: str, names: dict[str, str], variables: tuple[str, ...]) ->
 def _aggregation(model: ResearchModel, function: RFunction, facts: PriceFacts) -> None:
     body = function.body
     loop = re.search(r"\bfor\s*\([^)]*\)\s*\{", body)
-    indexed = re.search(r"\b\w+\s*\[\s*\w+\s*\]\s*\.\s*\w+\s*\(|\(\s*\w+\s*\[\s*\w+\s*\]\s*\)\s*\.\s*\w+", body)
+    indexed = re.search(
+        r"\b\w+\s*\[\s*\w+\s*\]\s*\.\s*\w+\s*\(|\(\s*\w+\s*\[\s*\w+\s*\]\s*\)\s*\.\s*\w+", body
+    )
     facts.aggregated = bool(loop and indexed and facts.sources)
     if not facts.aggregated:
         return
     facts.tolerant = bool(
         re.search(r"\bcatch\b[^{]*\{[^}]*\bcontinue\b", body)
-        or re.search(r"\b(if|require)\s*\([^)]*(price|answer|value|ok|success)[^)]*\)\s*\{?\s*(continue|valid\w*\s*\+\+|\+\+\s*valid)", body)
+        or re.search(
+            r"\b(if|require)\s*\([^)]*(price|answer|value|ok|success)[^)]*\)\s*\{?\s*(continue|valid\w*\s*\+\+|\+\+\s*valid)",
+            body,
+        )
         or re.search(r"if\s*\([^)]*(==\s*0|<=\s*0|!ok|!success)[^)]*\)\s*(\{\s*)?continue", body)
         or re.search(r"\btry\b", body)
     )
@@ -228,7 +239,9 @@ def _aggregation(model: ResearchModel, function: RFunction, facts: PriceFacts) -
     )
 
 
-def _quorum_value(model: ResearchModel, function: RFunction, token: str, operator: str) -> int | None:
+def _quorum_value(
+    model: ResearchModel, function: RFunction, token: str, operator: str
+) -> int | None:
     if token.isdigit():
         number = int(token)
     else:
@@ -274,12 +287,15 @@ def _consumers(model: ResearchModel, producer: RFunction) -> list[tuple[RFunctio
         if function is producer or not function.has_body:
             continue
         calls = any(
-            name == producer.name and function.contract in {producer.contract, *model.lineage(function.contract)}
+            name == producer.name
+            and function.contract in {producer.contract, *model.lineage(function.contract)}
             for name, _args, _ in plain_calls(function.body)
         ) or any(
             call.name == producer.name
             and model.contract_for_type(
-                model.state_vars(function.contract).get(re.sub(r"\(.*\)|\[.*\]", "", call.receiver), "")
+                model.state_vars(function.contract).get(
+                    re.sub(r"\(.*\)|\[.*\]", "", call.receiver), ""
+                )
                 or re.sub(r"\(.*\)", "", call.receiver)
             )
             == producer.contract
@@ -319,11 +335,18 @@ def _candidates(
         ("use_basis", "identifier hints in the consuming function"),
     )
     confidence = "medium" if sensitive else "low"
-    tags = ("oracle_dependent_value", "collateral_valuation" if "collateral_valuation" in hints else "reserve_accounting")
+    tags = (
+        "oracle_dependent_value",
+        "collateral_valuation" if "collateral_valuation" in hints else "reserve_accounting",
+    )
     found: list[SemanticCandidate] = []
 
     def make(
-        detector: str, title: str, summary: str, missing: tuple[str, ...], observed: tuple[str, ...],
+        detector: str,
+        title: str,
+        summary: str,
+        missing: tuple[str, ...],
+        observed: tuple[str, ...],
         line: int | None = None,
     ) -> SemanticCandidate:
         return SemanticCandidate(
@@ -344,15 +367,21 @@ def _candidates(
         )
 
     use_text = f" It feeds {', '.join(hints)}." if hints else ""
-    if facts.aggregated and facts.tolerant and (
-        not facts.quorum_checked or (facts.quorum_min is not None and facts.quorum_min <= 1)
+    if (
+        facts.aggregated
+        and facts.tolerant
+        and (not facts.quorum_checked or (facts.quorum_min is not None and facts.quorum_min <= 1))
     ):
         reason = (
             "no minimum count of valid sources is enforced"
             if not facts.quorum_checked
             else f"the enforced minimum is {facts.quorum_min} valid source"
         )
-        spot = " Spot-reserve sources are included." if "spot_reserves" in facts.kinds or "spot_slot0" in facts.kinds else ""
+        spot = (
+            " Spot-reserve sources are included."
+            if "spot_reserves" in facts.kinds or "spot_slot0" in facts.kinds
+            else ""
+        )
         found.append(
             make(
                 "insufficient_quorum",
@@ -401,7 +430,12 @@ def _candidates(
             )
         )
     spot_kinds = facts.kinds & {"spot_reserves", "spot_slot0"}
-    if spot_kinds and not (facts.kinds & {"twap", "chainlink"}) and not facts.deviation and sensitive:
+    if (
+        spot_kinds
+        and not (facts.kinds & {"twap", "chainlink"})
+        and not facts.deviation
+        and sensitive
+    ):
         found.append(
             make(
                 "spot_price_sensitive_use",
@@ -423,7 +457,12 @@ def _candidates(
                 ("all sources are spot prices",),
             )
         )
-    if facts.aggregated and len(facts.sources) >= 2 and not facts.decimals and "chainlink" in facts.kinds:
+    if (
+        facts.aggregated
+        and len(facts.sources) >= 2
+        and not facts.decimals
+        and "chainlink" in facts.kinds
+    ):
         found.append(
             make(
                 "decimals_not_normalized",

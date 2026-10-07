@@ -68,11 +68,22 @@ def analyze_message_binding(model: ResearchModel) -> list[SemanticCandidate]:
     for function in model.all_functions():
         if not function.has_body or function.contract not in model.contracts:
             continue
+        if _entry_point_validated(function):
+            continue
         for verification in _verifications(function)[:MAX_VERIFICATIONS_PER_FUNCTION]:
             found.extend(_binding(model, function, verification))
     found.extend(_typehash_mismatch(model))
     found.extend(_cached_domain(model))
     return cap(found)
+
+
+def _entry_point_validated(function: RFunction) -> bool:
+    """ERC-4337 validation signs a hash the entry point computed over the whole operation.
+
+    The account abstraction analyzer owns that family, so the generic field-binding
+    heuristics do not apply to a function that receives a user operation.
+    """
+    return any("UserOperation" in item.type_name for item in function.params)
 
 
 # ---- verification sites ---------------------------------------------------------------------
@@ -96,16 +107,24 @@ def _verifications(function: RFunction) -> list[Verification]:
             found.append(Verification("erc1271", call, call.arguments[index], call.start, call.end))
         elif name in {"verify", "verifyCalldata", "processProof"} and len(call.arguments) >= 3:
             found.append(Verification("merkle", call, call.arguments[2], call.start, call.end))
-    for name, args, offset in plain_calls(body):
-        if name in {"verify", "_verify", "verifyProof"} and len(args) >= 3 and "proof" in body.lower():
-            found.append(Verification("merkle", None, args[-1], offset, offset + len(name)))
+    for plain_name, plain_args, offset in plain_calls(body):
+        if (
+            plain_name in {"verify", "_verify", "verifyProof"}
+            and len(plain_args) >= 3
+            and "proof" in body.lower()
+        ):
+            found.append(
+                Verification("merkle", None, plain_args[-1], offset, offset + len(plain_name))
+            )
     return sorted(found, key=lambda item: item.offset)
 
 
 # ---- digest resolution ----------------------------------------------------------------------
 
 
-def resolve_digest(model: ResearchModel, function: RFunction, expression: str, depth: int = 0) -> str:
+def resolve_digest(
+    model: ResearchModel, function: RFunction, expression: str, depth: int = 0
+) -> str:
     """Expand a digest expression through local variables and in-model helpers."""
     text = expression.strip()
     if depth > MAX_DIGEST_DEPTH:
@@ -134,14 +153,18 @@ def resolve_digest(model: ResearchModel, function: RFunction, expression: str, d
         name = inner_match.group(1)
         assignment = re.search(rf"\b{re.escape(name)}\s*=\s*([^;]+);", function.body)
         if assignment and name not in _CRYPTO_SKIP and depth < MAX_DIGEST_DEPTH:
-            expanded += f" || {name} := {resolve_digest(model, function, assignment.group(1), depth + 1)}"
+            expanded += (
+                f" || {name} := {resolve_digest(model, function, assignment.group(1), depth + 1)}"
+            )
     return expanded
 
 
 def _bindings(digest_text: str) -> dict[str, bool]:
     return {
-        "chain": bool(_CHAIN_RE.search(digest_text)) or any(m in digest_text for m in _DOMAIN_MARKERS),
-        "contract": "address(this)" in digest_text or any(m in digest_text for m in _DOMAIN_MARKERS),
+        "chain": bool(_CHAIN_RE.search(digest_text))
+        or any(m in digest_text for m in _DOMAIN_MARKERS),
+        "contract": "address(this)" in digest_text
+        or any(m in digest_text for m in _DOMAIN_MARKERS),
         "domain": any(m in digest_text for m in _DOMAIN_MARKERS),
     }
 
@@ -155,9 +178,7 @@ _PROOF_TYPES = {"bytes", "bytes32[]", "bytes[]", "uint8", "bytes32"}
 def _decisions(function: RFunction, after: int) -> list[Decision]:
     tail = function.body[after:]
     statements = [s.strip() for s in re.findall(r"[^;{}]+[;{}]", tail)]
-    effects = [
-        s for s in statements if s and not re.match(r"(require|assert|if|emit|revert)\b", s)
-    ]
+    effects = [s for s in statements if s and not re.match(r"(require|assert|if|emit|revert)\b", s)]
     decisions: list[Decision] = []
     for parameter in function.params:
         name = parameter.name
@@ -305,7 +326,11 @@ def _binding(
         and verification.kind != "merkle"
         and not (bound["chain"] and bound["contract"])
     ):
-        absent = [n for n, ok in (("chain id", bound["chain"]), ("verifying contract", bound["contract"])) if not ok]
+        absent = [
+            n
+            for n, ok in (("chain id", bound["chain"]), ("verifying contract", bound["contract"]))
+            if not ok
+        ]
         found.append(
             make(
                 "missing_domain_separation",
@@ -358,7 +383,8 @@ def _typehash_mismatch(model: ResearchModel) -> list[SemanticCandidate]:
         contract = model.contracts[name]
         typehashes: dict[str, tuple[str, int]] = {}
         for match in re.finditer(
-            r"\b([A-Za-z_]\w*)\s*=\s*keccak256\s*\(\s*\"([A-Za-z_]\w*\(([^\"]*)\))\"\s*\)", contract.body
+            r"\b([A-Za-z_]\w*)\s*=\s*keccak256\s*\(\s*\"([A-Za-z_]\w*\(([^\"]*)\))\"\s*\)",
+            contract.body,
         ):
             fields = [f for f in match.group(3).split(",") if f.strip()]
             typehashes[match.group(1)] = (match.group(2), len(fields))
@@ -373,7 +399,9 @@ def _typehash_mismatch(model: ResearchModel) -> list[SemanticCandidate]:
                 struct, declared = typehashes[call.arguments[0].strip()]
                 encoded = len(call.arguments) - 1
                 if encoded != declared:
-                    found.append(_typehash_candidate(function, struct, declared, encoded, call.start))
+                    found.append(
+                        _typehash_candidate(function, struct, declared, encoded, call.start)
+                    )
     return found
 
 
@@ -394,7 +422,11 @@ def _typehash_candidate(
         contract=function.contract,
         function=function.signature,
         path=(f"{function.contract}.{function.signature} @{function.file}:{function.line}",),
-        facts=(("struct", struct[:100]), ("declared_fields", str(declared)), ("encoded_values", str(encoded))),
+        facts=(
+            ("struct", struct[:100]),
+            ("declared_fields", str(declared)),
+            ("encoded_values", str(encoded)),
+        ),
         observed=("typehash string and abi.encode arity are both present",),
         missing=("one encoded value for every declared field",),
         confidence="high",
@@ -414,14 +446,17 @@ def _cached_domain(model: ResearchModel) -> list[SemanticCandidate]:
         if not cached:
             continue
         variable = cached.group(1)
-        immutable_or_state = any(var == variable or var.startswith(variable) for var, _ in contract.state_vars)
+        immutable_or_state = any(
+            var == variable or var.startswith(variable) for var, _ in contract.state_vars
+        )
         if not immutable_or_state:
             continue
         refreshed = re.search(
             r"block\.chainid\s*(==|!=)|(==|!=)\s*block\.chainid|_cachedChainId|CACHED_CHAIN", text
         )
         used = any(
-            variable in function.body and ("ecrecover" in function.body or ".recover" in function.body)
+            variable in function.body
+            and ("ecrecover" in function.body or ".recover" in function.body)
             for function in contract.functions
         )
         if refreshed or not used:

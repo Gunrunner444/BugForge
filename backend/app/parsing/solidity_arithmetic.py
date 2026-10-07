@@ -22,7 +22,17 @@ from app.parsing.solidity_research import (
 from app.parsing.solidity_version import solidity_language_facts
 
 FAMILY = "arithmetic"
-_NARROW = ("uint8", "uint16", "uint32", "uint64", "uint96", "uint112", "uint128", "uint160", "int128")
+_NARROW = (
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint96",
+    "uint112",
+    "uint128",
+    "uint160",
+    "int128",
+)
 _CEIL = re.compile(r"mulDivUp|divUp|ceilDiv|Rounding\.(Up|Ceil)|\+\s*\w+\s*-\s*1\s*\)\s*/", re.I)
 _VALUE_EFFECT = re.compile(
     r"\.(transfer|safeTransfer|transferFrom|safeTransferFrom|send)\s*\(|\bcall\s*\{\s*value|\b_?(mint|burn)\s*\("
@@ -151,7 +161,11 @@ def _batch_accumulation(function: RFunction, mode: str) -> list[SemanticCandidat
                     f"caller-supplied array into `{accumulator}` ({kind}); {reason}, and the total "
                     f"then gates a transfer or limit check.",
                     absolute,
-                    (("accumulator", accumulator), ("accumulator_type", kind), ("arithmetic", mode)),
+                    (
+                        ("accumulator", accumulator),
+                        ("accumulator_type", kind),
+                        ("arithmetic", mode),
+                    ),
                     ("array elements are summed in a loop", "the total is used afterwards"),
                     ("checked full-width accumulation or an explicit bound",),
                     "medium",
@@ -273,7 +287,10 @@ def _rounding_asymmetry(model: ResearchModel) -> list[SemanticCandidate]:
                     continue
                 tail = function.body[conversion.end() :]
                 burns = bool(
-                    re.search(rf"-=\s*{re.escape(shares)}\b|\b_?burn\s*\([^;]*\b{re.escape(shares)}\b", tail)
+                    re.search(
+                        rf"-=\s*{re.escape(shares)}\b|\b_?burn\s*\([^;]*\b{re.escape(shares)}\b",
+                        tail,
+                    )
                 )
                 if not burns:
                     continue
