@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from functools import lru_cache
 
 from app.analyzers.framework_detector import FrameworkInfo
 from app.domain.security import VulnerabilityClass
@@ -30,6 +31,8 @@ from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call,
 from app.parsing.solidity_methodology import analyze_methodology
 from app.parsing.solidity_modifiers import resolve_modifier
 from app.parsing.solidity_proxy import analyze_proxy
+from app.parsing.solidity_research import SemanticCandidate, build_research_model
+from app.parsing.solidity_research_suite import FAMILIES, account_abstraction_present
 from app.parsing.solidity_storage import analyze_storage
 from app.parsing.solidity_version import checked_arithmetic
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
@@ -85,6 +88,7 @@ def solidity_security_rules() -> list[SecurityRule]:
         Erc4626InflationRule(),
         FlashSpotRule(),
         *_defi_rules(),
+        *_research_rules(),
     ]
 
 
@@ -1431,3 +1435,67 @@ def _yul_class(item: str) -> VulnerabilityClass:
     ):
         return VulnerabilityClass.UNSAFE_EXTERNAL_CALL
     return VulnerabilityClass.DYNAMIC_EXECUTION
+
+
+_RESEARCH_CLASS = {
+    "caller_context": VulnerabilityClass.AUTHORIZATION,
+    "oracle_quality": VulnerabilityClass.BUSINESS_LOGIC,
+    "message_binding": VulnerabilityClass.SIGNATURE_FLAW,
+    "account_abstraction": VulnerabilityClass.AUTHORIZATION,
+    "balance_delta": VulnerabilityClass.BUSINESS_LOGIC,
+    "arithmetic": VulnerabilityClass.UNSAFE_ARITHMETIC,
+}
+
+
+def _research_rules() -> list[SecurityRule]:
+    return [_ResearchRule(family) for family in sorted(FAMILIES)]
+
+
+@lru_cache(maxsize=8)
+def _research_candidates(
+    path: str, source: str, family: str
+) -> tuple[SemanticCandidate, ...]:
+    model = build_research_model({path: source})
+    if family == "account_abstraction" and not account_abstraction_present(model):
+        return ()
+    return tuple(FAMILIES[family](model))
+
+
+class _ResearchRule(_SolidityRule):
+    """Phase 50 semantic candidates. Each is a static candidate, never verification."""
+
+    def __init__(self, family: str) -> None:
+        self.family = family
+        self.rule_id = f"sol.research.{family}"
+        self.vulnerability_class = _RESEARCH_CLASS[family]
+
+    def _check(self, graph: SyntaxGraph) -> list[SecurityObservation]:
+        found: list[SecurityObservation] = []
+        for item in _research_candidates(graph.file_path, graph.source, self.family):
+            found.append(
+                SecurityObservation(
+                    rule_id=self.rule_id,
+                    vulnerability_class=self.vulnerability_class,
+                    title=item.title,
+                    summary=item.summary,
+                    file_path=graph.file_path,
+                    line=item.line,
+                    evidence_text="; ".join(item.observed)[:300],
+                    confidence=item.confidence,
+                    language="solidity",
+                    documentation=_DOC,
+                    parser_backend=graph.parser_backend,
+                    parser_tier=str(graph.parser_tier),
+                    node_id=item.function,
+                    metadata={
+                        "contract": item.contract,
+                        "function": item.function,
+                        "status": "potential",
+                        "analysis_origin": "research_model",
+                        "semantic_status": "candidate",
+                        "detector": item.detector,
+                        "missing": "; ".join(item.missing)[:300],
+                    },
+                )
+            )
+        return found
