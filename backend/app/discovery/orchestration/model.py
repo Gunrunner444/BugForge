@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
-from app.discovery.orchestration.codec import digest
+from app.discovery.orchestration.codec import digest, to_jsonable
 
 SCHEMA_VERSION = 1
 ORCHESTRATOR_VERSION = "phase49.1"
@@ -259,10 +259,20 @@ class CampaignIdentity:
     source_file: str = ""
     deployment: str = ""
     fork_reference: str = ""
+    program_context: str = ""
 
     def target_digest(self) -> str:
-        """Identity of what is investigated, without the campaign id."""
-        return digest(replace(self, campaign_id=""))
+        """Identity of what is investigated, without the campaign id.
+
+        An empty program context is left out so identities and persisted campaigns
+        from before bounty programs existed keep their digests.
+        """
+        base = replace(self, campaign_id="")
+        if base.program_context:
+            return digest(base)
+        data = to_jsonable(base)
+        data.pop("program_context", None)
+        return digest(data)
 
     def identity_key(self) -> str:
         """Contract and function together, or empty. A bare name is not an identity."""

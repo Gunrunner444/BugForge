@@ -95,6 +95,7 @@ def identity_from_request(request: AnalysisRequest, *, campaign_id: str = "") ->
         source_file=request.source_file,
         deployment=extra.get("deployment_address", ""),
         fork_reference=extra.get("fork_reference", ""),
+        program_context=extra.get("program_context", ""),
     )
     chosen = campaign_id or request.campaign_id or f"cp_{base.target_digest()}"
     return replace(base, campaign_id=chosen)

@@ -104,6 +104,7 @@ def identity_matches(result: DynamicResult, identity: CampaignIdentity) -> bool:
     pairs = (
         ("source_snapshot", identity.source_snapshot),
         ("compiler_configuration", identity.compiler_configuration),
+        ("program_context", identity.program_context),
     )
     for name, expected in pairs:
         reported = str(result.metadata.get(name, ""))
