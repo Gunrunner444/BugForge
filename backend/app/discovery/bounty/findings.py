@@ -130,7 +130,7 @@ def _one(
     seen_roots.setdefault(key, finding_id)
     related = _evidence_for(state, candidate)
     quality = _best_quality(related)
-    poc = _poc_status(state, candidate, related)
+    poc = _poc_status(related)
     own = tuple(
         s
         for s in sequences
@@ -286,9 +286,7 @@ def _best_quality(items: list[EvidenceItem]) -> str:
     return "static_candidate" if not items else UNKNOWN
 
 
-def _poc_status(
-    state: ResearchState | None, candidate: SemanticCandidate, related: list[EvidenceItem]
-) -> str:
+def _poc_status(related: list[EvidenceItem]) -> str:
     runtime = [
         item
         for item in related

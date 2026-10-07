@@ -70,7 +70,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 47 | Protocol-wide cross-contract security analysis | ✅ Implemented |
 | Phase 48 | Runtime, fork, and differential validation | ✅ Implemented |
 | Phase 49 | Adaptive multi-engine research orchestration | ✅ Implemented |
-| Phase 50 | Production bounty-research workflow | Not started |
+| Phase 50 | Production bounty-research workflow | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -122,8 +122,8 @@ Later Solidity work is also on `main`:
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
 [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
-and
-[docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md).
+[docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md),
+and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md).
 Foundry, Slither, Echidna, Medusa, Halmos, Wake, and ItyFuzz are optional.
 A missing tool is unavailable and does not invent a result. Economic analysis
 does not verify a finding.
@@ -418,11 +418,18 @@ persists its state so it can resume. It records contradictions without
 choosing a side, and "nothing found" is never proof of safety. It does not
 verify a finding, call a model, or grant an approval. Cursor remains the only
 AI controller.
+Phase 50 adds program-aware bounty research. A campaign manifest binds scope,
+rules, known issues, and pinned source and fork identity into the campaign.
+Semantic Solidity analyzers, call-sequence generation, a local compiler
+advisory corpus, and a deterministic report pack produce candidates for human
+review. A known issue is not safe, an out-of-scope asset is not safe, and
+nothing is verified or submitted automatically.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
 [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
-and [docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md).
+[docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md),
+and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md).
 
 ### Security testing roadmap
 
