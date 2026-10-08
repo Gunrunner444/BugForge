@@ -30,6 +30,7 @@ from app.discovery.bounty.advisories import (
 )
 from app.discovery.bounty.campaign import BountyManifest
 from app.discovery.bounty.compiler_diff import NoCompilerBackend, run_differential
+from app.discovery.bounty.deployment_identity import resolve_scope_identity
 from app.discovery.bounty.engine import build_bounty_engines, load_sources
 from app.discovery.bounty.findings import ResearchFinding, build_findings
 from app.discovery.bounty.gate import BountyGate
@@ -428,6 +429,26 @@ class BountyCampaignService:
             contract=campaign.spec.contract, file=campaign.spec.source_file
         )
         return {"status": scope.status.value, "reason": scope.reason}
+
+    def scope_identity(self, campaign_id: str) -> dict[str, Any]:
+        """Deployment/scope identity reconciliation (source is never assumed deployed)."""
+        campaign = self.get(campaign_id)
+        sources = load_sources(campaign.request)
+        model = build_research_model(sources) if sources else None
+        address = ""
+        chain_id = ""
+        deployment = campaign.identity.deployment
+        if ":" in deployment:
+            chain_id, address = deployment.split(":", 1)
+        decision = resolve_scope_identity(
+            campaign.manifest,
+            contract=campaign.spec.contract,
+            file=campaign.spec.source_file,
+            address=address,
+            chain_id=chain_id,
+            model=model,
+        )
+        return {"campaign_id": campaign_id, **decision.as_dict()}
 
     @staticmethod
     def _evidence_dict(item: EvidenceItem) -> dict[str, Any]:

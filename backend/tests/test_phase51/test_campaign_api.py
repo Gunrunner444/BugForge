@@ -156,3 +156,15 @@ async def test_invalid_manifest_is_rejected(client: AsyncClient) -> None:
 async def test_unknown_campaign_is_404(client: AsyncClient) -> None:
     resp = await client.get(f"{BASE}/campaigns/cp_missing", headers=OPERATOR_HEADERS)
     assert resp.status_code == 404
+
+
+async def test_scope_identity_endpoint(client: AsyncClient) -> None:
+    campaign_id = await _create(client)
+    resp = await client.get(
+        f"{BASE}/campaigns/{campaign_id}/scope-identity", headers=OPERATOR_HEADERS
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # in scope by manifest, but no runtime digest -> binding is not confidently in scope
+    assert body["status"] in {"ambiguous", "confidently_in_scope", "unknown"}
+    assert "binding" in body
