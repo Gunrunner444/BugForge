@@ -63,6 +63,17 @@ class CampaignAnalysis:
     # first file); and path -> sha256 of every file read at analysis time.
     sequence_sources: dict[str, dict[str, str]] = field(default_factory=dict)
     source_hashes: dict[str, str] = field(default_factory=dict)
+    # "detector@Contract.signature" -> why no sequence template applied (coverage gaps)
+    sequence_skipped: dict[str, str] = field(default_factory=dict)
+
+    def all_models(self) -> tuple[ResearchModel, ...]:
+        """The main model first, then each distinct follow-up model (stable order)."""
+        found: list[ResearchModel] = [self.model] if self.model is not None else []
+        for sid in sorted(self.models):
+            item = self.models[sid]
+            if all(item is not other for other in found):
+                found.append(item)
+        return tuple(found)
 
     def sources_for(self, sequence_id: str) -> dict[str, str]:
         return self.sequence_sources.get(sequence_id, {})
@@ -132,6 +143,7 @@ def analyze_campaign(
     sequences: list[Vfcs] = []
     models: dict[str, ResearchModel] = {}
     sequence_sources: dict[str, dict[str, str]] = {}
+    sequence_skipped: dict[str, str] = {}
     hashes: dict[str, str] = {path: _sha256(text) for path, text in sources.items()}
     ambiguous: set[str] = set()
     followup: dict[str, Any] = {
@@ -155,6 +167,8 @@ def analyze_campaign(
             seq_identity,
             limit=min(room, MAX_VFCS_CANDIDATES),
         )
+        for key, reason in built.skipped:
+            sequence_skipped.setdefault(key, reason)
         for item in built.sequences:
             if item.sequence_id not in models:
                 sequences.append(item)
@@ -242,6 +256,7 @@ def analyze_campaign(
         truncated=bool(selection.truncated or (model is not None and model.truncated)),
         _deployments=deployments,
         sequence_sources=sequence_sources,
+        sequence_skipped=sequence_skipped,
         source_hashes=hashes,
     )
 

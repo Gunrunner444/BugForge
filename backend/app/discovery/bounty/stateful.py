@@ -127,6 +127,41 @@ class ReplayMode(StrEnum):
     PINNED_FORK_REPLAY = "pinned_fork_replay"  # operator-approved pinned fork only
 
 
+def replay_modes() -> dict[str, dict[str, str]]:
+    """What each replay mode would establish and whether this path can run it.
+
+    The three are never conflated: a local source replay says nothing about the
+    deployed bytecode or state; a deployment replay needs captured runtime code and
+    state; a pinned fork replay needs an approved fork, which research tooling never
+    opens (no RPC).
+    """
+    tools = tool_status()
+    local = (
+        "usable"
+        if execution_enabled() and tools.available
+        else ("blocked_by_policy" if not execution_enabled() else "unavailable")
+    )
+    return {
+        ReplayMode.LOCAL_SOURCE_REPLAY.value: {
+            "status": local,
+            "establishes": "behavior of the analyzed source, freshly deployed with fixtures",
+            "does_not_establish": "deployed bytecode, storage, balances or configuration",
+        },
+        ReplayMode.DEPLOYMENT_REPLAY.value: {
+            "status": "unavailable",
+            "establishes": "behavior of the deployed runtime bytecode with captured state",
+            "does_not_establish": "anything without a captured runtime and state snapshot",
+            "reason": "no runtime/state capture adapter exists in this path",
+        },
+        ReplayMode.PINNED_FORK_REPLAY.value: {
+            "status": "blocked_by_policy",
+            "establishes": "behavior against chain state pinned at a block",
+            "does_not_establish": "anything here: research tooling opens no RPC or fork",
+            "reason": "needs an operator-approved pinned fork outside this path",
+        },
+    }
+
+
 @dataclass(frozen=True)
 class ToolStatus:
     forge: str
@@ -2407,8 +2442,18 @@ def replay_bundle(
     blobs: Mapping[str, str],
     *,
     timeout: int | None = None,
+    mode: str = ReplayMode.LOCAL_SOURCE_REPLAY.value,
 ) -> dict[str, Any]:
-    """Re-run a stored bundle locally and compare the observation with the stored one."""
+    """Re-run a stored bundle locally and compare the observation with the stored one.
+
+    Only ``local_source_replay`` runs here; any other mode is refused with its status
+    instead of silently being replaced by a local replay.
+    """
+    if mode != ReplayMode.LOCAL_SOURCE_REPLAY.value:
+        info = replay_modes().get(mode)
+        if info is None:
+            return {"status": "refused", "reason": f"unknown replay mode {mode!r}"}
+        return {"status": info["status"], "mode": mode, "reason": info.get("reason", "")}
     tools = tool_status()
     if not (execution_enabled() and tools.available):
         return {"status": "unavailable", "reason": "forge/solc unavailable or disabled"}

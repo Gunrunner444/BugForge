@@ -1321,6 +1321,8 @@ class BountyCampaignService:
 
     def stateful_status(self, campaign_id: str) -> dict[str, Any]:
         """Persisted stateful results (durable across restarts). Nothing verified."""
+        from app.discovery.bounty.stateful import replay_modes
+
         campaign = self.get(campaign_id)
         stored = dict(campaign.record.artifacts.get("stateful", {}))
         bundles = dict(campaign.record.artifacts.get("repro_bundles", {}))
@@ -1330,6 +1332,7 @@ class BountyCampaignService:
             "executions": dict(stored.get("executions", {})),
             "feedback": dict(stored.get("feedback", {})),
             "engines": list(stored.get("engines", [])),
+            "replay_modes": replay_modes(),
             "bundles": {
                 bid: {
                     "schema": b.get("schema"),
@@ -1363,6 +1366,78 @@ class BountyCampaignService:
             "self_contained": all(referenced.values()),
             "verified": False,
         }
+
+    def research_ledger(self, campaign_id: str) -> dict[str, Any]:
+        """RESEARCH_COVERAGE + RESEARCH_GAPS from typed state. Read-only; nothing verified."""
+        from app.discovery.bounty.properties import build_property
+        from app.discovery.bounty.research_ledger import build_ledger
+
+        campaign = self.get(campaign_id)
+        analysis = self._analysis(campaign)
+        specs = {
+            sequence.sequence_id: build_property(
+                sequence,
+                analysis.models[sequence.sequence_id],
+                analysis.candidate_for(sequence.derived_from),
+            )
+            for sequence in analysis.sequences
+        }
+        ledger = build_ledger(
+            models=analysis.all_models(),
+            candidates=analysis.candidates,
+            sequences=analysis.sequences,
+            specs=specs,
+            skipped=analysis.sequence_skipped,
+            executions=self.stored_executions(campaign, analysis),
+            engines=self._engine_snapshot(campaign),
+            manifest=campaign.manifest,
+        )
+        return {"campaign_id": campaign_id, **ledger}
+
+    def research_plan(self, campaign_id: str) -> dict[str, Any]:
+        """Cost-aware next research actions over the ledger (a recommendation only)."""
+        from app.discovery.bounty.research_ledger import plan_actions
+        from app.discovery.bounty.stateful import MAX_RUNS
+
+        campaign = self.get(campaign_id)
+        ledger = self.research_ledger(campaign_id)
+        budget = campaign.state.budget
+        plan = plan_actions(
+            ledger,
+            budget_remaining={name: budget.remaining(name) for name in sorted(budget.limits)},
+            local_runs_remaining=MAX_RUNS,
+        )
+        return {
+            "campaign_id": campaign_id,
+            "ledger_digest": ledger["ledger_digest"],
+            **plan,
+        }
+
+    def research_engines(self, campaign_id: str) -> dict[str, Any]:
+        """Engine availability: the snapshot the last run used, and the box's current view.
+
+        The current view is not smoke-checked here (a GET runs no engine), so an
+        engine that is present reads ``installed``; ``usable`` comes only from a run's
+        smoke-checked snapshot.
+        """
+        from app.discovery.bounty.engine_adapters import engine_registry
+
+        campaign = self.get(campaign_id)
+        stored = dict(campaign.record.artifacts.get("stateful", {}))
+        return {
+            "campaign_id": campaign_id,
+            "last_run": list(stored.get("engines", [])),
+            "current": [entry.as_dict() for entry in engine_registry(smoke=False)],
+            "verified": False,
+        }
+
+    def _engine_snapshot(self, campaign: BountyCampaign) -> list[dict[str, Any]]:
+        from app.discovery.bounty.engine_adapters import engine_registry
+
+        stored = list(dict(campaign.record.artifacts.get("stateful", {})).get("engines", []))
+        if stored:
+            return stored
+        return [entry.as_dict() for entry in engine_registry(smoke=False)]
 
     def stored_executions(
         self, campaign: BountyCampaign, analysis: CampaignAnalysis
