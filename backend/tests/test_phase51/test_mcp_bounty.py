@@ -141,3 +141,90 @@ def test_tool_count_includes_session_and_campaign_tools() -> None:
     names = {tool["name"] for tool in TOOL_DEFINITIONS}
     assert "bugforge_status" in names  # Phase 49/50 session tools preserved
     assert "bugforge_create_campaign" in names  # Phase 51 campaign tools added
+
+
+def _create_via_mcp(api: BugForgeApi) -> str:
+    body = create_body()
+    created = dispatch_tool(
+        "bugforge_create_campaign",
+        {
+            "manifest": body["manifest"],
+            "repo_root": str(FIXTURES),
+            "target": body["target"],
+            "contract": body["contract"],
+            "function": body["function"],
+            "source_file": body["source_file"],
+            "files": body["files"],
+            "max_rounds": 12,
+        },
+        api,
+    )
+    return str(created["campaign_id"])
+
+
+def test_mcp_exposes_read_tools_for_selection_scope_and_advisories() -> None:
+    api = _bridged_api()
+    cid = _create_via_mcp(api)
+
+    selection = dispatch_tool(
+        "bugforge_campaign_source_selection", {"campaign_id": cid}, api
+    )
+    assert "selected" in selection or "mode" in selection
+
+    scope = dispatch_tool("bugforge_campaign_scope_identity", {"campaign_id": cid}, api)
+    assert isinstance(scope, dict)
+
+    advisories = dispatch_tool("bugforge_campaign_advisories", {"campaign_id": cid}, api)
+    assert isinstance(advisories, dict)
+
+    progress = dispatch_tool("bugforge_campaign_progress", {"campaign_id": cid}, api)
+    assert isinstance(progress, dict)
+
+
+def test_mcp_vfcs_feedback_steers_without_widening_scope() -> None:
+    api = _bridged_api()
+    cid = _create_via_mcp(api)
+    result = dispatch_tool(
+        "bugforge_campaign_vfcs_feedback",
+        {"campaign_id": cid, "signals": [{"sequence_id": "seq-1", "outcome": "reverted"}]},
+        api,
+    )
+    assert isinstance(result, dict)
+    # feedback never verifies or submits
+    assert result.get("verified", False) is False
+
+
+def test_mcp_pause_resume_stop_flow_through_the_state_machine() -> None:
+    api = _bridged_api()
+    cid = _create_via_mcp(api)
+
+    paused = dispatch_tool(
+        "bugforge_campaign_pause", {"campaign_id": cid, "reason": "operator"}, api
+    )
+    assert isinstance(paused, dict)
+
+    resumed = dispatch_tool("bugforge_campaign_resume", {"campaign_id": cid}, api)
+    assert isinstance(resumed, dict)
+
+    stopped = dispatch_tool(
+        "bugforge_campaign_stop", {"campaign_id": cid, "reason": "operator"}, api
+    )
+    assert isinstance(stopped, dict)
+    # once stopped, resume is refused by the real state machine
+    with pytest.raises(LocalApiError):
+        dispatch_tool("bugforge_campaign_resume", {"campaign_id": cid}, api)
+
+
+def test_mcp_new_campaign_tools_are_listed() -> None:
+    names = {tool["name"] for tool in TOOL_DEFINITIONS}
+    for expected in {
+        "bugforge_campaign_source_selection",
+        "bugforge_campaign_scope_identity",
+        "bugforge_campaign_advisories",
+        "bugforge_campaign_vfcs_feedback",
+        "bugforge_campaign_pause",
+        "bugforge_campaign_resume",
+        "bugforge_campaign_stop",
+        "bugforge_campaign_progress",
+    }:
+        assert expected in names

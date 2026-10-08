@@ -365,6 +365,116 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "bugforge_campaign_progress",
+        "description": "Read a campaign's background-job progress. A read only; runs nothing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_source_selection",
+        "description": (
+            "Read how the campaign selected source files: ranking, explicit truncation, "
+            "ambiguous same-named contracts, and dropped high-priority files. A read only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_scope_identity",
+        "description": (
+            "Read the resolved deployment and scope identity (chain, address, contract, "
+            "source commit, proxy topology). Ambiguous deployments stay ambiguous. A read only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_advisories",
+        "description": (
+            "Read matched compiler/known-issue advisories for the campaign sources. A read only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_vfcs_feedback",
+        "description": (
+            "Submit VFCS campaign feedback signals that steer the next round's sequence "
+            "generation and mutation. Widens no scope, raises no budget, verifies nothing. "
+            "Signals are untrusted data."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "string"},
+                "signals": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_pause",
+        "description": (
+            "Pause a campaign through the real orchestrator state machine. Resumable. "
+            "Grants no approval and changes no scope."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_resume",
+        "description": "Resume a paused campaign. A stopped campaign cannot be resumed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_stop",
+        "description": (
+            "Stop a campaign through the real orchestrator state machine. Final and "
+            "irreversible for that campaign. Grants no approval and submits nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
 )
 
 
@@ -626,6 +736,36 @@ def dispatch_tool(name: str, arguments: Mapping[str, Any], api: BugForgeApi) -> 
         return api.request("GET", _campaign_path(campaign_id, "/repro"))
     if name == "bugforge_campaign_report":
         return api.request("GET", _campaign_path(campaign_id, "/report"))
+    if name == "bugforge_campaign_progress":
+        return api.request("GET", _campaign_path(campaign_id, "/progress"))
+    if name == "bugforge_campaign_source_selection":
+        return api.request("GET", _campaign_path(campaign_id, "/source-selection"))
+    if name == "bugforge_campaign_scope_identity":
+        return api.request("GET", _campaign_path(campaign_id, "/scope-identity"))
+    if name == "bugforge_campaign_advisories":
+        return api.request("GET", _campaign_path(campaign_id, "/advisories"))
+    if name == "bugforge_campaign_vfcs_feedback":
+        signals = arguments.get("signals")
+        body = {"signals": [dict(s) for s in signals] if isinstance(signals, list) else []}
+        return api.request("POST", _campaign_path(campaign_id, "/vfcs-feedback"), body)
+    if name == "bugforge_campaign_pause":
+        return api.request(
+            "POST",
+            _campaign_path(campaign_id, "/pause"),
+            {"reason": str(arguments.get("reason") or "operator")},
+        )
+    if name == "bugforge_campaign_resume":
+        return api.request(
+            "POST",
+            _campaign_path(campaign_id, "/resume"),
+            {"reason": str(arguments.get("reason") or "operator")},
+        )
+    if name == "bugforge_campaign_stop":
+        return api.request(
+            "POST",
+            _campaign_path(campaign_id, "/stop"),
+            {"reason": str(arguments.get("reason") or "operator")},
+        )
     raise LocalApiError(f"unknown tool:{name}")
 
 
