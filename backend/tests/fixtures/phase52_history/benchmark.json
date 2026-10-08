@@ -1,0 +1,21 @@
+{
+  "schema": "bugforge.local_benchmark/1",
+  "note": "Compact local reconstructions of incident classes. A regression benchmark for these fixtures only; it says nothing about a real-world detection rate.",
+  "cases": [
+    {"id": "bridge_receiver", "vulnerable": "bridge_receiver_vulnerable.sol", "safe": "bridge_receiver_safe.sol",
+     "detector": "bridge.receiver_without_endpoint_check", "contract": "OpenReceiver",
+     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}},
+    {"id": "v4_hook", "vulnerable": "v4_hook_vulnerable.sol", "safe": "v4_hook_safe.sol",
+     "detector": "v4_hooks.callback_without_pool_manager_check", "contract": "CounterHook",
+     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}},
+    {"id": "read_only_reentrancy", "vulnerable": "ro_reentrancy_vulnerable.sol", "safe": "ro_reentrancy_safe.sol",
+     "detector": "read_only_reentrancy.view_observes_mid_update", "contract": "PoolShares"},
+    {"id": "eoa_gate", "vulnerable": "eoa_gate_vulnerable.sol", "safe": "eoa_gate_safe.sol",
+     "detector": "eip7702.eoa_assumption", "contract": "Minter"},
+    {"id": "transient_lock", "vulnerable": "transient_lock_vulnerable.sol", "safe": "transient_lock_safe.sol",
+     "detector": "transient_storage.not_cleared", "contract": "Router"},
+    {"id": "fee_on_transfer", "vulnerable": "fee_on_transfer_vulnerable.sol", "safe": "fee_on_transfer_safe.sol",
+     "detector": "accounting.fee_on_transfer_mismatch", "contract": "Vault",
+     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}}
+  ]
+}

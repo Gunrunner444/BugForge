@@ -203,6 +203,7 @@ _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("upgrade.", PropertyFamily.UPGRADE_SAFETY),
     ("governance.", PropertyFamily.GOVERNANCE),
     ("bridge.", PropertyFamily.BRIDGE_MESSAGE_BINDING),
+    ("v4_hooks.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
 )
 
 
@@ -399,7 +400,11 @@ def _initializer(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) 
 
 
 def _unauthenticated(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
-    if det != "aa.unauthenticated_account_execution":
+    if det not in {
+        "aa.unauthenticated_account_execution",
+        "v4_hooks.callback_without_pool_manager_check",
+        "bridge.receiver_without_endpoint_check",
+    }:
         return (
             OracleSpec(),
             (),
@@ -417,8 +422,12 @@ def _unauthenticated(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: s
         ),
         (),
         (),
-        f"{fn.name} performs an arbitrary call and has no caller authentication",
-        ("the attacker is neither the account owner nor the EntryPoint",),
+        f"{fn.name} acts on caller-supplied input and has no caller authentication",
+        (
+            "the attacker is not the trusted caller (account owner/EntryPoint, PoolManager, "
+            "or bridge endpoint)",
+            "a revert for these fixture inputs holds the property only for these inputs",
+        ),
         "",
     )
 

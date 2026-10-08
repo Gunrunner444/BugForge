@@ -1449,6 +1449,8 @@ _RESEARCH_CLASS = {
     # fallback is only used if a new high-value detector is added without a
     # per-detector mapping below.
     "high_value": VulnerabilityClass.BUSINESS_LOGIC,
+    # evidence-triggered protocol modules (v4 hooks, bridges): unauthenticated callers
+    "protocol_modules": VulnerabilityClass.AUTHORIZATION,
 }
 
 # Some research families (notably ``high_value``) emit several detectors that

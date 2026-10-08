@@ -361,11 +361,20 @@ def _initializer(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     return "initialize→reinitialize", [first, second], "an account initializes exactly once"
 
 
+UNAUTHENTICATED_EXECUTION = frozenset(
+    {
+        "aa.unauthenticated_account_execution",
+        "v4_hooks.callback_without_pool_manager_check",
+        "bridge.receiver_without_endpoint_check",
+    }
+)
+
+
 def _account_validation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
         return function
-    if candidate.detector == "aa.unauthenticated_account_execution":
+    if candidate.detector in UNAUTHENTICATED_EXECUTION:
         calls = [_call(function, "execute", ATTACKER, default=ATTACKER_CONTROLLED)]
         return "unauthenticated-execution", calls, "execution requires a valid operation"
     calls = [_call(function, "validate", ATTACKER, default="forged_operation")]
@@ -385,6 +394,8 @@ def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
 
 
 _BUILDERS: dict[str, Builder] = {
+    "v4_hooks.callback_without_pool_manager_check": _account_validation,
+    "bridge.receiver_without_endpoint_check": _account_validation,
     "caller_context.self_call_elevation": _dispatch,
     "caller_context.forwarded_sender_delegatecall": _dispatch,
     "caller_context.unrestricted_dispatch_with_approval_authority": _approval_dispatch,

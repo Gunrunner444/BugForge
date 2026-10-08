@@ -55,6 +55,7 @@ from app.discovery.bounty.stateful import (
     execution_enabled,
     sha256_text,
     tool_status,
+    untrusted_cheatcode_use,
 )
 from app.discovery.bounty.vfcs import Vfcs
 from app.discovery.process import tool_path
@@ -513,6 +514,16 @@ class PropertyEngine:
                 **common,
             )
         common["harness_hash"] = sha256_text(source)
+        cheats = untrusted_cheatcode_use(sources)
+        if cheats:
+            return EngineRun(
+                self.name,
+                "not_run",
+                Outcome.INCONCLUSIVE,
+                PropertyVerdict.NOT_EVALUATED.value,
+                f"blocked_by_policy: cheatcode references in sources ({'; '.join(cheats)})",
+                **common,
+            )
         binary = tool_path(self.spec.binary)
         if not binary or not tool_path("solc") or not tool_path("crytic-compile"):
             return EngineRun(

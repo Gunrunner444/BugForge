@@ -20,6 +20,7 @@ from app.parsing.solidity_arithmetic import analyze_arithmetic
 from app.parsing.solidity_caller_context import analyze_caller_context
 from app.parsing.solidity_high_value import analyze_high_value
 from app.parsing.solidity_message_binding import analyze_message_binding
+from app.parsing.solidity_modules import analyze_protocol_modules, modules_present
 from app.parsing.solidity_oracle_quality import analyze_oracle_quality
 from app.parsing.solidity_research import ResearchModel, SemanticCandidate, build_research_model
 
@@ -33,6 +34,7 @@ FAMILIES: dict[str, Analyzer] = {
     "balance_delta": analyze_balance_delta,
     "arithmetic": analyze_arithmetic,
     "high_value": analyze_high_value,
+    "protocol_modules": analyze_protocol_modules,
 }
 MAX_TOTAL_CANDIDATES = 256
 
@@ -61,6 +63,9 @@ def run_suite(model: ResearchModel, families: tuple[str, ...] | None = None) -> 
             continue
         if name == "account_abstraction" and not account_abstraction_present(model):
             skipped.append(name)
+            continue
+        if name == "protocol_modules" and not modules_present(model):
+            skipped.append(name)  # evidence-triggered: no hook/bridge evidence
             continue
         run.append(name)
         found.extend(analyzer(model))

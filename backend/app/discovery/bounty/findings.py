@@ -413,6 +413,29 @@ def execution_summary(
     )
 
 
+def quality_of(candidate_strength: str, corroboration: str) -> dict[str, Any]:
+    """Three separate axes: being a candidate, being corroborated, being verified.
+
+    Static detection always yields a *candidate*. Local execution can at most make it
+    a *corroborated* candidate. *Verification* is a separate human/approved process
+    that nothing in the automated path performs, so it is always ``unverified`` here.
+    """
+    if corroboration == "disagreement":
+        corroborated = "contradicted"
+    else:
+        corroborated = {
+            "corroborated_candidate": "corroborated",
+            "strong_candidate": "single_path_execution",
+            "weak_execution_only": "execution_only",
+        }.get(candidate_strength, "none")
+    return {
+        "candidate": "static_candidate",
+        "corroboration": corroborated,
+        "verification": "unverified",
+        "verified": False,
+    }
+
+
 def match_known_issue(
     issues: Iterable[KnownIssue], candidate: SemanticCandidate
 ) -> KnownIssueMatch | None:

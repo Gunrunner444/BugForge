@@ -1500,6 +1500,36 @@ def classify(
 _PROXY_KINDS = frozenset({"uups", "transparent", "beacon", "diamond", "clone", "generic_proxy"})
 
 
+# Untrusted analyzed sources run inside forge/echidna/medusa, where any contract can
+# call the cheatcode address. ffi and file access are off by config and the
+# environment is minimal, but a fork/RPC cheatcode could still reach the network,
+# so sources that reference the cheatcode address or a dangerous cheatcode by name
+# are refused before anything runs. (Obfuscated selectors remain a residual risk
+# that only an OS-level network sandbox closes; that is outside this path.)
+_CHEAT_ADDRESS = re.compile(r"0x7109709ecfa91a80626ff3989d68f67f5b1dd12d|hevm cheat code", re.I)
+_CHEAT_CALL = re.compile(
+    r"\b(createFork|createSelectFork|selectFork|rollFork|makePersistent|ffi|tryFfi|rpc"
+    r"|rpcUrl|rpcUrls|readFile|readFileBinary|readLine|writeFile|writeFileBinary|writeLine"
+    r"|removeFile|readDir|envString|envUint|envInt|envAddress|envBytes32|envBytes|envBool"
+    r"|envOr|envExists|setEnv|startBroadcast|broadcast|httpGet|httpPost|prompt"
+    r"|promptSecret|projectRoot)\s*\("
+)
+
+
+def untrusted_cheatcode_use(sources: Mapping[str, str]) -> tuple[str, ...]:
+    """``file: construct`` for every cheatcode reference in untrusted sources."""
+    from app.parsing.solidity_research import strip_comments
+
+    found: list[str] = []
+    for path, text in sorted(sources.items()):
+        clean = strip_comments(text)
+        for pattern in (_CHEAT_ADDRESS, _CHEAT_CALL):
+            match = pattern.search(clean)
+            if match is not None:
+                found.append(f"{path}: {match.group(0)[:40]}")
+    return tuple(found[:8])
+
+
 def foundry_config(pipeline: str, solc: str) -> str:
     """Server-owned Foundry config. Nothing from the analyzed repository reaches it."""
     via_ir = "true" if pipeline == "via_ir" else "false"
@@ -1513,7 +1543,9 @@ def foundry_config(pipeline: str, solc: str) -> str:
         "ffi = false\n"
         "fs_permissions = []\n"
         "auto_detect_solc = false\n"
-        "offline = true\n" + solc_line + f"via_ir = {via_ir}\n"
+        "offline = true\n"
+        "no_storage_caching = true\n"
+        "rpc_endpoints = {}\n" + solc_line + f"via_ir = {via_ir}\n"
         f"optimizer = {optimizer}\n"
         'remappings = ["forge-std/=lib/forge-std/src/"]\n'
         "\n[lint]\nlint_on_build = false\n"
@@ -1614,6 +1646,14 @@ class StatefulExecutor:
             )
         if not execution_enabled():
             return base.done(Outcome.UNAVAILABLE, "local stateful execution is disabled")
+        cheats = untrusted_cheatcode_use(sources)
+        if cheats:
+            return base.done(
+                Outcome.INCONCLUSIVE,
+                "the analyzed sources reference cheatcodes; untrusted code is not run with "
+                f"cheatcode access ({'; '.join(cheats)})",
+                "blocked_by_policy:cheatcode_in_source",
+            )
         if not self.tools.available:
             missing = "forge" if self.tools.forge != "available" else "solc"
             return base.done(Outcome.UNAVAILABLE, f"{missing} is not installed", "tool_missing")
@@ -2457,6 +2497,19 @@ def replay_bundle(
     tools = tool_status()
     if not (execution_enabled() and tools.available):
         return {"status": "unavailable", "reason": "forge/solc unavailable or disabled"}
+    artifacts = dict(bundle.get("artifacts", {}))
+    stored = {
+        str(path): blobs.get(str(value), "")
+        for path, value in dict(bundle.get("source_hashes", {})).items()
+    }
+    cheats = untrusted_cheatcode_use(
+        {**stored, "test/VfcsHarness.t.sol": str(artifacts.get("test/VfcsHarness.t.sol", ""))}
+    )
+    if cheats:
+        return {
+            "status": "blocked_by_policy",
+            "reason": f"cheatcode references in the bundle: {'; '.join(cheats)}",
+        }
     limit = timeout if timeout is not None else _timeout_setting()
     forge = tool_path("forge") or "forge"
     with tempfile.TemporaryDirectory(prefix="bugforge-replay-") as tmp:
@@ -2483,7 +2536,7 @@ def replay_bundle(
         return {"status": "execution_failed", "reason": "no structured result"}
     events = decode_events(test)
     stored = dict(dict(bundle.get("execution", {})).get("result") or {})
-    stored_events = [tuple(item) for item in stored.get("events", [])]
+    stored_events: list[tuple[object, ...]] = [tuple(item) for item in stored.get("events", [])]
     calls = len(dict(bundle.get("sequence", {})).get("calls", []))
     observation, _deployed, _done = observation_from_events(events, calls)
     return {

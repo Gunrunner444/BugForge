@@ -348,6 +348,12 @@ _INCONCLUSIVE_NEXT: dict[str, tuple[str, str, Cost, str]] = {
         Cost(local_runs=1, human=True),
         "",
     ),
+    "blocked_by_policy:cheatcode_in_source": (
+        "an execution environment that may run code referencing cheatcodes",
+        "review:untrusted_cheatcode_use",
+        Cost(human=True),
+        "blocked_by_policy: untrusted sources reference cheatcodes",
+    ),
     "identity_mismatch": (
         "an execution bound to the analyzed snapshot",
         "re-analyze then foundry:stateful_execute",

@@ -1394,6 +1394,30 @@ class BountyCampaignService:
         )
         return {"campaign_id": campaign_id, **ledger}
 
+    def evidence_graph(self, campaign_id: str) -> dict[str, Any]:
+        """The derived evidence graph: provenance on every edge, contradictions visible."""
+        from app.discovery.bounty.evidence_graph import build_evidence_graph
+        from app.discovery.bounty.properties import build_property
+
+        campaign = self.get(campaign_id)
+        analysis = self._analysis(campaign)
+        specs = {
+            sequence.sequence_id: build_property(
+                sequence,
+                analysis.models[sequence.sequence_id],
+                analysis.candidate_for(sequence.derived_from),
+            )
+            for sequence in analysis.sequences
+        }
+        graph = build_evidence_graph(
+            candidates=analysis.candidates,
+            sequences=analysis.sequences,
+            specs=specs,
+            executions=self.stored_executions(campaign, analysis),
+            phase49_contradictions=self.evidence(campaign_id)["contradictions"],
+        )
+        return {"campaign_id": campaign_id, **graph}
+
     def research_plan(self, campaign_id: str) -> dict[str, Any]:
         """Cost-aware next research actions over the ledger (a recommendation only)."""
         from app.discovery.bounty.research_ledger import plan_actions
@@ -1550,6 +1574,8 @@ def _evidence_dict(item: Any) -> dict[str, Any]:
 
 
 def _finding_dict(item: Any) -> dict[str, Any]:
+    from app.discovery.bounty.findings import quality_of
+
     return {
         "finding_id": item.finding_id,
         "title": item.title,
@@ -1577,6 +1603,7 @@ def _finding_dict(item: Any) -> dict[str, Any]:
         "property_ids": list(item.property_ids),
         "bundle_ids": list(item.bundle_ids),
         "corroboration": item.corroboration,
+        "quality": quality_of(item.candidate_strength, item.corroboration),
         "verified": item.verified,
         "submitted": item.submitted,
     }
