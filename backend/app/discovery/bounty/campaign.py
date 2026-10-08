@@ -67,6 +67,31 @@ class Deployment:
     chain_id: str
     contract_name: str = ""
     runtime_bytecode_digest: str = ""
+    # Deployment topology as the program or operator declares it (Phase 51
+    # hardening). Empty means unknown; nothing here is inferred from the source.
+    proxy_kind: str = ""  # uups | transparent | beacon | diamond | clone | generic_proxy
+    implementation: str = ""
+    beacon: str = ""
+    facets: tuple[str, ...] = ()
+    clone_of: str = ""
+    source_commit: str = ""
+    compiler_version: str = ""
+
+
+# Deployment fields added after Phase 50. Left out of the program-context digest
+# while empty so manifests (and campaigns) from before keep their identity.
+_DEPLOYMENT_EXTENSIONS = (
+    "proxy_kind",
+    "implementation",
+    "beacon",
+    "facets",
+    "clone_of",
+    "source_commit",
+    "compiler_version",
+)
+_PROXY_KINDS = frozenset(
+    {"", "uups", "transparent", "beacon", "diamond", "clone", "generic_proxy", "none"}
+)
 
 
 @dataclass(frozen=True)
@@ -150,8 +175,17 @@ class BountyManifest:
     # ---- identity ----------------------------------------------------------------------
 
     def identity_digest(self) -> str:
-        """Digest of every field that defines the program context."""
-        return f"pc_{digest(self, length=24)}"
+        """Digest of every field that defines the program context.
+
+        Deployment topology fields that are empty are left out, so a manifest that
+        does not use them keeps the digest it had before they existed.
+        """
+        data = to_jsonable(self)
+        for item in data.get("deployments", []):
+            for name in _DEPLOYMENT_EXTENSIONS:
+                if item.get(name) in ("", [], None):
+                    item.pop(name, None)
+        return f"pc_{digest(data, length=24)}"
 
     def to_campaign_identity(
         self,
@@ -219,22 +253,36 @@ class BountyManifest:
     # ---- scope -------------------------------------------------------------------------
 
     def scope_of(
-        self, *, contract: str = "", file: str = "", address: str = "", chain_id: str = ""
+        self,
+        *,
+        contract: str = "",
+        file: str = "",
+        address: str = "",
+        chain_id: str = "",
+        repository: str | None = None,
     ) -> ScopeDecision:
-        """Explicit exclusion wins, an explicit inclusion is required, nothing is assumed."""
+        """Explicit exclusion wins, an explicit inclusion is required, nothing is assumed.
+
+        A ``repository`` asset matches only source that comes from that repository
+        (``repository`` defaults to the manifest's own repository and only applies
+        to a contract or file target). It never matches a bare address: a deployed
+        address is bound by address assets or by a declared deployment.
+        """
         if not any((contract, file, address)):
             return ScopeDecision(
                 ScopeStatus.UNKNOWN, "the target names no contract, file, or address"
             )
+        repo = self.repository if repository is None else repository
+        source_target = bool(contract or file)
         for asset in self.out_of_scope:
-            if _matches(asset, contract, file, address, chain_id):
+            if _matches(asset, contract, file, address, chain_id, repo, source_target):
                 return ScopeDecision(
                     ScopeStatus.OUT_OF_SCOPE, f"excluded by {asset.kind} {asset.identifier}", asset
                 )
         if not self.in_scope:
             return ScopeDecision(ScopeStatus.UNKNOWN, "the manifest declares no in-scope assets")
         for asset in self.in_scope:
-            if _matches(asset, contract, file, address, chain_id):
+            if _matches(asset, contract, file, address, chain_id, repo, source_target):
                 return ScopeDecision(
                     ScopeStatus.IN_SCOPE,
                     f"listed as in scope: {asset.kind} {asset.identifier}",
@@ -309,8 +357,36 @@ class ScopeDecision:
         return self.status is ScopeStatus.IN_SCOPE
 
 
-def _matches(asset: AssetRef, contract: str, file: str, address: str, chain_id: str) -> bool:
+def normalize_repository(value: str) -> str:
+    """Compare repositories by host/owner/name, ignoring scheme, case, and ``.git``."""
+    text = value.strip().lower()
+    for prefix in ("https://", "http://", "ssh://", "git://"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    if text.startswith("git@"):
+        text = text[4:].replace(":", "/", 1)
+    text = text.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if text.endswith(".git"):
+        text = text[:-4]
+    return text
+
+
+def _matches(
+    asset: AssetRef,
+    contract: str,
+    file: str,
+    address: str,
+    chain_id: str,
+    repository: str = "",
+    source_target: bool = False,
+) -> bool:
     ident = asset.identifier
+    if asset.kind == "repository":
+        return (
+            source_target
+            and bool(repository)
+            and normalize_repository(repository) == normalize_repository(ident)
+        )
     if asset.kind == "contract":
         return bool(contract) and contract == ident
     if asset.kind == "path":
@@ -369,6 +445,19 @@ def _validate(manifest: BountyManifest) -> None:
     for deployment in manifest.deployments:
         if not re.fullmatch(r"0x[0-9a-fA-F]{40}", deployment.address):
             raise ManifestError(f"deployment address {deployment.address!r} is not an address")
+        linked = [
+            ("implementation", deployment.implementation),
+            ("beacon", deployment.beacon),
+            ("clone_of", deployment.clone_of),
+            *(("facet", facet) for facet in deployment.facets),
+        ]
+        for label, value in linked:
+            if value and not re.fullmatch(r"0x[0-9a-fA-F]{40}", value):
+                raise ManifestError(f"deployment {label} {value!r} is not an address")
+        if deployment.proxy_kind not in _PROXY_KINDS:
+            raise ManifestError(f"unknown proxy kind {deployment.proxy_kind!r}")
+        if len(deployment.facets) > 64:
+            raise ManifestError("a diamond lists too many facets")
     for name in (manifest.program_url, manifest.fork.source_ref if manifest.fork else ""):
         _check_url(name)
     for text in (

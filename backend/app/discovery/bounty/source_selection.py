@@ -21,6 +21,9 @@ from app.discovery.bounty.campaign import BountyManifest
 MAX_CANDIDATE_FILES = 2000
 DEFAULT_LIMIT = 64
 MAX_FILE_BYTES = 400_000
+# Bounded follow-up for high-priority files that did not fit the primary budget.
+MAX_FOLLOWUP_BATCHES = 2
+FOLLOWUP_PRIORITY = 4  # Priority.SECURITY_SENSITIVE and better
 _SKIP_DIRS = frozenset(
     {".git", "node_modules", "lib", "out", "cache", "artifacts", "broadcast", "test", "tests"}
 )
@@ -63,14 +66,79 @@ class SourceSelection:
     limit: int
     truncated: bool
     dropped: tuple[str, ...]
+    # contract name -> every file that declares it, when more than one does. Such a
+    # name is never silently bound to the first file in alphabetical order.
+    ambiguous_contracts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    mode: str = "ranked"  # ranked | explicit
+
+    @staticmethod
+    def explicit(files: tuple[str, ...]) -> SourceSelection:
+        """The operator named the files; nothing was ranked or dropped."""
+        ranked = tuple(RankedFile(path, Priority.SCOPE, "named by the operator") for path in files)
+        return SourceSelection(
+            selected=tuple(files),
+            ranked=ranked,
+            considered=len(files),
+            limit=len(files),
+            truncated=False,
+            dropped=(),
+            mode="explicit",
+        )
+
+    @property
+    def dropped_high_priority(self) -> tuple[str, ...]:
+        """Dropped files that matter: scope, deployed, proxy, imported, sensitive."""
+        priority = {item.path: item.priority for item in self.ranked}
+        return tuple(
+            path
+            for path in self.dropped
+            if priority.get(path, Priority.OTHER).value <= FOLLOWUP_PRIORITY
+        )
+
+    def followup_batches(
+        self, max_batches: int = MAX_FOLLOWUP_BATCHES
+    ) -> tuple[tuple[str, ...], ...]:
+        """Bounded follow-up batches over the dropped high-priority files, best first."""
+        pending = list(self.dropped_high_priority)
+        size = max(1, self.limit)
+        batches: list[tuple[str, ...]] = []
+        while pending and len(batches) < max(0, max_batches):
+            batches.append(tuple(pending[:size]))
+            pending = pending[size:]
+        return tuple(batches)
+
+    def request_extra(self) -> dict[str, str]:
+        """Selection facts that travel with the analysis request and its evidence."""
+        extra = {
+            "source_selection_mode": self.mode,
+            "source_selection_truncated": str(self.truncated).lower(),
+            "source_selection_considered": str(self.considered),
+            "source_selection_selected": str(len(self.selected)),
+        }
+        if self.truncated:
+            extra["source_selection_dropped"] = str(len(self.dropped))
+            extra["source_selection_dropped_high_priority"] = str(len(self.dropped_high_priority))
+        if self.ambiguous_contracts:
+            extra["source_selection_ambiguous"] = ",".join(
+                name for name, _ in self.ambiguous_contracts
+            )[:300]
+        return extra
 
     def as_dict(self) -> dict[str, Any]:
+        batches = self.followup_batches()
+        followed = {path for batch in batches for path in batch}
         return {
+            "mode": self.mode,
             "selected": list(self.selected),
             "considered": self.considered,
             "limit": self.limit,
             "truncated": self.truncated,
             "dropped_count": len(self.dropped),
+            "dropped": list(self.dropped[:200]),
+            "dropped_high_priority": list(self.dropped_high_priority[:200]),
+            "followup_batches": [list(batch) for batch in batches],
+            "never_read": [p for p in self.dropped_high_priority if p not in followed][:200],
+            "ambiguous_contracts": {name: list(files) for name, files in self.ambiguous_contracts},
             "note": (
                 "truncated=true means files were not read under the budget; a dropped file "
                 "is not implied to be clean, safe, or out of scope"
@@ -127,16 +195,22 @@ def select_sources(
     deployed_contracts = (
         {d.contract_name for d in manifest.deployments if d.contract_name} if manifest else set()
     )
-    contract_to_file = _contract_index(texts)
-    scope_files = _files_for(scope_contracts, scope_paths, contract_to_file)
+    contract_to_files = _contract_index(texts)
+    scope_files = _files_for(scope_contracts, scope_paths, contract_to_files, focus_file)
     imported = _imports_of(scope_files, texts, root)
+    ambiguous = tuple(
+        (name, tuple(files))
+        for name, files in sorted(contract_to_files.items())
+        if len(files) > 1 and (name in scope_contracts or name in deployed_contracts)
+    )
+    ambiguous_files = {path: name for name, files in ambiguous for path in files}
 
     ranked: list[RankedFile] = []
     for rel in rel_paths:
         text = texts[rel]
-        priority, reason = _rank_one(
-            rel, text, scope_files, deployed_contracts, contract_to_file, imported
-        )
+        priority, reason = _rank_one(rel, text, scope_files, deployed_contracts, imported)
+        if rel in ambiguous_files and priority.value <= Priority.DEPLOYED.value:
+            reason = f"{reason}; contract name {ambiguous_files[rel]} is declared in several files"
         ranked.append(RankedFile(rel, priority, reason))
 
     ranked.sort(key=lambda item: (item.priority.value, item.path))
@@ -149,6 +223,7 @@ def select_sources(
         limit=limit,
         truncated=len(ranked) > limit,
         dropped=dropped,
+        ambiguous_contracts=ambiguous,
     )
 
 
@@ -171,21 +246,32 @@ def _scope_targets(
     return contracts, paths
 
 
-def _contract_index(texts: dict[str, str]) -> dict[str, str]:
-    index: dict[str, str] = {}
+def _contract_index(texts: dict[str, str]) -> dict[str, list[str]]:
+    """Every file that declares each contract name (not only the first one)."""
+    index: dict[str, list[str]] = {}
     for rel, text in texts.items():
         for name in _CONTRACT_DECL.findall(text):
-            index.setdefault(name, rel)
+            files = index.setdefault(name, [])
+            if rel not in files:
+                files.append(rel)
     return index
 
 
 def _files_for(
-    contracts: set[str], paths: set[str], contract_to_file: dict[str, str]
+    contracts: set[str],
+    paths: set[str],
+    contract_to_files: dict[str, list[str]],
+    focus_file: str = "",
 ) -> set[str]:
+    """Files for the scoped contracts. A name declared in several files keeps all of
+    them unless the operator's focus file disambiguates it."""
     files: set[str] = set()
     for name in contracts:
-        if name in contract_to_file:
-            files.add(contract_to_file[name])
+        declaring = contract_to_files.get(name, [])
+        if focus_file and focus_file in declaring:
+            files.add(focus_file)
+        else:
+            files.update(declaring)
     files.update(paths)
     return files
 
@@ -212,7 +298,6 @@ def _rank_one(
     text: str,
     scope_files: set[str],
     deployed_contracts: set[str],
-    contract_to_file: dict[str, str],
     imported: set[str],
 ) -> tuple[Priority, str]:
     if rel in scope_files or any(rel.endswith("/" + f) for f in scope_files):

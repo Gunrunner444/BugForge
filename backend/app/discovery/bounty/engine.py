@@ -55,11 +55,17 @@ RESEARCH_CAPABILITIES = frozenset(
     }
 )
 MAX_DIRECTORY_FILES = 400
-_SKIP_DIRS = frozenset({".git", "node_modules", "lib", "out", "cache", "artifacts", "broadcast"})
+ENGINE_VERSION = "phase51.1"
 
 
 def load_sources(request: AnalysisRequest) -> dict[str, str]:
-    """Read the requested Solidity files under the repository root. Nothing leaves it."""
+    """Read the requested Solidity files under the repository root. Nothing leaves it.
+
+    When the request names no file, the files come from the truncation-aware
+    :func:`select_sources` ranking (scope, deployed, proxy, imported, sensitive
+    first) instead of the first files in alphabetical order. Truncation is
+    reported by the selection; a file that was not read is not implied safe.
+    """
     root = request.repo_root.resolve()
     chosen: list[Path] = []
     named = [*request.files, *([request.source_file] if request.source_file else [])]
@@ -68,12 +74,17 @@ def load_sources(request: AnalysisRequest) -> dict[str, str]:
         if path.is_file() and root in path.parents and path.suffix == ".sol":
             chosen.append(path)
     if not chosen and root.is_dir():
-        for path in sorted(root.rglob("*.sol"))[:MAX_DIRECTORY_FILES]:
-            relative = path.relative_to(root)
-            if path.is_file() and not (set(relative.parts) & _SKIP_DIRS):
-                chosen.append(path.resolve())
+        from app.discovery.bounty.source_selection import select_sources
+
+        selection = select_sources(
+            root,
+            focus_contract=request.contract,
+            focus_file=request.source_file,
+            limit=min(MAX_FILES, MAX_DIRECTORY_FILES),
+        )
+        chosen.extend((root / rel).resolve() for rel in selection.selected)
     sources: dict[str, str] = {}
-    for path in sorted(set(chosen))[:MAX_FILES]:
+    for path in list(dict.fromkeys(chosen))[:MAX_FILES]:
         try:
             if path.stat().st_size > MAX_FILE_BYTES:
                 continue
@@ -120,7 +131,9 @@ class BugforgeResearchEngine(DiscoveryEngine):
         return EngineAvailability.AVAILABLE
 
     def version(self) -> str:
-        return "phase50"
+        # New results carry the current phase. Evidence recorded by earlier versions
+        # keeps the version it was recorded with; it is never rewritten.
+        return ENGINE_VERSION
 
     def _campaign_capability(self, request: AnalysisRequest) -> EngineCapability:
         try:
@@ -268,6 +281,9 @@ class BugforgeResearchEngine(DiscoveryEngine):
             "analysis": "static",
             "verified": "false",
         }
+        for key, value in request.extra.items():
+            if key.startswith("source_selection_") or key.startswith("deployment_"):
+                base[key] = value
         return DynamicResult(
             engine=self.engine_id,
             engine_version=self.version(),

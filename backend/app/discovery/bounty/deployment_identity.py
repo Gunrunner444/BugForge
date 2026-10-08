@@ -201,9 +201,16 @@ def reconcile_deployment(
     chain_id: str = "",
     model: ResearchModel | None = None,
 ) -> DeploymentBinding:
-    """Bind a (chain, address, contract) target to a deployment and judge the binding."""
+    """Bind a (chain, address, contract) target to a deployment and judge the binding.
 
-    deployment = _find_deployment(manifest, contract=contract, address=address, chain_id=chain_id)
+    A target that matches several deployments (the same address on several chains
+    with no chain given, or a contract name deployed more than once) is reported as
+    ambiguous; it is never bound to the first match.
+    """
+
+    deployment, ambiguity = find_deployment(
+        manifest, contract=contract, address=address, chain_id=chain_id
+    )
     proxy = (
         detect_proxy_topology(model, contract)
         if model is not None
@@ -212,7 +219,7 @@ def reconcile_deployment(
     reasons: list[str] = []
 
     if deployment is None:
-        reasons.append("no manifest deployment matches this target")
+        reasons.append(ambiguity or "no manifest deployment matches this target")
         return DeploymentBinding(
             chain_id=chain_id,
             address=address,
@@ -222,10 +229,13 @@ def reconcile_deployment(
             compiler_fingerprint=manifest.compiler.fingerprint(),
             proxy=proxy,
             source_matches_deployed="unknown",
-            confidence=BindingConfidence.UNBOUND,
+            confidence=BindingConfidence.AMBIGUOUS if ambiguity else BindingConfidence.UNBOUND,
             reasons=tuple(reasons),
         )
 
+    declared = _declared_topology(deployment)
+    if declared is not None and not proxy.is_proxy:
+        proxy = declared
     matches = _digest_match(manifest, deployment)
     reasons.append(_digest_reason(manifest, deployment, matches))
     confidence = BindingConfidence.BOUND
@@ -235,6 +245,10 @@ def reconcile_deployment(
             f"deployed address is a {proxy.kind.value}; the running implementation "
             "may not be this source"
         )
+    if deployment.source_commit and manifest.source_commit:
+        if deployment.source_commit != manifest.source_commit:
+            confidence = BindingConfidence.AMBIGUOUS
+            reasons.append("the deployment was built from a different source commit")
     if matches == "unknown":
         confidence = BindingConfidence.AMBIGUOUS
     elif matches == "no":
@@ -246,13 +260,38 @@ def reconcile_deployment(
         address=deployment.address,
         contract_name=deployment.contract_name or contract,
         runtime_bytecode_digest=deployment.runtime_bytecode_digest,
-        source_commit=manifest.source_commit,
+        source_commit=deployment.source_commit or manifest.source_commit,
         compiler_fingerprint=manifest.compiler.fingerprint(),
         proxy=proxy,
         source_matches_deployed=matches,
         confidence=confidence,
         reasons=tuple(reasons),
     )
+
+
+def _declared_topology(deployment: Deployment) -> ProxyTopology | None:
+    kind = deployment.proxy_kind.strip().lower()
+    if kind in {"", "none"}:
+        if deployment.implementation or deployment.beacon or deployment.facets:
+            kind = "generic_proxy"
+        elif deployment.clone_of:
+            kind = "clone"
+        else:
+            return None
+    try:
+        parsed = ProxyKind(kind)
+    except ValueError:
+        parsed = ProxyKind.UNKNOWN
+    detail = [f"declared by the manifest as {parsed.value}"]
+    if deployment.implementation:
+        detail.append(f"implementation {deployment.implementation}")
+    if deployment.beacon:
+        detail.append(f"beacon {deployment.beacon}")
+    if deployment.facets:
+        detail.append(f"{len(deployment.facets)} facets")
+    if deployment.clone_of:
+        detail.append(f"clone of {deployment.clone_of}")
+    return ProxyTopology(parsed, deployment.contract_name, tuple(detail))
 
 
 def resolve_scope_identity(
@@ -296,18 +335,42 @@ def resolve_scope_identity(
     )
 
 
-def _find_deployment(
+def find_deployment(
     manifest: BountyManifest, *, contract: str, address: str, chain_id: str
-) -> Deployment | None:
-    for item in manifest.deployments:
-        if address and item.address.lower() == address.lower():
-            if not chain_id or not item.chain_id or item.chain_id == chain_id:
-                return item
+) -> tuple[Deployment | None, str]:
+    """The single deployment a target names, or ``(None, reason)`` when ambiguous."""
+    if address:
+        hits = [
+            item
+            for item in manifest.deployments
+            if item.address.lower() == address.lower()
+            and (not chain_id or not item.chain_id or item.chain_id == chain_id)
+        ]
+        if len(hits) == 1:
+            return hits[0], ""
+        if len(hits) > 1:
+            chains = ",".join(sorted({item.chain_id or "?" for item in hits}))
+            return None, f"address {address} is deployed on several chains ({chains}); name one"
+        return None, ""
     if contract:
         named = [d for d in manifest.deployments if d.contract_name == contract]
         if len(named) == 1:
-            return named[0]
-    return None
+            return named[0], ""
+        if len(named) > 1:
+            return None, (
+                f"contract {contract} has {len(named)} deployments; the target address is "
+                "required to choose one"
+            )
+    return None, ""
+
+
+def _find_deployment(
+    manifest: BountyManifest, *, contract: str, address: str, chain_id: str
+) -> Deployment | None:
+    found, _reason = find_deployment(
+        manifest, contract=contract, address=address, chain_id=chain_id
+    )
+    return found
 
 
 def _digest_match(manifest: BountyManifest, deployment: Deployment) -> str:
@@ -326,4 +389,103 @@ def _digest_reason(manifest: BountyManifest, deployment: Deployment, matches: st
     return (
         "runtime bytecode digest unknown on at least one side; source is not assumed "
         "to be the deployed code"
+    )
+
+
+@dataclass(frozen=True)
+class DeploymentIdentity:
+    """The deployment truth carried end to end: scope, findings, sequences, evidence,
+    report, dedup, and runtime replay all use this one record."""
+
+    chain_id: str
+    address: str
+    contract: str
+    source_commit: str
+    runtime_digest: str
+    compiler: str
+    proxy_kind: str
+    implementation: str
+    beacon: str
+    facets: tuple[str, ...]
+    clone_of: str
+    binding: str  # bound | ambiguous | unbound
+    source_matches_deployed: str  # yes | no | unknown
+    reasons: tuple[str, ...]
+
+    @property
+    def key(self) -> str:
+        """A short identity for dedup and sequence binding. ``source`` when unbound."""
+        if self.address:
+            return f"{self.chain_id or '?'}:{self.address.lower()}"
+        return "source"
+
+    @property
+    def known(self) -> bool:
+        return bool(self.address)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "chain_id": self.chain_id or UNKNOWN,
+            "address": self.address or UNKNOWN,
+            "contract": self.contract or UNKNOWN,
+            "source_commit": self.source_commit or UNKNOWN,
+            "runtime_digest": self.runtime_digest or UNKNOWN,
+            "compiler": self.compiler or UNKNOWN,
+            "proxy_kind": self.proxy_kind,
+            "implementation": self.implementation or UNKNOWN,
+            "beacon": self.beacon or UNKNOWN,
+            "facets": list(self.facets),
+            "clone_of": self.clone_of or UNKNOWN,
+            "binding": self.binding,
+            "source_matches_deployed": self.source_matches_deployed,
+            "reasons": list(self.reasons),
+            "key": self.key,
+        }
+
+    def request_extra(self) -> dict[str, str]:
+        """Fields for runtime/replay requests. Empty values are left out."""
+        extra = {
+            "deployment_address": self.address.lower(),
+            "deployment_chain_id": self.chain_id,
+            "deployment_binding": self.binding,
+            "deployment_proxy_kind": self.proxy_kind,
+            "deployment_implementation": self.implementation.lower(),
+            "deployment_runtime_digest": self.runtime_digest,
+        }
+        return {key: value for key, value in extra.items() if value}
+
+
+def deployment_identity(
+    manifest: BountyManifest,
+    *,
+    contract: str = "",
+    address: str = "",
+    chain_id: str = "",
+    model: ResearchModel | None = None,
+) -> DeploymentIdentity:
+    """Build the end-to-end deployment identity for a target. Unknown stays unknown."""
+    binding = reconcile_deployment(
+        manifest, contract=contract, address=address, chain_id=chain_id, model=model
+    )
+    deployment, _ = find_deployment(
+        manifest, contract=contract, address=address, chain_id=chain_id
+    )
+    compiler = manifest.compiler.fingerprint()
+    if deployment is not None and deployment.compiler_version:
+        compiler = f"declared:{deployment.compiler_version};{compiler}".rstrip(";")
+    return DeploymentIdentity(
+        chain_id=binding.chain_id,
+        address=binding.address,
+        contract=binding.contract_name,
+        source_commit=binding.source_commit,
+        runtime_digest=binding.runtime_bytecode_digest,
+        compiler=compiler,
+        proxy_kind=binding.proxy.kind.value,
+        implementation=deployment.implementation if deployment else "",
+        beacon=deployment.beacon if deployment else "",
+        facets=tuple(deployment.facets) if deployment else (),
+        clone_of=deployment.clone_of if deployment else "",
+        binding=binding.confidence.value,
+        source_matches_deployed=binding.source_matches_deployed,
+        reasons=binding.reasons,
     )

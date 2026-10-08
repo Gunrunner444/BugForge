@@ -1445,8 +1445,27 @@ _RESEARCH_CLASS = {
     "account_abstraction": VulnerabilityClass.AUTHORIZATION,
     "balance_delta": VulnerabilityClass.BUSINESS_LOGIC,
     "arithmetic": VulnerabilityClass.UNSAFE_ARITHMETIC,
-    "high_value": VulnerabilityClass.REENTRANCY,
+    # ``high_value`` is a bundle of three distinct detectors, so the family
+    # fallback is only used if a new high-value detector is added without a
+    # per-detector mapping below.
+    "high_value": VulnerabilityClass.BUSINESS_LOGIC,
 }
+
+# Some research families (notably ``high_value``) emit several detectors that
+# belong to different vulnerability classes. The detector prefix (the part before
+# the first dot) decides the real class so a read-only reentrancy finding is not
+# mislabelled as transient-storage misuse and an EIP-7702 EOA assumption lands in
+# the authorization class rather than reentrancy.
+_DETECTOR_CLASS = {
+    "read_only_reentrancy": VulnerabilityClass.REENTRANCY,
+    "transient_storage": VulnerabilityClass.BUSINESS_LOGIC,
+    "eip7702": VulnerabilityClass.AUTHORIZATION,
+}
+
+
+def _class_for_detector(detector: str, fallback: VulnerabilityClass) -> VulnerabilityClass:
+    prefix = detector.split(".", 1)[0]
+    return _DETECTOR_CLASS.get(prefix, fallback)
 
 
 def _research_rules() -> list[SecurityRule]:
@@ -1475,7 +1494,9 @@ class _ResearchRule(_SolidityRule):
             found.append(
                 SecurityObservation(
                     rule_id=self.rule_id,
-                    vulnerability_class=self.vulnerability_class,
+                    vulnerability_class=_class_for_detector(
+                        item.detector, self.vulnerability_class
+                    ),
                     title=item.title,
                     summary=item.summary,
                     file_path=graph.file_path,

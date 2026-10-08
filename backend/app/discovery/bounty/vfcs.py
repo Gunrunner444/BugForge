@@ -40,6 +40,8 @@ class SequenceIdentity:
     compiler_configuration: str = ""
     fork_reference: str = ""
     program_context: str = ""
+    # chain:address of the deployment the sequence targets ("" = source only).
+    deployment: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,11 +93,21 @@ class FeedbackSignal:
 
 
 def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceIdentity) -> str:
+    bound: object = identity
+    if not identity.deployment:
+        # Sequences without a deployment keep the ids they had before the field existed.
+        bound = {
+            "campaign_id": identity.campaign_id,
+            "source_snapshot": identity.source_snapshot,
+            "compiler_configuration": identity.compiler_configuration,
+            "fork_reference": identity.fork_reference,
+            "program_context": identity.program_context,
+        }
     return "vf_" + digest(
         (
             [(c.contract, c.function, c.role, c.actor, c.arguments, c.primitive) for c in calls],
             template,
-            identity,
+            bound,
         )
     )
 
