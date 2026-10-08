@@ -1369,19 +1369,11 @@ class BountyCampaignService:
 
     def research_ledger(self, campaign_id: str) -> dict[str, Any]:
         """RESEARCH_COVERAGE + RESEARCH_GAPS from typed state. Read-only; nothing verified."""
-        from app.discovery.bounty.properties import build_property
         from app.discovery.bounty.research_ledger import build_ledger
 
         campaign = self.get(campaign_id)
         analysis = self._analysis(campaign)
-        specs = {
-            sequence.sequence_id: build_property(
-                sequence,
-                analysis.models[sequence.sequence_id],
-                analysis.candidate_for(sequence.derived_from),
-            )
-            for sequence in analysis.sequences
-        }
+        specs = self._property_specs(analysis)
         ledger = build_ledger(
             models=analysis.all_models(),
             candidates=analysis.candidates,
@@ -1397,18 +1389,10 @@ class BountyCampaignService:
     def evidence_graph(self, campaign_id: str) -> dict[str, Any]:
         """The derived evidence graph: provenance on every edge, contradictions visible."""
         from app.discovery.bounty.evidence_graph import build_evidence_graph
-        from app.discovery.bounty.properties import build_property
 
         campaign = self.get(campaign_id)
         analysis = self._analysis(campaign)
-        specs = {
-            sequence.sequence_id: build_property(
-                sequence,
-                analysis.models[sequence.sequence_id],
-                analysis.candidate_for(sequence.derived_from),
-            )
-            for sequence in analysis.sequences
-        }
+        specs = self._property_specs(analysis)
         graph = build_evidence_graph(
             candidates=analysis.candidates,
             sequences=analysis.sequences,
@@ -1435,6 +1419,95 @@ class BountyCampaignService:
             "campaign_id": campaign_id,
             "ledger_digest": ledger["ledger_digest"],
             **plan,
+        }
+
+    def _property_specs(self, analysis: Any) -> dict[str, Any]:
+        from app.discovery.bounty.properties import build_property
+
+        return {
+            sequence.sequence_id: build_property(
+                sequence,
+                analysis.models[sequence.sequence_id],
+                analysis.candidate_for(sequence.derived_from),
+            )
+            for sequence in analysis.sequences
+        }
+
+    def research_properties(self, campaign_id: str) -> dict[str, Any]:
+        """Each sequence's declared property and oracle, with its latest observation.
+
+        Read-only. A property stays a hypothesis; an observation is a local execution
+        result for the stated inputs, never a verification.
+        """
+        campaign = self.get(campaign_id)
+        analysis = self._analysis(campaign)
+        specs = self._property_specs(analysis)
+        executions = self.stored_executions(campaign, analysis)
+        properties = []
+        for sequence in sorted(analysis.sequences, key=lambda item: item.sequence_id):
+            spec = specs[sequence.sequence_id]
+            record = dict(executions.get(sequence.sequence_id) or {})
+            properties.append(
+                {
+                    "sequence_id": sequence.sequence_id,
+                    "derived_from": sequence.derived_from,
+                    **spec.as_dict(),
+                    "observation": (
+                        {
+                            "outcome": record.get("outcome"),
+                            "identity_status": record.get("identity_status"),
+                            "replay_mode": record.get("replay_mode"),
+                            "stale": bool(record.get("stale")),
+                            "check_paths": list(record.get("check_paths", []) or []),
+                            "bundle_id": record.get("bundle_id", ""),
+                        }
+                        if record
+                        else None
+                    ),
+                    "verified": False,
+                }
+            )
+        return {
+            "campaign_id": campaign_id,
+            "properties": properties,
+            "skipped": [
+                {"candidate": key, "reason": reason}
+                for key, reason in sorted(analysis.sequence_skipped.items())
+            ],
+            "verified": False,
+        }
+
+    def research_modules(self, campaign_id: str) -> dict[str, Any]:
+        """Which evidence-triggered protocol modules ran, with the triggering evidence."""
+        from app.parsing.solidity_modules import module_triggers
+
+        campaign = self.get(campaign_id)
+        analysis = self._analysis(campaign)
+        merged: dict[str, dict[str, Any]] = {}
+        for model in analysis.all_models():
+            for status in module_triggers(model):
+                entry = merged.setdefault(
+                    status.module,
+                    {
+                        "module": status.module,
+                        "triggered": False,
+                        "status": "not_triggered",
+                        "detectors": list(status.detectors),
+                        "evidence": [],
+                    },
+                )
+                if status.triggered:
+                    entry["triggered"] = True
+                    entry["status"] = status.status
+                    for file, line, what in status.evidence:
+                        item = {"file": file, "line": line, "evidence": what}
+                        if item not in entry["evidence"]:
+                            entry["evidence"].append(item)
+        return {
+            "campaign_id": campaign_id,
+            "modules": [merged[name] for name in sorted(merged)],
+            "note": "a module runs only on evidence; triggered_no_detector makes no claim",
+            "verified": False,
         }
 
     def research_engines(self, campaign_id: str) -> dict[str, Any]:

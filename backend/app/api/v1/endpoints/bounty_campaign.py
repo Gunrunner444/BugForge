@@ -364,6 +364,66 @@ async def campaign_repro_bundle(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/campaigns/{campaign_id}/research/coverage")
+async def campaign_research_coverage(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """RESEARCH_COVERAGE and RESEARCH_GAPS (read only; ranks gaps, runs nothing)."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().research_ledger, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/research/plan")
+async def campaign_research_plan(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Cost-aware next research actions within the server-owned budget (a recommendation)."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().research_plan, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/research/engines")
+async def campaign_research_engines(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Engine availability: last run's smoke-checked snapshot and the current view."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().research_engines, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/research/properties")
+async def campaign_research_properties(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Declared properties/oracles per sequence with their latest observation."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().research_properties, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/research/evidence-graph")
+async def campaign_research_evidence_graph(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Derived evidence graph: provenance on every edge, contradictions visible."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().evidence_graph, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/research/modules")
+async def campaign_research_modules(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Evidence-triggered protocol modules and the triggering evidence."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().research_modules, campaign_id)
+
+
 @router.get("/campaigns/{campaign_id}/report")
 async def campaign_report(
     campaign_id: str,

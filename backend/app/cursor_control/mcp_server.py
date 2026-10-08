@@ -414,6 +414,101 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         },
     },
     {
+        "name": "bugforge_campaign_stateful_status",
+        "description": (
+            "Read persisted stateful-execution observations, VFCS feedback status, bundle metadata, and the engine snapshot. A read only; nothing is verified."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_research_coverage",
+        "description": (
+            "Read the research coverage ledger and ranked gaps (unexecuted, inconclusive, unsupported, blocked). A read only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_research_plan",
+        "description": (
+            "Read cost-aware next research actions. A recommendation only; it grants no approval and raises no budget."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_engines",
+        "description": (
+            "Read engine availability (usable/installed/unavailable/unsupported/blocked_by_policy). Runs no engine."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_properties",
+        "description": (
+            "Read declared properties and oracles per sequence with their latest local observation. Nothing is verified."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_evidence_graph",
+        "description": (
+            "Read the derived evidence graph with edge provenance and open contradictions. A read only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_modules",
+        "description": ("Read which evidence-triggered protocol modules ran and why. A read only."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_repro_bundle",
+        "description": (
+            "Read one stored reproduction bundle (metadata and content-addressed artifacts). "
+            "Reading it replays nothing and verifies nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}, "bundle_id": {"type": "string"}},
+            "required": ["campaign_id", "bundle_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "bugforge_campaign_vfcs_feedback",
         "description": (
             "Submit VFCS campaign feedback signals that steer the next round's sequence "
@@ -744,6 +839,25 @@ def dispatch_tool(name: str, arguments: Mapping[str, Any], api: BugForgeApi) -> 
         return api.request("GET", _campaign_path(campaign_id, "/scope-identity"))
     if name == "bugforge_campaign_advisories":
         return api.request("GET", _campaign_path(campaign_id, "/advisories"))
+    if name == "bugforge_campaign_stateful_status":
+        return api.request("GET", _campaign_path(campaign_id, "/stateful"))
+    if name == "bugforge_campaign_research_coverage":
+        return api.request("GET", _campaign_path(campaign_id, "/research/coverage"))
+    if name == "bugforge_campaign_research_plan":
+        return api.request("GET", _campaign_path(campaign_id, "/research/plan"))
+    if name == "bugforge_campaign_engines":
+        return api.request("GET", _campaign_path(campaign_id, "/research/engines"))
+    if name == "bugforge_campaign_properties":
+        return api.request("GET", _campaign_path(campaign_id, "/research/properties"))
+    if name == "bugforge_campaign_evidence_graph":
+        return api.request("GET", _campaign_path(campaign_id, "/research/evidence-graph"))
+    if name == "bugforge_campaign_modules":
+        return api.request("GET", _campaign_path(campaign_id, "/research/modules"))
+    if name == "bugforge_campaign_repro_bundle":
+        bundle_id = str(arguments.get("bundle_id") or "")
+        if not _CAMPAIGN_ID.fullmatch(bundle_id):
+            raise LocalApiError("invalid bundle id")
+        return api.request("GET", _campaign_path(campaign_id, f"/repro-bundles/{bundle_id}"))
     if name == "bugforge_campaign_vfcs_feedback":
         signals = arguments.get("signals")
         body = {"signals": [dict(s) for s in signals] if isinstance(signals, list) else []}
