@@ -36,6 +36,7 @@ from app.discovery.bounty.findings import ResearchFinding, build_findings
 from app.discovery.bounty.gate import BountyGate
 from app.discovery.bounty.priority import prioritize
 from app.discovery.bounty.report_pack import ReportPack, build_report_pack
+from app.discovery.bounty.source_selection import select_sources
 from app.discovery.bounty.vfcs import MAX_VFCS_CANDIDATES, SequenceIdentity, Vfcs, generate
 from app.discovery.builtin import BugforgeStaticEngine
 from app.discovery.corpus import DiscoveryCorpus
@@ -429,6 +430,17 @@ class BountyCampaignService:
             contract=campaign.spec.contract, file=campaign.spec.source_file
         )
         return {"status": scope.status.value, "reason": scope.reason}
+
+    def source_selection(self, campaign_id: str) -> dict[str, Any]:
+        """Truncation-aware ranking of the repo's sources. Dropped != safe."""
+        campaign = self.get(campaign_id)
+        selection = select_sources(
+            campaign.request.repo_root,
+            manifest=campaign.manifest,
+            focus_contract=campaign.spec.contract,
+            focus_file=campaign.spec.source_file,
+        )
+        return {"campaign_id": campaign_id, **selection.as_dict()}
 
     def scope_identity(self, campaign_id: str) -> dict[str, Any]:
         """Deployment/scope identity reconciliation (source is never assumed deployed)."""

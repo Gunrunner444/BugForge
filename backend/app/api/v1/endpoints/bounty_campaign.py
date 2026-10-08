@@ -204,6 +204,15 @@ async def campaign_repro(
     return get_bounty_service().repro(campaign_id)
 
 
+@router.get("/campaigns/{campaign_id}/source-selection")
+async def campaign_source_selection(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    return get_bounty_service().source_selection(campaign_id)
+
+
 @router.get("/campaigns/{campaign_id}/scope-identity")
 async def campaign_scope_identity(
     campaign_id: str,
