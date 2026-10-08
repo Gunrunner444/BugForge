@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import os
+
+# Bounty campaigns persist through a real database (Phase 51). Tests use a shared
+# in-memory SQLite so the Phase 49 SqlStore and the campaign record store run end
+# to end. This must be set before any module reads the cached settings.
+os.environ.setdefault(
+    "BOUNTY_CAMPAIGN_DATABASE_URL",
+    "sqlite:///file:bugforge_campaign_test?mode=memory&cache=shared&uri=true",
+)
 from collections.abc import AsyncGenerator
 
 import pytest_asyncio

@@ -108,9 +108,20 @@ def test_out_of_scope_target_blocks_before_any_engine_runs() -> None:
 
 
 def test_run_is_deterministic() -> None:
-    # fresh services, identical specs -> identical observable outcome
-    a = BountyCampaignService()
-    b = BountyCampaignService()
+    # fresh services with independent databases, identical specs -> identical
+    # observable outcome.
+    import uuid
+
+    from app.services.bounty_campaign_store import runner_for_url
+
+    def _mem_runner():
+        name = f"det_{uuid.uuid4().hex}"
+        return runner_for_url(
+            f"sqlite:///file:{name}?mode=memory&cache=shared&uri=true"
+        )
+
+    a = BountyCampaignService(runner=_mem_runner())
+    b = BountyCampaignService(runner=_mem_runner())
     ca = a.create(_spec())
     cb = b.create(_spec())
     ra = a.analyze(ca.campaign_id)

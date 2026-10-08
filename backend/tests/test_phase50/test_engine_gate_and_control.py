@@ -373,7 +373,9 @@ def test_bounty_package_has_no_network_model_or_submission_code() -> None:
                     name,
                 )
                 if name == "subprocess" or name.startswith("subprocess."):
-                    assert path.name == "compiler_diff.py"
+                    # compiler_diff.py shells out to solc; stateful.py (Phase 52)
+                    # shells out to forge for local stateful execution.
+                    assert path.name in {"compiler_diff.py", "stateful.py"}
     # the manifest legitimately names credential words in order to refuse them
     text = "\n".join(
         p.read_text(encoding="utf-8") for p in PACKAGE.glob("*.py") if p.name != "campaign.py"

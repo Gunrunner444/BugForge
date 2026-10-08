@@ -153,3 +153,35 @@ def test_candidates_are_never_verified() -> None:
     for candidate in analyze_high_value(model):
         assert candidate.verified is False
         assert candidate.status == "candidate"
+
+
+# ---- classification (Phase 51 item 8) -------------------------------------------------------
+
+
+def _classes(tmp_path, source: str) -> set[str]:
+    from app.security.engine import SecurityAnalysisEngine
+
+    path = tmp_path / "C.sol"
+    path.write_text(source, encoding="utf-8")
+    result = SecurityAnalysisEngine().analyze_repository(tmp_path, [path])
+    return {
+        obs.vulnerability_class.value
+        for obs in result.observations
+        if obs.rule_id == "sol.research.high_value"
+    }
+
+
+def test_read_only_reentrancy_is_classified_as_reentrancy(tmp_path) -> None:
+    assert "reentrancy" in _classes(tmp_path, _RO_VULN)
+
+
+def test_transient_misuse_is_not_classified_as_reentrancy(tmp_path) -> None:
+    classes = _classes(tmp_path, _TS_VULN)
+    assert "business_logic_risk" in classes
+    assert "reentrancy" not in classes
+
+
+def test_eip7702_assumption_is_classified_as_authorization(tmp_path) -> None:
+    classes = _classes(tmp_path, _EOA_VULN)
+    assert "authorization_flaw" in classes
+    assert "reentrancy" not in classes

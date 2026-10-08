@@ -14,7 +14,7 @@ from app.discovery.bounty.vfcs import (
 )
 from app.parsing.solidity_research import build_research_model
 from app.parsing.solidity_research_suite import run_suite
-from tests.test_phase50.phase50_support import FIXTURES, read
+from tests.test_phase50.phase50_support import read
 
 
 def _sequences():

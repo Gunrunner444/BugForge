@@ -355,7 +355,7 @@ def test_migration_027_follows_026_and_matches_the_models() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
     revision = script.get_revision("027")
     assert revision is not None and revision.down_revision == "026"
-    assert script.get_current_head() == "027"
+    assert script.get_current_head() in {"027", "028"}  # 028 (Phase 51) follows 027
 
 
 def test_migration_027_upgrades_and_downgrades_cleanly() -> None:

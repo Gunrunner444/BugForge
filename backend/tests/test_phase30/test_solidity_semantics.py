@@ -8,7 +8,7 @@ import pytest
 
 from app.parsing.engine import parse_source, reset_syntax_registry
 from app.parsing.keccak import function_selector
-from app.parsing.solidity_compiler import compiler_semantics, solidity_compiler_status
+from app.parsing.solidity_compiler import compiler_semantics
 from app.parsing.solidity_links import selector_for_function, unique_abi_aliases
 from app.parsing.solidity_loops import loop_is_bounded
 from app.parsing.solidity_types import (
@@ -470,8 +470,12 @@ def test_compiler_overlay_does_not_invent_layout(monkeypatch: pytest.MonkeyPatch
     def unavailable() -> SolidityCompilerStatus:
         return SolidityCompilerStatus("UNAVAILABLE", "", "compiler absent in this test")
 
+    import app.parsing.solidity_compiler as _compiler_mod
+
     monkeypatch.setattr("app.parsing.solidity_compiler.solidity_compiler_status", unavailable)
-    assert solidity_compiler_status().status == "UNAVAILABLE"
+    # Check through the module so the monkeypatch is observed even when a real
+    # solc is installed on the host (the test-local import is a stale reference).
+    assert _compiler_mod.solidity_compiler_status().status == "UNAVAILABLE"
     absent = compiler_semantics("contract C {}")
     assert absent.status == "UNAVAILABLE"
     assert absent.storage == []
