@@ -1,9 +1,14 @@
-"""Bounty-campaign API (Phase 51).
+"""Bounty-campaign API (Phase 51/52).
 
-Exposes the Phase 49 orchestrator and Phase 50 bounty engines over the existing
-FastAPI + operator-auth conventions. Every route requires an authenticated local
-operator. The AI/Cursor cannot grant an approval, change scope, raise a budget,
-mark a finding verified, or submit anything through these routes.
+Exposes the Phase 49 orchestrator, the Phase 50 bounty engines, and the Phase 52
+local stateful execution over the existing FastAPI + operator-auth conventions.
+Every route requires an authenticated local operator. The AI/Cursor cannot grant
+an approval, change scope, raise a budget, mark a finding verified, or submit
+anything through these routes.
+
+Expensive campaign work (running the orchestrator, synthesizing and running
+harnesses, building the report) never blocks the event loop: it runs on a worker
+thread, either through the background-job endpoints or via ``run_in_threadpool``.
 """
 
 from __future__ import annotations
@@ -12,12 +17,15 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from app.discovery.bounty.campaign import BountyManifest, ManifestError
 from app.discovery.bounty.service import (
     APPROVABLE_CAPABILITIES,
     BountyCampaign,
+    CampaignControlError,
     CampaignError,
+    CampaignPersistenceError,
     CampaignSpec,
     UnknownCampaignError,
     get_bounty_service,
@@ -39,6 +47,8 @@ class CreateCampaignRequest(BaseModel):
     language: str = "solidity"
     max_rounds: int = 16
     max_engines: int = 16
+    address: str = ""
+    chain_id: str = ""
 
 
 class ExecuteRequest(BaseModel):
@@ -64,15 +74,29 @@ class ControlRequest(BaseModel):
     reason: str = "operator"
 
 
+class JobRequest(BaseModel):
+    max_steps: int = 32
+
+
+class StatefulRequest(BaseModel):
+    rounds: int = 3
+
+
 def _owned(campaign_id: str, operator: OperatorSession) -> BountyCampaign:
     try:
         campaign = get_bounty_service().get(campaign_id)
     except UnknownCampaignError as exc:
         raise HTTPException(status_code=404, detail="Unknown campaign") from exc
+    except CampaignPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     owner = campaign.operator_identity
     if owner and owner != operator.identity:
         raise HTTPException(status_code=403, detail="campaign_operator_mismatch")
     return campaign
+
+
+def _control_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail=str(exc))
 
 
 @router.post("/campaigns")
@@ -95,12 +119,19 @@ async def create_campaign(
         language=payload.language,
         max_rounds=max(1, min(payload.max_rounds, 64)),
         max_engines=max(1, min(payload.max_engines, 64)),
+        address=payload.address,
+        chain_id=payload.chain_id,
     )
+    service = get_bounty_service()
     try:
-        campaign = get_bounty_service().create(spec, operator_identity=operator.identity)
+        campaign = await run_in_threadpool(
+            service.create, spec, operator_identity=operator.identity
+        )
     except CampaignError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return get_bounty_service().report(campaign.campaign_id)
+    except CampaignPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return await run_in_threadpool(service.report, campaign.campaign_id)
 
 
 @router.get("/campaigns")
@@ -108,12 +139,10 @@ async def list_campaigns(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     service = get_bounty_service()
-    ids = [
-        cid
-        for cid in service.list_ids()
-        if not service.get(cid).operator_identity
-        or service.get(cid).operator_identity == operator.identity
-    ]
+    try:
+        ids = await run_in_threadpool(service.list_ids, operator.identity)
+    except CampaignPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"campaigns": ids}
 
 
@@ -123,7 +152,7 @@ async def inspect_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().report(campaign_id)
+    return await run_in_threadpool(get_bounty_service().report, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/state")
@@ -132,7 +161,16 @@ async def campaign_state(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().report(campaign_id)
+    return await run_in_threadpool(get_bounty_service().report, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/progress")
+async def campaign_progress(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().progress, campaign_id)
 
 
 @router.post("/campaigns/{campaign_id}/analyze")
@@ -141,7 +179,25 @@ async def analyze_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().analyze(campaign_id)
+    try:
+        return await run_in_threadpool(get_bounty_service().analyze, campaign_id)
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
+
+
+@router.post("/campaigns/{campaign_id}/jobs")
+async def start_campaign_job(
+    campaign_id: str,
+    payload: JobRequest,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    try:
+        return await run_in_threadpool(
+            get_bounty_service().start_job, campaign_id, max_steps=payload.max_steps
+        )
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
 
 
 @router.get("/campaigns/{campaign_id}/next-action")
@@ -150,7 +206,16 @@ async def campaign_next_action(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().next_action(campaign_id)
+    return await run_in_threadpool(get_bounty_service().next_action, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/decisions")
+async def campaign_decisions(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().decisions, campaign_id)
 
 
 @router.post("/campaigns/{campaign_id}/execute")
@@ -160,9 +225,15 @@ async def execute_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().step(
-        campaign_id, capability=payload.capability, reason=payload.reason
-    )
+    try:
+        return await run_in_threadpool(
+            get_bounty_service().step,
+            campaign_id,
+            capability=payload.capability,
+            reason=payload.reason,
+        )
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
 
 
 @router.post("/campaigns/{campaign_id}/suggest")
@@ -172,8 +243,12 @@ async def suggest_capability(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    accepted = get_bounty_service().suggest(
-        campaign_id, payload.capability, engine=payload.engine, reason=payload.reason
+    accepted = await run_in_threadpool(
+        get_bounty_service().suggest,
+        campaign_id,
+        payload.capability,
+        engine=payload.engine,
+        reason=payload.reason,
     )
     return {
         "accepted": accepted,
@@ -187,7 +262,7 @@ async def campaign_findings(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().findings(campaign_id)
+    return await run_in_threadpool(get_bounty_service().findings, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/evidence")
@@ -196,7 +271,7 @@ async def campaign_evidence(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().evidence(campaign_id)
+    return await run_in_threadpool(get_bounty_service().evidence, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/repro")
@@ -205,7 +280,7 @@ async def campaign_repro(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().repro(campaign_id)
+    return await run_in_threadpool(get_bounty_service().repro, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/source-selection")
@@ -214,7 +289,7 @@ async def campaign_source_selection(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().source_selection(campaign_id)
+    return await run_in_threadpool(get_bounty_service().source_selection, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/scope-identity")
@@ -223,7 +298,7 @@ async def campaign_scope_identity(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().scope_identity(campaign_id)
+    return await run_in_threadpool(get_bounty_service().scope_identity, campaign_id)
 
 
 @router.get("/campaigns/{campaign_id}/advisories")
@@ -232,7 +307,7 @@ async def campaign_advisories(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().advisories(campaign_id)
+    return await run_in_threadpool(get_bounty_service().advisories, campaign_id)
 
 
 @router.post("/campaigns/{campaign_id}/vfcs-feedback")
@@ -242,7 +317,21 @@ async def campaign_vfcs_feedback(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().vfcs_feedback(campaign_id, list(payload.signals))
+    return await run_in_threadpool(
+        get_bounty_service().vfcs_feedback, campaign_id, list(payload.signals)
+    )
+
+
+@router.post("/campaigns/{campaign_id}/stateful-execute")
+async def campaign_stateful_execute(
+    campaign_id: str,
+    payload: StatefulRequest,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(
+        get_bounty_service().stateful_execute, campaign_id, rounds=max(1, min(payload.rounds, 5))
+    )
 
 
 @router.get("/campaigns/{campaign_id}/report")
@@ -251,7 +340,7 @@ async def campaign_report(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    pack = get_bounty_service().report_pack(campaign_id)
+    pack = await run_in_threadpool(get_bounty_service().report_pack, campaign_id)
     return {
         "campaign_id": campaign_id,
         "pack_id": pack.pack_id,
@@ -275,7 +364,12 @@ async def grant_campaign_approval(
     if payload.capability not in APPROVABLE_CAPABILITIES:
         raise HTTPException(status_code=400, detail="capability is not approvable")
     try:
-        approvals = get_bounty_service().grant_approval(campaign_id, payload.capability)
+        approvals = await run_in_threadpool(
+            get_bounty_service().grant_approval,
+            campaign_id,
+            payload.capability,
+            granted_by=operator.identity,
+        )
     except CampaignError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"campaign_id": campaign_id, "approvals": sorted(approvals)}
@@ -288,7 +382,12 @@ async def pause_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().pause(campaign_id, reason=payload.reason)
+    try:
+        return await run_in_threadpool(
+            get_bounty_service().pause, campaign_id, reason=payload.reason
+        )
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
 
 
 @router.post("/campaigns/{campaign_id}/resume")
@@ -298,7 +397,12 @@ async def resume_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().resume(campaign_id)
+    try:
+        return await run_in_threadpool(get_bounty_service().resume, campaign_id)
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
+    except CampaignError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/campaigns/{campaign_id}/stop")
@@ -308,4 +412,9 @@ async def stop_campaign(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return get_bounty_service().stop(campaign_id, reason=payload.reason)
+    try:
+        return await run_in_threadpool(
+            get_bounty_service().stop, campaign_id, reason=payload.reason
+        )
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
