@@ -37,7 +37,15 @@ from app.discovery.bounty.gate import BountyGate
 from app.discovery.bounty.priority import prioritize
 from app.discovery.bounty.report_pack import ReportPack, build_report_pack
 from app.discovery.bounty.source_selection import select_sources
-from app.discovery.bounty.vfcs import MAX_VFCS_CANDIDATES, SequenceIdentity, Vfcs, generate
+from app.discovery.bounty.vfcs import (
+    MAX_VFCS_CANDIDATES,
+    FeedbackSignal,
+    SequenceIdentity,
+    Vfcs,
+    generate,
+    incorporate_feedback,
+    instance_identities,
+)
 from app.discovery.builtin import BugforgeStaticEngine
 from app.discovery.corpus import DiscoveryCorpus
 from app.discovery.engine import AnalysisRequest, DiscoveryEngine
@@ -338,10 +346,38 @@ class BountyCampaignService:
                     "template": seq.template,
                     "derived_from": seq.derived_from,
                     "calls": [call.identity for call in seq.calls],
+                    "instances": list(instance_identities(seq)),
                 }
                 for seq in sequences
             ],
         }
+
+    def vfcs_feedback(self, campaign_id: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+        """Fold bounded fuzzer feedback (foundry/echidna/medusa/ityfuzz) into new plans.
+
+        BugForge runs no fuzzer of its own; a signal from an unavailable fuzzer is
+        reported as unavailable, never fabricated.
+        """
+        campaign = self.get(campaign_id)
+        _candidates, sequences = self._candidates_and_sequences(campaign)
+        available = frozenset(
+            engine.engine_id
+            for engine in campaign.orchestrator.scheduler.engines
+            if engine.availability().value == "available"
+        )
+        parsed = [
+            FeedbackSignal(
+                kind=str(item.get("kind", "")),
+                sequence_id=str(item.get("sequence_id", "")),
+                call_index=int(item.get("call_index", -1)),
+                values=tuple((str(k), str(v)) for k, v in dict(item.get("values", {})).items()),
+                engine=str(item.get("engine", "")),
+                call_instance=str(item.get("call_instance", "")),
+            )
+            for item in signals
+        ]
+        outcome = incorporate_feedback(sequences, parsed, available_engines=available)
+        return {"campaign_id": campaign_id, **outcome.as_dict()}
 
     def report_pack(self, campaign_id: str) -> ReportPack:
         campaign = self.get(campaign_id)

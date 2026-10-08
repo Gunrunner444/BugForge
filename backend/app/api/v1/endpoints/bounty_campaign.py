@@ -52,6 +52,10 @@ class SuggestRequest(BaseModel):
     reason: str = ""
 
 
+class VfcsFeedbackRequest(BaseModel):
+    signals: list[dict[str, object]] = []
+
+
 class ApprovalRequest(BaseModel):
     capability: str
 
@@ -229,6 +233,16 @@ async def campaign_advisories(
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
     return get_bounty_service().advisories(campaign_id)
+
+
+@router.post("/campaigns/{campaign_id}/vfcs-feedback")
+async def campaign_vfcs_feedback(
+    campaign_id: str,
+    payload: VfcsFeedbackRequest,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    return get_bounty_service().vfcs_feedback(campaign_id, list(payload.signals))
 
 
 @router.get("/campaigns/{campaign_id}/report")

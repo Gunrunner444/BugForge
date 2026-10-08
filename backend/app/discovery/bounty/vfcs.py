@@ -86,6 +86,8 @@ class FeedbackSignal:
     sequence_id: str
     call_index: int = -1
     values: tuple[tuple[str, str], ...] = ()
+    engine: str = ""  # the fuzzer that produced the signal (foundry/echidna/medusa/ityfuzz)
+    call_instance: str = ""  # stable call-instance id, resolved to call_index when given
 
 
 def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceIdentity) -> str:
@@ -562,3 +564,119 @@ def minimize(
             return result(current, True, "one_minimal")
         granularity = min(len(current), granularity * 2)
     return result(current, True, "one_minimal")
+
+
+# ---- stable call-instance identity and bounded feedback loop (Phase 51, owner Phase 5) -------
+#
+# A sequence may call the same (contract, function) more than once; a per-instance identity is
+# needed so a fuzzer's feedback maps back to the exact call it refers to. The identity is derived
+# from the deterministic sequence id plus the call's position and role, so it is stable across
+# regeneration of the same sequence. Feedback is accepted only from the existing bounded fuzzers
+# (Foundry, Echidna, Medusa, ItyFuzz); BugForge adds no fuzzer of its own.
+
+ALLOWED_FEEDBACK_ENGINES = frozenset({"foundry", "echidna", "medusa", "ityfuzz"})
+
+
+def call_instance_id(sequence: Vfcs, index: int) -> str:
+    """A stable identity for one call position within a sequence."""
+    call = sequence.calls[index]
+    return "ci_" + digest(
+        (sequence.sequence_id, index, call.contract, call.function, call.role, call.actor)
+    )
+
+
+def instance_identities(sequence: Vfcs) -> tuple[str, ...]:
+    """Stable per-call-instance identities, one per call position."""
+    return tuple(call_instance_id(sequence, index) for index in range(len(sequence.calls)))
+
+
+def index_for_instance(sequence: Vfcs, instance_id: str) -> int:
+    """Resolve a stable call-instance id to its position, or -1 when it does not belong."""
+    for index in range(len(sequence.calls)):
+        if call_instance_id(sequence, index) == instance_id:
+            return index
+    return -1
+
+
+@dataclass(frozen=True)
+class FeedbackOutcome:
+    """The result of folding fuzzer feedback back into the research loop. Nothing verified."""
+
+    children: tuple[Vfcs, ...]
+    accepted: tuple[str, ...]
+    refused: tuple[tuple[str, str], ...]  # (signal reference, reason)
+    unavailable_engines: tuple[str, ...]
+    verified: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "verified": False,
+            "children": [
+                {
+                    "sequence_id": child.sequence_id,
+                    "origin": child.origin,
+                    "template": child.template,
+                    "calls": [call.identity for call in child.calls],
+                    "instances": list(instance_identities(child)),
+                }
+                for child in self.children
+            ],
+            "accepted": list(self.accepted),
+            "refused": [{"signal": ref, "reason": reason} for ref, reason in self.refused],
+            "unavailable_engines": list(self.unavailable_engines),
+        }
+
+
+def incorporate_feedback(
+    parents: Iterable[Vfcs],
+    signals: Iterable[FeedbackSignal],
+    *,
+    available_engines: frozenset[str] | None = None,
+    limit: int = MAX_MUTATIONS,
+) -> FeedbackOutcome:
+    """Fold bounded fuzzer feedback into new candidate sequences.
+
+    Only signals from the allowed fuzzers are considered. A signal whose engine is allowed
+    but not currently available is reported as unavailable and ignored (never fabricated).
+    A signal that names a stable call-instance has it resolved to the concrete call index.
+    The actual expansion reuses the existing bounded ``mutate`` and stays within ``limit``.
+    """
+
+    parent_list = list(parents)
+    by_id = {item.sequence_id: item for item in parent_list}
+    usable: list[FeedbackSignal] = []
+    refused: list[tuple[str, str]] = []
+    unavailable: set[str] = set()
+    for signal in signals:
+        ref = f"{signal.engine or '?'}:{signal.kind}:{signal.sequence_id}"
+        engine = (signal.engine or "").strip().lower()
+        if engine not in ALLOWED_FEEDBACK_ENGINES:
+            refused.append((ref, "feedback is accepted only from foundry/echidna/medusa/ityfuzz"))
+            continue
+        if available_engines is not None and engine not in available_engines:
+            unavailable.add(engine)
+            refused.append((ref, f"{engine} is unavailable; its feedback is not fabricated"))
+            continue
+        parent = by_id.get(signal.sequence_id)
+        if parent is None:
+            refused.append((ref, "signal does not match a known sequence"))
+            continue
+        resolved = signal
+        if signal.call_instance:
+            index = index_for_instance(parent, signal.call_instance)
+            if index < 0:
+                refused.append((ref, "call-instance id does not belong to this sequence"))
+                continue
+            resolved = replace(signal, call_index=index)
+        usable.append(resolved)
+
+    children = mutate(parent_list, usable, limit=limit)
+    accepted = tuple(
+        f"{s.engine}:{s.kind}:{s.sequence_id}:{s.call_index}" for s in usable
+    )
+    return FeedbackOutcome(
+        children=children,
+        accepted=accepted,
+        refused=tuple(refused),
+        unavailable_engines=tuple(sorted(unavailable)),
+    )
