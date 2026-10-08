@@ -154,6 +154,20 @@ def test_end_to_end_campaign_execution_is_durable_and_drives_findings(repo: Path
     never = findings[("aa.signature_result_ignored", "LooseAccount")]
     assert never["candidate_strength"] == "static_candidate"
 
+    # the engine registry the run used is persisted with honest statuses
+    engines = {e["name"]: e for e in status["engines"]}
+    assert engines["fork_replay"]["status"] == "blocked_by_policy"
+    assert engines["foundry"]["status"] == "usable"
+    for name in ("echidna", "medusa"):
+        assert engines[name]["status"] in {"usable", "installed", "unavailable"}
+    # every executed violation lists its check paths; a usable engine was really run
+    executed = [e for e in status["executions"].values() if e["outcome"] == "property_violated"]
+    assert executed and all(e["check_paths"] for e in executed)
+    for name, entry in engines.items():
+        if entry.get("role") == "property_engine" and entry["status"] == "usable":
+            ran = [p for e in executed for p in e["check_paths"] if p["path"] == f"{name}:property"]
+            assert ran and all(p["verdict"] != "not_evaluated" for p in ran)
+
 
 @requires_forge
 def test_a_source_changed_after_analysis_is_an_identity_mismatch(repo: Path) -> None:

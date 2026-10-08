@@ -31,7 +31,7 @@ import re
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from functools import lru_cache
@@ -389,6 +389,41 @@ class Primitive:
         }
 
 
+MAX_DEPLOYED = 4  # target + at most three graph-justified dependencies
+MAX_DEPENDENCY_DEPTH = 2
+
+
+@dataclass(frozen=True)
+class Relationship:
+    """Why a non-target contract is deployed in the harness.
+
+    ``basis`` is ``type_relationship`` (a constructor parameter is typed with that
+    contract), ``sole_implementation`` (the parameter is an interface and exactly one
+    deployable contract in the exact source set implements it), or ``token_fixture``.
+    ``graph_edges`` lists Phase 47 protocol-graph edges between the two contracts when
+    the graph resolves any; an empty list is reported, never filled in.
+    """
+
+    owner: str
+    parameter: str
+    declared_type: str
+    deployed: str
+    basis: str
+    depth: int
+    graph_edges: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "owner": self.owner,
+            "parameter": self.parameter,
+            "declared_type": self.declared_type,
+            "deployed": self.deployed,
+            "basis": self.basis,
+            "depth": self.depth,
+            "graph_edges": list(self.graph_edges),
+        }
+
+
 @dataclass(frozen=True)
 class HarnessArtifact:
     sequence_id: str
@@ -402,6 +437,12 @@ class HarnessArtifact:
     oracle: OracleSpec = field(default_factory=OracleSpec)
     primitives: tuple[Primitive, ...] = ()
     deployed: tuple[str, ...] = ()
+    # Why every non-target contract is in the harness (bounded, graph-justified).
+    relationships: tuple[Relationship, ...] = ()
+    # The run body and imports, so another engine can host the same plan verbatim.
+    body: str = ""
+    imports: tuple[str, ...] = ()
+    fixture: bool = False
 
     @property
     def buildable(self) -> bool:
@@ -425,6 +466,7 @@ class HarnessArtifact:
             "oracle": self.oracle.as_dict(),
             "primitives": [item.as_dict() for item in self.primitives],
             "deployed": list(self.deployed),
+            "relationships": [item.as_dict() for item in self.relationships],
             "harness_hash": self.harness_hash,
         }
 
@@ -522,6 +564,42 @@ def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction |
     return None
 
 
+@lru_cache(maxsize=32)
+def _protocol_graph_edges(items: tuple[tuple[str, str], ...]) -> frozenset[tuple[str, str, str]]:
+    """Resolved Phase 47 protocol-graph edges (source, target, kind) for a source set."""
+    from app.parsing.engine import parse_source
+    from app.parsing.solidity_ir import build_semantic_program
+    from app.parsing.solidity_protocol import build_protocol_graph
+
+    programs = []
+    for rel, text in items:
+        try:
+            programs.append(build_semantic_program(parse_source("solidity", Path(rel), text)))
+        except (OSError, UnicodeError, ValueError, RuntimeError):
+            return frozenset()
+    if not programs:
+        return frozenset()
+    graph = build_protocol_graph(
+        tuple(programs),
+        project="harness",
+        source_snapshot=source_set_digest({rel: sha256_text(text) for rel, text in items}),
+        compiler_configuration="harness",
+        sources=dict(items),
+    )
+    names = {node.node_id: node.contract for node in graph.nodes}
+    return frozenset(
+        (names.get(edge.source, ""), names.get(edge.target, ""), str(edge.kind))
+        for edge in graph.edges
+    )
+
+
+def protocol_edges(sources: Mapping[str, str], owner: str, other: str) -> tuple[str, ...]:
+    """Phase 47 edges between two contracts (either direction), when the graph has any."""
+    items = tuple(sorted((k, v) for k, v in sources.items() if k.endswith(".sol")))
+    edges = _protocol_graph_edges(items)
+    return tuple(sorted(f"{a}->{b}:{kind}" for a, b, kind in edges if {a, b} == {owner, other}))
+
+
 class _UnbuildableError(Exception):
     def __init__(self, reason: str, code: str) -> None:
         super().__init__(reason)
@@ -550,11 +628,13 @@ class _Synth:
         self.steps: list[str] = []
         self.primitives: list[Primitive] = []
         self.deployed: list[str] = [contract]
+        self.relationships: list[Relationship] = []
         self.token_kind = ""  # standard | fee_on_transfer | false_return
         self.token_bound = False  # the target can see the fixture token
         self.funded: set[str] = set()
         self.approved: set[str] = set()
         self.counter = 0
+        self.body = ""
 
     # -- token fixture -------------------------------------------------------------------
     def want_token(self, kind: str, why: str) -> None:
@@ -708,9 +788,12 @@ class _Synth:
         ]
         return f"abi.encodeWithSignature({', '.join([json.dumps(canonical), *args])})"
 
-    # -- constructor -----------------------------------------------------------------------
+    # -- constructor ---------------------------------------------------------------------
     def constructor_args(self) -> list[str]:
-        ctor = _constructor(self.model, self.contract)
+        return self._ctor_args(self.contract, 0, (self.contract,))
+
+    def _ctor_args(self, contract: str, depth: int, chain: tuple[str, ...]) -> list[str]:
+        ctor = _constructor(self.model, contract)
         if ctor is None or not ctor.params:
             return []
         args: list[str] = []
@@ -719,40 +802,89 @@ class _Synth:
             if _is_token_type(self.model, param.type_name) and "[" not in type_text:
                 self.want_token(
                     self.oracle.token_fixture or "standard",
-                    f"constructor parameter {param.name} is a token",
+                    f"constructor parameter {param.name} of {contract} is a token",
                 )
                 self.token_bound = True
                 args.append(f"{type_text}(address(bfToken))")
                 continue
-            dep = self.model.contract_for_type(type_text)
-            dep_ctor = _constructor(self.model, dep) if dep else None
-            if (
-                dep
-                and dep != self.contract
-                and _deployable(self.model, dep, self.sources)
-                and (dep_ctor is None or not dep_ctor.params)
-            ):
-                name = self._name("Dep")
-                self.pre_deploy.append(f"        {dep} {name} = new {dep}();")
-                self.deployed.append(dep)
-                self.primitives.append(
-                    Primitive(
-                        name="test_deploy:graph_dependency",
-                        purpose=f"deploy {dep} for constructor parameter {param.name}",
-                        actor="harness",
-                        value=dep,
-                        property_relevance="the target cannot be deployed without it",
-                        established_by=f"constructor parameter {param.name} is typed {dep}",
-                    )
-                )
-                args.append(name)
-                continue
+            args.append(self._dependency(contract, param, type_text, depth + 1, chain))
+        return args
+
+    def _implementation(self, declared: str) -> tuple[str, str]:
+        """(contract to deploy, basis) for a contract-typed parameter, or raise."""
+        item = self.model.contracts.get(declared)
+        if item is not None and _deployable(self.model, declared, self.sources):
+            return declared, "type_relationship"
+        if item is None:
+            return "", ""
+        implementations = sorted(
+            name
+            for name in self.model.contracts
+            if name != declared
+            and declared in self.model.bases_of(name)
+            and _deployable(self.model, name, self.sources)
+        )
+        if len(implementations) == 1:
+            return implementations[0], "sole_implementation"
+        if len(implementations) > 1:
             raise _UnbuildableError(
-                f"constructor argument {param.name or '?'} ({param.type_name}) is unknown; "
-                "it is not invented",
+                f"{declared} has {len(implementations)} implementations in the source set; "
+                "the harness does not pick one",
+                "ambiguous_dependency",
+            )
+        return "", ""
+
+    def _dependency(
+        self, owner: str, param: Param, type_text: str, depth: int, chain: tuple[str, ...]
+    ) -> str:
+        declared = self.model.contract_for_type(type_text)
+        deployed, basis = self._implementation(declared) if declared else ("", "")
+        if not deployed:
+            raise _UnbuildableError(
+                f"constructor argument {param.name or '?'} ({param.type_name}) of {owner} is "
+                "unknown; it is not invented",
                 "unknown_constructor_argument",
             )
-        return args
+        if deployed in chain:
+            raise _UnbuildableError(
+                f"{owner} and {deployed} need each other at construction; the cycle is not "
+                "resolved by guessing an address",
+                "cyclic_dependency",
+            )
+        if depth > MAX_DEPENDENCY_DEPTH or len(self.deployed) >= MAX_DEPLOYED:
+            raise _UnbuildableError(
+                f"deploying {deployed} exceeds the harness bound ({MAX_DEPLOYED} contracts, "
+                f"depth {MAX_DEPENDENCY_DEPTH})",
+                "dependency_bound_exceeded",
+            )
+        args = self._ctor_args(deployed, depth, (*chain, deployed))
+        name = self._name("Dep")
+        self.pre_deploy.append(f"        {deployed} {name} = new {deployed}({', '.join(args)});")
+        self.deployed.append(deployed)
+        self.relationships.append(
+            Relationship(
+                owner=owner,
+                parameter=param.name,
+                declared_type=type_text,
+                deployed=deployed,
+                basis=basis,
+                depth=depth,
+                graph_edges=protocol_edges(self.sources or {}, owner, deployed),
+            )
+        )
+        self.primitives.append(
+            Primitive(
+                name="test_deploy:graph_dependency",
+                purpose=f"deploy {deployed} for constructor parameter {param.name} of {owner}",
+                actor="harness",
+                value=deployed,
+                property_relevance=f"{owner} cannot be deployed without it",
+                established_by=f"{basis}: {param.name} is typed {type_text}",
+            )
+        )
+        if deployed != declared:
+            return f"{type_text}(address({name}))"
+        return name
 
     # -- primitives ------------------------------------------------------------------------
     def primitive(self, index: int, call: VfcsCall) -> None:
@@ -887,12 +1019,22 @@ class _Synth:
                 f"        emit BugForgeObservation({K_DONE}, {len(self.sequence.calls)}, 1);",
             ]
         )
+        self.body = body
         return _HARNESS_TEMPLATE.format(
             schema=HARNESS_SCHEMA,
-            import_path=self.model.contracts[self.contract].file,
+            imports="".join(f'import "src/{path}";\n' for path in self.imports()),
             fixture=_FIXTURE_TOKEN if self.token_kind else "",
             body=body,
         )
+
+    def imports(self) -> tuple[str, ...]:
+        """Every declaring file of a deployed contract, target first, de-duplicated."""
+        files: list[str] = []
+        for name in self.deployed:
+            path = self.model.contracts[name].file
+            if path not in files:
+                files.append(path)
+        return tuple(files)
 
 
 def build_harness(
@@ -951,6 +1093,10 @@ def build_harness(
         oracle=oracle,
         primitives=tuple(synth.primitives),
         deployed=tuple(synth.deployed),
+        relationships=tuple(synth.relationships),
+        body=synth.body,
+        imports=synth.imports(),
+        fixture=bool(synth.token_kind),
     )
 
 
@@ -960,8 +1106,7 @@ _HARNESS_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.7.0;
 
 import {{Test}} from "forge-std/Test.sol";
-import "src/{import_path}";
-{fixture}
+{imports}{fixture}
 contract VfcsHarness is Test {{
     event BugForgeObservation(uint256 kind, uint256 index, uint256 value);
 
@@ -1747,6 +1892,7 @@ class Corroboration:
     status: str  # corroborated_candidate | single_path | disagreement | not_applicable
     paths: tuple[CheckPath, ...] = ()
     note: str = ""
+    engine_runs: tuple[Mapping[str, Any], ...] = ()
     verified: bool = False
 
     @property
@@ -1763,17 +1909,19 @@ class Corroboration:
             "paths": [p.as_dict() for p in self.paths],
             "agreeing": list(self.agreeing),
             "note": self.note,
+            "engine_runs": [dict(item) for item in self.engine_runs],
             "verified": False,
         }
 
 
 ENGINE_PROPERTY_ADAPTERS: dict[str, str] = {
-    # Engines that could judge the same property. Without a property adapter the
-    # path is recorded as unavailable; nothing is fabricated.
-    "echidna": "no property adapter for VFCS oracles yet",
-    "medusa": "no property adapter for VFCS oracles yet",
-    "ityfuzz": "no property adapter for VFCS oracles yet",
-    "symbolic": "no symbolic adapter for VFCS oracles yet",
+    # Engines that could judge the same property. An engine with an adapter runs only
+    # when the registry found it usable (smoke-checked); otherwise, and for engines
+    # without an adapter, the path is recorded as unavailable. Nothing is fabricated.
+    "echidna": "engine-hosted harness with an independent in-EVM judge",
+    "medusa": "engine-hosted harness with an independent in-EVM judge",
+    "ityfuzz": "no property adapter for VFCS oracles",
+    "symbolic": "no symbolic adapter for VFCS oracles",
 }
 
 
@@ -1792,6 +1940,7 @@ def independent_check(
     context: IdentityContext | None = None,
     engine_status: Mapping[str, str] | None = None,
     supporting_detectors: tuple[str, ...] = (),
+    property_engines: Sequence[Any] = (),
 ) -> tuple[Corroboration, tuple[StatefulObservation, ...]]:
     """Re-judge a violated property along independent paths and record which agree.
 
@@ -1799,8 +1948,11 @@ def independent_check(
       It catches pipeline-dependent behavior but is *not* materially independent.
     * ``foundry:alternate:<oracle>`` -- a different oracle formulation of the same
       property (for example a state read instead of call success). Material.
-    * echidna / medusa / ityfuzz / symbolic -- recorded with their real status; no
-      property adapter exists yet, so they never count.
+    * ``echidna:property`` / ``medusa:property`` -- the same harness plan hosted in a
+      different EVM implementation with an independently implemented in-EVM judge.
+      Material. They run only when passed in (the registry found them usable);
+      otherwise they are recorded with their real status and never count.
+    * ityfuzz / symbolic -- no adapter; recorded unavailable.
     * supporting static detectors (a *different* detector at the same site) are
       listed but never counted: the same detector twice is not two analyses.
     """
@@ -1823,7 +1975,42 @@ def independent_check(
         runs.append(obs)
         label = f"foundry:alternate:{alternate.kind.value}:{alternate.getter or '-'}"
         paths.append(_path(obs, label, True))
-    for engine, missing in sorted(ENGINE_PROPERTY_ADAPTERS.items()):
+    engine_runs: list[Mapping[str, Any]] = []
+    ran: set[str] = set()
+    for engine in property_engines:
+        if primary.harness is None or not primary.harness.buildable:
+            break
+        if executor.runs >= executor.max_runs:
+            paths.append(
+                CheckPath(
+                    f"{engine.name}:property",
+                    engine.name,
+                    True,
+                    Outcome.INCONCLUSIVE.value,
+                    PropertyVerdict.NOT_EVALUATED.value,
+                    "the local run budget is exhausted",
+                )
+            )
+            ran.add(engine.name)
+            continue
+        executor.runs += 1
+        run = engine.run(primary.harness, sequence, sources)
+        ran.add(engine.name)
+        engine_runs.append(run.as_dict())
+        paths.append(
+            CheckPath(
+                f"{engine.name}:property",
+                engine.name,
+                True,
+                run.outcome.value,
+                run.verdict,
+                run.reason,
+            )
+        )
+    for engine_name, missing in sorted(ENGINE_PROPERTY_ADAPTERS.items()):
+        if engine_name in ran:
+            continue
+        engine = engine_name
         status = (engine_status or {}).get(engine, "unavailable")
         paths.append(
             CheckPath(
@@ -1859,7 +2046,14 @@ def independent_check(
         status = "single_path"
         note = "no materially independent path could judge this property"
     return (
-        Corroboration(sequence.sequence_id, spec.property_id, status, tuple(paths), note),
+        Corroboration(
+            sequence.sequence_id,
+            spec.property_id,
+            status,
+            tuple(paths),
+            note,
+            tuple(engine_runs),
+        ),
         tuple(runs),
     )
 
@@ -1931,6 +2125,7 @@ def run_feedback_loop(
     limit: int = MAX_MUTATIONS,
     engine_status: Mapping[str, str] | None = None,
     supporting: Mapping[str, tuple[str, ...]] | None = None,
+    property_engines: Sequence[Any] = (),
 ) -> FeedbackLoopResult:
     """execute -> observe -> feedback -> mutate -> re-execute -> minimize -> independent check.
 
@@ -1996,6 +2191,7 @@ def run_feedback_loop(
                     context=context,
                     engine_status=engine_status,
                     supporting_detectors=(supporting or {}).get(sequence.derived_from, ()),
+                    property_engines=property_engines,
                 )
                 independent[sequence.sequence_id] = corroboration
                 independent_runs[sequence.sequence_id] = runs

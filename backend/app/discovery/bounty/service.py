@@ -1111,6 +1111,12 @@ class BountyCampaignService:
         closed. Refused for stopped/paused campaigns and out-of-scope targets.
         """
         from app.discovery.bounty.campaign import ScopeStatus
+        from app.discovery.bounty.engine_adapters import (
+            PropertyEngine,
+            engine_registry,
+            engine_status_map,
+            usable_property_engines,
+        )
         from app.discovery.bounty.properties import build_property
         from app.discovery.bounty.stateful import (
             StatefulExecutor,
@@ -1165,11 +1171,9 @@ class BountyCampaignService:
             specs[sequence.sequence_id] = build_property(sequence, model, candidate)
             runnable.append(sequence)
         supporting = self._supporting_detectors(analysis)
-        engine_status = {
-            name: status
-            for name, status in self.tool_availability(campaign).items()
-            if name in {"echidna", "medusa", "ityfuzz"}
-        }
+        registry = engine_registry()
+        engine_status = engine_status_map(registry)
+        engines = [PropertyEngine(name) for name in usable_property_engines(registry)]
         executor = StatefulExecutor()
         result = run_feedback_loop(
             executor,
@@ -1181,8 +1185,10 @@ class BountyCampaignService:
             rounds=max(1, min(rounds, 5)),
             engine_status=engine_status,
             supporting=supporting,
+            property_engines=engines,
         )
         bundles, blobs, executions = self._bundles(result, sources)
+        registry_snapshot = [entry.as_dict() for entry in registry]
         persistence = self._persist_artifacts(
             campaign,
             lambda artifacts: _merge_stateful(
@@ -1191,6 +1197,7 @@ class BountyCampaignService:
                 bundles=bundles,
                 blobs=blobs,
                 feedback=result.feedback,
+                engines=registry_snapshot,
                 run={
                     "at": _now(),
                     "outcomes": result.outcome_counts(),
@@ -1212,6 +1219,7 @@ class BountyCampaignService:
             "forge_runs": executor.runs,
             "bundles": sorted(bundles),
             "persistence": persistence,
+            "engines": registry_snapshot,
             **result.as_dict(),
         }
 
@@ -1284,6 +1292,23 @@ class BountyCampaignService:
                 "replay_mode": identity.replay_mode.value if identity else "",
                 "corroboration": corroboration.status if corroboration else "not_applicable",
                 "agreeing_paths": list(corroboration.agreeing) if corroboration else [],
+                "check_paths": (
+                    [
+                        {
+                            "path": path.path,
+                            "engine": path.engine,
+                            "material": path.material,
+                            "verdict": path.verdict,
+                        }
+                        for path in corroboration.paths
+                    ]
+                    if corroboration
+                    else []
+                ),
+                "harness_contracts": list(obs.harness.deployed) if obs.harness else [],
+                "relationships": (
+                    [item.as_dict() for item in obs.harness.relationships] if obs.harness else []
+                ),
                 "minimized_calls": (
                     len(result.minimized[obs.sequence_id].minimized)
                     if obs.sequence_id in result.minimized
@@ -1304,6 +1329,7 @@ class BountyCampaignService:
             "runs": list(stored.get("runs", [])),
             "executions": dict(stored.get("executions", {})),
             "feedback": dict(stored.get("feedback", {})),
+            "engines": list(stored.get("engines", [])),
             "bundles": {
                 bid: {
                     "schema": b.get("schema"),
@@ -1374,6 +1400,7 @@ def _merge_stateful(
     blobs: dict[str, str],
     feedback: tuple[dict[str, Any], ...],
     run: dict[str, Any],
+    engines: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Additive, idempotent merge of one stateful run into persisted artifacts.
 
@@ -1403,6 +1430,9 @@ def _merge_stateful(
         if key and key not in stored_feedback and len(stored_feedback) < MAX_STORED_FEEDBACK:
             stored_feedback[key] = dict(item)
     stateful["feedback"] = stored_feedback
+    if engines is not None:
+        # the registry snapshot the latest run used (status is per box, so latest wins)
+        stateful["engines"] = list(engines)
     stored_blobs = dict(artifacts.get("source_blobs", {}))
     size = sum(len(text) for text in stored_blobs.values())
     stored_bundles = dict(artifacts.get("repro_bundles", {}))

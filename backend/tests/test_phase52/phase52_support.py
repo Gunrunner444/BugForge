@@ -155,3 +155,56 @@ def forge_json(logs: list[dict[str, object]], status: str = "Success", reason: s
             }
         }
     )
+
+
+def requires_engine(name: str) -> pytest.MarkDecorator:
+    """Skip unless forge, solc, crytic-compile and the named engine are installed."""
+    return pytest.mark.skipif(
+        not all(_has(tool) for tool in ("forge", "solc", "crytic-compile", name)),
+        reason=f"{name}, crytic-compile or solc is not installed",
+    )
+
+
+REGISTRY_FILE = """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+interface IRegistry {
+    function isAllowed(address who) external view returns (bool);
+}
+
+contract OpenRegistry is IRegistry {
+    function isAllowed(address) external pure returns (bool) {
+        return true;
+    }
+}
+"""
+
+MULTI_ACCT = """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "./registry/Registry.sol";
+
+contract Clock {
+    uint256 public tick;
+}
+
+contract Acct {
+    IRegistry public registry;
+    Clock public clock;
+    address public owner;
+
+    constructor(IRegistry r, Clock c) {
+        registry = r;
+        clock = c;
+    }
+
+    function initialize(address newOwner) external {
+        require(registry.isAllowed(newOwner), "denied");
+        owner = newOwner;
+    }
+}
+"""
+
+
+def multi_sources() -> dict[str, str]:
+    return {"registry/Registry.sol": REGISTRY_FILE, "Acct.sol": MULTI_ACCT}
