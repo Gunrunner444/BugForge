@@ -1,43 +1,64 @@
 """Stateful local execution bridge: VFCS plans -> executable Foundry harnesses.
 
-This is the Phase 52 closed loop's execution leg. A deterministic VFCS plan is
-compiled into a real Foundry test that deploys the analyzed contract and runs the
-plan's attacker-role call sequence against a fresh instance, entirely offline:
+This is the Phase 52 closed loop's execution leg, hardened. A deterministic VFCS
+plan plus its :class:`~app.discovery.bounty.properties.PropertySpec` is compiled
+into a Foundry test that deploys the analyzed contract from the *exact* source set
+the sequence was built from and runs the plan against a fresh local instance,
+entirely offline (``--offline``, ``FOUNDRY_OFFLINE=true``, ffi off, no fs access,
+no RPC, no fork, pinned host ``solc``, no auto-detect/download).
 
-* no RPC, no fork, no live chain (``--no-match-path`` nothing, ``--offline``,
-  ``FOUNDRY_OFFLINE=true``, fs/ffi disabled);
-* the installed ``forge`` runs the test and the process exit status is
-  authoritative -- a document left by a crashed process is never evidence;
-* when ``forge`` or a compiler is missing, or the plan cannot be made executable
-  (an unresolved constructor, a primitive that needs an environment actor), the
-  result is reported UNAVAILABLE or INCONCLUSIVE and never fabricated.
+The harness never decides anything. It only *reports* structured observations by
+emitting ``BugForgeObservation(kind, index, value)`` events; the result is read
+from ``forge test --json`` (raw logs filtered to the harness address) and the
+property is judged in Python by :func:`properties.evaluate`. Analyzed source code
+cannot forge an observation (events from any other address are ignored), and it
+cannot choose a Forge flag or a config value: execution policy is server-owned.
 
-An execution produces a bounded :class:`StatefulObservation`. A reverting call
-or a violated property becomes a :class:`FeedbackSignal` that drives the existing
-bounded ``mutate``; mutated plans are re-executed. Minimization reuses the VFCS
-delta-debugger with the executor as its evaluator. An independent re-check rebuilds
-and reruns the plan under a second compiler pipeline; agreement is required before
-anything is called corroborated. Nothing here marks a finding verified.
+Outcomes are distinct and never collapse to a generic failure: PROPERTY_VIOLATED,
+PROPERTY_HELD, SEQUENCE_EXECUTED_NO_ORACLE, SEQUENCE_REVERTED, COMPILE_FAILED,
+EXECUTION_FAILED, TIMEOUT, IDENTITY_MISMATCH, INCONCLUSIVE, UNAVAILABLE. A revert
+is not a finding. A sequence that ran without an oracle is not a finding. Two
+agreeing local observations are at most a CORROBORATED_CANDIDATE. Nothing here
+marks anything verified.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from app.discovery.bounty.properties import (
+    OracleKind,
+    OracleObservation,
+    OracleSpec,
+    PropertyDeclaration,
+    PropertyEvaluation,
+    PropertySpec,
+    PropertyVerdict,
+    build_property,
+    evaluate,
+    probe_index,
+)
 from app.discovery.bounty.vfcs import (
     ATTACKER,
     MAX_MUTATIONS,
+    VICTIM,
     FeedbackSignal,
     MinimizationResult,
     Vfcs,
     VfcsCall,
+    instance_identities,
     minimize,
     mutate,
 )
@@ -47,52 +68,325 @@ from app.parsing.solidity_research import Param, ResearchModel, RFunction
 MAX_CALLS = 8
 MAX_FEEDBACK_ROUNDS = 3
 EXEC_TIMEOUT = 120
+MAX_TAIL = 2000
+MAX_EVENTS = 128
+MAX_RUNS = 160  # forge invocations per executor (one campaign request)
+HARNESS_SCHEMA = "bugforge.harness/2"
 ATTACKER_ADDR = "address(0xA11CE)"
 VICTIM_ADDR = "address(0xB0B)"
+FIXTURE_AMOUNT = "1000000000000000000"  # 1e18 fixture units; local only
+# Forge deploys the test contract at this fixed address (default sender, nonce 1).
+# Only events emitted by the harness itself are observations; any other emitter,
+# including the analyzed contract, is ignored.
+HARNESS_ADDRESS = "0x7fa9385be102ac3eac297483dd6233d62b3e1496"
+# keccak256("BugForgeObservation(uint256,uint256,uint256)")
+OBSERVATION_TOPIC = "0x05cd64bb6ffe3a3804e150ecc2c28424720f099e6672c02e96eb325669e2f411"
+
+K_DEPLOYED = 1
+K_CALL = 2
+K_BEFORE = 3
+K_AFTER = 4
+K_READ_FAILED = 5
+K_RECEIVED = 6
+K_CREDITED = 7
+K_PRIMITIVE = 8
+K_DONE = 9
 
 
 class Outcome(StrEnum):
     PROPERTY_VIOLATED = "property_violated"
     PROPERTY_HELD = "property_held"
-    SEQUENCE_EXECUTED = "sequence_executed"
+    SEQUENCE_EXECUTED_NO_ORACLE = "sequence_executed_no_oracle"
     SEQUENCE_REVERTED = "sequence_reverted"
+    COMPILE_FAILED = "compile_failed"
+    EXECUTION_FAILED = "execution_failed"
+    TIMEOUT = "timeout"
+    IDENTITY_MISMATCH = "identity_mismatch"
     INCONCLUSIVE = "inconclusive"
     UNAVAILABLE = "unavailable"
 
 
+# Outcomes where the harness actually ran the sequence to completion.
 RUNNABLE = frozenset(
     {
         Outcome.PROPERTY_VIOLATED,
         Outcome.PROPERTY_HELD,
-        Outcome.SEQUENCE_EXECUTED,
+        Outcome.SEQUENCE_EXECUTED_NO_ORACLE,
         Outcome.SEQUENCE_REVERTED,
     }
 )
+# Outcomes worth a durable reproduction bundle.
+BUNDLED = RUNNABLE | {Outcome.COMPILE_FAILED, Outcome.EXECUTION_FAILED, Outcome.INCONCLUSIVE}
+
+
+class ReplayMode(StrEnum):
+    """What a local execution reproduces. Only LOCAL_SOURCE_REPLAY runs here."""
+
+    LOCAL_SOURCE_REPLAY = "local_source_replay"  # fresh deploy of analyzed source
+    DEPLOYMENT_REPLAY = "deployment_replay"  # deployed bytecode (needs runtime capture)
+    PINNED_FORK_REPLAY = "pinned_fork_replay"  # operator-approved pinned fork only
 
 
 @dataclass(frozen=True)
 class ToolStatus:
     forge: str
     solc: str
+    forge_version: str = ""
+    solc_version: str = ""
 
     @property
     def available(self) -> bool:
-        return self.forge == "available"
+        return self.forge == "available" and self.solc == "available"
 
     def as_dict(self) -> dict[str, str]:
-        return {"forge": self.forge, "solc": self.solc}
+        return {
+            "forge": self.forge,
+            "solc": self.solc,
+            "forge_version": self.forge_version or "unknown",
+            "solc_version": self.solc_version or "unknown",
+        }
+
+
+@lru_cache(maxsize=8)
+def _version(binary: str) -> str:
+    path = tool_path(binary)
+    if not path:
+        return ""
+    try:
+        proc = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=20, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    text = proc.stdout + proc.stderr
+    if binary == "solc":
+        match = re.search(r"Version:\s*(\d+\.\d+\.\d+)", text)
+        return match.group(1) if match else ""
+    match = re.search(r"(\d+\.\d+\.\d+[\w.+-]*)", text)
+    return match.group(1) if match else ""
 
 
 def tool_status() -> ToolStatus:
     forge = "available" if tool_path("forge") else "unavailable"
     solc = "available" if tool_path("solc") else "unavailable"
-    return ToolStatus(forge=forge, solc=solc)
+    return ToolStatus(
+        forge=forge,
+        solc=solc,
+        forge_version=_version("forge") if forge == "available" else "",
+        solc_version=_version("solc") if solc == "available" else "",
+    )
 
 
 def execution_enabled() -> bool:
     from app.core.config import get_settings
 
     return bool(get_settings().bounty_stateful_execution)
+
+
+def _timeout_setting() -> int:
+    from app.core.config import get_settings
+
+    value = int(getattr(get_settings(), "bounty_stateful_timeout_seconds", EXEC_TIMEOUT))
+    return max(5, min(value, 600))
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _tail(text: str, limit: int = MAX_TAIL) -> str:
+    return text[-limit:] if text else ""
+
+
+# ---- sequence identity ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IdentityContext:
+    """What the caller expects the sequence to be bound to (server-owned, not from text)."""
+
+    campaign_id: str = ""
+    deployment: str = ""  # chain:address, or "" / "source" when source-only
+    chain_id: str = ""
+    address: str = ""
+    runtime_digest: str = ""
+    proxy_kind: str = "none"
+    implementation: str = ""
+    compiler_configuration: str = ""
+    source_snapshot: str = ""
+    # path -> sha256 recorded when the sequence's sources were analyzed
+    expected_hashes: Mapping[str, str] = field(default_factory=dict)
+    expected_file: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionIdentity:
+    campaign_id: str
+    source_snapshot: str
+    source_files: tuple[str, ...]
+    source_hashes: tuple[tuple[str, str], ...]
+    source_set_digest: str
+    contract: str
+    contract_file: str
+    chain_id: str
+    address: str
+    deployment: str
+    runtime_digest: str
+    proxy_kind: str
+    implementation: str
+    compiler_configuration: str
+    solc_version: str
+    property_id: str
+    sequence_id: str
+    call_instances: tuple[str, ...]
+    replay_mode: ReplayMode
+    status: str  # bound | identity_mismatch
+    mismatches: tuple[str, ...] = ()
+
+    @property
+    def bound(self) -> bool:
+        return self.status == "bound"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "campaign_id": self.campaign_id,
+            "source_snapshot": self.source_snapshot,
+            "source_files": list(self.source_files),
+            "source_hashes": dict(self.source_hashes),
+            "source_set_digest": self.source_set_digest,
+            "contract": self.contract,
+            "contract_file": self.contract_file,
+            "chain_id": self.chain_id,
+            "address": self.address,
+            "deployment": self.deployment,
+            "runtime_digest": self.runtime_digest,
+            "proxy_kind": self.proxy_kind,
+            "implementation": self.implementation,
+            "compiler_configuration": self.compiler_configuration,
+            "solc_version": self.solc_version,
+            "property_id": self.property_id,
+            "sequence_id": self.sequence_id,
+            "call_instances": list(self.call_instances),
+            "replay_mode": self.replay_mode.value,
+            "status": self.status,
+            "mismatches": list(self.mismatches),
+        }
+
+
+def target_contract(sequence: Vfcs) -> str:
+    """The contract a sequence targets: the candidate's contract, never calls[0]."""
+    _detector, _, target = sequence.derived_from.partition("@")
+    contract = target.partition(".")[0]
+    if contract:
+        return contract
+    for call in sequence.calls:
+        if not call.primitive:
+            return call.contract
+    return ""
+
+
+def source_set_digest(hashes: Mapping[str, str]) -> str:
+    return sha256_text(json.dumps(sorted(hashes.items()), separators=(",", ":")))
+
+
+def bind_identity(
+    sequence: Vfcs,
+    model: ResearchModel,
+    sources: Mapping[str, str],
+    context: IdentityContext,
+    *,
+    property_id: str = "",
+    solc_version: str = "",
+) -> ExecutionIdentity:
+    """Bind a sequence to the exact source set it was built from. Mismatches fail closed."""
+    contract = target_contract(sequence)
+    item = model.contracts.get(contract)
+    contract_file = item.file if item is not None else ""
+    hashes = {path: sha256_text(text) for path, text in sorted(sources.items())}
+    problems: list[str] = []
+    if item is None:
+        problems.append(f"contract {contract or '?'} is not in the sequence's model")
+    elif contract in model.ambiguous:
+        problems.append(f"contract name {contract} is declared in several files")
+    if contract_file and contract_file not in sources:
+        problems.append(f"{contract_file} (declares {contract}) is not in the source set")
+    if item is not None:
+        for owner in model.lineage(contract):
+            base = model.contracts.get(owner)
+            if base is not None and base.file not in sources:
+                problems.append(f"{base.file} (declares {owner}) is not in the source set")
+    if context.expected_file and contract_file and context.expected_file != contract_file:
+        problems.append(
+            f"expected source file {context.expected_file} but {contract} is declared in "
+            f"{contract_file}"
+        )
+    if context.expected_hashes:
+        for path, digest_value in hashes.items():
+            expected = context.expected_hashes.get(path)
+            if expected is None:
+                problems.append(f"{path} is not part of the analyzed snapshot")
+            elif expected != digest_value:
+                problems.append(f"{path} changed since it was analyzed")
+    seq_campaign = sequence.identity.campaign_id
+    if context.campaign_id and seq_campaign and seq_campaign != context.campaign_id:
+        problems.append("the sequence belongs to another campaign")
+    seq_deployment = sequence.identity.deployment
+    ctx_deployment = "" if context.deployment == "source" else context.deployment
+    if seq_deployment and ctx_deployment and seq_deployment != ctx_deployment:
+        problems.append(
+            f"the sequence is bound to {seq_deployment}, not the target {ctx_deployment}"
+        )
+    return ExecutionIdentity(
+        campaign_id=context.campaign_id or seq_campaign,
+        source_snapshot=context.source_snapshot or sequence.identity.source_snapshot,
+        source_files=tuple(sorted(sources)),
+        source_hashes=tuple(sorted(hashes.items())),
+        source_set_digest=source_set_digest(hashes),
+        contract=contract,
+        contract_file=contract_file,
+        chain_id=context.chain_id,
+        address=context.address,
+        deployment=ctx_deployment or seq_deployment or "source",
+        runtime_digest=context.runtime_digest,
+        proxy_kind=context.proxy_kind or "none",
+        implementation=context.implementation,
+        compiler_configuration=context.compiler_configuration
+        or sequence.identity.compiler_configuration,
+        solc_version=solc_version,
+        property_id=property_id,
+        sequence_id=sequence.sequence_id,
+        call_instances=instance_identities(sequence),
+        replay_mode=ReplayMode.LOCAL_SOURCE_REPLAY,
+        status="identity_mismatch" if problems else "bound",
+        mismatches=tuple(problems[:12]),
+    )
+
+
+# ---- harness synthesis ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Primitive:
+    """A bounded local environment step. It never widens scope, auth, budget, or network."""
+
+    name: str
+    purpose: str
+    actor: str
+    value: str
+    property_relevance: str
+    established_by: str
+    limits: str = "local test fixture only; fresh chain; no RPC; no real assets"
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "purpose": self.purpose,
+            "actor": self.actor,
+            "value": self.value,
+            "property_relevance": self.property_relevance,
+            "established_by": self.established_by,
+            "limits": self.limits,
+        }
 
 
 @dataclass(frozen=True)
@@ -102,10 +396,806 @@ class HarnessArtifact:
     test_name: str
     pipeline: str
     reason: str = ""
+    reason_code: str = ""
+    contract: str = ""
+    contract_file: str = ""
+    oracle: OracleSpec = field(default_factory=OracleSpec)
+    primitives: tuple[Primitive, ...] = ()
+    deployed: tuple[str, ...] = ()
 
     @property
     def buildable(self) -> bool:
         return bool(self.source)
+
+    @property
+    def harness_hash(self) -> str:
+        return sha256_text(self.source) if self.source else ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sequence_id": self.sequence_id,
+            "schema": HARNESS_SCHEMA,
+            "test_name": self.test_name,
+            "pipeline": self.pipeline,
+            "buildable": self.buildable,
+            "reason": self.reason,
+            "reason_code": self.reason_code,
+            "contract": self.contract,
+            "contract_file": self.contract_file,
+            "oracle": self.oracle.as_dict(),
+            "primitives": [item.as_dict() for item in self.primitives],
+            "deployed": list(self.deployed),
+            "harness_hash": self.harness_hash,
+        }
+
+
+_ELEMENTARY = re.compile(r"(address|bool|string|bytes(?:[1-9]|[12]\d|3[0-2])?|u?int\d*)")
+_LOCATION = re.compile(r"\b(memory|calldata|storage|payable)\b")
+_TOKEN_TYPE = re.compile(r"^I?ERC20\w*$|^IERC4626$|^SafeERC20$|^IWETH\w*$")
+_AMOUNT_LIKE = frozenset(
+    {
+        "amount_one",
+        "minimum_amount",
+        "victim_amount",
+        "credited_balance",
+        "all_shares",
+        "unconstrained",
+        "attacker_controlled",
+        "maximum",
+    }
+)
+TOKEN_ORACLES = frozenset(
+    {
+        OracleKind.CREDIT_LE_RECEIVED,
+        OracleKind.CREDIT_LE_HOLDINGS,
+        OracleKind.BALANCE_NOT_INCREASED,
+    }
+)
+
+
+def _strip_type(type_name: str) -> str:
+    return " ".join(_LOCATION.sub(" ", type_name).split())
+
+
+def _is_token_type(model: ResearchModel, type_name: str) -> bool:
+    base = re.sub(r"\[.*\]", "", _strip_type(type_name)).strip()
+    if _TOKEN_TYPE.match(base):
+        return True
+    item = model.contracts.get(base)
+    if item is None or not item.is_interface:
+        return False
+    names = {fn.name for fn in item.functions}
+    return {"transfer", "transferFrom", "balanceOf"} <= names
+
+
+def abi_type(model: ResearchModel, type_name: str) -> str | None:
+    """The canonical ABI type of a declared Solidity type, or None (structs, mappings...)."""
+    text = _strip_type(type_name)
+    match = re.fullmatch(r"([A-Za-z_][\w.]*)\s*((?:\[\d*\])*)", text)
+    if match is None:
+        return None
+    base, suffix = match.group(1), match.group(2)
+    if _ELEMENTARY.fullmatch(base):
+        if base == "uint":
+            base = "uint256"
+        elif base == "int":
+            base = "int256"
+        return base + suffix
+    name = base.rsplit(".", 1)[-1]
+    item = model.contracts.get(name)
+    if item is not None and item.kind in {"contract", "interface"}:
+        return "address" + suffix
+    if _TOKEN_TYPE.match(name):
+        return "address" + suffix
+    return None
+
+
+def canonical_signature(model: ResearchModel, function: RFunction) -> str | None:
+    types: list[str] = []
+    for param in function.params:
+        item = abi_type(model, param.type_name)
+        if item is None:
+            return None
+        types.append(item)
+    return f"{function.name}({','.join(types)})"
+
+
+def _deployable(model: ResearchModel, contract: str, sources: Mapping[str, str] | None) -> bool:
+    item = model.contracts.get(contract)
+    if item is None or item.kind != "contract":
+        return False
+    text = (sources or {}).get(item.file, "")
+    return not re.search(rf"\babstract\s+contract\s+{re.escape(contract)}\b", text)
+
+
+def _constructor(model: ResearchModel, contract: str) -> RFunction | None:
+    for function in model.functions_of(contract, inherited=False):
+        if function.kind == "constructor":
+            return function
+    return None
+
+
+def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
+    for function in model.functions_of(contract):
+        if function.signature == signature and function.has_body:
+            return function
+    return None
+
+
+class _UnbuildableError(Exception):
+    def __init__(self, reason: str, code: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
+
+
+class _Synth:
+    """Assembles one harness. Raises _UnbuildableError instead of inventing anything."""
+
+    def __init__(
+        self,
+        model: ResearchModel,
+        sequence: Vfcs,
+        contract: str,
+        oracle: OracleSpec,
+        sources: Mapping[str, str] | None,
+    ) -> None:
+        self.model = model
+        self.sequence = sequence
+        self.contract = contract
+        self.oracle = oracle
+        self.sources = sources
+        self.pre_deploy: list[str] = []
+        self.post_deploy: list[str] = []
+        self.steps: list[str] = []
+        self.primitives: list[Primitive] = []
+        self.deployed: list[str] = [contract]
+        self.token_kind = ""  # standard | fee_on_transfer | false_return
+        self.token_bound = False  # the target can see the fixture token
+        self.funded: set[str] = set()
+        self.approved: set[str] = set()
+        self.counter = 0
+
+    # -- token fixture -------------------------------------------------------------------
+    def want_token(self, kind: str, why: str) -> None:
+        if not self.token_kind:
+            self.token_kind = kind or "standard"
+            fee, false_return = {
+                "standard": ("0", "false"),
+                "fee_on_transfer": ("100", "false"),
+                "false_return": ("0", "true"),
+            }.get(self.token_kind, ("0", "false"))
+            self.pre_deploy.append(
+                f"        BugForgeFixtureToken bfToken = new BugForgeFixtureToken({fee}, "
+                f"{false_return});"
+            )
+            self.primitives.append(
+                Primitive(
+                    name="test_deploy:fixture_token",
+                    purpose=f"a local {self.token_kind} ERC-20 fixture",
+                    actor="harness",
+                    value=f"fee_bps={fee}, returns_false={false_return}",
+                    property_relevance=why,
+                    established_by="oracle token fixture / token-typed parameter",
+                )
+            )
+
+    def fund(self, actor_name: str, actor_addr: str) -> None:
+        if actor_name in self.funded:
+            return
+        self.funded.add(actor_name)
+        self.post_deploy.append(f"        bfToken.mint({actor_addr}, 4 * {FIXTURE_AMOUNT});")
+        self.primitives.append(
+            Primitive(
+                name="funding:fixture_mint",
+                purpose=f"give the {actor_name} fixture tokens to act with",
+                actor=actor_name,
+                value=f"4 * {FIXTURE_AMOUNT}",
+                property_relevance="the sequence moves tokens on the actor's behalf",
+                established_by="token fixture",
+            )
+        )
+
+    def approve(self, actor_name: str, actor_addr: str, why: str) -> None:
+        if actor_name in self.approved:
+            return
+        self.approved.add(actor_name)
+        self.fund(actor_name, actor_addr)
+        self.post_deploy.append(f"        vm.prank({actor_addr});")
+        self.post_deploy.append("        bfToken.approve(address(t), type(uint256).max);")
+        self.primitives.append(
+            Primitive(
+                name="approval:fixture_approve",
+                purpose=f"the {actor_name} approves the target for the fixture token",
+                actor=actor_name,
+                value="type(uint256).max (fixture only)",
+                property_relevance=why,
+                established_by="the target pulls tokens with transferFrom",
+            )
+        )
+
+    # -- values ---------------------------------------------------------------------------
+    def _name(self, stem: str) -> str:
+        self.counter += 1
+        return f"bf{stem}{self.counter}"
+
+    def literal(self, param: Param, call: VfcsCall, override: str, nested_ok: bool) -> str:
+        abi = abi_type(self.model, param.type_name)
+        if abi is None:
+            raise _UnbuildableError(
+                f"parameter {param.name or '?'} ({param.type_name}) is not expressible",
+                "param_not_expressible",
+            )
+        if override.startswith("nested_call:"):
+            if not nested_ok or abi not in {"bytes", "bytes[]"}:
+                raise _UnbuildableError(
+                    "a nested call cannot be encoded here", "param_not_expressible"
+                )
+            encoded = self.nested(override.split(":", 1)[1])
+            if abi == "bytes":
+                return encoded
+            name = self._name("Arr")
+            self.steps.append(f"        bytes[] memory {name} = new bytes[](1);")
+            self.steps.append(f"        {name}[0] = {encoded};")
+            return name
+        if _is_token_type(self.model, param.type_name) and not abi.endswith("]"):
+            self.want_token(self.oracle.token_fixture or "standard", "a token-typed parameter")
+            self.token_bound = True
+            return "address(bfToken)"
+        if abi.endswith("[]"):
+            inner = abi[:-2]
+            if "[" in inner:
+                raise _UnbuildableError(
+                    "nested arrays are not expressible", "param_not_expressible"
+                )
+            return f"new {inner}[](0)"
+        if "[" in abi:
+            raise _UnbuildableError(
+                "fixed-size arrays are not expressible", "param_not_expressible"
+            )
+        if abi == "address":
+            if override in {VICTIM, "victim", "second_owner"}:
+                return VICTIM_ADDR
+            if override in {"attacker_controlled", "attacker_substituted", ATTACKER}:
+                return ATTACKER_ADDR
+            return ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        if abi.startswith("uint") or abi.startswith("int"):
+            if override == "max_uint":
+                return f"type({abi}).max"
+            if override == "zero":
+                return "0"
+            if override == "one":
+                return "1"
+            if self.token_kind and override in _AMOUNT_LIKE and abi in {"uint256", "uint"}:
+                return FIXTURE_AMOUNT
+            if override == "amount_one":
+                return "1"
+            return "0"
+        if abi == "bool":
+            return "false"
+        if abi == "string":
+            return '""'
+        if abi == "bytes":
+            return 'bytes("")'
+        if abi.startswith("bytes"):
+            return f"{abi}(0)"
+        raise _UnbuildableError(f"type {abi} is not expressible", "param_not_expressible")
+
+    def nested(self, target: str) -> str:
+        contract, _, signature = target.partition(".")
+        callee = _resolve(self.model, contract, signature)
+        if callee is None or contract != self.contract:
+            raise _UnbuildableError(
+                "the nested callee is not a function of the target", "nested_unresolved"
+            )
+        canonical = canonical_signature(self.model, callee)
+        if canonical is None:
+            raise _UnbuildableError("the nested callee's parameters are not expressible", "param")
+        probe = VfcsCall(contract, signature, "nested", ATTACKER)
+        args = [self.literal(p, probe, "attacker_controlled", False) for p in callee.params]
+        return f"abi.encodeWithSignature({', '.join([json.dumps(canonical), *args])})"
+
+    def encode(self, call: VfcsCall, function: RFunction) -> str:
+        canonical = canonical_signature(self.model, function)
+        if canonical is None:
+            raise _UnbuildableError(
+                f"a parameter of {function.name} is not ABI-expressible", "param_not_expressible"
+            )
+        overrides = dict(call.arguments)
+        args = [
+            self.literal(param, call, overrides.get(param.name, ""), True)
+            for param in function.params
+        ]
+        return f"abi.encodeWithSignature({', '.join([json.dumps(canonical), *args])})"
+
+    # -- constructor -----------------------------------------------------------------------
+    def constructor_args(self) -> list[str]:
+        ctor = _constructor(self.model, self.contract)
+        if ctor is None or not ctor.params:
+            return []
+        args: list[str] = []
+        for param in ctor.params:
+            type_text = _strip_type(param.type_name)
+            if _is_token_type(self.model, param.type_name) and "[" not in type_text:
+                self.want_token(
+                    self.oracle.token_fixture or "standard",
+                    f"constructor parameter {param.name} is a token",
+                )
+                self.token_bound = True
+                args.append(f"{type_text}(address(bfToken))")
+                continue
+            dep = self.model.contract_for_type(type_text)
+            dep_ctor = _constructor(self.model, dep) if dep else None
+            if (
+                dep
+                and dep != self.contract
+                and _deployable(self.model, dep, self.sources)
+                and (dep_ctor is None or not dep_ctor.params)
+            ):
+                name = self._name("Dep")
+                self.pre_deploy.append(f"        {dep} {name} = new {dep}();")
+                self.deployed.append(dep)
+                self.primitives.append(
+                    Primitive(
+                        name="test_deploy:graph_dependency",
+                        purpose=f"deploy {dep} for constructor parameter {param.name}",
+                        actor="harness",
+                        value=dep,
+                        property_relevance="the target cannot be deployed without it",
+                        established_by=f"constructor parameter {param.name} is typed {dep}",
+                    )
+                )
+                args.append(name)
+                continue
+            raise _UnbuildableError(
+                f"constructor argument {param.name or '?'} ({param.type_name}) is unknown; "
+                "it is not invented",
+                "unknown_constructor_argument",
+            )
+        return args
+
+    # -- primitives ------------------------------------------------------------------------
+    def primitive(self, index: int, call: VfcsCall) -> None:
+        actor_addr = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        if call.function == "warp(uint256)":
+            self.steps.append("        vm.warp(block.timestamp + 1 days);")
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="time_advance:warp",
+                    purpose="advance the local clock",
+                    actor="harness",
+                    value="+1 day",
+                    property_relevance=call.established_by,
+                    established_by=call.established_by,
+                )
+            )
+            return
+        if call.contract == "token" and call.function in {
+            "transfer(address,uint256)",
+            "approve(address,uint256)",
+        }:
+            self.want_token(self.oracle.token_fixture or "standard", call.established_by)
+            self.fund(call.actor, actor_addr)
+            verb = "transfer" if call.function.startswith("transfer") else "approve"
+            amount = FIXTURE_AMOUNT if verb == "transfer" else "type(uint256).max"
+            ok = self._name("Prim")
+            self.steps.append(f"        vm.prank({actor_addr});")
+            self.steps.append(
+                f"        (bool {ok}, ) = address(bfToken).call(abi.encodeWithSignature("
+                f'"{verb}(address,uint256)", address(t), {amount}));'
+            )
+            self.steps.append(
+                f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, {ok} ? 1 : 0);"
+            )
+            self.primitives.append(
+                Primitive(
+                    name=f"{'donation' if verb == 'transfer' else 'approval'}:fixture_{verb}",
+                    purpose=f"the {call.actor} {verb}s fixture tokens to/for the target",
+                    actor=call.actor,
+                    value=amount,
+                    property_relevance=call.established_by,
+                    established_by=call.established_by,
+                )
+            )
+            return
+        raise _UnbuildableError(
+            f"call {index} is an environment primitive ({call.contract}.{call.function}) "
+            "that needs a fixture the local harness does not provide",
+            "unsupported_primitive",
+        )
+
+    # -- oracle reads ----------------------------------------------------------------------
+    def read_getter(self, kind: int, index: int) -> None:
+        oracle = self.oracle
+        getter = oracle.getter
+        if not getter:
+            return
+        if getter.endswith("(address)"):
+            actor = ATTACKER_ADDR if oracle.getter_actor in {"", ATTACKER} else VICTIM_ADDR
+            data = f'abi.encodeWithSignature("{getter}", {actor})'
+        else:
+            data = f'abi.encodeWithSignature("{getter}")'
+        ok, value = self._name("Ok"), self._name("Val")
+        self.steps.append(f"        (bool {ok}, uint256 {value}) = _bfRead(address(t), {data});")
+        self.steps.append(
+            f"        if ({ok}) {{ emit BugForgeObservation({kind}, {index}, {value}); }} "
+            f"else {{ emit BugForgeObservation({K_READ_FAILED}, {index}, {kind}); }}"
+        )
+
+    def read_balance(self, index: int, slot: int) -> None:
+        value = self._name("Bal")
+        self.steps.append(f"        uint256 {value} = bfToken.balanceOf(address(t));")
+        self.steps.append(f"        emit BugForgeObservation({K_RECEIVED}, {slot}, {value});")
+
+    def read_credit(self, slot: int) -> None:
+        self.read_getter(K_CREDITED, slot)
+
+    # -- assemble --------------------------------------------------------------------------
+    def build(self) -> str:
+        oracle = self.oracle
+        probe = probe_index(self.sequence, oracle) if oracle.executable else -1
+        if oracle.kind in TOKEN_ORACLES:
+            self.want_token(oracle.token_fixture or "standard", oracle.expression)
+        ctor_args = self.constructor_args()
+        if oracle.kind in TOKEN_ORACLES:
+            self.approve(ATTACKER, ATTACKER_ADDR, "the probe deposits fixture tokens")
+        for index, call in enumerate(self.sequence.calls):
+            if call.primitive:
+                self.primitive(index, call)
+                continue
+            function = _resolve(self.model, call.contract, call.function)
+            if function is None or call.contract != self.contract:
+                raise _UnbuildableError(
+                    "a call is not a function of the target contract", "call_outside_target"
+                )
+            encoded = self.encode(call, function)
+            if index == probe and oracle.kind is OracleKind.STATE_UNCHANGED:
+                self.read_getter(K_BEFORE, index)
+            if index == probe and oracle.kind in TOKEN_ORACLES:
+                self.read_balance(index, 0)
+                self.read_credit(0)
+            sender = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+            if call.actor not in {ATTACKER, VICTIM}:
+                raise _UnbuildableError(
+                    f"actor {call.actor!r} is not a harness actor", "unknown_actor"
+                )
+            self.steps.append(f"        vm.prank({sender});")
+            self.steps.append(f"        (bool ok_{index}, ) = address(t).call({encoded});")
+            self.steps.append(
+                f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
+            )
+            if index == probe and oracle.kind is OracleKind.STATE_UNCHANGED:
+                self.read_getter(K_AFTER, index)
+            if index == probe and oracle.kind in TOKEN_ORACLES:
+                self.read_balance(index, 1)
+                self.read_credit(1)
+        if self.token_kind and not self.token_bound:
+            raise _UnbuildableError(
+                f"{self.contract} reads its token from state the harness cannot bind "
+                "(no token parameter or constructor argument)",
+                "unbound_token",
+            )
+        deploy = f"        {self.contract} t = new {self.contract}({', '.join(ctor_args)});"
+        body = "\n".join(
+            [
+                *self.pre_deploy,
+                deploy,
+                f"        emit BugForgeObservation({K_DEPLOYED}, 0, 1);",
+                *self.post_deploy,
+                *self.steps,
+                f"        emit BugForgeObservation({K_DONE}, {len(self.sequence.calls)}, 1);",
+            ]
+        )
+        return _HARNESS_TEMPLATE.format(
+            schema=HARNESS_SCHEMA,
+            import_path=self.model.contracts[self.contract].file,
+            fixture=_FIXTURE_TOKEN if self.token_kind else "",
+            body=body,
+        )
+
+
+def build_harness(
+    sequence: Vfcs,
+    model: ResearchModel,
+    *,
+    oracle: OracleSpec | None = None,
+    pipeline: str = "default",
+    sources: Mapping[str, str] | None = None,
+    source_file: str = "",
+) -> HarnessArtifact:
+    """Compile a VFCS plan (and its oracle) into a Foundry test, or explain why not.
+
+    The import is the declaring file of the *target* contract, never a generic first
+    file. ``source_file`` is accepted only as an expectation: a different file is an
+    identity mismatch and nothing is built.
+    """
+    oracle = oracle or OracleSpec()
+    contract = target_contract(sequence)
+    item = model.contracts.get(contract)
+    contract_file = item.file if item is not None else ""
+
+    def fail(reason: str, code: str) -> HarnessArtifact:
+        return HarnessArtifact(
+            sequence.sequence_id,
+            "",
+            "",
+            pipeline,
+            reason,
+            code,
+            contract,
+            contract_file,
+            oracle,
+        )
+
+    if len(sequence.calls) > MAX_CALLS:
+        return fail("sequence too long", "too_long")
+    if source_file and contract_file and source_file != contract_file:
+        return fail(
+            f"{contract} is declared in {contract_file}, not {source_file}", "identity_mismatch"
+        )
+    if item is None or not _deployable(model, contract, sources):
+        return fail("target contract is not a deployable source", "not_deployable")
+    synth = _Synth(model, sequence, contract, oracle, sources)
+    try:
+        source = synth.build()
+    except _UnbuildableError as exc:
+        return fail(exc.reason, exc.code)
+    return HarnessArtifact(
+        sequence_id=sequence.sequence_id,
+        source=source,
+        test_name="test_vfcs_execute",
+        pipeline=pipeline,
+        contract=contract,
+        contract_file=contract_file,
+        oracle=oracle,
+        primitives=tuple(synth.primitives),
+        deployed=tuple(synth.deployed),
+    )
+
+
+_HARNESS_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
+// BUGFORGE LOCAL HARNESS ({schema}). Deterministic local execution only. Not a proof.
+// The harness only reports observations; the property is judged outside the EVM.
+pragma solidity >=0.7.0;
+
+import {{Test}} from "forge-std/Test.sol";
+import "src/{import_path}";
+{fixture}
+contract VfcsHarness is Test {{
+    event BugForgeObservation(uint256 kind, uint256 index, uint256 value);
+
+    function _bfRead(address target, bytes memory data) internal view returns (bool, uint256) {{
+        (bool ok, bytes memory out) = target.staticcall(data);
+        if (!ok || out.length < 32) return (false, 0);
+        return (true, abi.decode(out, (uint256)));
+    }}
+
+    function test_vfcs_execute() public {{
+{body}
+    }}
+}}
+"""
+
+_FIXTURE_TOKEN = """
+contract BugForgeFixtureToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint256 public totalSupply;
+    uint256 public immutable feeBps;
+    bool public immutable returnsFalse;
+
+    constructor(uint256 fee, bool falseReturn) {
+        feeBps = fee;
+        returnsFalse = falseReturn;
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return _move(msg.sender, to, amount);
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (returnsFalse) return false;
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "allowance");
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+        return _move(from, to, amount);
+    }
+
+    function _move(address from, address to, uint256 amount) internal returns (bool) {
+        if (returnsFalse) return false;
+        require(balanceOf[from] >= amount, "balance");
+        uint256 fee = (amount * feeBps) / 10000;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - fee;
+        totalSupply -= fee;
+        return true;
+    }
+}
+"""
+
+# forge-std is big; BugForge does not vendor it. A tiny local shim provides only the
+# Test base and the cheatcodes the harness uses, so execution needs no download.
+_FORGE_STD = """// SPDX-License-Identifier: MIT
+pragma solidity >=0.7.0;
+
+interface Vm {
+    function prank(address) external;
+    function warp(uint256) external;
+    function roll(uint256) external;
+    function deal(address, uint256) external;
+}
+
+contract Test {
+    Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+}
+"""
+
+
+# ---- structured execution results -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """What one local run produced, structurally. Built from process status and forge's
+    JSON report (raw harness events), never from free-text heuristics."""
+
+    process_status: str  # not_run | completed | timeout | spawn_failed
+    compiler_status: str  # not_run | ok | failed
+    test_status: str  # not_run | passed | failed | missing
+    sequence_status: str  # not_run | completed | reverted | incomplete
+    property_status: str  # not_run | violated | held | not_evaluated | no_oracle
+    return_code: int | None = None
+    reverted_index: int = -1
+    call_results: tuple[int, ...] = ()  # per call: 1 ok, 0 reverted, -1 not reached
+    events: tuple[tuple[int, int, int], ...] = ()
+    assertion_id: str = ""  # the property id the oracle judged
+    failure_reason: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    forge_version: str = ""
+    solc_version: str = ""
+    pipeline: str = "default"
+    source_hashes: tuple[tuple[str, str], ...] = ()
+    harness_hash: str = ""
+    config_hash: str = ""
+    command: tuple[str, ...] = ()
+    duration_ms: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "process_status": self.process_status,
+            "compiler_status": self.compiler_status,
+            "test_status": self.test_status,
+            "sequence_status": self.sequence_status,
+            "property_status": self.property_status,
+            "return_code": self.return_code,
+            "reverted_index": self.reverted_index,
+            "call_results": list(self.call_results),
+            "events": [list(item) for item in self.events],
+            "assertion_id": self.assertion_id,
+            "failure_reason": self.failure_reason,
+            "stdout_tail": self.stdout_tail,
+            "stderr_tail": self.stderr_tail,
+            "forge_version": self.forge_version,
+            "solc_version": self.solc_version,
+            "pipeline": self.pipeline,
+            "source_hashes": dict(self.source_hashes),
+            "harness_hash": self.harness_hash,
+            "config_hash": self.config_hash,
+            "command": list(self.command),
+            "duration_ms": self.duration_ms,
+        }
+
+
+def parse_forge_report(stdout: str) -> dict[str, Any] | None:
+    """The JSON document ``forge test --json`` printed, or None."""
+    start = stdout.find("{")
+    if start < 0:
+        return None
+    try:
+        value = json.loads(stdout[start:])
+    except ValueError:
+        # forge may print one JSON document per line; take the first that parses
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                break
+        else:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def harness_test(report: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    for suite, body in report.items():
+        if not str(suite).endswith(":VfcsHarness") or not isinstance(body, Mapping):
+            continue
+        tests = body.get("test_results")
+        if isinstance(tests, Mapping):
+            for name, result in tests.items():
+                if str(name).startswith("test_vfcs_execute") and isinstance(result, Mapping):
+                    return result
+    return None
+
+
+def decode_events(test: Mapping[str, Any]) -> tuple[tuple[int, int, int], ...]:
+    """Decode harness observations from raw logs. Only the harness address counts."""
+    found: list[tuple[int, int, int]] = []
+    for log in test.get("logs") or ():
+        if not isinstance(log, Mapping):
+            continue
+        if str(log.get("address", "")).lower() != HARNESS_ADDRESS:
+            continue
+        topics = log.get("topics") or ()
+        if not topics or str(topics[0]).lower() != OBSERVATION_TOPIC:
+            continue
+        data = str(log.get("data", ""))
+        data = data[2:] if data.startswith("0x") else data
+        if len(data) != 192 or not re.fullmatch(r"[0-9a-fA-F]+", data):
+            continue
+        words = [int(data[i : i + 64], 16) for i in range(0, 192, 64)]
+        found.append((words[0], words[1], words[2]))
+        if len(found) >= MAX_EVENTS:
+            break
+    return tuple(found)
+
+
+def observation_from_events(
+    events: tuple[tuple[int, int, int], ...], count: int
+) -> tuple[OracleObservation, bool, bool]:
+    """(oracle observation, deployed, done) from structured events."""
+    calls = [-1] * count
+    before = after = ""
+    readable = True
+    received: dict[int, int] = {}
+    credited: dict[int, int] = {}
+    deployed = done = False
+    for kind, index, value in events:
+        if kind == K_DEPLOYED:
+            deployed = True
+        elif kind in {K_CALL, K_PRIMITIVE} and 0 <= index < count:
+            calls[index] = 1 if value == 1 else 0
+        elif kind == K_BEFORE:
+            before = f"0x{value:064x}"
+        elif kind == K_AFTER:
+            after = f"0x{value:064x}"
+        elif kind == K_READ_FAILED:
+            readable = False
+        elif kind == K_RECEIVED:
+            received[index] = value
+        elif kind == K_CREDITED:
+            credited[index] = value
+        elif kind == K_DONE:
+            done = index == count
+    observation = OracleObservation(
+        call_ok=tuple(calls),
+        before=before,
+        after=after,
+        readable=readable,
+        received=received[1] - received[0] if {0, 1} <= set(received) else None,
+        credited=credited[1] - credited[0] if {0, 1} <= set(credited) else None,
+        holdings_after=received.get(1),
+        credit_after=credited.get(1),
+    )
+    return observation, deployed, done
 
 
 @dataclass(frozen=True)
@@ -123,6 +1213,31 @@ class StatefulObservation:
     tools: ToolStatus
     stdout_tail: str = ""
     verified: bool = False
+    property_id: str = ""
+    declaration: str = PropertyDeclaration.NO_PROPERTY_AVAILABLE.value
+    verdict: str = PropertyVerdict.NOT_EVALUATED.value
+    formulation: str = "primary"
+    oracle_kind: str = OracleKind.NONE.value
+    evaluation: PropertyEvaluation | None = None
+    result: ExecutionResult | None = None
+    identity: ExecutionIdentity | None = None
+    harness: HarnessArtifact | None = None
+    reason_code: str = ""
+
+    @property
+    def no_oracle(self) -> bool:
+        return self.outcome is Outcome.SEQUENCE_EXECUTED_NO_ORACLE
+
+    @property
+    def strong_candidate(self) -> bool:
+        """Only an executed, identity-bound oracle violation is a strong candidate."""
+        return (
+            self.outcome is Outcome.PROPERTY_VIOLATED
+            and self.declaration == PropertyDeclaration.PROPERTY_UNDER_TEST.value
+            and self.property_checked
+            and self.identity is not None
+            and self.identity.bound
+        )
 
     def signal(self) -> FeedbackSignal | None:
         """Turn an execution observation into bounded feedback. None = nothing to learn."""
@@ -133,13 +1248,12 @@ class StatefulObservation:
                 call_index=self.reverted_index,
                 engine="foundry",
             )
-        if self.outcome is Outcome.PROPERTY_VIOLATED:
+        if self.outcome is Outcome.PROPERTY_HELD:
+            index = self.evaluation.probe_index if self.evaluation else -1
             return FeedbackSignal(
-                kind="symbolic_counterexample",
-                sequence_id=self.sequence_id,
-                engine="foundry",
+                kind="near_miss", sequence_id=self.sequence_id, call_index=index, engine="foundry"
             )
-        if self.outcome is Outcome.SEQUENCE_EXECUTED:
+        if self.outcome is Outcome.SEQUENCE_EXECUTED_NO_ORACLE:
             return FeedbackSignal(
                 kind="coverage_gain", sequence_id=self.sequence_id, engine="foundry"
             )
@@ -150,200 +1264,138 @@ class StatefulObservation:
             "sequence_id": self.sequence_id,
             "outcome": self.outcome.value,
             "reason": self.reason,
+            "reason_code": self.reason_code,
             "pipeline": self.pipeline,
             "executed": self.executed,
             "return_code": self.return_code,
             "reverted_index": self.reverted_index,
             "property_under_test": self.property_under_test,
             "property_checked": self.property_checked,
+            "property_id": self.property_id,
+            "declaration": self.declaration,
+            "verdict": self.verdict,
+            "formulation": self.formulation,
+            "oracle_kind": self.oracle_kind,
+            "strong_candidate": self.strong_candidate,
+            "evaluation": self.evaluation.as_dict() if self.evaluation else None,
+            "result": self.result.as_dict() if self.result else None,
+            "identity": self.identity.as_dict() if self.identity else None,
             "deployment": self.deployment,
             "tools": self.tools.as_dict(),
             "verified": False,
         }
 
 
-# ---- harness synthesis ----------------------------------------------------------------------
-
-_SIMPLE_VALUE = {
-    "address": ATTACKER_ADDR,
-    "bool": "false",
-    "string": '""',
-    "bytes": '""',
-}
-
-
-def _default_arg(param: Param, actor: str, override: str) -> str | None:
-    """A concrete Solidity literal for a parameter, or None when it is not expressible."""
-    type_name = param.type_name.strip()
-    base = type_name.split()[0]
-    if override in {"victim_amount", "minimum_amount", "all_shares", "credited_balance"}:
-        override = ""
-    if base == "address" or base == "address payable":
-        if override in {"attacker_controlled", "attacker_substituted"} or actor == ATTACKER:
-            return ATTACKER_ADDR
-        return VICTIM_ADDR
-    if base.startswith("uint") or base.startswith("int"):
-        if override == "max_uint":
-            return "type(uint256).max" if base.startswith("uint") else "type(int256).max"
-        if override in {"one", "amount_one"}:
-            return "1"
-        if override == "zero":
-            return "0"
-        return "0"
-    if base == "bool":
-        return "false"
-    if base == "string":
-        return '""'
-    if base.startswith("bytes") and base != "bytes":
-        return f"{base}(0)"
-    if base == "bytes":
-        return '""'
-    if base.endswith("[]"):
-        inner = base[:-2]
-        return f"new {inner}[](0)"
-    return None
-
-
-def _encode_call(call: VfcsCall, function: RFunction) -> str | None:
-    args: list[str] = []
-    overrides = dict(call.arguments)
-    for param in function.params:
-        value = _default_arg(param, call.actor, overrides.get(param.name, ""))
-        if value is None:
-            return None
-        args.append(value)
-    selector = function.signature
-    encoded = ", ".join([json.dumps(selector)] + args) if args else json.dumps(selector)
-    return f"abi.encodeWithSignature({encoded})"
-
-
-def _constructor(model: ResearchModel, contract: str) -> RFunction | None:
-    for function in model.functions_of(contract, inherited=False):
-        if function.kind == "constructor":
-            return function
-    return None
-
-
-def build_harness(
+def classify(
     sequence: Vfcs,
-    model: ResearchModel,
-    *,
-    source_file: str,
-    pipeline: str = "default",
-) -> HarnessArtifact:
-    """Compile a VFCS plan into an executable Foundry test, or explain why not."""
-    if len(sequence.calls) > MAX_CALLS:
-        return HarnessArtifact(sequence.sequence_id, "", "", pipeline, "sequence too long")
-    contract = sequence.calls[0].contract if sequence.calls else ""
-    item = model.contracts.get(contract)
-    if item is None or item.is_interface:
-        return HarnessArtifact(
-            sequence.sequence_id, "", "", pipeline, "target contract is not a deployable source"
+    oracle: OracleSpec,
+    observation: OracleObservation,
+) -> tuple[Outcome, PropertyEvaluation, str]:
+    """Map a completed run to a distinct outcome. Revert != finding; no oracle != finding."""
+    calls = observation.call_ok
+    reverted = next((i for i, ok in enumerate(calls) if ok == 0), -1)
+    if not oracle.executable:
+        evaluation = evaluate(sequence, oracle, observation)
+        if reverted >= 0:
+            return (
+                Outcome.SEQUENCE_REVERTED,
+                evaluation,
+                f"call {reverted} reverted against a fresh local deployment (not a finding)",
+            )
+        return (
+            Outcome.SEQUENCE_EXECUTED_NO_ORACLE,
+            evaluation,
+            "every call succeeded, but no oracle judged a property: execution only",
         )
-    ctor = _constructor(model, contract)
-    if ctor is not None and ctor.params:
-        return HarnessArtifact(
-            sequence.sequence_id, "", "", pipeline, "constructor requires arguments"
-        )
-    steps: list[str] = []
-    property_checked = False
-    prior_init = False
-    for index, call in enumerate(sequence.calls):
-        if call.primitive:
-            # An environment primitive (donation, warp, external market) is not
-            # executed locally; the plan stays honest about needing it.
-            return HarnessArtifact(
-                sequence.sequence_id,
-                "",
-                "",
-                pipeline,
-                f"call {index} is an environment primitive ({call.function})",
-            )
-        function = _resolve(model, call.contract, call.function)
-        if function is None or call.contract != contract:
-            return HarnessArtifact(
-                sequence.sequence_id,
-                "",
-                "",
-                pipeline,
-                "a call is not a function of the single target contract",
-            )
-        encoded = _encode_call(call, function)
-        if encoded is None:
-            return HarnessArtifact(
-                sequence.sequence_id, "", "", pipeline, "a parameter type is not expressible"
-            )
-        sender = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
-        check = ""
-        if sequence.template == "initialize→reinitialize" and call.role == "reinitialize":
-            # Property: a second initialization must not succeed.
-            check = (
-                f"        if (ok_{index}) {{ emit PropertyViolated({index}); violated = true; }}\n"
-            )
-            property_checked = True
-            prior_init = True
-        steps.append(
-            f"        vm.prank({sender});\n"
-            f"        (bool ok_{index}, ) = address(t).call({encoded});\n"
-            f"        reached_{index} = ok_{index};\n" + check
-        )
-    rel_import = source_file
-    body = "\n".join(steps)
-    reached_decls = "\n".join(f"    bool public reached_{i};" for i in range(len(sequence.calls)))
-    test_name = "test_vfcs_execute"
-    source = _HARNESS_TEMPLATE.format(
-        import_path=rel_import,
-        contract=contract,
-        reached_decls=reached_decls,
-        body=body,
-        test_name=test_name,
-        property_tag="true" if property_checked else "false",
+    evaluation = evaluate(sequence, oracle, observation)
+    if evaluation.verdict is PropertyVerdict.PROPERTY_VIOLATED:
+        return Outcome.PROPERTY_VIOLATED, evaluation, evaluation.reason
+    if evaluation.verdict is PropertyVerdict.PROPERTY_HELD:
+        return Outcome.PROPERTY_HELD, evaluation, evaluation.reason
+    return Outcome.INCONCLUSIVE, evaluation, evaluation.reason
+
+
+# ---- execution --------------------------------------------------------------------------------
+
+_PROXY_KINDS = frozenset({"uups", "transparent", "beacon", "diamond", "clone", "generic_proxy"})
+
+
+def foundry_config(pipeline: str, solc: str) -> str:
+    """Server-owned Foundry config. Nothing from the analyzed repository reaches it."""
+    via_ir = "true" if pipeline == "via_ir" else "false"
+    optimizer = "false" if pipeline == "no_optimizer" else "true"
+    solc_line = f"solc = {json.dumps(solc)}\n" if solc else ""
+    return (
+        "[profile.default]\n"
+        'src = "src"\n'
+        'test = "test"\n'
+        'libs = ["lib"]\n'
+        "ffi = false\n"
+        "fs_permissions = []\n"
+        "auto_detect_solc = false\n"
+        "offline = true\n" + solc_line + f"via_ir = {via_ir}\n"
+        f"optimizer = {optimizer}\n"
+        'remappings = ["forge-std/=lib/forge-std/src/"]\n'
+        "\n[lint]\nlint_on_build = false\n"
     )
-    _ = prior_init
-    return HarnessArtifact(sequence.sequence_id, source, test_name, pipeline)
 
 
-def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
-    for function in model.functions_of(contract):
-        if function.signature == signature and function.has_body:
-            return function
-    return None
+def _safe_env(home: str) -> dict[str, str]:
+    """A minimal environment: no RPC URLs, keys, or tokens from the server reach forge."""
+    parts = [p for p in os.environ.get("PATH", "").split(":") if p]
+    return {
+        "PATH": ":".join(parts) or "/usr/bin:/bin",
+        "HOME": home,
+        "FOUNDRY_OFFLINE": "true",
+        "FOUNDRY_FFI": "false",
+        "NO_COLOR": "1",
+    }
 
 
-_HARNESS_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
-// UNTRUSTED CANDIDATE HARNESS. Deterministic local execution only. Not a verified proof.
-pragma solidity >=0.7.0;
-
-import {{Test}} from "forge-std/Test.sol";
-import "src/{import_path}";
-
-contract VfcsHarness is Test {{
-{reached_decls}
-    bool public violated;
-    bool public constant PROPERTY_CHECKED = {property_tag};
-
-    event PropertyViolated(uint256 step);
-
-    function {test_name}() public {{
-        {contract} t = new {contract}();
-{body}
-        // reachability is recorded in reached_* ; a violated property fails the test
-        require(!violated, "property violated: sequence reached a forbidden state");
-    }}
-}}
-"""
+def scaffold(root: Path, sources: Mapping[str, str], harness_source: str, config: str) -> None:
+    """Lay out a self-contained Foundry project from the exact source set."""
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "test").mkdir(parents=True, exist_ok=True)
+    (root / "lib" / "forge-std" / "src").mkdir(parents=True, exist_ok=True)
+    base = (root / "src").resolve()
+    for rel, text in sorted(sources.items()):
+        target = (base / rel).resolve()
+        if base not in target.parents:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    (root / "test" / "VfcsHarness.t.sol").write_text(harness_source, encoding="utf-8")
+    (root / "lib" / "forge-std" / "src" / "Test.sol").write_text(_FORGE_STD, encoding="utf-8")
+    (root / "foundry.toml").write_text(config, encoding="utf-8")
 
 
-# ---- execution ------------------------------------------------------------------------------
+BUILD_ARGV = ("forge", "build", "--offline")
+TEST_ARGV = (
+    "forge",
+    "test",
+    "--offline",
+    "--json",
+    "-vv",
+    "--match-path",
+    "test/VfcsHarness.t.sol",
+)
 
 
 class StatefulExecutor:
     """Runs synthesized harnesses with the installed ``forge``, offline and bounded."""
 
-    def __init__(self, *, timeout: int = EXEC_TIMEOUT, bundle_dir: Path | None = None) -> None:
-        self.timeout = timeout
-        self.bundle_dir = bundle_dir
-        self.tools = tool_status()
+    def __init__(
+        self,
+        *,
+        timeout: int | None = None,
+        tools: ToolStatus | None = None,
+        max_runs: int = MAX_RUNS,
+    ) -> None:
+        self.timeout = timeout if timeout is not None else _timeout_setting()
+        self.tools = tools if tools is not None else tool_status()
+        self.runs = 0
+        # A server-owned run budget; nothing a caller sends can raise it.
+        self.max_runs = max(0, min(max_runs, MAX_RUNS))
 
     def available(self) -> bool:
         return execution_enabled() and self.tools.available
@@ -352,49 +1404,96 @@ class StatefulExecutor:
         self,
         sequence: Vfcs,
         model: ResearchModel,
-        sources: dict[str, str],
+        sources: Mapping[str, str],
         *,
-        source_file: str,
-        deployment: str = "",
+        spec: PropertySpec | None = None,
+        oracle: OracleSpec | None = None,
+        context: IdentityContext | None = None,
         pipeline: str = "default",
+        deployment: str = "",
+        source_file: str = "",
     ) -> StatefulObservation:
+        spec = spec if spec is not None else build_property(sequence, model)
+        chosen = oracle if oracle is not None else spec.oracle
+        context = context or IdentityContext(deployment=deployment, expected_file=source_file)
+        if source_file and not context.expected_file:
+            context = replace(context, expected_file=source_file)
+        identity = bind_identity(
+            sequence,
+            model,
+            sources,
+            context,
+            property_id=spec.property_id,
+            solc_version=self.tools.solc_version,
+        )
+        base = _Base(sequence, spec, chosen, pipeline, identity, self.tools)
+        # Identity first: a sequence bound to other sources never runs, tools or not.
+        if not identity.bound:
+            return base.done(
+                Outcome.IDENTITY_MISMATCH, "; ".join(identity.mismatches), "identity_mismatch"
+            )
         if not execution_enabled():
-            return self._unavailable(sequence, "local stateful execution is disabled", pipeline)
+            return base.done(Outcome.UNAVAILABLE, "local stateful execution is disabled")
         if not self.tools.available:
-            return self._unavailable(sequence, "forge is not installed", pipeline)
-        harness = build_harness(sequence, model, source_file=source_file, pipeline=pipeline)
+            missing = "forge" if self.tools.forge != "available" else "solc"
+            return base.done(Outcome.UNAVAILABLE, f"{missing} is not installed", "tool_missing")
+        if context.proxy_kind in _PROXY_KINDS:
+            return base.done(
+                Outcome.INCONCLUSIVE,
+                f"the target deployment is a {context.proxy_kind} proxy; deploying the "
+                "implementation alone is not the deployed behavior",
+                "proxy_requires_compatible_harness",
+            )
+        from app.parsing.solidity_version import pragma_allows
+
+        contract_text = sources.get(identity.contract_file, "")
+        if pragma_allows(contract_text, self.tools.solc_version) is False:
+            return base.done(
+                Outcome.UNAVAILABLE,
+                f"installed solc {self.tools.solc_version} is outside the source pragma",
+                "compiler_unavailable",
+            )
+        if self.runs >= self.max_runs:
+            return base.done(
+                Outcome.INCONCLUSIVE,
+                f"the local run budget ({self.max_runs}) is exhausted",
+                "budget_exhausted",
+            )
+        harness = build_harness(sequence, model, oracle=chosen, pipeline=pipeline, sources=sources)
         if not harness.buildable:
-            return self._inconclusive(sequence, harness.reason, pipeline, deployment)
-        return self._run(sequence, harness, sources, deployment, pipeline)
+            outcome = (
+                Outcome.IDENTITY_MISMATCH
+                if harness.reason_code == "identity_mismatch"
+                else Outcome.INCONCLUSIVE
+            )
+            return base.done(outcome, harness.reason, harness.reason_code, harness=harness)
+        return self._run(base, harness, sources)
 
     def _run(
-        self,
-        sequence: Vfcs,
-        harness: HarnessArtifact,
-        sources: dict[str, str],
-        deployment: str,
-        pipeline: str,
+        self, base: _Base, harness: HarnessArtifact, sources: Mapping[str, str]
     ) -> StatefulObservation:
+        self.runs += 1
+        forge = tool_path("forge") or "forge"
+        solc = tool_path("solc") or ""
+        config = foundry_config(harness.pipeline, solc)
+        common: dict[str, Any] = {
+            "pipeline": harness.pipeline,
+            "forge_version": self.tools.forge_version,
+            "solc_version": self.tools.solc_version,
+            "source_hashes": base.identity.source_hashes,
+            "harness_hash": harness.harness_hash,
+            "config_hash": sha256_text(config),
+            "command": (*BUILD_ARGV, "&&", *TEST_ARGV),
+            "assertion_id": base.spec.property_id if base.oracle.executable else "",
+        }
+        started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="bugforge-vfcs-") as tmp:
             root = Path(tmp)
-            self._scaffold(root, sources, harness, pipeline)
-            argv = [
-                "forge",
-                "test",
-                "--match-path",
-                "test/VfcsHarness.t.sol",
-                "--offline",
-                "-vv",
-            ]
-            env = {
-                "PATH": _safe_path(),
-                "FOUNDRY_OFFLINE": "true",
-                "FOUNDRY_FFI": "false",
-                "HOME": tmp,
-            }
+            scaffold(root, sources, harness.source, config)
+            env = _safe_env(tmp)
             try:
-                proc = subprocess.run(
-                    argv,
+                build = subprocess.run(
+                    [forge, *BUILD_ARGV[1:]],
                     cwd=root,
                     capture_output=True,
                     text=True,
@@ -402,180 +1501,370 @@ class StatefulExecutor:
                     check=False,
                     env=env,
                 )
-            except (OSError, subprocess.SubprocessError) as exc:
-                return self._inconclusive(
-                    sequence, f"forge did not run: {str(exc)[:160]}", pipeline, deployment
+            except subprocess.TimeoutExpired:
+                return base.done(
+                    Outcome.TIMEOUT,
+                    f"forge build exceeded {self.timeout}s",
+                    "timeout",
+                    harness=harness,
+                    result=ExecutionResult(
+                        "timeout", "not_run", "not_run", "not_run", "not_run", **common
+                    ),
                 )
-            observation = self._interpret(
-                sequence, harness, proc.returncode, proc.stdout + "\n" + proc.stderr, deployment
-            )
-            if self.bundle_dir is not None and observation.outcome in RUNNABLE:
-                self._write_bundle(sequence, harness, observation, argv)
-            return observation
-
-    def _scaffold(
-        self, root: Path, sources: dict[str, str], harness: HarnessArtifact, pipeline: str
-    ) -> None:
-        (root / "src").mkdir(parents=True, exist_ok=True)
-        (root / "test").mkdir(parents=True, exist_ok=True)
-        (root / "lib" / "forge-std" / "src").mkdir(parents=True, exist_ok=True)
-        for rel, text in sources.items():
-            target = (root / "src" / rel).resolve()
-            if root.resolve() not in target.parents:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
-        (root / "test" / "VfcsHarness.t.sol").write_text(harness.source, encoding="utf-8")
-        (root / "lib" / "forge-std" / "src" / "Test.sol").write_text(_FORGE_STD, encoding="utf-8")
-        via_ir = "true" if pipeline == "via_ir" else "false"
-        optimizer = "false" if pipeline == "no_optimizer" else "true"
-        # Point Foundry at the installed solc so nothing is downloaded (offline).
-        solc = tool_path("solc")
-        solc_line = f'solc = "{solc}"\n' if solc else ""
-        (root / "foundry.toml").write_text(
-            "[profile.default]\n"
-            'src = "src"\n'
-            'test = "test"\n'
-            'libs = ["lib"]\n'
-            "ffi = false\n"
-            "fs_permissions = []\n"
-            "auto_detect_solc = false\n" + solc_line + f"via_ir = {via_ir}\n"
-            f"optimizer = {optimizer}\n"
-            'remappings = ["forge-std/=lib/forge-std/src/"]\n',
-            encoding="utf-8",
+            except (OSError, subprocess.SubprocessError) as exc:
+                return base.done(
+                    Outcome.EXECUTION_FAILED,
+                    f"forge did not start: {str(exc)[:160]}",
+                    "spawn_failed",
+                    harness=harness,
+                    result=ExecutionResult(
+                        "spawn_failed", "not_run", "not_run", "not_run", "not_run", **common
+                    ),
+                )
+            if build.returncode != 0:
+                return base.done(
+                    Outcome.COMPILE_FAILED,
+                    "the harness did not compile against this exact source set",
+                    "compile_failed",
+                    harness=harness,
+                    result=ExecutionResult(
+                        "completed",
+                        "failed",
+                        "not_run",
+                        "not_run",
+                        "not_run",
+                        return_code=build.returncode,
+                        failure_reason="compilation failed",
+                        stdout_tail=_tail(build.stdout),
+                        stderr_tail=_tail(build.stderr),
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        **common,
+                    ),
+                )
+            try:
+                proc = subprocess.run(
+                    [forge, *TEST_ARGV[1:]],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    check=False,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return base.done(
+                    Outcome.TIMEOUT,
+                    f"forge test exceeded {self.timeout}s",
+                    "timeout",
+                    harness=harness,
+                    result=ExecutionResult(
+                        "timeout", "ok", "not_run", "not_run", "not_run", **common
+                    ),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return base.done(
+                    Outcome.EXECUTION_FAILED,
+                    f"forge test did not start: {str(exc)[:160]}",
+                    "spawn_failed",
+                    harness=harness,
+                    result=ExecutionResult(
+                        "spawn_failed", "ok", "not_run", "not_run", "not_run", **common
+                    ),
+                )
+        duration = int((time.monotonic() - started) * 1000)
+        return interpret(
+            base,
+            harness,
+            proc.returncode,
+            proc.stdout,
+            proc.stderr,
+            duration_ms=duration,
+            common=common,
         )
 
-    def _interpret(
+
+@dataclass
+class _Base:
+    """Shared fields for every observation of one (sequence, oracle, pipeline)."""
+
+    sequence: Vfcs
+    spec: PropertySpec
+    oracle: OracleSpec
+    pipeline: str
+    identity: ExecutionIdentity
+    tools: ToolStatus
+
+    def done(
         self,
-        sequence: Vfcs,
-        harness: HarnessArtifact,
-        return_code: int,
-        output: str,
-        deployment: str,
+        outcome: Outcome,
+        reason: str,
+        code: str = "",
+        *,
+        harness: HarnessArtifact | None = None,
+        result: ExecutionResult | None = None,
+        evaluation: PropertyEvaluation | None = None,
     ) -> StatefulObservation:
-        tail = output[-1500:]
-        if (
-            re.search(r"Compiler run failed|Error \(\d+\)|could not", output)
-            and "PASS" not in output
-        ):
-            return self._inconclusive(
-                sequence,
-                "the harness did not compile against this source",
-                harness.pipeline,
-                deployment,
-                tail,
-            )
-        passed = bool(re.search(r"\[PASS\].*test_vfcs_execute", output))
-        failed = bool(re.search(r"\[FAIL.*test_vfcs_execute", output))
-        property_checked = "PROPERTY_CHECKED = true" in harness.source
-        revert_index = _reverted_index(output, len(sequence.calls))
-        if failed and "property violated" in output:
-            outcome = Outcome.PROPERTY_VIOLATED
-            reason = "the sequence reached the forbidden state the property forbids"
-        elif passed and property_checked:
-            outcome = Outcome.PROPERTY_HELD
-            reason = "the sequence executed and the property held"
-        elif passed:
-            outcome = Outcome.SEQUENCE_EXECUTED
-            reason = "the attacker call sequence executed end to end against a fresh deployment"
-        elif failed and revert_index >= 0:
-            outcome = Outcome.SEQUENCE_REVERTED
-            reason = f"call {revert_index} reverted against a fresh deployment"
-        elif failed:
-            outcome = Outcome.SEQUENCE_REVERTED
-            reason = "the sequence reverted against a fresh deployment"
-        else:
-            return self._inconclusive(
-                sequence, "forge produced no test result", harness.pipeline, deployment, tail
-            )
+        executed = outcome in RUNNABLE
+        declaration = self.spec.declaration.value
+        if not self.oracle.executable and declaration == "property_under_test":
+            declaration = PropertyDeclaration.NO_PROPERTY_AVAILABLE.value
+        verdict = evaluation.verdict.value if evaluation else PropertyVerdict.NOT_EVALUATED.value
+        reverted = -1
+        if result is not None:
+            reverted = result.reverted_index
         return StatefulObservation(
-            sequence_id=sequence.sequence_id,
+            sequence_id=self.sequence.sequence_id,
             outcome=outcome,
             reason=reason,
-            pipeline=harness.pipeline,
-            executed=True,
-            return_code=return_code,
-            reverted_index=revert_index,
-            property_under_test=sequence.property_under_test,
-            property_checked=property_checked,
-            deployment=deployment,
+            pipeline=self.pipeline,
+            executed=executed,
+            return_code=result.return_code if result else None,
+            reverted_index=reverted,
+            property_under_test=self.sequence.property_under_test,
+            property_checked=bool(evaluation and evaluation.evaluated),
+            deployment=self.identity.deployment,
             tools=self.tools,
-            stdout_tail=tail,
+            stdout_tail=result.stdout_tail if result else "",
+            property_id=self.spec.property_id,
+            declaration=declaration,
+            verdict=verdict,
+            formulation=self.oracle.formulation,
+            oracle_kind=self.oracle.kind.value,
+            evaluation=evaluation,
+            result=result,
+            identity=self.identity,
+            harness=harness,
+            reason_code=code or outcome.value,
         )
 
-    def _unavailable(self, sequence: Vfcs, reason: str, pipeline: str) -> StatefulObservation:
-        return StatefulObservation(
-            sequence.sequence_id,
-            Outcome.UNAVAILABLE,
+
+def interpret(
+    base: _Base,
+    harness: HarnessArtifact,
+    return_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    duration_ms: int = 0,
+    common: Mapping[str, Any] | None = None,
+) -> StatefulObservation:
+    """Interpret one ``forge test --json`` run structurally. Pure; testable without forge."""
+    common = dict(common or {"pipeline": harness.pipeline, "harness_hash": harness.harness_hash})
+    count = len(base.sequence.calls)
+    report = parse_forge_report(stdout)
+    test = harness_test(report) if report is not None else None
+
+    def failed(reason: str, code: str, test_status: str) -> StatefulObservation:
+        return base.done(
+            Outcome.EXECUTION_FAILED,
             reason,
-            pipeline,
-            False,
-            None,
-            -1,
-            sequence.property_under_test,
-            False,
-            "",
-            self.tools,
-        )
-
-    def _inconclusive(
-        self, sequence: Vfcs, reason: str, pipeline: str, deployment: str, tail: str = ""
-    ) -> StatefulObservation:
-        return StatefulObservation(
-            sequence.sequence_id,
-            Outcome.INCONCLUSIVE,
-            reason,
-            pipeline,
-            True,
-            None,
-            -1,
-            sequence.property_under_test,
-            False,
-            deployment,
-            self.tools,
-            tail,
-        )
-
-    def _write_bundle(
-        self, sequence: Vfcs, harness: HarnessArtifact, obs: StatefulObservation, argv: list[str]
-    ) -> None:
-        assert self.bundle_dir is not None
-        folder = self.bundle_dir / sequence.sequence_id
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "VfcsHarness.t.sol").write_text(harness.source, encoding="utf-8")
-        (folder / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "sequence_id": sequence.sequence_id,
-                    "template": sequence.template,
-                    "property_under_test": sequence.property_under_test,
-                    "command": " ".join(argv),
-                    "pipeline": harness.pipeline,
-                    "observation": obs.as_dict(),
-                    "note": "deterministic local reproduction; offline; ffi disabled; not verified",
-                },
-                indent=2,
-                sort_keys=True,
+            code,
+            harness=harness,
+            result=ExecutionResult(
+                "completed",
+                "ok",
+                test_status,
+                "incomplete",
+                "not_run",
+                return_code=return_code,
+                failure_reason=reason[:300],
+                stdout_tail=_tail(stdout),
+                stderr_tail=_tail(stderr),
+                duration_ms=duration_ms,
+                **common,
             ),
-            encoding="utf-8",
         )
 
+    if test is None:
+        return failed("forge produced no structured harness result", "no_result", "missing")
+    status = str(test.get("status", ""))
+    events = decode_events(test)
+    observation, deployed, done = observation_from_events(events, count)
+    if status != "Success":
+        reason = str(test.get("reason") or "the harness test failed")[:200]
+        if not deployed:
+            reason = f"the target could not be deployed locally: {reason}"
+        return failed(reason, "harness_failed", "failed")
+    if not deployed or not done:
+        return failed("the harness did not report a complete run", "incomplete_run", "passed")
+    outcome, evaluation, reason = classify(base.sequence, base.oracle, observation)
+    reverted = next((i for i, ok in enumerate(observation.call_ok) if ok == 0), -1)
+    property_status = {
+        PropertyVerdict.PROPERTY_VIOLATED: "violated",
+        PropertyVerdict.PROPERTY_HELD: "held",
+        PropertyVerdict.EXECUTION_ONLY_OBSERVATION: "no_oracle",
+    }.get(evaluation.verdict, "not_evaluated")
+    result = ExecutionResult(
+        "completed",
+        "ok",
+        "passed",
+        "reverted" if reverted >= 0 else "completed",
+        property_status,
+        return_code=return_code,
+        reverted_index=reverted,
+        call_results=observation.call_ok,
+        events=events,
+        stdout_tail=_tail(stdout, 600),
+        stderr_tail=_tail(stderr, 600),
+        duration_ms=duration_ms,
+        **common,
+    )
+    code = outcome.value
+    if outcome is Outcome.INCONCLUSIVE and not evaluation.precondition_ok:
+        code = "precondition_failed"
+    return base.done(outcome, reason, code, harness=harness, result=result, evaluation=evaluation)
 
-def _reverted_index(output: str, count: int) -> int:
-    for index in range(count):
-        if re.search(rf"reached_{index}\(\)\s+false|reached_{index} = false", output):
-            return index
-    return -1
+
+# ---- independent checks -----------------------------------------------------------------------
 
 
-def _safe_path() -> str:
-    import os
+@dataclass(frozen=True)
+class CheckPath:
+    path: str
+    engine: str
+    material: bool  # materially independent of the primary oracle
+    outcome: str
+    verdict: str
+    reason: str = ""
 
-    parts = [p for p in os.environ.get("PATH", "").split(":") if p]
-    return ":".join(parts) or "/usr/bin:/bin"
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "engine": self.engine,
+            "material": self.material,
+            "outcome": self.outcome,
+            "verdict": self.verdict,
+            "reason": self.reason[:200],
+        }
 
 
-# ---- feedback-directed closed loop ----------------------------------------------------------
+@dataclass(frozen=True)
+class Corroboration:
+    """Which independent paths agree. Agreement is CORROBORATED_CANDIDATE, never VERIFIED."""
+
+    sequence_id: str
+    property_id: str
+    status: str  # corroborated_candidate | single_path | disagreement | not_applicable
+    paths: tuple[CheckPath, ...] = ()
+    note: str = ""
+    verified: bool = False
+
+    @property
+    def agreeing(self) -> tuple[str, ...]:
+        return tuple(
+            p.path for p in self.paths if p.verdict == PropertyVerdict.PROPERTY_VIOLATED.value
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sequence_id": self.sequence_id,
+            "property_id": self.property_id,
+            "status": self.status,
+            "paths": [p.as_dict() for p in self.paths],
+            "agreeing": list(self.agreeing),
+            "note": self.note,
+            "verified": False,
+        }
+
+
+ENGINE_PROPERTY_ADAPTERS: dict[str, str] = {
+    # Engines that could judge the same property. Without a property adapter the
+    # path is recorded as unavailable; nothing is fabricated.
+    "echidna": "no property adapter for VFCS oracles yet",
+    "medusa": "no property adapter for VFCS oracles yet",
+    "ityfuzz": "no property adapter for VFCS oracles yet",
+    "symbolic": "no symbolic adapter for VFCS oracles yet",
+}
+
+
+def _path(obs: StatefulObservation, path: str, material: bool) -> CheckPath:
+    return CheckPath(path, "foundry", material, obs.outcome.value, obs.verdict, obs.reason)
+
+
+def independent_check(
+    executor: StatefulExecutor,
+    sequence: Vfcs,
+    model: ResearchModel,
+    sources: Mapping[str, str],
+    spec: PropertySpec,
+    primary: StatefulObservation,
+    *,
+    context: IdentityContext | None = None,
+    engine_status: Mapping[str, str] | None = None,
+    supporting_detectors: tuple[str, ...] = (),
+) -> tuple[Corroboration, tuple[StatefulObservation, ...]]:
+    """Re-judge a violated property along independent paths and record which agree.
+
+    * ``foundry:pipeline:no_optimizer`` -- same oracle, different compiler pipeline.
+      It catches pipeline-dependent behavior but is *not* materially independent.
+    * ``foundry:alternate:<oracle>`` -- a different oracle formulation of the same
+      property (for example a state read instead of call success). Material.
+    * echidna / medusa / ityfuzz / symbolic -- recorded with their real status; no
+      property adapter exists yet, so they never count.
+    * supporting static detectors (a *different* detector at the same site) are
+      listed but never counted: the same detector twice is not two analyses.
+    """
+    if primary.outcome is not Outcome.PROPERTY_VIOLATED:
+        return (
+            Corroboration(sequence.sequence_id, spec.property_id, "not_applicable"),
+            (),
+        )
+    runs: list[StatefulObservation] = []
+    paths = [_path(primary, "foundry:primary", True)]
+    differential = executor.execute(
+        sequence, model, sources, spec=spec, context=context, pipeline="no_optimizer"
+    )
+    runs.append(differential)
+    paths.append(_path(differential, "foundry:pipeline:no_optimizer", False))
+    for alternate in spec.alternates:
+        obs = executor.execute(
+            sequence, model, sources, spec=spec, oracle=alternate, context=context
+        )
+        runs.append(obs)
+        label = f"foundry:alternate:{alternate.kind.value}:{alternate.getter or '-'}"
+        paths.append(_path(obs, label, True))
+    for engine, missing in sorted(ENGINE_PROPERTY_ADAPTERS.items()):
+        status = (engine_status or {}).get(engine, "unavailable")
+        paths.append(
+            CheckPath(
+                f"{engine}:property",
+                engine,
+                False,
+                Outcome.UNAVAILABLE.value,
+                PropertyVerdict.NOT_EVALUATED.value,
+                f"{engine} {status}; {missing}",
+            )
+        )
+    for detector in supporting_detectors:
+        paths.append(
+            CheckPath(
+                f"static:{detector}",
+                "bugforge-static",
+                False,
+                "supporting_static_candidate",
+                PropertyVerdict.NOT_EVALUATED.value,
+                "a different detector at the same site; static, not an execution",
+            )
+        )
+    judged = [p for p in paths[1:] if p.verdict in {"property_violated", "property_held"}]
+    held = [p for p in judged if p.verdict == "property_held"]
+    material = [p for p in judged if p.material and p.verdict == "property_violated"]
+    if held:
+        status = "disagreement"
+        note = "an independent path held the property: the contradiction stays visible"
+    elif material:
+        status = "corroborated_candidate"
+        note = "a materially independent oracle agrees; still a candidate, not verified"
+    else:
+        status = "single_path"
+        note = "no materially independent path could judge this property"
+    return (
+        Corroboration(sequence.sequence_id, spec.property_id, status, tuple(paths), note),
+        tuple(runs),
+    )
+
+
+# ---- feedback-directed closed loop ------------------------------------------------------------
 
 
 @dataclass
@@ -584,48 +1873,80 @@ class FeedbackLoopResult:
     mutated: tuple[Vfcs, ...]
     signals_emitted: tuple[str, ...]
     minimized: dict[str, MinimizationResult] = field(default_factory=dict)
-    independent: dict[str, StatefulObservation] = field(default_factory=dict)
+    independent: dict[str, Corroboration] = field(default_factory=dict)
+    independent_runs: dict[str, tuple[StatefulObservation, ...]] = field(default_factory=dict)
+    specs: dict[str, PropertySpec] = field(default_factory=dict)
+    sequences: dict[str, Vfcs] = field(default_factory=dict)
+    feedback: tuple[dict[str, Any], ...] = ()
 
     @property
     def violations(self) -> tuple[StatefulObservation, ...]:
         return tuple(o for o in self.observations if o.outcome is Outcome.PROPERTY_VIOLATED)
 
+    def outcome_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in self.observations:
+            counts[item.outcome.value] = counts.get(item.outcome.value, 0) + 1
+        return counts
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "verified": False,
             "observations": [o.as_dict() for o in self.observations],
+            "outcomes": self.outcome_counts(),
             "mutated": [s.sequence_id for s in self.mutated],
             "signals_emitted": list(self.signals_emitted),
+            "feedback": list(self.feedback),
             "minimized": {
                 sid: {
                     "original": len(result.original),
                     "minimized": len(result.minimized),
                     "completed": result.completed,
                     "reason": result.reason,
+                    "calls": [c.identity for c in result.minimized],
                 }
                 for sid, result in self.minimized.items()
             },
-            "independent_checks": {sid: obs.as_dict() for sid, obs in self.independent.items()},
+            "independent_checks": {sid: c.as_dict() for sid, c in self.independent.items()},
+            "properties": {sid: spec.as_dict() for sid, spec in self.specs.items()},
         }
+
+
+def parent_of(child: Vfcs) -> str:
+    """The parent sequence id recorded in a mutation origin, or ""."""
+    if child.origin.startswith("mutation:"):
+        return child.origin.rsplit(":", 1)[-1]
+    return ""
 
 
 def run_feedback_loop(
     executor: StatefulExecutor,
     sequences: tuple[Vfcs, ...],
-    models: dict[str, ResearchModel],
-    sources: dict[str, str],
+    models: Mapping[str, ResearchModel],
+    sources: Mapping[str, Mapping[str, str]],
     *,
-    source_file: str,
-    deployment: str = "",
+    specs: Mapping[str, PropertySpec] | None = None,
+    context: IdentityContext | None = None,
     rounds: int = MAX_FEEDBACK_ROUNDS,
     limit: int = MAX_MUTATIONS,
+    engine_status: Mapping[str, str] | None = None,
+    supporting: Mapping[str, tuple[str, ...]] | None = None,
 ) -> FeedbackLoopResult:
-    """The executable closed loop: execute -> observe -> feedback -> mutate -> re-execute
-    -> minimize -> independent re-check. Idempotent per (sequence, pipeline)."""
+    """execute -> observe -> feedback -> mutate -> re-execute -> minimize -> independent check.
+
+    ``models`` and ``sources`` are keyed by sequence id: every sequence runs against
+    the exact model and source set it was built from; a mutated child inherits its
+    parent's. Idempotent per sequence id within a call.
+    """
+    models = dict(models)
+    sources = dict(sources)
+    spec_map: dict[str, PropertySpec] = dict(specs or {})
     observations: list[StatefulObservation] = []
     emitted: list[str] = []
+    feedback: list[dict[str, Any]] = []
     minimized: dict[str, MinimizationResult] = {}
-    independent: dict[str, StatefulObservation] = {}
+    independent: dict[str, Corroboration] = {}
+    independent_runs: dict[str, tuple[StatefulObservation, ...]] = {}
     seen: set[str] = set()
     frontier = list(sequences)
     all_mutated: list[Vfcs] = []
@@ -639,43 +1960,57 @@ def run_feedback_loop(
                 continue
             seen.add(sequence.sequence_id)
             model = models.get(sequence.sequence_id)
-            if model is None:
+            exact = sources.get(sequence.sequence_id)
+            if model is None or exact is None:
                 continue
-            obs = executor.execute(
-                sequence, model, sources, source_file=source_file, deployment=deployment
-            )
+            spec = spec_map.get(sequence.sequence_id) or build_property(sequence, model)
+            spec_map[sequence.sequence_id] = spec
+            obs = executor.execute(sequence, model, exact, spec=spec, context=context)
             observations.append(obs)
             signal = obs.signal()
             if signal is not None:
                 signals.append(signal)
-                emitted.append(f"{signal.engine}:{signal.kind}:{signal.sequence_id}")
-            if obs.outcome in {Outcome.PROPERTY_VIOLATED, Outcome.SEQUENCE_REVERTED}:
-                result = _minimize_sequence(
-                    executor, sequence, model, sources, source_file, deployment
+                key = f"{signal.engine}:{signal.kind}:{signal.sequence_id}:{signal.call_index}"
+                emitted.append(key)
+                feedback.append(
+                    {
+                        "key": key,
+                        "engine": signal.engine,
+                        "kind": signal.kind,
+                        "sequence_id": signal.sequence_id,
+                        "call_index": signal.call_index,
+                        "from_outcome": obs.outcome.value,
+                    }
                 )
+            if obs.outcome is Outcome.PROPERTY_VIOLATED:
+                result = _minimize_sequence(executor, sequence, model, exact, spec, context)
                 if result is not None:
                     minimized[sequence.sequence_id] = result
-                indep = executor.execute(
+                corroboration, runs = independent_check(
+                    executor,
                     sequence,
                     model,
-                    sources,
-                    source_file=source_file,
-                    deployment=deployment,
-                    pipeline="no_optimizer",
+                    exact,
+                    spec,
+                    obs,
+                    context=context,
+                    engine_status=engine_status,
+                    supporting_detectors=(supporting or {}).get(sequence.derived_from, ()),
                 )
-                independent[sequence.sequence_id] = indep
+                independent[sequence.sequence_id] = corroboration
+                independent_runs[sequence.sequence_id] = runs
         if not signals:
             break
-        parents = list(by_id.values())
-        children = mutate(parents, signals, limit=limit)
+        children = mutate(list(by_id.values()), signals, limit=limit)
         for child in children:
             if child.sequence_id in by_id:
                 continue
-            parent_model = _parent_model(child, models)
-            if parent_model is None:
+            parent = parent_of(child)
+            if parent not in models or parent not in sources:
                 continue
             by_id[child.sequence_id] = child
-            models[child.sequence_id] = parent_model
+            models[child.sequence_id] = models[parent]
+            sources[child.sequence_id] = sources[parent]
             all_mutated.append(child)
             next_frontier.append(child)
         frontier = next_frontier
@@ -688,71 +2023,266 @@ def run_feedback_loop(
         signals_emitted=tuple(emitted),
         minimized=minimized,
         independent=independent,
+        independent_runs=independent_runs,
+        specs=spec_map,
+        sequences=by_id,
+        feedback=tuple(feedback),
     )
-
-
-def _parent_model(child: Vfcs, models: dict[str, ResearchModel]) -> ResearchModel | None:
-    # Mutations keep the parent's identity/contract; any model that built a sibling works.
-    for model in models.values():
-        if child.calls and child.calls[0].contract in model.contracts:
-            return model
-    return None
 
 
 def _minimize_sequence(
     executor: StatefulExecutor,
     sequence: Vfcs,
     model: ResearchModel,
-    sources: dict[str, str],
-    source_file: str,
-    deployment: str,
+    sources: Mapping[str, str],
+    spec: PropertySpec,
+    context: IdentityContext | None,
 ) -> MinimizationResult | None:
     def evaluator(calls: tuple[VfcsCall, ...]) -> bool | None:
-        from dataclasses import replace
-
         trial = replace(sequence, calls=calls)
-        obs = executor.execute(
-            trial, model, sources, source_file=source_file, deployment=deployment
-        )
+        obs = executor.execute(trial, model, sources, spec=spec, context=context)
         if obs.outcome is Outcome.PROPERTY_VIOLATED:
             return True
-        if obs.outcome in {Outcome.PROPERTY_HELD, Outcome.SEQUENCE_EXECUTED}:
+        if obs.outcome in {Outcome.PROPERTY_HELD, Outcome.SEQUENCE_EXECUTED_NO_ORACLE}:
             return False
-        if obs.outcome is Outcome.SEQUENCE_REVERTED:
-            return False
-        return None
+        return None  # reverted / inconclusive / failed: cannot tell
 
-    return minimize(sequence, evaluator, evaluator_name="foundry_local", max_attempts=16)
+    return minimize(sequence, evaluator, evaluator_name="foundry_local_oracle", max_attempts=12)
 
 
-# forge-std is big; BugForge does not vendor it. A tiny local shim provides only the
-# Test base and the vm.prank cheat the harness uses, so execution needs no download.
-_FORGE_STD = """// SPDX-License-Identifier: MIT
-pragma solidity >=0.7.0;
+# ---- durable reproduction bundles -------------------------------------------------------------
 
-interface Vm {
-    function prank(address) external;
-    function warp(uint256) external;
-    function deal(address, uint256) external;
-    function startPrank(address) external;
-    function stopPrank() external;
-}
+BUNDLE_SCHEMA = "bugforge.repro_bundle/1"
+MAX_BUNDLE_BYTES = 96_000
 
-contract Test {
-    Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
-}
-"""
+
+def _calls_dict(calls: tuple[VfcsCall, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "contract": c.contract,
+            "function": c.function,
+            "role": c.role,
+            "actor": c.actor,
+            "arguments": [list(item) for item in c.arguments],
+            "primitive": c.primitive,
+            "established_by": c.established_by,
+        }
+        for c in calls
+    ]
+
+
+def build_bundle(
+    observation: StatefulObservation,
+    sequence: Vfcs,
+    spec: PropertySpec,
+    sources: Mapping[str, str],
+    *,
+    minimized: MinimizationResult | None = None,
+    corroboration: Corroboration | None = None,
+    independent_runs: tuple[StatefulObservation, ...] = (),
+    created_at: str = "",
+) -> dict[str, Any]:
+    """A self-contained, hash-addressed reproduction bundle (no secrets, bounded).
+
+    Sources are referenced by sha256 and stored once in the campaign's artifact
+    storage (``source_blobs``); every other artifact is inline and hashed. The
+    bundle id is the hash of its content (timestamps excluded), so persisting the
+    same run twice is idempotent.
+    """
+    harness = observation.harness
+    result = observation.result
+    config = foundry_config(observation.pipeline, "<host solc>")
+    artifacts: dict[str, str] = {
+        "test/VfcsHarness.t.sol": harness.source if harness else "",
+        "foundry.toml": config,
+        "lib/forge-std/src/Test.sol": _FORGE_STD,
+    }
+    artifacts = {name: text for name, text in artifacts.items() if text}
+    source_hashes = {path: sha256_text(text) for path, text in sorted(sources.items())}
+    core: dict[str, Any] = {
+        "schema": BUNDLE_SCHEMA,
+        "sequence": {
+            "sequence_id": sequence.sequence_id,
+            "template": sequence.template,
+            "origin": sequence.origin,
+            "derived_from": sequence.derived_from,
+            "property_under_test": sequence.property_under_test,
+            "calls": _calls_dict(sequence.calls),
+            "call_instances": list(instance_identities(sequence)),
+            "identity": {
+                "campaign_id": sequence.identity.campaign_id,
+                "source_snapshot": sequence.identity.source_snapshot,
+                "compiler_configuration": sequence.identity.compiler_configuration,
+                "fork_reference": sequence.identity.fork_reference,
+                "program_context": sequence.identity.program_context,
+                "deployment": sequence.identity.deployment,
+            },
+        },
+        "minimized": (
+            {
+                "calls": _calls_dict(minimized.minimized),
+                "completed": minimized.completed,
+                "reason": minimized.reason,
+                "attempts": minimized.attempts,
+                "evaluator": minimized.evaluator,
+            }
+            if minimized is not None
+            else None
+        ),
+        "property": spec.as_dict(),
+        "oracle": observation.harness.oracle.as_dict() if observation.harness else {},
+        "identity": observation.identity.as_dict() if observation.identity else {},
+        "harness": harness.as_dict() if harness else {},
+        "execution": observation.as_dict() | {"result": result.as_dict() if result else None},
+        "independent": corroboration.as_dict() if corroboration else None,
+        "independent_runs": [
+            {
+                "pipeline": run.pipeline,
+                "formulation": run.formulation,
+                "oracle_kind": run.oracle_kind,
+                "outcome": run.outcome.value,
+                "verdict": run.verdict,
+                "harness_hash": run.harness.harness_hash if run.harness else "",
+            }
+            for run in independent_runs
+        ],
+        "command": list(BUILD_ARGV) + ["&&"] + list(TEST_ARGV),
+        "environment": {
+            "forge_version": observation.tools.forge_version,
+            "solc_version": observation.tools.solc_version,
+            "offline": True,
+            "ffi": False,
+            "rpc": "none",
+            "replay_mode": ReplayMode.LOCAL_SOURCE_REPLAY.value,
+        },
+        "source_hashes": source_hashes,
+        "artifact_hashes": {name: sha256_text(text) for name, text in artifacts.items()},
+        "artifacts": artifacts,
+        "note": (
+            "deterministic local reproduction of an analyzed source set; offline; ffi "
+            "disabled; not a deployment replay; not verified"
+        ),
+        "verified": False,
+    }
+    blob = json.dumps(core, sort_keys=True, default=str)
+    if len(blob) > MAX_BUNDLE_BYTES:
+        execution = dict(core["execution"])
+        if execution.get("result"):
+            execution["result"] = {
+                **execution["result"],
+                "stdout_tail": "",
+                "stderr_tail": "",
+                "events": [],
+            }
+        core["execution"] = execution
+        core["truncated"] = True
+    bundle_id = "rb_" + sha256_text(json.dumps(core, sort_keys=True, default=str))[:24]
+    return {**core, "bundle_id": bundle_id, "created_at": created_at}
+
+
+class BundleIntegrityError(ValueError):
+    """A stored bundle or source blob does not match its recorded hash."""
+
+
+def materialize_bundle(
+    bundle: Mapping[str, Any], blobs: Mapping[str, str], dest: Path
+) -> dict[str, str]:
+    """Write a bundle back into a Foundry project, verifying every hash first."""
+    sources: dict[str, str] = {}
+    for path, digest_value in dict(bundle.get("source_hashes", {})).items():
+        text = blobs.get(str(digest_value))
+        if text is None or sha256_text(text) != digest_value:
+            raise BundleIntegrityError(f"source {path} is missing or does not match its hash")
+        sources[str(path)] = text
+    artifacts = dict(bundle.get("artifacts", {}))
+    for name, digest_value in dict(bundle.get("artifact_hashes", {})).items():
+        if sha256_text(str(artifacts.get(name, ""))) != digest_value:
+            raise BundleIntegrityError(f"artifact {name} does not match its hash")
+    harness = str(artifacts.get("test/VfcsHarness.t.sol", ""))
+    if not harness:
+        raise BundleIntegrityError("the bundle has no harness")
+    pipeline = str(dict(bundle.get("execution", {})).get("pipeline", "default"))
+    scaffold(dest, sources, harness, foundry_config(pipeline, tool_path("solc") or ""))
+    return sources
+
+
+def replay_bundle(
+    bundle: Mapping[str, Any],
+    blobs: Mapping[str, str],
+    *,
+    timeout: int | None = None,
+) -> dict[str, Any]:
+    """Re-run a stored bundle locally and compare the observation with the stored one."""
+    tools = tool_status()
+    if not (execution_enabled() and tools.available):
+        return {"status": "unavailable", "reason": "forge/solc unavailable or disabled"}
+    limit = timeout if timeout is not None else _timeout_setting()
+    forge = tool_path("forge") or "forge"
+    with tempfile.TemporaryDirectory(prefix="bugforge-replay-") as tmp:
+        root = Path(tmp)
+        materialize_bundle(bundle, blobs, root)
+        env = _safe_env(tmp)
+        try:
+            proc = subprocess.run(
+                [forge, *TEST_ARGV[1:]],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=limit,
+                check=False,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return {"status": "timeout"}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"status": "execution_failed", "reason": str(exc)[:160]}
+    report = parse_forge_report(proc.stdout)
+    test = harness_test(report) if report is not None else None
+    if test is None:
+        return {"status": "execution_failed", "reason": "no structured result"}
+    events = decode_events(test)
+    stored = dict(dict(bundle.get("execution", {})).get("result") or {})
+    stored_events = [tuple(item) for item in stored.get("events", [])]
+    calls = len(dict(bundle.get("sequence", {})).get("calls", []))
+    observation, _deployed, _done = observation_from_events(events, calls)
+    return {
+        "status": "replayed",
+        "events_match": bool(stored_events) and stored_events == [tuple(e) for e in events],
+        "call_results": list(observation.call_ok),
+        "stored_call_results": stored.get("call_results", []),
+        "verified": False,
+    }
 
 
 __all__ = [
+    "BUNDLE_SCHEMA",
+    "BundleIntegrityError",
+    "CheckPath",
+    "Corroboration",
+    "ExecutionIdentity",
+    "ExecutionResult",
+    "FeedbackLoopResult",
     "HarnessArtifact",
+    "IdentityContext",
     "Outcome",
+    "Primitive",
+    "ReplayMode",
     "StatefulExecutor",
     "StatefulObservation",
-    "FeedbackLoopResult",
     "ToolStatus",
+    "abi_type",
+    "bind_identity",
+    "build_bundle",
     "build_harness",
+    "canonical_signature",
+    "classify",
+    "decode_events",
     "execution_enabled",
+    "independent_check",
+    "interpret",
+    "materialize_bundle",
+    "replay_bundle",
     "run_feedback_loop",
+    "target_contract",
     "tool_status",
 ]

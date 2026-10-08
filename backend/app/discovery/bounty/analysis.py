@@ -59,6 +59,19 @@ class CampaignAnalysis:
     followup: dict[str, Any] = field(default_factory=dict)
     truncated: bool = False
     _deployments: dict[str, DeploymentIdentity] = field(default_factory=dict)
+    # sequence_id -> the exact source set its model was built from (never a generic
+    # first file); and path -> sha256 of every file read at analysis time.
+    sequence_sources: dict[str, dict[str, str]] = field(default_factory=dict)
+    source_hashes: dict[str, str] = field(default_factory=dict)
+
+    def sources_for(self, sequence_id: str) -> dict[str, str]:
+        return self.sequence_sources.get(sequence_id, {})
+
+    def candidate_for(self, derived_from: str) -> SemanticCandidate | None:
+        for item in self.candidates:
+            if f"{item.detector}@{item.contract}.{item.function}" == derived_from:
+                return item
+        return None
 
     def deployment_for(self, contract: str) -> DeploymentIdentity | None:
         return self._deployments.get(contract)
@@ -118,6 +131,8 @@ def analyze_campaign(
     candidates: list[SemanticCandidate] = []
     sequences: list[Vfcs] = []
     models: dict[str, ResearchModel] = {}
+    sequence_sources: dict[str, dict[str, str]] = {}
+    hashes: dict[str, str] = {path: _sha256(text) for path, text in sources.items()}
     ambiguous: set[str] = set()
     followup: dict[str, Any] = {
         "batches": [],
@@ -125,8 +140,12 @@ def analyze_campaign(
         "never_read": [],
     }
 
-    def absorb(part: ResearchModel, found: tuple[SemanticCandidate, ...]) -> None:
+    def absorb(
+        part: ResearchModel, found: tuple[SemanticCandidate, ...], part_sources: dict[str, str]
+    ) -> None:
         candidates.extend(found)
+        for path, text in part_sources.items():
+            hashes.setdefault(path, _sha256(text))
         room = MAX_TOTAL_SEQUENCES - len(sequences)
         if room <= 0:
             return
@@ -140,9 +159,10 @@ def analyze_campaign(
             if item.sequence_id not in models:
                 sequences.append(item)
                 models[item.sequence_id] = part
+                sequence_sources[item.sequence_id] = part_sources
 
     if model is not None:
-        absorb(model, run_suite(model).candidates)
+        absorb(model, run_suite(model).candidates, sources)
         ambiguous |= set(model.ambiguous)
 
     # Bounded follow-up over dropped high-priority files.
@@ -155,7 +175,7 @@ def analyze_campaign(
         covered |= set(batch_sources)
         part = build_research_model(batch_sources)
         found = tuple(c for c in run_suite(part).candidates if c.file in batch_sources)
-        absorb(part, found)
+        absorb(part, found, batch_sources)
         ambiguous |= set(part.ambiguous)
         followup["batches"].append({"files": sorted(batch_sources), "candidates": len(found)})
     followed = {path for batch in batches for path in batch}
@@ -187,7 +207,7 @@ def analyze_campaign(
                 continue
             part = build_research_model(alone)
             found = tuple(c for c in run_suite(part).candidates if c.contract == name)
-            absorb(part, found)
+            absorb(part, found, alone)
             followup["ambiguous_passes"].append(
                 {"contract": name, "file": path, "candidates": len(found)}
             )
@@ -221,7 +241,15 @@ def analyze_campaign(
         followup=followup,
         truncated=bool(selection.truncated or (model is not None and model.truncated)),
         _deployments=deployments,
+        sequence_sources=sequence_sources,
+        source_hashes=hashes,
     )
+
+
+def _sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def sources_digest(sources: Mapping[str, str]) -> str:

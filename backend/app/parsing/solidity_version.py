@@ -60,6 +60,22 @@ def solidity_language_facts(source: str = "", compiler_version: str = "") -> Sol
     return facts
 
 
+def pragma_allows(source: str, compiler_version: str) -> bool | None:
+    """Whether every ``pragma solidity`` in ``source`` admits ``compiler_version``.
+
+    ``None`` means it cannot be decided (no pragma, an unparsable range, or an
+    unparsable version); callers must treat that as unknown, never as allowed.
+    """
+    point = _compiler_point(compiler_version)
+    clauses = _constraint_clauses(source)
+    if point is None or not clauses:
+        return None
+    intervals = _intervals(clauses)
+    if intervals is None:
+        return None
+    return any(item.low <= point and (item.high is None or point < item.high) for item in intervals)
+
+
 def checked_arithmetic(context: tuple[str, ...]) -> bool | None:
     """Read the canonical arithmetic flag. Unknown stays ``None``."""
     for item in context:

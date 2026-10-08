@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.discovery.bounty.campaign import (
     BountyManifest,
@@ -94,6 +94,13 @@ class ResearchFinding:
     root_cause_key: str = ""
     duplicate_basis: str = ""
     deployment: tuple[tuple[str, str], ...] = ()
+    # Phase 52 hardening: what local execution established. A sequence that ran
+    # without an oracle is ``weak_execution_only`` and never a strong candidate.
+    execution_status: str = "not_executed"
+    candidate_strength: str = "static_candidate"
+    property_ids: tuple[str, ...] = ()
+    bundle_ids: tuple[str, ...] = ()
+    corroboration: str = "not_applicable"
 
 
 # Facts that name the defect itself rather than the entry point. Two entry points
@@ -147,8 +154,10 @@ def build_findings(
     ambiguous_contracts: frozenset[str] = frozenset(),
     target_address: str = "",
     target_chain_id: str = "",
+    executions: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[ResearchFinding, ...]:
     sequences = tuple(sequences)
+    execution_list = tuple(dict(item) for item in (executions or {}).values())
     minimized = minimized or {}
     seen_roots: dict[str, str] = {}
     seen_sites: dict[str, str] = {}
@@ -172,6 +181,7 @@ def build_findings(
             candidate.contract in ambiguous_contracts,
             target_address,
             target_chain_id,
+            execution_list,
         )
         findings.append(finding)
     return tuple(findings)
@@ -190,6 +200,7 @@ def _one(
     name_ambiguous: bool = False,
     target_address: str = "",
     target_chain_id: str = "",
+    executions: tuple[dict[str, Any], ...] = (),
 ) -> ResearchFinding:
     seen_sites = {} if seen_sites is None else seen_sites
     deployment_key = deployment.key if deployment is not None else ""
@@ -220,6 +231,9 @@ def _one(
     related = _evidence_for(state, candidate)
     quality = _best_quality(related)
     poc = _poc_status(related)
+    execution = execution_summary(candidate, executions)
+    if execution.strength in {"strong_candidate", "corroborated_candidate"} and poc == "none":
+        poc = "local_harness_violation_unverified"
     own = tuple(
         s
         for s in sequences
@@ -240,6 +254,7 @@ def _one(
         name_ambiguous=name_ambiguous,
     )
     uncertainties = _uncertainties(manifest, scope.status, candidate, poc, severity)
+    uncertainties = (*uncertainties, *execution.uncertainties)
     if deployment is not None and deployment.binding != "bound":
         uncertainties = (*uncertainties, f"deployment binding is {deployment.binding}")
     if name_ambiguous:
@@ -300,6 +315,101 @@ def _one(
                 "runtime_digest",
             }
         ),
+        execution_status=execution.status,
+        candidate_strength=execution.strength,
+        property_ids=execution.property_ids,
+        bundle_ids=execution.bundle_ids,
+        corroboration=execution.corroboration,
+    )
+
+
+@dataclass(frozen=True)
+class ExecutionSummary:
+    status: str
+    strength: str
+    property_ids: tuple[str, ...]
+    bundle_ids: tuple[str, ...]
+    corroboration: str
+    uncertainties: tuple[str, ...]
+
+
+# Strongest first. Only an oracle-judged, identity-bound violation is "strong".
+_STATUS_ORDER = (
+    "property_violated",
+    "property_held",
+    "sequence_executed_no_oracle",
+    "sequence_reverted",
+    "inconclusive",
+    "identity_mismatch",
+    "compile_failed",
+    "execution_failed",
+    "timeout",
+    "unavailable",
+)
+
+
+def is_strong(record: Mapping[str, Any]) -> bool:
+    """Recomputed from the structured fields; a stored flag alone is never trusted."""
+    return bool(
+        record.get("outcome") == "property_violated"
+        and record.get("declaration") == "property_under_test"
+        and record.get("verdict") == "property_violated"
+        and record.get("oracle_kind") not in {"", "none", None}
+        and record.get("identity_status") == "bound"
+        and not record.get("stale")
+    )
+
+
+def execution_summary(
+    candidate: SemanticCandidate, executions: tuple[dict[str, Any], ...]
+) -> ExecutionSummary:
+    key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    own = [item for item in executions if item.get("derived_from") == key]
+    if not own:
+        return ExecutionSummary("not_executed", "static_candidate", (), (), "not_applicable", ())
+    fresh = [item for item in own if not item.get("stale")]
+    notes: list[str] = []
+    if len(fresh) < len(own):
+        notes.append("some executions ran against a source set that has since changed")
+    ranked = sorted(
+        fresh,
+        key=lambda r: (
+            _STATUS_ORDER.index(r["outcome"]) if r.get("outcome") in _STATUS_ORDER else 99
+        ),
+    )
+    status = str(ranked[0].get("outcome")) if ranked else "stale"
+    strong = [item for item in fresh if is_strong(item)]
+    corroboration = "not_applicable"
+    if strong:
+        statuses = {str(item.get("corroboration", "")) for item in strong}
+        if "disagreement" in statuses:
+            corroboration = "disagreement"
+            notes.append("an independent path disagrees with the local violation")
+        elif "corroborated_candidate" in statuses:
+            corroboration = "corroborated_candidate"
+        else:
+            corroboration = "single_path"
+    held = any(item.get("outcome") == "property_held" for item in fresh)
+    if strong and held:
+        notes.append("the property held on another sequence; the contradiction stays open")
+    if strong and corroboration == "corroborated_candidate":
+        strength = "corroborated_candidate"
+    elif strong:
+        strength = "strong_candidate"
+    elif any(item.get("outcome") == "sequence_executed_no_oracle" for item in fresh):
+        strength = "weak_execution_only"
+        notes.append("the sequence executed without an oracle; execution is not a finding")
+    else:
+        strength = "static_candidate"
+    if strong:
+        notes.append("local source replay only; not a deployment replay; not verified")
+    return ExecutionSummary(
+        status=status,
+        strength=strength,
+        property_ids=tuple(sorted({str(i.get("property_id", "")) for i in fresh} - {""})),
+        bundle_ids=tuple(sorted({str(i.get("bundle_id", "")) for i in fresh} - {""})),
+        corroboration=corroboration,
+        uncertainties=tuple(notes),
     )
 
 
@@ -399,6 +509,11 @@ def qualify(
     if manifest.poc_requirement is PocRequirement.REQUIRED and poc == "none":
         reasons.append("the program requires a proof of concept and none exists")
         return Qualification("needs_poc", tuple(reasons))
+    if poc.startswith("local_harness"):
+        reasons.append(
+            "the proof of concept is a local source replay of a property violation; "
+            "not a deployment replay and not verified"
+        )
     if manifest.poc_requirement is PocRequirement.UNKNOWN:
         reasons.append("the program's proof-of-concept requirement is unknown")
     if not has_sequence:

@@ -787,6 +787,7 @@ class BountyCampaignService:
             ambiguous_contracts=analysis.ambiguous_contracts,
             target_address=campaign.spec.address,
             target_chain_id=campaign.spec.chain_id,
+            executions=self.stored_executions(campaign, analysis),
         )
         return {
             "campaign_id": campaign_id,
@@ -957,6 +958,7 @@ class BountyCampaignService:
             ambiguous_contracts=analysis.ambiguous_contracts,
             target_address=campaign.spec.address,
             target_chain_id=campaign.spec.chain_id,
+            executions=self.stored_executions(campaign, analysis),
         )
         advisories = match_advisories(campaign.manifest.compiler, analysis.sources)
         differential = self._differential(campaign, analysis.sources)
@@ -988,86 +990,445 @@ class BountyCampaignService:
         backend = HostSolcBackend()
         if backend.available():
             result = run_differential(sources, backend=backend, expected=campaign.manifest.compiler)
-            campaign.record.artifacts["compiler_differential"] = {
+            summary = {
                 "status": result.status,
                 "reason": result.reason,
                 "backend": result.backend,
                 "compiler_version": result.compiler_version,
                 "differences": len(result.differences),
             }
-            try:
-                self._save_record(campaign)
-            except (CampaignConflictError, CampaignPersistenceError):
-                pass
+
+            def put(artifacts: dict[str, Any]) -> list[str]:
+                artifacts["compiler_differential"] = summary
+                return []
+
+            # Fail closed: the persistence state is recorded, never swallowed.
+            state = self._persist_artifacts(campaign, put)
+            campaign.cache["differential_persistence"] = state
             return result
         return run_differential(sources, backend=backend)
 
-    def stateful_execute(self, campaign_id: str, *, rounds: int = 3) -> dict[str, Any]:
-        """Phase 52: the executable closed loop over the campaign's VFCS plans.
+    # ---- fail-closed artifact persistence ----------------------------------------------
 
-        Needs an in-scope or operator-acknowledged target and the installed forge.
-        Honest: a missing tool or a non-executable plan is reported, never faked.
+    def _persist_artifacts(
+        self,
+        campaign: BountyCampaign,
+        merge: Callable[[dict[str, Any]], list[str]],
+    ) -> dict[str, Any]:
+        """Merge into the campaign's persisted artifacts and save, failing closed.
+
+        ``merge`` must be additive and idempotent (it adds keyed, immutable evidence and
+        returns the keys it refused to overwrite). Returns one of:
+
+        * ``persisted`` -- written (possibly after reloading and reconciling);
+        * ``persistence_conflict`` -- another writer kept winning; nothing overwritten;
+        * ``persistence_unavailable`` -- the database refused or is down.
+
+        Errors are never swallowed silently: the state is always returned to the caller.
         """
+        with campaign.lock:
+            draft = campaign.record.copy()
+            refused = merge(draft.artifacts)
+            try:
+                campaign.record = self._records.update(draft)
+                return {
+                    "status": "persisted",
+                    "revision": campaign.record.revision,
+                    "reconciled": False,
+                    "refused_overwrites": refused,
+                }
+            except CampaignConflictError:
+                pass
+            except CampaignPersistenceError as exc:
+                return {"status": "persistence_unavailable", "reason": str(exc)[:200]}
+            except PersistenceError as exc:
+                return {"status": "persistence_unavailable", "reason": str(exc)[:200]}
+            # Conflict: reload the latest record, reconcile immutable evidence, retry once.
+            try:
+                latest = self._records.get(campaign.campaign_id)
+            except (CampaignPersistenceError, PersistenceError) as exc:
+                return {"status": "persistence_unavailable", "reason": str(exc)[:200]}
+            if latest is None:
+                return {"status": "persistence_unavailable", "reason": "the record disappeared"}
+            refused = merge(latest.artifacts)
+            try:
+                saved = self._records.update(latest)
+            except CampaignConflictError:
+                self._evict(campaign.campaign_id)
+                return {
+                    "status": "persistence_conflict",
+                    "reason": "the campaign record kept changing; nothing was overwritten",
+                }
+            except (CampaignPersistenceError, PersistenceError) as exc:
+                return {"status": "persistence_unavailable", "reason": str(exc)[:200]}
+            campaign.record = saved
+            return {
+                "status": "persisted",
+                "revision": saved.revision,
+                "reconciled": True,
+                "refused_overwrites": refused,
+            }
+
+    # ---- Phase 52 hardened stateful execution -------------------------------------------
+
+    def _identity_context(self, campaign: BountyCampaign, analysis: CampaignAnalysis) -> Any:
+        from app.discovery.bounty.stateful import IdentityContext
+
+        deployment = analysis.deployment
+        return IdentityContext(
+            campaign_id=campaign.campaign_id,
+            deployment=deployment.key,
+            chain_id=deployment.chain_id,
+            address=deployment.address,
+            runtime_digest=deployment.runtime_digest,
+            proxy_kind=deployment.proxy_kind or "none",
+            implementation=deployment.implementation,
+            compiler_configuration=campaign.manifest.compiler.fingerprint(),
+            source_snapshot=campaign.manifest.source_commit,
+            expected_hashes=dict(analysis.source_hashes),
+        )
+
+    def _current_sources(
+        self, campaign: BountyCampaign, analysis: CampaignAnalysis, sequence_id: str
+    ) -> dict[str, str]:
+        """Re-read a sequence's exact source set from disk (so a changed file is caught)."""
+        from app.discovery.bounty.analysis import read_sources
+
+        recorded = analysis.sources_for(sequence_id)
+        if not recorded:
+            return {}
+        current = read_sources(campaign.spec.repo_root, tuple(sorted(recorded)))
+        # a file that vanished keeps its analyzed text out of the set: identity fails closed
+        return current
+
+    def stateful_execute(self, campaign_id: str, *, rounds: int = 3) -> dict[str, Any]:
+        """Phase 52 (hardened): the executable closed loop over the campaign's VFCS plans.
+
+        Every sequence runs against the exact source set it was built from (re-read
+        and hash-checked), with its declared property. Results are structured; a
+        sequence that ran without an oracle is execution only. Durable reproduction
+        bundles go into the campaign's persisted artifacts, and persistence fails
+        closed. Refused for stopped/paused campaigns and out-of-scope targets.
+        """
+        from app.discovery.bounty.campaign import ScopeStatus
+        from app.discovery.bounty.properties import build_property
         from app.discovery.bounty.stateful import (
             StatefulExecutor,
             execution_enabled,
             run_feedback_loop,
+            target_contract,
             tool_status,
         )
 
         campaign = self.get(campaign_id)
-        analysis = self._analysis(campaign)
-        tools = tool_status()
-        if not execution_enabled():
-            return {
-                "campaign_id": campaign_id,
-                "available": False,
-                "reason": "local stateful execution is disabled",
-                "tools": tools.as_dict(),
-                "verified": False,
-            }
-        if not tools.available:
-            return {
-                "campaign_id": campaign_id,
-                "available": False,
-                "reason": "forge is not installed; stateful execution is unavailable",
-                "tools": tools.as_dict(),
-                "verified": False,
-            }
-        source_file = campaign.spec.source_file or (
-            next(iter(analysis.sources), "") if analysis.sources else ""
+        self._check_runnable(campaign)
+        # Policy refusals come before tool availability: they hold whatever is installed.
+        target_scope = campaign.manifest.scope_of(
+            contract=campaign.spec.contract, file=campaign.spec.source_file
         )
-        import tempfile
-        from pathlib import Path as _Path
-
-        bundle_root = _Path(tempfile.mkdtemp(prefix="bugforge-bundle-"))
-        executor = StatefulExecutor(bundle_dir=bundle_root)
+        if target_scope.status is ScopeStatus.OUT_OF_SCOPE:
+            raise CampaignControlError(f"the target is out of scope: {target_scope.reason}")
+        tools = tool_status()
+        unavailable = {
+            "campaign_id": campaign_id,
+            "available": False,
+            "tools": tools.as_dict(),
+            "verified": False,
+        }
+        if not execution_enabled():
+            return {**unavailable, "reason": "local stateful execution is disabled"}
+        if not tools.available:
+            missing = "forge" if tools.forge != "available" else "solc"
+            return {**unavailable, "reason": f"{missing} is not installed; unavailable"}
+        analysis = self._analysis(campaign)
+        context = self._identity_context(campaign, analysis)
+        runnable: list[Any] = []
+        skipped: list[dict[str, str]] = []
+        sources: dict[str, dict[str, str]] = {}
+        specs: dict[str, Any] = {}
+        for sequence in analysis.sequences:
+            contract = target_contract(sequence)
+            scope = campaign.manifest.scope_of(contract=contract)
+            if scope.status is ScopeStatus.OUT_OF_SCOPE:
+                skipped.append(
+                    {
+                        "sequence_id": sequence.sequence_id,
+                        "reason": "blocked_by_policy:out_of_scope",
+                    }
+                )
+                continue
+            sources[sequence.sequence_id] = self._current_sources(
+                campaign, analysis, sequence.sequence_id
+            )
+            model = analysis.models[sequence.sequence_id]
+            candidate = analysis.candidate_for(sequence.derived_from)
+            specs[sequence.sequence_id] = build_property(sequence, model, candidate)
+            runnable.append(sequence)
+        supporting = self._supporting_detectors(analysis)
+        engine_status = {
+            name: status
+            for name, status in self.tool_availability(campaign).items()
+            if name in {"echidna", "medusa", "ityfuzz"}
+        }
+        executor = StatefulExecutor()
         result = run_feedback_loop(
             executor,
-            analysis.sequences,
+            tuple(runnable),
             dict(analysis.models),
-            analysis.sources,
-            source_file=source_file,
-            deployment=analysis.deployment.key,
-            rounds=rounds,
+            sources,
+            specs=specs,
+            context=context,
+            rounds=max(1, min(rounds, 5)),
+            engine_status=engine_status,
+            supporting=supporting,
         )
-        campaign.record.artifacts["stateful"] = {
-            "observations": len(result.observations),
-            "violations": len(result.violations),
-            "mutated": len(result.mutated),
-            "bundle_dir": str(bundle_root),
-        }
-        try:
-            self._save_record(campaign)
-        except (CampaignConflictError, CampaignPersistenceError):
-            pass
+        bundles, blobs, executions = self._bundles(result, sources)
+        persistence = self._persist_artifacts(
+            campaign,
+            lambda artifacts: _merge_stateful(
+                artifacts,
+                executions=executions,
+                bundles=bundles,
+                blobs=blobs,
+                feedback=result.feedback,
+                run={
+                    "at": _now(),
+                    "outcomes": result.outcome_counts(),
+                    "observations": len(result.observations),
+                    "violations": len(result.violations),
+                    "mutated": len(result.mutated),
+                    "forge_runs": executor.runs,
+                    "tools": tools.as_dict(),
+                },
+            ),
+        )
+        campaign.cache.pop("coverage", None)
         return {
             "campaign_id": campaign_id,
             "available": True,
             "deployment": analysis.deployment.as_dict(),
-            "bundle_dir": str(bundle_root),
+            "scope_status": target_scope.status.value,
+            "skipped": skipped,
+            "forge_runs": executor.runs,
+            "bundles": sorted(bundles),
+            "persistence": persistence,
             **result.as_dict(),
         }
+
+    def _supporting_detectors(self, analysis: CampaignAnalysis) -> dict[str, tuple[str, ...]]:
+        """Other detectors (different family) at the same function: supporting only."""
+        by_site: dict[str, list[Any]] = {}
+        for item in analysis.candidates:
+            by_site.setdefault(f"{item.contract}.{item.function}", []).append(item)
+        found: dict[str, tuple[str, ...]] = {}
+        for site, items in by_site.items():
+            for item in items:
+                others = sorted({o.detector for o in items if o.family != item.family})
+                if others:
+                    found[f"{item.detector}@{site}"] = tuple(others[:4])
+        return found
+
+    def _bundles(
+        self, result: Any, sources: dict[str, dict[str, str]]
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+        from app.discovery.bounty.stateful import BUNDLED, build_bundle, parent_of
+
+        bundles: dict[str, Any] = {}
+        blobs: dict[str, str] = {}
+        executions: dict[str, Any] = {}
+        for obs in result.observations:
+            sequence = result.sequences.get(obs.sequence_id)
+            spec = result.specs.get(obs.sequence_id)
+            if sequence is None or spec is None:
+                continue
+            exact = sources.get(obs.sequence_id) or sources.get(parent_of(sequence), {})
+            bundle_id = ""
+            if (
+                obs.outcome in BUNDLED
+                and obs.harness is not None
+                and len(bundles) < MAX_BUNDLES_PER_RUN
+            ):
+                bundle = build_bundle(
+                    obs,
+                    sequence,
+                    spec,
+                    exact,
+                    minimized=result.minimized.get(obs.sequence_id),
+                    corroboration=result.independent.get(obs.sequence_id),
+                    independent_runs=result.independent_runs.get(obs.sequence_id, ()),
+                    created_at=_now(),
+                )
+                bundle_id = bundle["bundle_id"]
+                bundles[bundle_id] = bundle
+                for text in exact.values():
+                    import hashlib
+
+                    blobs[hashlib.sha256(text.encode("utf-8")).hexdigest()] = text
+            corroboration = result.independent.get(obs.sequence_id)
+            identity = obs.identity
+            executions[obs.sequence_id] = {
+                "sequence_id": obs.sequence_id,
+                "derived_from": sequence.derived_from,
+                "origin": sequence.origin,
+                "outcome": obs.outcome.value,
+                "reason": obs.reason[:200],
+                "reason_code": obs.reason_code,
+                "declaration": obs.declaration,
+                "verdict": obs.verdict,
+                "oracle_kind": obs.oracle_kind,
+                "property_id": obs.property_id,
+                "family": spec.family.value,
+                "strong_candidate": obs.strong_candidate,
+                "identity_status": identity.status if identity else "unknown",
+                "source_set_digest": identity.source_set_digest if identity else "",
+                "replay_mode": identity.replay_mode.value if identity else "",
+                "corroboration": corroboration.status if corroboration else "not_applicable",
+                "agreeing_paths": list(corroboration.agreeing) if corroboration else [],
+                "minimized_calls": (
+                    len(result.minimized[obs.sequence_id].minimized)
+                    if obs.sequence_id in result.minimized
+                    else None
+                ),
+                "bundle_id": bundle_id,
+                "verified": False,
+            }
+        return bundles, blobs, executions
+
+    def stateful_status(self, campaign_id: str) -> dict[str, Any]:
+        """Persisted stateful results (durable across restarts). Nothing verified."""
+        campaign = self.get(campaign_id)
+        stored = dict(campaign.record.artifacts.get("stateful", {}))
+        bundles = dict(campaign.record.artifacts.get("repro_bundles", {}))
+        return {
+            "campaign_id": campaign_id,
+            "runs": list(stored.get("runs", [])),
+            "executions": dict(stored.get("executions", {})),
+            "feedback": dict(stored.get("feedback", {})),
+            "bundles": {
+                bid: {
+                    "schema": b.get("schema"),
+                    "created_at": b.get("created_at"),
+                    "sequence_id": dict(b.get("sequence", {})).get("sequence_id"),
+                    "outcome": dict(b.get("execution", {})).get("outcome"),
+                    "property_id": dict(b.get("property", {})).get("property_id"),
+                    "artifact_hashes": b.get("artifact_hashes", {}),
+                    "source_hashes": b.get("source_hashes", {}),
+                }
+                for bid, b in sorted(bundles.items())
+            },
+            "verified": False,
+        }
+
+    def repro_bundle(self, campaign_id: str, bundle_id: str) -> dict[str, Any]:
+        """A full stored bundle plus the source blobs it references."""
+        campaign = self.get(campaign_id)
+        bundle = dict(campaign.record.artifacts.get("repro_bundles", {})).get(bundle_id)
+        if bundle is None:
+            raise CampaignError(f"no reproduction bundle {bundle_id!r}")
+        blobs = dict(campaign.record.artifacts.get("source_blobs", {}))
+        referenced = {
+            digest: blobs.get(digest, "")
+            for digest in dict(bundle.get("source_hashes", {})).values()
+        }
+        return {
+            "campaign_id": campaign_id,
+            "bundle": bundle,
+            "sources": referenced,
+            "self_contained": all(referenced.values()),
+            "verified": False,
+        }
+
+    def stored_executions(
+        self, campaign: BountyCampaign, analysis: CampaignAnalysis
+    ) -> dict[str, dict[str, Any]]:
+        """Persisted executions whose source set still matches the analyzed snapshot."""
+        stored = dict(dict(campaign.record.artifacts.get("stateful", {})).get("executions", {}))
+        current = {sid: _digest_of(analysis.sources_for(sid)) for sid in analysis.sequence_sources}
+        valid_digests = set(current.values())
+        found: dict[str, dict[str, Any]] = {}
+        for sid, item in stored.items():
+            record = dict(item)
+            record["stale"] = record.get("source_set_digest") not in valid_digests
+            found[sid] = record
+        return found
+
+
+MAX_BUNDLES_PER_RUN = 12
+MAX_STORED_BUNDLES = 24
+MAX_BLOB_BYTES = 600_000
+MAX_STORED_RUNS = 16
+MAX_STORED_FEEDBACK = 256
+
+
+def _digest_of(sources: dict[str, str]) -> str:
+    from app.discovery.bounty.stateful import sha256_text, source_set_digest
+
+    return source_set_digest({path: sha256_text(text) for path, text in sources.items()})
+
+
+def _merge_stateful(
+    artifacts: dict[str, Any],
+    *,
+    executions: dict[str, Any],
+    bundles: dict[str, Any],
+    blobs: dict[str, str],
+    feedback: tuple[dict[str, Any], ...],
+    run: dict[str, Any],
+) -> list[str]:
+    """Additive, idempotent merge of one stateful run into persisted artifacts.
+
+    Bundles and blobs are content-addressed and immutable: an existing key is never
+    overwritten. Executions record the latest observation per sequence and keep the
+    earlier one in ``history`` when the outcome changed. Feedback is keyed and
+    idempotent. Every collection is bounded.
+    """
+    refused: list[str] = []
+    stateful = artifacts.setdefault("stateful", {})
+    runs = list(stateful.get("runs", []))
+    if run not in runs:
+        runs.append(run)
+    stateful["runs"] = runs[-MAX_STORED_RUNS:]
+    stored_exec = dict(stateful.get("executions", {}))
+    for sid, record in executions.items():
+        previous = stored_exec.get(sid)
+        if previous is not None and previous.get("outcome") != record.get("outcome"):
+            history = list(previous.get("history", []))[-4:]
+            history.append({k: previous.get(k) for k in ("outcome", "verdict", "bundle_id")})
+            record = {**record, "history": history}
+        stored_exec[sid] = record
+    stateful["executions"] = stored_exec
+    stored_feedback = dict(stateful.get("feedback", {}))
+    for item in feedback:
+        key = str(item.get("key", ""))
+        if key and key not in stored_feedback and len(stored_feedback) < MAX_STORED_FEEDBACK:
+            stored_feedback[key] = dict(item)
+    stateful["feedback"] = stored_feedback
+    stored_blobs = dict(artifacts.get("source_blobs", {}))
+    size = sum(len(text) for text in stored_blobs.values())
+    stored_bundles = dict(artifacts.get("repro_bundles", {}))
+    for bundle_id, bundle in sorted(bundles.items()):
+        if bundle_id in stored_bundles:
+            if stored_bundles[bundle_id].get("artifact_hashes") != bundle.get("artifact_hashes"):
+                refused.append(bundle_id)
+            continue
+        if len(stored_bundles) >= MAX_STORED_BUNDLES:
+            refused.append(f"{bundle_id}:capacity")
+            continue
+        needed = {
+            digest: blobs[digest]
+            for digest in dict(bundle.get("source_hashes", {})).values()
+            if digest in blobs and digest not in stored_blobs
+        }
+        extra = sum(len(text) for text in needed.values())
+        if size + extra > MAX_BLOB_BYTES:
+            refused.append(f"{bundle_id}:source_capacity")
+            continue
+        stored_blobs.update(needed)
+        size += extra
+        stored_bundles[bundle_id] = bundle
+    artifacts["source_blobs"] = stored_blobs
+    artifacts["repro_bundles"] = stored_bundles
+    return refused
 
 
 def _evidence_dict(item: Any) -> dict[str, Any]:
@@ -1106,6 +1467,11 @@ def _finding_dict(item: Any) -> dict[str, Any]:
         "root_cause_key": item.root_cause_key,
         "qualification": item.qualification.status,
         "deployment": dict(item.deployment),
+        "execution_status": item.execution_status,
+        "candidate_strength": item.candidate_strength,
+        "property_ids": list(item.property_ids),
+        "bundle_ids": list(item.bundle_ids),
+        "corroboration": item.corroboration,
         "verified": item.verified,
         "submitted": item.submitted,
     }

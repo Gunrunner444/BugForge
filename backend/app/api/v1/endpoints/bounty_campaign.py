@@ -329,9 +329,39 @@ async def campaign_stateful_execute(
     operator: OperatorSession = Depends(require_operator),
 ) -> dict[str, object]:
     _owned(campaign_id, operator)
-    return await run_in_threadpool(
-        get_bounty_service().stateful_execute, campaign_id, rounds=max(1, min(payload.rounds, 5))
-    )
+    try:
+        return await run_in_threadpool(
+            get_bounty_service().stateful_execute,
+            campaign_id,
+            rounds=max(1, min(payload.rounds, 5)),
+        )
+    except CampaignControlError as exc:
+        raise _control_error(exc) from exc
+    except CampaignPersistenceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/campaigns/{campaign_id}/stateful")
+async def campaign_stateful_status(
+    campaign_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    """Persisted execution observations, feedback, and bundle metadata (read only)."""
+    _owned(campaign_id, operator)
+    return await run_in_threadpool(get_bounty_service().stateful_status, campaign_id)
+
+
+@router.get("/campaigns/{campaign_id}/repro-bundles/{bundle_id}")
+async def campaign_repro_bundle(
+    campaign_id: str,
+    bundle_id: str,
+    operator: OperatorSession = Depends(require_operator),
+) -> dict[str, object]:
+    _owned(campaign_id, operator)
+    try:
+        return await run_in_threadpool(get_bounty_service().repro_bundle, campaign_id, bundle_id)
+    except CampaignError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/campaigns/{campaign_id}/report")
