@@ -440,6 +440,26 @@ def _named_require_error(cleaned: Mapping[str, str], model: ResearchModel) -> tu
     return tuple(path for path, text in cleaned.items() if pattern.search(text))[:4]
 
 
+def _delegatecall_use(cleaned: Mapping[str, str], _model: ResearchModel) -> tuple[str, ...]:
+    pattern = re.compile(r"\.delegatecall\s*\(")
+    return tuple(path for path, text in cleaned.items() if pattern.search(text))[:4]
+
+
+def _raw_send_use(cleaned: Mapping[str, str], _model: ResearchModel) -> tuple[str, ...]:
+    pattern = re.compile(r"\.send\s*\(")
+    return tuple(path for path, text in cleaned.items() if pattern.search(text))[:4]
+
+
+def _ecrecover_use(cleaned: Mapping[str, str], _model: ResearchModel) -> tuple[str, ...]:
+    pattern = re.compile(r"\becrecover\s*\(")
+    return tuple(path for path, text in cleaned.items() if pattern.search(text))[:4]
+
+
+def _inline_assembly(cleaned: Mapping[str, str], _model: ResearchModel) -> tuple[str, ...]:
+    pattern = re.compile(r"\bassembly\b[^{]*\{")
+    return tuple(path for path, text in cleaned.items() if pattern.search(text))[:4]
+
+
 _TRIGGERS: dict[str, Trigger] = {
     "SOL-2026-1": _transient_clear,
     "SOL-2026-2": _mutual_recursion,
@@ -448,6 +468,10 @@ _TRIGGERS: dict[str, Trigger] = {
     "SOL-2025-1": _layout_with_arrays,
     "SOL-2026-5": _memory_bytes_delete,
     "SOL-2026-6": _named_require_error,
+    "SOL-2017-4": _delegatecall_use,
+    "SOL-2016-6": _raw_send_use,
+    "SOL-2017-3": _ecrecover_use,
+    "SOL-2022-4": _inline_assembly,
 }
 
 
@@ -472,3 +496,213 @@ def advisory_dict(report: AdvisoryReport) -> dict[str, Any]:
             for m in report.matches
         ],
     }
+
+
+# ---- precondition graphs (Phase 51) ---------------------------------------------------------
+#
+# A precondition graph makes an advisory's reasoning explicit: it is an ordered chain of
+# preconditions (compiler version in range -> each pipeline condition -> a source trigger)
+# where every node carries a status that is one of "yes", "no", "unknown", or "not_assessed".
+# The graph never upgrades an advisory to a vulnerability; it only shows which preconditions
+# are established, which are refuted, and which cannot be decided from the evidence present.
+
+
+@dataclass(frozen=True)
+class PreconditionNode:
+    key: str  # version_range | condition:<name> | source_trigger
+    label: str
+    status: str  # yes | no | unknown | not_assessed
+    detail: str = ""
+    locations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreconditionGraph:
+    uid: str
+    name: str
+    severity: str
+    link: str
+    nodes: tuple[PreconditionNode, ...]
+    outcome: str  # applicable_candidate | refuted | undecided | not_in_range
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "uid": self.uid,
+            "name": self.name,
+            "severity": self.severity,
+            "link": self.link,
+            "outcome": self.outcome,
+            "nodes": [
+                {
+                    "key": node.key,
+                    "label": node.label,
+                    "status": node.status,
+                    "detail": node.detail,
+                    "locations": list(node.locations),
+                }
+                for node in self.nodes
+            ],
+        }
+
+
+def precondition_graph(
+    advisory: Advisory,
+    compiler: CompilerConfiguration,
+    cleaned: Mapping[str, str],
+    model: ResearchModel | None,
+) -> PreconditionGraph:
+    """Build the ordered precondition graph for one advisory.
+
+    The traversal stops marking later nodes decidable only when an earlier node is
+    refuted; a refuted node short-circuits to ``refuted``. A node whose evidence is
+    missing is ``unknown`` and never silently read as satisfied.
+    """
+
+    nodes: list[PreconditionNode] = []
+    version = parse_version(compiler.version) if compiler.version != UNKNOWN else None
+    introduced = parse_version(advisory.introduced) if advisory.introduced else (0, 0, 0)
+    fixed = parse_version(advisory.fixed)
+
+    # 1. version-range node
+    if version is None:
+        nodes.append(
+            PreconditionNode(
+                "version_range",
+                f"compiler version in [{advisory.introduced or '0'}, {advisory.fixed})",
+                "unknown",
+                "the exact compiler version is not known",
+            )
+        )
+        return PreconditionGraph(
+            advisory.uid, advisory.name, advisory.severity, advisory.link, tuple(nodes), "undecided"
+        )
+    if introduced is None or fixed is None:
+        nodes.append(
+            PreconditionNode(
+                "version_range", "compiler version in range", "unknown", "range unreadable"
+            )
+        )
+        return PreconditionGraph(
+            advisory.uid, advisory.name, advisory.severity, advisory.link, tuple(nodes), "undecided"
+        )
+    in_range = introduced <= version < fixed
+    nodes.append(
+        PreconditionNode(
+            "version_range",
+            f"compiler version in [{advisory.introduced or '0'}, {advisory.fixed})",
+            "yes" if in_range else "no",
+            f"version {_fmt(version)}",
+        )
+    )
+    if not in_range:
+        return PreconditionGraph(
+            advisory.uid,
+            advisory.name,
+            advisory.severity,
+            advisory.link,
+            tuple(nodes),
+            "not_in_range",
+        )
+
+    # 2. one node per pipeline condition
+    undecided = False
+    refuted = False
+    for name, encoded in advisory.conditions:
+        wanted = json.loads(encoded)
+        state = _condition(name, wanted, compiler, cleaned)
+        status = {"yes": "yes", "no": "no", "unknown": "unknown"}[state]
+        nodes.append(
+            PreconditionNode(
+                f"condition:{name}",
+                f"{name}={wanted}",
+                status,
+                "" if state != "unknown" else "pipeline evidence missing",
+            )
+        )
+        if state == "no":
+            refuted = True
+        elif state == "unknown":
+            undecided = True
+
+    # 3. source-trigger node
+    detector = _TRIGGERS.get(advisory.uid)
+    if detector is None and advisory.regex_check:
+        detector = _regex_trigger(advisory.regex_check)
+    if detector is None:
+        nodes.append(
+            PreconditionNode(
+                "source_trigger",
+                "a source construct the advisory names",
+                "not_assessed",
+                "no source trigger is modeled for this advisory",
+            )
+        )
+        trigger_status = "not_assessed"
+        locations: tuple[str, ...] = ()
+    elif not cleaned or model is None:
+        nodes.append(
+            PreconditionNode(
+                "source_trigger",
+                "a source construct the advisory names",
+                "not_assessed",
+                "no source was supplied to assess the trigger",
+            )
+        )
+        trigger_status = "not_assessed"
+        locations = ()
+    else:
+        locations = detector(cleaned, model)
+        trigger_status = "yes" if locations else "no"
+        nodes.append(
+            PreconditionNode(
+                "source_trigger",
+                "a source construct the advisory names",
+                trigger_status,
+                "present" if locations else "no matching construct found",
+                locations,
+            )
+        )
+
+    if refuted:
+        outcome = "refuted"
+    elif undecided or trigger_status == "not_assessed":
+        outcome = "undecided"
+    elif trigger_status == "yes":
+        outcome = "applicable_candidate"
+    else:
+        outcome = "refuted"
+    return PreconditionGraph(
+        advisory.uid, advisory.name, advisory.severity, advisory.link, tuple(nodes), outcome
+    )
+
+
+def precondition_graphs(
+    compiler: CompilerConfiguration,
+    sources: Mapping[str, str] | None = None,
+    *,
+    corpus: Corpus | None = None,
+    only: tuple[str, ...] = (),
+) -> tuple[PreconditionGraph, ...]:
+    """Precondition graphs for the corpus (or a chosen subset of advisory uids).
+
+    Graphs whose version range does not contain the compiler version are omitted so
+    the result stays focused on advisories that could still apply.
+    """
+
+    corpus = corpus or load_corpus()
+    cleaned = {
+        path: strip_comments(text) for path, text in sorted((sources or {}).items())[:MAX_SOURCES]
+    }
+    model = build_research_model(dict(sources or {})) if sources else None
+    wanted = set(only)
+    graphs = [
+        precondition_graph(advisory, compiler, cleaned, model)
+        for advisory in corpus.advisories
+        if not wanted or advisory.uid in wanted
+    ]
+    kept = [g for g in graphs if g.outcome != "not_in_range"]
+    kept.sort(key=lambda g: (_GRAPH_RANK.get(g.outcome, 9), g.uid))
+    return tuple(kept)
+
+
+_GRAPH_RANK = {"applicable_candidate": 0, "undecided": 1, "refuted": 2}

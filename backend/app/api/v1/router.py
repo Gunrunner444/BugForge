@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints.ai_status import router as ai_router
 from app.api.v1.endpoints.analyses import router as analyses_router
 from app.api.v1.endpoints.autonomous import router as autonomous_router
+from app.api.v1.endpoints.bounty_campaign import router as bounty_campaign_router
 from app.api.v1.endpoints.debugging import router as debugging_router
 from app.api.v1.endpoints.discovered_repositories import router as discovered_repos_router
 from app.api.v1.endpoints.discovery import router as discovery_router
@@ -37,3 +38,5 @@ api_router.include_router(ai_router)
 api_router.include_router(security_router)
 api_router.include_router(security_testing_router)
 api_router.include_router(security_agent_router)
+# Phase 51 — operational bounty campaigns (Phase 49 orchestrator + Phase 50 engines)
+api_router.include_router(bounty_campaign_router)

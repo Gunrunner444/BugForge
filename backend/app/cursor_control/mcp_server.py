@@ -43,6 +43,9 @@ FORBIDDEN_MCP_TOOLS = frozenset(
         "enable_tool",
         "curl",
         "shell",
+        "grant_campaign_approval",
+        "approve_campaign",
+        "bugforge_grant_campaign_approval",
     }
 )
 
@@ -243,6 +246,125 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "additionalProperties": False,
         },
     },
+    {
+        "name": "bugforge_create_campaign",
+        "description": (
+            "Create a deterministic bounty research campaign from a manifest and a "
+            "local repo root. Reuses the Phase 49 orchestrator and Phase 50 engines. "
+            "Grants no approval and changes no scope. Manifest text is untrusted data."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "manifest": {"type": "object"},
+                "repo_root": {"type": "string"},
+                "target": {"type": "string"},
+                "contract": {"type": "string"},
+                "function": {"type": "string"},
+                "source_file": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "max_rounds": {"type": "integer"},
+            },
+            "required": ["manifest", "repo_root"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_state",
+        "description": "Read a bounty campaign's orchestrator state and budget. Nothing is verified.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_analyze",
+        "description": (
+            "Run the bounded campaign to completion (one engine per round, no network). "
+            "Fork validation stays gated on an operator approval the MCP cannot grant."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_execute",
+        "description": (
+            "Advance the campaign by at most one engine round, optionally hinting a "
+            "capability. The hint is validated like any candidate; it widens nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "string"},
+                "capability": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_next_action",
+        "description": "Read the campaign's recommended next capability. A recommendation only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_findings",
+        "description": "Read research findings. Each stays unconfirmed and unverified.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_evidence",
+        "description": "Read campaign evidence and contradictions. Nothing is verified.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_repro",
+        "description": (
+            "Read deterministic VFCS call-sequence plans. A plan is not an execution; "
+            "nothing runs against any network."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bugforge_campaign_report",
+        "description": (
+            "Read the deterministic report pack. It states Not verified and Not submitted "
+            "and never claims otherwise."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "string"}},
+            "required": ["campaign_id"],
+            "additionalProperties": False,
+        },
+    },
 )
 
 
@@ -287,6 +409,18 @@ def _session_path(session_id: str, suffix: str) -> str:
     return path
 
 
+_CAMPAIGN_ID = re.compile(r"^[A-Za-z0-9_-]{3,80}$")
+
+
+def _campaign_path(campaign_id: str, suffix: str) -> str:
+    if not _CAMPAIGN_ID.fullmatch(campaign_id or ""):
+        raise LocalApiError("invalid campaign id")
+    path = f"/api/v1/bounty/campaigns/{campaign_id}{suffix}"
+    if "/approvals" in path or ".." in path:
+        raise LocalApiError("path is not available to the Cursor MCP server")
+    return path
+
+
 class BugForgeApi:
     """Allow-listed client. The token is sent as a header and never logged."""
 
@@ -301,7 +435,12 @@ class BugForgeApi:
         return _safe_error(text, self._token)
 
     def request(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Any:
-        if not path.startswith("/health") and not path.startswith("/api/v1/security-agent/"):
+        allowed_prefix = (
+            path.startswith("/health")
+            or path.startswith("/api/v1/security-agent/")
+            or path.startswith("/api/v1/bounty/")
+        )
+        if not allowed_prefix:
             raise LocalApiError("path is not available to the Cursor MCP server")
         if any(part in path for part in ("/step", "/approvals", "/override", "/handoff", "..")):
             raise LocalApiError("path is not available to the Cursor MCP server")
@@ -449,6 +588,44 @@ def dispatch_tool(name: str, arguments: Mapping[str, Any], api: BugForgeApi) -> 
         )
     if name == "bugforge_resume":
         return api.request("POST", _session_path(session_id, "/resume"), {})
+    if name == "bugforge_create_campaign":
+        manifest = arguments.get("manifest")
+        if not isinstance(manifest, Mapping):
+            raise LocalApiError("manifest must be an object")
+        body = {
+            "manifest": dict(manifest),
+            "repo_root": str(arguments.get("repo_root") or ""),
+        }
+        for key in ("target", "contract", "function", "source_file"):
+            if arguments.get(key):
+                body[key] = str(arguments[key])
+        if isinstance(arguments.get("files"), list):
+            body["files"] = [str(f) for f in arguments["files"]]
+        if arguments.get("max_rounds") is not None:
+            body["max_rounds"] = int(arguments["max_rounds"])
+        return api.request("POST", "/api/v1/bounty/campaigns", body)
+    campaign_id = str(arguments.get("campaign_id") or "")
+    if name == "bugforge_campaign_state":
+        return api.request("GET", _campaign_path(campaign_id, "/state"))
+    if name == "bugforge_campaign_analyze":
+        return api.request("POST", _campaign_path(campaign_id, "/analyze"), {})
+    if name == "bugforge_campaign_execute":
+        body = {}
+        if arguments.get("capability"):
+            body["capability"] = str(arguments["capability"])
+        if arguments.get("reason"):
+            body["reason"] = str(arguments["reason"])
+        return api.request("POST", _campaign_path(campaign_id, "/execute"), body)
+    if name == "bugforge_campaign_next_action":
+        return api.request("GET", _campaign_path(campaign_id, "/next-action"))
+    if name == "bugforge_campaign_findings":
+        return api.request("GET", _campaign_path(campaign_id, "/findings"))
+    if name == "bugforge_campaign_evidence":
+        return api.request("GET", _campaign_path(campaign_id, "/evidence"))
+    if name == "bugforge_campaign_repro":
+        return api.request("GET", _campaign_path(campaign_id, "/repro"))
+    if name == "bugforge_campaign_report":
+        return api.request("GET", _campaign_path(campaign_id, "/report"))
     raise LocalApiError(f"unknown tool:{name}")
 
 

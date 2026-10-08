@@ -71,6 +71,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 48 | Runtime, fork, and differential validation | ✅ Implemented |
 | Phase 49 | Adaptive multi-engine research orchestration | ✅ Implemented |
 | Phase 50 | Production bounty-research workflow | ✅ Implemented |
+| Phase 51 | Operational bounty campaigns: API + MCP + E2E over the Phase 49/50 stack | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -424,6 +425,7 @@ Semantic Solidity analyzers, call-sequence generation, a local compiler
 advisory corpus, and a deterministic report pack produce candidates for human
 review. A known issue is not safe, an out-of-scope asset is not safe, and
 nothing is verified or submitted automatically.
+Phase 51 makes that stack *operational*: a bounty campaign is reachable from the REST API (`/api/v1/bounty/campaigns/...`) and the Cursor MCP server (`bugforge_create_campaign`, `bugforge_campaign_analyze`, and the read tools). A campaign reuses the Phase 49 orchestrator, the Phase 50 engines, the campaign manifest identity, `BountyGate`, findings, VFCS plans, advisories, and the report pack. Every route requires an authenticated local operator; fork validation stays gated on an operator approval the AI and the MCP server cannot grant; and no result is ever marked verified or submitted.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
@@ -452,7 +454,8 @@ and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-
 | 47 | Protocol-wide cross-contract security analysis and bounded path discovery | Implemented |
 | 48 | Sandboxed runtime observations, pinned forks, and differential comparison | Implemented |
 | 49 | Evidence-driven, bounded multi-engine research orchestration with persisted state and resume | Implemented |
-| 50 | Production bounty-research workflow | Not started |
+| 50 | Production bounty-research workflow | Implemented |
+| 51 | Operational bounty campaigns reachable from the REST API and Cursor MCP server: create/analyze/execute/findings/evidence/repro/report over the Phase 49 orchestrator and Phase 50 engines. No new session, evidence store, or authority model | Implemented |
 
 In-memory `RateLimiter` is **per process**. Multiple API workers do not share
 a global per-target budget; production live mode should run one worker or

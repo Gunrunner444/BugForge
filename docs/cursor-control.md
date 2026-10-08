@@ -34,7 +34,9 @@ unless that asset and mode are explicit. Cursor cannot flip that switch.
 `live_hackerone` stays on the existing operator path and is not started by
 the MCP tools. Phase 45 sequence exploration, ItyFuzz, replay, Phase 46
 economic analysis, Phase 47 protocol-graph analysis, and Phase 48 runtime,
-fork, and differential validation are deterministic BugForge code. They do
+fork, and differential validation, Phase 49 orchestration, Phase 50 bounty
+research, and Phase 51 operational bounty campaigns are deterministic BugForge
+code. They do
 not call Grok, xAI, OpenAI, or Anthropic. A planner request cannot raise
 their budgets or enable the network. `llm_invoked` stays false. Work continues
 on `main` only: no phase branch and no stacked phase pull request.
@@ -120,7 +122,12 @@ The agent tool list should include `bugforge_status`,
 `bugforge_analyze_repository`, `bugforge_source_inspect`,
 `bugforge_request_tool`, `bugforge_update_hypothesis`, `bugforge_reproduce`,
 `bugforge_get_evidence`, `bugforge_timeline`, `bugforge_pause`,
-`bugforge_stop`, and `bugforge_resume`.
+`bugforge_stop`, `bugforge_resume`, and the Phase 51 bounty-campaign tools
+`bugforge_create_campaign`, `bugforge_campaign_state`,
+`bugforge_campaign_analyze`, `bugforge_campaign_execute`,
+`bugforge_campaign_next_action`, `bugforge_campaign_findings`,
+`bugforge_campaign_evidence`, `bugforge_campaign_repro`, and
+`bugforge_campaign_report`.
 
 ## Confirm no BugForge model is running
 
@@ -131,3 +138,21 @@ value is not used for that session.
 
 The local GitLab lab target is `http://127.0.0.1:3000`. Do not add
 `gitlab.com` to the lab scope. A request there is denied before it is sent.
+
+
+## Phase 51: operational bounty campaigns
+
+A bounty campaign is reachable from the MCP server and the REST API without a
+second session type, evidence store, or authority model. `bugforge_create_campaign`
+takes a campaign manifest and a local repo root and builds a campaign on the
+Phase 49 orchestrator with the Phase 50 engines and `BountyGate`. The read and
+advance tools (`bugforge_campaign_analyze`, `bugforge_campaign_execute`,
+`bugforge_campaign_findings`, `bugforge_campaign_evidence`,
+`bugforge_campaign_repro`, `bugforge_campaign_report`) only report evidence.
+
+The MCP server cannot reach the approvals path at all: granting fork validation
+is a human-operator-only REST route (`POST /api/v1/bounty/campaigns/{id}/approvals`)
+and the AI operator identity is refused there. A Cursor suggestion is validated
+like any candidate; it cannot widen scope, raise a budget, enable a gated
+capability, or mark anything verified. Optional tools (`solc`, `forge`) report
+UNAVAILABLE and never fabricate a result.

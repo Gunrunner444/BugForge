@@ -7,7 +7,7 @@ snapshot, compiler configuration, contract, function). It adds no engine and
 no analysis of its own.
 
 Development stays on `main`. There is no phase branch and no stacked pull
-request. Phase 50 is not started.
+request. Phase 50 (program-aware bounty research) and Phase 51 (operational bounty campaigns over the API and Cursor MCP server) build on this.
 
 ## Boundaries
 
@@ -273,7 +273,12 @@ recorded by a hash of its text, not the text.
   Medusa, Halmos, Wake, ItyFuzz, or Docker runtime ran for these tests.
 - Phase 48 runtime integration still needs Docker and the runtime image to run
   for real. It reports unavailable otherwise.
-- The `SqlStore` is synchronous. Wiring it into the async API is not part of
-  this phase.
-- There is no UI or API route for orchestration yet.
-- Phase 50 (production bounty-research workflow) is not started.
+- The `SqlStore` is synchronous. Phase 51 wires the orchestrator into the async
+  API through an in-process campaign service that uses `MemoryStore`; `SqlStore`
+  remains available for synchronous callers.
+- Phase 51 adds the API routes (`/api/v1/bounty/campaigns/...`) and Cursor MCP
+  tools that drive the orchestrator for a bounty campaign.
+- Phase 50 (production bounty-research workflow) and Phase 51 (operational
+  bounty campaigns) are implemented. See
+  [docs/phase50-production-bounty-research.md](phase50-production-bounty-research.md)
+  and [docs/phase51-operational-bounty-campaigns.md](phase51-operational-bounty-campaigns.md).
