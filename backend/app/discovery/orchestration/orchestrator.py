@@ -34,6 +34,7 @@ from app.discovery.orchestration.evidence import (
 )
 from app.discovery.orchestration.gate import DefaultGate, ExecutionGate
 from app.discovery.orchestration.model import (
+    OPERATOR_STOPS,
     RESUMABLE_STOPS,
     STOP_STATE,
     TERMINAL,
@@ -212,6 +213,45 @@ class Orchestrator:
 
     def report(self) -> dict[str, object]:
         return dict(build_report(self.state))
+
+    def halt(self, reason: StopReason, *, detail: str = "") -> bool:
+        """Operator pause or stop through the normal state machine.
+
+        A pause (``OPERATOR_PAUSED``) is a resumable stop; a stop
+        (``OPERATOR_STOPPED``) is final. The call is only valid between rounds,
+        which callers guarantee by holding the campaign lock that ``step`` runs
+        under. The decision is recorded like any other stop and persisted. A
+        terminal campaign, or one already stopped for a non-operator reason, is
+        left unchanged and ``False`` is returned.
+        """
+        if reason not in OPERATOR_STOPS:
+            raise InvalidDecisionError(f"not an operator stop: {reason.value}")
+        if not self._started:
+            self.start()
+        state = self.state
+        if state.state in TERMINAL:
+            return False
+        if state.state is _S.STOPPED:
+            current = state.stop_reason
+            if current == StopReason.OPERATOR_STOPPED.value:
+                return False
+            if current == reason.value:
+                return False
+            resumable = {item.value for item in RESUMABLE_STOPS}
+            if current not in resumable:
+                return False
+            # Re-enter planning (an operator action) only to record the new stop.
+            self._move(_S.PLANNING, explicit_resume=True)
+            state.stop_reason = ""
+        elif state.state is _S.CREATED:
+            self._move(_S.BASELINE)
+            self._move(_S.PLANNING)
+        elif state.state not in {_S.PLANNING, _S.CONTINUE, _S.BLOCKED}:
+            raise IllegalTransitionError(f"cannot halt from {state.state.value}")
+        self._suggestions.clear()
+        needs = assess(state, self._context())
+        self._stop(reason, needs, None, detail[:400] or f"{reason.value} by operator")
+        return True
 
     # ---- stepping --------------------------------------------------------------------------
 
@@ -628,6 +668,9 @@ class Orchestrator:
                 next_capability=state.next_capability,
                 previous_state=previous.value,
                 stop_reason=reason.value,
+                source=DecisionSource.OPERATOR
+                if reason in OPERATOR_STOPS
+                else DecisionSource.PLANNER,
             ),
         )
         state.recommend_verification_review = _recommend(state)

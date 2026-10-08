@@ -144,6 +144,14 @@ class Settings(BaseSettings):
     security_agent_fork_source: str = ""
     # Developer-only. The default research path does not execute host solc.
     solidity_host_compiler: bool = False
+    # Bounty campaigns (Phase 51/52). Empty means the application database_url.
+    # Campaign state is persisted there through the Phase 49 SqlStore; there is no
+    # in-memory production fallback.
+    bounty_campaign_database_url: str = ""
+    # Bounded local stateful execution of VFCS harnesses with an installed fuzzer
+    # (forge/echidna/medusa). Offline, no RPC, ffi disabled, never a fork or live chain.
+    bounty_stateful_execution: bool = True
+    bounty_stateful_timeout_seconds: int = 120
     # Bounded project-analysis profile. Defaults match the original scan limits.
     solidity_project_max_files: int = 40
     solidity_project_max_bytes: int = 200_000

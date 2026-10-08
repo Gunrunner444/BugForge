@@ -63,3 +63,41 @@ class DBOrchestrationDecision(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
+
+
+class DBBountyCampaign(Base):
+    """Operator inputs and campaign-level state for a Phase 51 bounty campaign.
+
+    One row per orchestration campaign. It stores what is needed to rebuild the
+    campaign after a restart (manifest, spec, operator, approvals) plus the
+    campaign's control state, background-job progress, source selection, and
+    VFCS feedback ledger. It holds no credential and no raw tool output. The
+    orchestrator's own state stays in ``discovery_orchestration_campaigns``.
+    """
+
+    __tablename__ = "discovery_bounty_campaigns"
+
+    campaign_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("discovery_orchestration_campaigns.campaign_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    operator_identity: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", index=True
+    )
+    engine_version: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    program_context: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    manifest: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[str] = mapped_column(Text, nullable=False)
+    approvals: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    control: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    control_reason: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    job: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    artifacts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )

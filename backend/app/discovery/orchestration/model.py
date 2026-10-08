@@ -103,6 +103,9 @@ class StopReason(StrEnum):
     ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
     UNRESOLVED_UNCERTAINTY = "unresolved_uncertainty"
     COMPLETED_BOUNDED_RESEARCH = "completed_bounded_research"
+    # Operator control (Phase 51 hardening). A pause is resumable; a stop is final.
+    OPERATOR_PAUSED = "operator_paused"
+    OPERATOR_STOPPED = "operator_stopped"
 
 
 # Stop reason -> terminal-ish machine state. Only these may be resumed explicitly.
@@ -121,14 +124,19 @@ STOP_STATE: dict[StopReason, OrchestratorState] = {
     StopReason.ENVIRONMENT_UNAVAILABLE: _S.STOPPED,
     StopReason.UNRESOLVED_UNCERTAINTY: _S.INCONCLUSIVE,
     StopReason.COMPLETED_BOUNDED_RESEARCH: _S.COMPLETED,
+    StopReason.OPERATOR_PAUSED: _S.STOPPED,
+    StopReason.OPERATOR_STOPPED: _S.STOPPED,
 }
 RESUMABLE_STOPS = frozenset(
     {
         StopReason.APPROVAL_REQUIRED,
         StopReason.ENVIRONMENT_UNAVAILABLE,
         StopReason.PREREQUISITES_UNAVAILABLE,
+        StopReason.OPERATOR_PAUSED,
     }
 )
+# Stops only an operator may request. Neither raises a budget or grants anything.
+OPERATOR_STOPS = frozenset({StopReason.OPERATOR_PAUSED, StopReason.OPERATOR_STOPPED})
 
 
 class NeedStatus(StrEnum):
@@ -243,6 +251,7 @@ class DecisionSource(StrEnum):
     EXTERNAL = "external_suggestion"
     RETRY = "retry"
     RECOVERY = "recovery"
+    OPERATOR = "operator"
 
 
 # ---- identity -------------------------------------------------------------------------------
