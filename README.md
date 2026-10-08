@@ -71,7 +71,8 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 48 | Runtime, fork, and differential validation | ✅ Implemented |
 | Phase 49 | Adaptive multi-engine research orchestration | ✅ Implemented |
 | Phase 50 | Production bounty-research workflow | ✅ Implemented |
-| Phase 51 | Operational bounty campaigns: API + MCP + E2E over the Phase 49/50 stack | ✅ Implemented |
+| Phase 51 | Operational bounty campaigns: durable persistence, real pause/stop/resume, full API + MCP over the Phase 49/50 stack | ✅ Implemented |
+| Phase 52 | Closed-loop stateful verification: VFCS → Foundry execution, feedback-directed, reproducible bundles | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -124,7 +125,9 @@ Later Solidity work is also on `main`:
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
 [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
 [docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md),
-and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md).
+[docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md),
+[docs/phase51-operational-bounty-campaigns.md](docs/phase51-operational-bounty-campaigns.md),
+and [docs/phase52-stateful-closed-loop.md](docs/phase52-stateful-closed-loop.md).
 Foundry, Slither, Echidna, Medusa, Halmos, Wake, and ItyFuzz are optional.
 A missing tool is unavailable and does not invent a result. Economic analysis
 does not verify a finding.
@@ -425,13 +428,17 @@ Semantic Solidity analyzers, call-sequence generation, a local compiler
 advisory corpus, and a deterministic report pack produce candidates for human
 review. A known issue is not safe, an out-of-scope asset is not safe, and
 nothing is verified or submitted automatically.
-Phase 51 makes that stack *operational*: a bounty campaign is reachable from the REST API (`/api/v1/bounty/campaigns/...`) and the Cursor MCP server (`bugforge_create_campaign`, `bugforge_campaign_analyze`, and the read tools). A campaign reuses the Phase 49 orchestrator, the Phase 50 engines, the campaign manifest identity, `BountyGate`, findings, VFCS plans, advisories, and the report pack. Every route requires an authenticated local operator; fork validation stays gated on an operator approval the AI and the MCP server cannot grant; and no result is ever marked verified or submitted.
+Phase 51 makes that stack *operational*: a bounty campaign is reachable from the REST API (`/api/v1/bounty/campaigns/...`) and the Cursor MCP server (`bugforge_create_campaign`, `bugforge_campaign_analyze`, and the read tools). A campaign reuses the Phase 49 orchestrator, the Phase 50 engines, the campaign manifest identity, `BountyGate`, findings, VFCS plans, advisories, and the report pack. Every route requires an authenticated local operator; fork validation stays gated on an operator approval the AI and the MCP server cannot grant; and no result is ever marked verified or submitted. Phase 51 campaigns now persist on the existing SQL store (they survive a restart), and an operator can pause, resume, or stop a running campaign through the real Phase 49 state machine from either the API or the loopback MCP server.
+
+Phase 52 closes the research loop. The deterministic VFCS call sequences a campaign discovers are compiled into a local Foundry harness (pinned host `solc`, offline, no FFI) and actually executed with `forge`. Each run is interpreted honestly — property violated, property held, sequence executed, reverted, or inconclusive — and the result feeds VFCS mutation, re-execution, minimisation, and a second independent (no-optimizer) check before a reproducible artifact bundle is written. Nothing runs against any network, and when `forge`/`solc` are absent the executor reports `UNAVAILABLE` rather than fabricating a result.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
 [docs/phase48-runtime-fork-differential-validation.md](docs/phase48-runtime-fork-differential-validation.md),
 [docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md),
-and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md).
+[docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md),
+[docs/phase51-operational-bounty-campaigns.md](docs/phase51-operational-bounty-campaigns.md),
+and [docs/phase52-stateful-closed-loop.md](docs/phase52-stateful-closed-loop.md).
 
 ### Security testing roadmap
 
@@ -455,7 +462,8 @@ and [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-
 | 48 | Sandboxed runtime observations, pinned forks, and differential comparison | Implemented |
 | 49 | Evidence-driven, bounded multi-engine research orchestration with persisted state and resume | Implemented |
 | 50 | Production bounty-research workflow | Implemented |
-| 51 | Operational bounty campaigns reachable from the REST API and Cursor MCP server: create/analyze/execute/findings/evidence/repro/report over the Phase 49 orchestrator and Phase 50 engines. No new session, evidence store, or authority model | Implemented |
+| 51 | Operational bounty campaigns reachable from the REST API and Cursor MCP server, now durable (survive restart) with real operator pause/stop/resume through the Phase 49 state machine, deployment-aware scope identity, and feedback-driven source selection. No new session, evidence store, or authority model | Implemented |
+| 52 | Closed-loop stateful verification: VFCS sequences compiled to a local Foundry harness and executed with `forge`, interpreted honestly, feedback-directed mutation/re-execution/minimisation, a second independent check, and a reproducible artifact bundle. Local only; no network; honest `UNAVAILABLE` when tools are absent | Implemented |
 
 In-memory `RateLimiter` is **per process**. Multiple API workers do not share
 a global per-target budget; production live mode should run one worker or

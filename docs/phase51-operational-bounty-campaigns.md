@@ -64,3 +64,40 @@ Cursor MCP tool  ->  /api/v1/bounty/...  ->  BountyCampaignService
   approval, invalid manifest, unknown campaign.
 - `test_mcp_bounty.py` — MCP tool-call path driving the real API through a bridged transport,
   blocked approvals path, forbidden tools, and token redaction.
+
+## Phase 51 hardening
+
+The first Phase 51 cut was operational but in-memory and partly stubbed. The
+hardening pass made it real:
+
+- **Durable persistence.** Campaigns now persist on the existing SQL store via
+  `app/services/bounty_campaign_store.py` (a `RunnerSqlStore` over the Phase 49
+  `SqlStore` plus a `CampaignRecordStore` with optimistic-revision conflict
+  detection) and Alembic migration `028`. A campaign — manifest, identity, operator,
+  approvals, control state, background job, and artifacts — survives a restart. No
+  new session or evidence database was introduced.
+- **Real pause / stop / resume.** `StopReason.OPERATOR_PAUSED` (resumable) and
+  `OPERATOR_STOPPED` (final) and `Orchestrator.halt(...)` route operator control
+  through the actual Phase 49 state machine between rounds. A concurrent `execute`
+  cannot bypass a pause, and a stopped campaign refuses resume.
+- **Deployment-aware scope identity.** A campaign carries deployment identity end to
+  end (chain, address, contract, source commit, runtime digest, compiler, proxy /
+  implementation / beacon / diamond / clone). Empty extension fields stay out of the
+  identity digest, so existing identities are unchanged. Ambiguous deployments stay
+  ambiguous.
+- **Real source selection.** `select_sources(...)` drives the analysis path with
+  explicit truncation, keeps every file that declares a same-named contract (no
+  silent first-alphabetical binding), and runs bounded follow-up over dropped
+  high-priority files.
+- **Honest report backends.** The compiler differential uses a real `solc` backend
+  when one is installed, the stored prior result otherwise, and `UNAVAILABLE` when
+  neither — never a hard-coded `NoCompilerBackend`.
+- **Correct classification.** The `high_value` family now maps per detector:
+  read-only reentrancy → reentrancy, transient-storage misuse → business-logic,
+  EIP-7702 EOA assumption → authorization (previously all were labelled reentrancy).
+- **Complete MCP.** The loopback, operator-token MCP server adds source selection,
+  scope identity, advisories, VFCS feedback, background progress, and real
+  pause/resume/stop. Every tool is a read or a state-machine control; none can grant
+  an approval, widen scope, raise a budget, verify, or submit.
+- **Async-safe API.** Every heavy route runs off the FastAPI event loop via
+  `run_in_threadpool`, and expensive analysis runs as a background job with progress.
