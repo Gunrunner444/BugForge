@@ -161,9 +161,7 @@ def detect_proxy_topology(model: ResearchModel, contract: str = "") -> ProxyTopo
     return best
 
 
-def _classify_contract(
-    name: str, head: str, body: str, bases: tuple[str, ...]
-) -> ProxyTopology:
+def _classify_contract(name: str, head: str, body: str, bases: tuple[str, ...]) -> ProxyTopology:
     text = f"{head}\n{body}"
     base_text = " ".join(bases)
     has_delegate = bool(_DELEGATECALL.search(text))
@@ -467,9 +465,7 @@ def deployment_identity(
     binding = reconcile_deployment(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
     )
-    deployment, _ = find_deployment(
-        manifest, contract=contract, address=address, chain_id=chain_id
-    )
+    deployment, _ = find_deployment(manifest, contract=contract, address=address, chain_id=chain_id)
     compiler = manifest.compiler.fingerprint()
     if deployment is not None and deployment.compiler_version:
         compiler = f"declared:{deployment.compiler_version};{compiler}".rstrip(";")

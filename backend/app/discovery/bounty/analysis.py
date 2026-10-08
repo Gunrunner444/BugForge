@@ -131,7 +131,10 @@ def analyze_campaign(
         if room <= 0:
             return
         built = generate(
-            part, _ordered(part, manifest, found), seq_identity, limit=min(room, MAX_VFCS_CANDIDATES)
+            part,
+            _ordered(part, manifest, found),
+            seq_identity,
+            limit=min(room, MAX_VFCS_CANDIDATES),
         )
         for item in built.sequences:
             if item.sequence_id not in models:
@@ -154,9 +157,7 @@ def analyze_campaign(
         found = tuple(c for c in run_suite(part).candidates if c.file in batch_sources)
         absorb(part, found)
         ambiguous |= set(part.ambiguous)
-        followup["batches"].append(
-            {"files": sorted(batch_sources), "candidates": len(found)}
-        )
+        followup["batches"].append({"files": sorted(batch_sources), "candidates": len(found)})
     followed = {path for batch in batches for path in batch}
     followup["never_read"] = [p for p in selection.dropped_high_priority if p not in followed]
 
@@ -174,7 +175,8 @@ def analyze_campaign(
         extra_files = [
             path
             for path in declared.get(name, [])
-            if model is None or model.contracts.get(name) is None
+            if model is None
+            or model.contracts.get(name) is None
             or model.contracts[name].file != path
         ]
         for path in extra_files:

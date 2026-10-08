@@ -61,7 +61,12 @@ class Outcome(StrEnum):
 
 
 RUNNABLE = frozenset(
-    {Outcome.PROPERTY_VIOLATED, Outcome.PROPERTY_HELD, Outcome.SEQUENCE_EXECUTED, Outcome.SEQUENCE_REVERTED}
+    {
+        Outcome.PROPERTY_VIOLATED,
+        Outcome.PROPERTY_HELD,
+        Outcome.SEQUENCE_EXECUTED,
+        Outcome.SEQUENCE_REVERTED,
+    }
 )
 
 
@@ -280,8 +285,7 @@ def build_harness(
         steps.append(
             f"        vm.prank({sender});\n"
             f"        (bool ok_{index}, ) = address(t).call({encoded});\n"
-            f"        reached_{index} = ok_{index};\n"
-            + check
+            f"        reached_{index} = ok_{index};\n" + check
         )
     rel_import = source_file
     body = "\n".join(steps)
@@ -435,9 +439,7 @@ class StatefulExecutor:
             'libs = ["lib"]\n'
             "ffi = false\n"
             "fs_permissions = []\n"
-            "auto_detect_solc = false\n"
-            + solc_line
-            + f"via_ir = {via_ir}\n"
+            "auto_detect_solc = false\n" + solc_line + f"via_ir = {via_ir}\n"
             f"optimizer = {optimizer}\n"
             'remappings = ["forge-std/=lib/forge-std/src/"]\n',
             encoding="utf-8",
@@ -452,10 +454,16 @@ class StatefulExecutor:
         deployment: str,
     ) -> StatefulObservation:
         tail = output[-1500:]
-        if re.search(r"Compiler run failed|Error \(\d+\)|could not", output) and "PASS" not in output:
+        if (
+            re.search(r"Compiler run failed|Error \(\d+\)|could not", output)
+            and "PASS" not in output
+        ):
             return self._inconclusive(
-                sequence, "the harness did not compile against this source", harness.pipeline,
-                deployment, tail,
+                sequence,
+                "the harness did not compile against this source",
+                harness.pipeline,
+                deployment,
+                tail,
             )
         passed = bool(re.search(r"\[PASS\].*test_vfcs_execute", output))
         failed = bool(re.search(r"\[FAIL.*test_vfcs_execute", output))
@@ -497,16 +505,35 @@ class StatefulExecutor:
 
     def _unavailable(self, sequence: Vfcs, reason: str, pipeline: str) -> StatefulObservation:
         return StatefulObservation(
-            sequence.sequence_id, Outcome.UNAVAILABLE, reason, pipeline, False, None, -1,
-            sequence.property_under_test, False, "", self.tools,
+            sequence.sequence_id,
+            Outcome.UNAVAILABLE,
+            reason,
+            pipeline,
+            False,
+            None,
+            -1,
+            sequence.property_under_test,
+            False,
+            "",
+            self.tools,
         )
 
     def _inconclusive(
         self, sequence: Vfcs, reason: str, pipeline: str, deployment: str, tail: str = ""
     ) -> StatefulObservation:
         return StatefulObservation(
-            sequence.sequence_id, Outcome.INCONCLUSIVE, reason, pipeline, True, None, -1,
-            sequence.property_under_test, False, deployment, self.tools, tail,
+            sequence.sequence_id,
+            Outcome.INCONCLUSIVE,
+            reason,
+            pipeline,
+            True,
+            None,
+            -1,
+            sequence.property_under_test,
+            False,
+            deployment,
+            self.tools,
+            tail,
         )
 
     def _write_bundle(
@@ -578,9 +605,7 @@ class FeedbackLoopResult:
                 }
                 for sid, result in self.minimized.items()
             },
-            "independent_checks": {
-                sid: obs.as_dict() for sid, obs in self.independent.items()
-            },
+            "independent_checks": {sid: obs.as_dict() for sid, obs in self.independent.items()},
         }
 
 
@@ -625,12 +650,18 @@ def run_feedback_loop(
                 signals.append(signal)
                 emitted.append(f"{signal.engine}:{signal.kind}:{signal.sequence_id}")
             if obs.outcome in {Outcome.PROPERTY_VIOLATED, Outcome.SEQUENCE_REVERTED}:
-                result = _minimize_sequence(executor, sequence, model, sources, source_file, deployment)
+                result = _minimize_sequence(
+                    executor, sequence, model, sources, source_file, deployment
+                )
                 if result is not None:
                     minimized[sequence.sequence_id] = result
                 indep = executor.execute(
-                    sequence, model, sources, source_file=source_file,
-                    deployment=deployment, pipeline="no_optimizer",
+                    sequence,
+                    model,
+                    sources,
+                    source_file=source_file,
+                    deployment=deployment,
+                    pipeline="no_optimizer",
                 )
                 independent[sequence.sequence_id] = indep
         if not signals:

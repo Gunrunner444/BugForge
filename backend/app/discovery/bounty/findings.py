@@ -196,7 +196,9 @@ def _one(
     key = root_cause_key(candidate, deployment_key)
     finding_id = f"rf_{digest((identity.campaign_id, candidate.detector, candidate.contract, candidate.function, candidate.line, candidate.file))}"
     bound_here = bool(
-        deployment is not None and deployment.address and target_address
+        deployment is not None
+        and deployment.address
+        and target_address
         and deployment.address.lower() == target_address.lower()
     )
     scope = manifest.scope_of(
@@ -287,8 +289,16 @@ def _one(
         deployment=tuple(
             (name, str(value))
             for name, value in (deployment.as_dict().items() if deployment else ())
-            if name in {"chain_id", "address", "binding", "proxy_kind", "implementation",
-                        "source_matches_deployed", "runtime_digest"}
+            if name
+            in {
+                "chain_id",
+                "address",
+                "binding",
+                "proxy_kind",
+                "implementation",
+                "source_matches_deployed",
+                "runtime_digest",
+            }
         ),
     )
 

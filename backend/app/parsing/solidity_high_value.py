@@ -39,7 +39,10 @@ _EXTERNAL_CALL_NAMES = frozenset({"call", "delegatecall", "send", "transfer"})
 
 # EIP-7702 EOA assumptions, only when used inside a guard (require/if/assert).
 _EOA_PATTERNS = (
-    (re.compile(r"msg\.sender\s*==\s*tx\.origin|tx\.origin\s*==\s*msg\.sender"), "msg.sender == tx.origin"),
+    (
+        re.compile(r"msg\.sender\s*==\s*tx\.origin|tx\.origin\s*==\s*msg\.sender"),
+        "msg.sender == tx.origin",
+    ),
     (re.compile(r"\.code\.length\s*==\s*0|\.code\.length\s*<\s*1"), "address.code.length == 0"),
     (re.compile(r"extcodesize\s*\([^)]*\)\s*==\s*0"), "extcodesize(a) == 0"),
     (re.compile(r"!\s*isContract\s*\("), "!isContract(a)"),
@@ -123,9 +126,7 @@ def _read_only_reentrancy(model: ResearchModel) -> list[SemanticCandidate]:
 def _written_after_external_call(function: RFunction, state: set[str]) -> set[str]:
     calls = member_calls(function.body)
     call_offsets = [
-        call.start
-        for call in calls
-        if "value" in call.options or call.name in _EXTERNAL_CALL_NAMES
+        call.start for call in calls if "value" in call.options or call.name in _EXTERNAL_CALL_NAMES
     ]
     if not call_offsets:
         return set()
@@ -194,9 +195,7 @@ def _transient_misuse(model: ResearchModel) -> list[SemanticCandidate]:
                         + "; a later call in the same transaction may read a stale value"
                     ),
                     file=function.file,
-                    line=line_of_text(function, "tstore")
-                    if uncleared
-                    else function.line,
+                    line=line_of_text(function, "tstore") if uncleared else function.line,
                     contract=name,
                     function=function.signature,
                     facts=(

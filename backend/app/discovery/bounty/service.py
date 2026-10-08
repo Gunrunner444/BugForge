@@ -751,7 +751,6 @@ class BountyCampaignService:
         campaign = self.get(campaign_id)
         return {"campaign_id": campaign_id, **campaign.selection.as_dict()}
 
-
     # ---- analysis-backed reads ----------------------------------------------------------
 
     def _analysis(self, campaign: BountyCampaign) -> CampaignAnalysis:
@@ -851,8 +850,10 @@ class BountyCampaignService:
         fuzzers = frozenset(
             name
             for name in ("foundry", "echidna", "medusa", "ityfuzz")
-            if any(e.engine_id == name and e.availability().value == "available"
-                   for e in campaign.orchestrator.scheduler.engines)
+            if any(
+                e.engine_id == name and e.availability().value == "available"
+                for e in campaign.orchestrator.scheduler.engines
+            )
         )
         parsed = [
             FeedbackSignal(
@@ -935,9 +936,7 @@ class BountyCampaignService:
             engine = next(
                 (e for e in campaign.orchestrator.scheduler.engines if e.engine_id == name), None
             )
-            tools[name] = (
-                engine.availability().value if engine is not None else "unavailable"
-            )
+            tools[name] = engine.availability().value if engine is not None else "unavailable"
         return tools
 
     def report_pack(self, campaign_id: str) -> ReportPack:
@@ -979,16 +978,16 @@ class BountyCampaignService:
             tools=self.tool_availability(campaign),
         )
 
-    def _differential(self, campaign: BountyCampaign, sources: dict[str, str]) -> DifferentialResult:
+    def _differential(
+        self, campaign: BountyCampaign, sources: dict[str, str]
+    ) -> DifferentialResult:
         """Real compiler differential when solc is installed and host compilation is on,
         else the stored prior result, else UNAVAILABLE. Never a hard-coded backend."""
         from app.discovery.bounty.compiler_diff import HostSolcBackend, run_differential
 
         backend = HostSolcBackend()
         if backend.available():
-            result = run_differential(
-                sources, backend=backend, expected=campaign.manifest.compiler
-            )
+            result = run_differential(sources, backend=backend, expected=campaign.manifest.compiler)
             campaign.record.artifacts["compiler_differential"] = {
                 "status": result.status,
                 "reason": result.reason,

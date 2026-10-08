@@ -683,9 +683,7 @@ def incorporate_feedback(
         usable.append(resolved)
 
     children = mutate(parent_list, usable, limit=limit)
-    accepted = tuple(
-        f"{s.engine}:{s.kind}:{s.sequence_id}:{s.call_index}" for s in usable
-    )
+    accepted = tuple(f"{s.engine}:{s.kind}:{s.sequence_id}:{s.call_index}" for s in usable)
     return FeedbackOutcome(
         children=children,
         accepted=accepted,

@@ -166,9 +166,7 @@ def test_mcp_exposes_read_tools_for_selection_scope_and_advisories() -> None:
     api = _bridged_api()
     cid = _create_via_mcp(api)
 
-    selection = dispatch_tool(
-        "bugforge_campaign_source_selection", {"campaign_id": cid}, api
-    )
+    selection = dispatch_tool("bugforge_campaign_source_selection", {"campaign_id": cid}, api)
     assert "selected" in selection or "mode" in selection
 
     scope = dispatch_tool("bugforge_campaign_scope_identity", {"campaign_id": cid}, api)

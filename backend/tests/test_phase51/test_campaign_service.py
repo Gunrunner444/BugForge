@@ -116,9 +116,7 @@ def test_run_is_deterministic() -> None:
 
     def _mem_runner():
         name = f"det_{uuid.uuid4().hex}"
-        return runner_for_url(
-            f"sqlite:///file:{name}?mode=memory&cache=shared&uri=true"
-        )
+        return runner_for_url(f"sqlite:///file:{name}?mode=memory&cache=shared&uri=true")
 
     a = BountyCampaignService(runner=_mem_runner())
     b = BountyCampaignService(runner=_mem_runner())
