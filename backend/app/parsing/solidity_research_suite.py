@@ -18,6 +18,7 @@ from app.parsing.solidity_account_abstraction import (
 from app.parsing.solidity_accounting import analyze_balance_delta
 from app.parsing.solidity_arithmetic import analyze_arithmetic
 from app.parsing.solidity_caller_context import analyze_caller_context
+from app.parsing.solidity_high_value import analyze_high_value
 from app.parsing.solidity_message_binding import analyze_message_binding
 from app.parsing.solidity_oracle_quality import analyze_oracle_quality
 from app.parsing.solidity_research import ResearchModel, SemanticCandidate, build_research_model
@@ -31,6 +32,7 @@ FAMILIES: dict[str, Analyzer] = {
     "account_abstraction": analyze_account_abstraction,
     "balance_delta": analyze_balance_delta,
     "arithmetic": analyze_arithmetic,
+    "high_value": analyze_high_value,
 }
 MAX_TOTAL_CANDIDATES = 256
 

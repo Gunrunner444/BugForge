@@ -1445,6 +1445,7 @@ _RESEARCH_CLASS = {
     "account_abstraction": VulnerabilityClass.AUTHORIZATION,
     "balance_delta": VulnerabilityClass.BUSINESS_LOGIC,
     "arithmetic": VulnerabilityClass.UNSAFE_ARITHMETIC,
+    "high_value": VulnerabilityClass.REENTRANCY,
 }
 
 
