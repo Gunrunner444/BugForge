@@ -903,10 +903,14 @@ def _condition(statement: str) -> str:
     return stripped[open_at:end]
 
 
+# ``_msgSender()`` is OpenZeppelin's Context accessor for the caller (Ownable v4/v5).
+_CALLER = r"(?:msg\.sender|\b_msgSender\s*\(\s*\))"
+
+
 def _auth_polarity(text: str) -> str | None:
-    if re.search(r"msg\.sender\s*!=|!=\s*msg\.sender|!\s*hasRole\s*\(", text):
+    if re.search(rf"{_CALLER}\s*!=|!=\s*{_CALLER}|!\s*hasRole\s*\(", text):
         return "negative"
-    if re.search(r"msg\.sender\s*==|==\s*msg\.sender|\bhasRole\s*\(", text):
+    if re.search(rf"{_CALLER}\s*==|==\s*{_CALLER}|\bhasRole\s*\(", text):
         return "positive"
     return None
 

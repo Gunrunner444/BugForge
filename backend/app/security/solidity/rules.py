@@ -30,7 +30,11 @@ from app.parsing.solidity_guards import initializer_is_protected, reentrancy_gua
 from app.parsing.solidity_ir import build_semantic_program
 from app.parsing.solidity_loops import loop_grows_state, loop_has_external_call, loop_is_bounded
 from app.parsing.solidity_methodology import analyze_methodology
-from app.parsing.solidity_modifiers import resolve_modifier
+from app.parsing.solidity_modifiers import (
+    ModifierResolution,
+    modifier_home_graph,
+    resolve_modifier,
+)
 from app.parsing.solidity_proxy import analyze_proxy
 from app.parsing.solidity_research import SemanticCandidate, build_research_model
 from app.parsing.solidity_research_suite import FAMILIES
@@ -1188,7 +1192,7 @@ def _authorized_text(graph: SyntaxGraph, function: SyntaxEvent) -> str:
     injections: list[str] = []
     for name in _modifier_names(_fields(function.extra).get("modifiers", "")):
         resolution = resolve_modifier(graph, contract, name)
-        if resolution.status == "resolved" and placeholder_is_guarded(resolution.body):
+        if resolution.status == "resolved" and _modifier_guarded(graph, resolution, name):
             injections.append("require(msg.sender == owner);")
     if injections:
         brace = text.find("{")
@@ -1204,6 +1208,30 @@ def _authorized_text(graph: SyntaxGraph, function: SyntaxEvent) -> str:
             text,
         )
     return text
+
+
+def _modifier_guarded(graph: SyntaxGraph, resolution: ModifierResolution, name: str) -> bool:
+    """A modifier guards its placeholder directly or through one guard helper call.
+
+    ``modifier onlyOwner() { _validateOwnership(); _; }`` is guarded when the helper,
+    found in the file that defines the modifier, is itself a sender guard. Helpers
+    that cannot be found keep the modifier unguarded, so nothing is assumed.
+    """
+    if placeholder_is_guarded(resolution.body):
+        return True
+    home = modifier_home_graph(graph, resolution)
+    if home is None:
+        return False
+    body = resolution.body
+    for helper in _guard_helpers(home):
+        if helper == name:
+            continue
+        body = re.sub(
+            rf"\b{re.escape(helper)}\s*\([^;]*\)\s*;",
+            "require(msg.sender == owner);",
+            body,
+        )
+    return body != resolution.body and placeholder_is_guarded(body)
 
 
 def _modifier_names(modifiers: str) -> list[str]:

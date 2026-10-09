@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.parsing.solidity_call_outcome import swallowed_call_failures
 from app.parsing.solidity_research import (
     MemberCall,
     ResearchModel,
@@ -197,6 +198,7 @@ def analyze_caller_context(model: ResearchModel) -> list[SemanticCandidate]:
     found.extend(_unrestricted_dispatch(model))
     found.extend(_trusted_intermediary(model))
     found.extend(_forwarded_sender_spoof(model))
+    found.extend(swallowed_call_failures(model))
     return cap(found)
 
 

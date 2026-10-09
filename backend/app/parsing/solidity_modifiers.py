@@ -38,6 +38,7 @@ class ModifierIndex:
         self._modifiers: dict[tuple[str, str, str], list[ModifierBody]] = {}
         self._bases: dict[tuple[str, str], list[str]] = {}
         self._contracts: dict[str, list[tuple[str, str]]] = {}
+        self._graphs: dict[str, SyntaxGraph] = {}
 
     @classmethod
     def from_graphs(cls, graphs: dict[str, SyntaxGraph]) -> ModifierIndex:
@@ -70,7 +71,11 @@ class ModifierIndex:
             return _finish(found[0])
         return ModifierResolution("unresolved", "", contract, file_path)
 
+    def graph_for(self, file_path: str) -> SyntaxGraph | None:
+        return self._graphs.get(file_path)
+
     def _absorb(self, path: str, graph: SyntaxGraph) -> None:
+        self._graphs[path] = graph
         for event in graph.events:
             if event.kind == "sol_contract":
                 fields = _fields(event.extra)
@@ -135,6 +140,16 @@ def resolve_modifier(graph: SyntaxGraph, contract: str, name: str) -> ModifierRe
     if index is None:
         index = ModifierIndex.from_graphs({graph.file_path: graph})
     return index.resolve(graph, contract, name)
+
+
+def modifier_home_graph(graph: SyntaxGraph, resolution: ModifierResolution) -> SyntaxGraph | None:
+    """The syntax graph of the file that defines a resolved modifier, when known."""
+    if resolution.file_path == graph.file_path:
+        return graph
+    index = current_modifier_index()
+    if index is None:
+        return None
+    return index.graph_for(resolution.file_path)
 
 
 def _finish(body: ModifierBody) -> ModifierResolution:

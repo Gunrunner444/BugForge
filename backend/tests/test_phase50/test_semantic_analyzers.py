@@ -27,10 +27,31 @@ SAFE_FIXTURES = (
 )
 
 
+# The ERC-4337 prefund in aa_safe.sol ignores its transfer result by design. Since the
+# swallowed-call detector no longer exempts value transfers, it is reported as one
+# labelled, low-confidence best-effort candidate (a documented possible false positive).
+def _without_labelled_prefund(candidates):
+    rest, prefund = [], []
+    for item in candidates:
+        facts = dict(item.facts)
+        if (
+            item.detector == "caller_context.swallowed_call_failure"
+            and facts.get("call_kind") == "eth_transfer_variable"
+            and item.confidence == "low"
+            and "best-effort" in facts.get("intent", "")
+            and item.function.startswith("validateUserOp")
+        ):
+            prefund.append(item)
+        else:
+            rest.append(item)
+    assert len(prefund) <= 1
+    return tuple(rest)
+
+
 @pytest.mark.parametrize("name", SAFE_FIXTURES)
 def test_safe_fixtures_report_nothing(name: str) -> None:
     result = analyze(name)
-    assert result.candidates == ()
+    assert _without_labelled_prefund(result.candidates) == ()
 
 
 def test_every_candidate_is_static_and_unverified() -> None:
@@ -283,7 +304,7 @@ def test_account_abstraction_mismatches_are_found_and_safe_code_is_clean() -> No
         "aa.factory_salt_not_bound_to_owner",
     }
     assert expected <= detectors(result)
-    assert analyze("aa_safe.sol").candidates == ()
+    assert _without_labelled_prefund(analyze("aa_safe.sol").candidates) == ()
 
 
 # ---- shared properties ----------------------------------------------------------------------
