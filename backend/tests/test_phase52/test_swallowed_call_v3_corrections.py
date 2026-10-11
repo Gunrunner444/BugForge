@@ -311,13 +311,125 @@ def test_expected_emission_is_not_a_vulnerability_precision_score() -> None:
     assert emitted_as_intended == 6 and genuine_flaws == 0
 
 
+def test_mechanism_probe_is_not_a_security_violation() -> None:
+    """Outer success is a mechanism observation. Outer revert is failure propagation.
+
+    Neither outcome is a security-property violation, and neither is counted as one.
+    ``CALL_MUST_FAIL`` keeps its existing verdict for other templates.
+    """
+    from app.discovery.bounty.findings import is_strong
+    from app.discovery.bounty.properties import (
+        OracleKind,
+        OracleObservation,
+        PropertyDeclaration,
+        PropertyVerdict,
+        build_property,
+        evaluate,
+    )
+    from app.discovery.bounty.stateful import (
+        FeedbackLoopResult,
+        Outcome,
+        StatefulObservation,
+        ToolStatus,
+        classify,
+    )
+    from app.discovery.bounty.vfcs import generate
+    from app.parsing.solidity_research import build_research_model
+
+    positive = HEAD_HOOK + (
+        "contract Relay {\n"
+        "  function relay(address target, bytes calldata data) external {\n"
+        "    (bool ok, ) = target.call(data);\n    ok;\n  }\n}\n"
+    )
+    sources = {"Relay.sol": positive}
+    model = build_research_model(sources)
+    candidate = next(
+        c for c in analyze_text(positive, ("caller_context",)).candidates if c.detector == DETECTOR
+    )
+    sequence = generate(model, [candidate]).sequences[0]
+    spec = build_property(sequence, model, candidate)
+    assert spec.declaration is PropertyDeclaration.MECHANISM_OBSERVATION
+    assert spec.oracle.kind is OracleKind.MECHANISM_PROBE
+    assert spec.family.value == "mechanism"
+
+    seen = evaluate(sequence, spec.oracle, OracleObservation(call_ok=(1, 1)))
+    assert seen.verdict is PropertyVerdict.MECHANISM_OBSERVED
+    assert "unproven" in seen.reason
+    outcome, evaluation, reason = classify(sequence, spec.oracle, OracleObservation(call_ok=(1, 1)))
+    assert outcome is Outcome.MECHANISM_OBSERVED
+    assert evaluation.verdict is PropertyVerdict.MECHANISM_OBSERVED
+    assert "security-property violation" in reason
+
+    propagated = evaluate(sequence, spec.oracle, OracleObservation(call_ok=(1, 0)))
+    assert propagated.verdict is PropertyVerdict.FAILURE_PROPAGATED
+    failed, _, failed_reason = classify(sequence, spec.oracle, OracleObservation(call_ok=(1, 0)))
+    assert failed is Outcome.FAILURE_PROPAGATED
+    assert "not reproduced" in failed_reason
+
+    tools = ToolStatus(forge="unavailable", solc="unavailable")
+    observation = StatefulObservation(
+        sequence_id=sequence.sequence_id,
+        outcome=Outcome.MECHANISM_OBSERVED,
+        reason=reason,
+        pipeline="default",
+        executed=True,
+        return_code=0,
+        reverted_index=-1,
+        property_under_test=spec.statement,
+        property_checked=True,
+        deployment="source",
+        tools=tools,
+        declaration=spec.declaration.value,
+        verdict=seen.verdict.value,
+        oracle_kind=spec.oracle.kind.value,
+    )
+    assert observation.strong_candidate is False
+    assert observation.signal() is None
+    loop = FeedbackLoopResult(observations=(observation,), mutated=(), signals_emitted=())
+    assert loop.violations == ()
+    assert loop.mechanism_observations == (observation,)
+    assert (
+        is_strong(
+            {
+                "outcome": "mechanism_observed",
+                "declaration": "mechanism_observation",
+                "verdict": "mechanism_observed",
+                "oracle_kind": "mechanism_probe",
+                "identity_status": "bound",
+            }
+        )
+        is False
+    )
+
+    security = evaluate(
+        sequence,
+        spec.oracle.__class__(
+            kind=OracleKind.CALL_MUST_FAIL,
+            probe_role="probe",
+            probe_function=spec.oracle.probe_function,
+            precondition_roles=("failing_callee",),
+            expression="an unauthenticated call must revert",
+        ),
+        OracleObservation(call_ok=(1, 1)),
+    )
+    assert security.verdict is PropertyVerdict.PROPERTY_VIOLATED
+
+
 def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
     """Positive fixture becomes a sequence and a local harness. Negative control does not.
 
     Forge executes the harness when it is installed. Otherwise the executor reports
     UNAVAILABLE and the test does not treat that as a completed run or a finding.
+    The dedicated integration job sets BUGFORGE_REQUIRE_FOUNDRY so UNAVAILABLE fails.
     """
-    from app.discovery.bounty.properties import PropertyDeclaration, build_property
+    import os
+
+    from app.discovery.bounty.properties import (
+        OracleKind,
+        PropertyDeclaration,
+        PropertyVerdict,
+        build_property,
+    )
     from app.discovery.bounty.stateful import Outcome, StatefulExecutor, build_harness
     from app.discovery.bounty.vfcs import generate
     from app.parsing.solidity_research import build_research_model
@@ -356,7 +468,8 @@ def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
     assert any(value == "reverting_callee" for _name, value in sequence.calls[1].arguments)
 
     spec = build_property(sequence, model, candidate)
-    assert spec.declaration is PropertyDeclaration.PROPERTY_UNDER_TEST
+    assert spec.declaration is PropertyDeclaration.MECHANISM_OBSERVATION
+    assert spec.oracle.kind is OracleKind.MECHANISM_PROBE
     assert spec.oracle.executable
     assert spec.as_dict()["verified"] is False
 
@@ -374,25 +487,37 @@ def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
     executor = StatefulExecutor()
     observation = executor.execute(sequence, model, sources, spec=spec)
     assert observation.verified is False
+    required = os.environ.get("BUGFORGE_REQUIRE_FOUNDRY") == "1"
     if not executor.available():
         assert observation.outcome is Outcome.UNAVAILABLE
         assert observation.result is None or observation.result.test_status == "not_run"
         assert observation.strong_candidate is False
+        if required:
+            raise AssertionError("forge and solc were required, but the executor is unavailable")
         return
 
-    assert observation.outcome is Outcome.PROPERTY_VIOLATED, observation.reason
+    assert observation.outcome is Outcome.MECHANISM_OBSERVED, observation.reason
+    assert observation.verdict == PropertyVerdict.MECHANISM_OBSERVED.value
+    assert observation.strong_candidate is False
+    assert "unproven" in observation.reason
     result = observation.result
     assert result is not None
     assert result.compiler_status == "ok"
     assert result.test_status == "passed"
     assert result.process_status == "completed"
+    assert result.property_status == "mechanism_observed"
     assert result.call_results[1] == 1  # outer call succeeded; the callee revert was swallowed
-    held = executor.execute(
+    propagated = executor.execute(
         sequence, build_research_model({"Relay.sol": negative}), {"Relay.sol": negative}, spec=spec
     )
-    assert held.outcome is Outcome.PROPERTY_HELD, held.reason
-    assert held.verified is False
-    assert held.result is not None and held.result.compiler_status == "ok"
+    assert propagated.outcome is Outcome.FAILURE_PROPAGATED, propagated.reason
+    assert propagated.verified is False
+    assert propagated.strong_candidate is False
+    assert propagated.result is not None
+    assert propagated.result.compiler_status == "ok"
+    assert propagated.result.test_status == "passed"
+    assert propagated.result.property_status == "failure_propagated"
+    assert propagated.result.call_results[1] == 0
 
 
 def test_unknown_receiver_and_constructor_are_limitations() -> None:

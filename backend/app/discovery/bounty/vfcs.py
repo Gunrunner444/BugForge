@@ -423,8 +423,8 @@ def _swallowed_call(model: ResearchModel, candidate: SemanticCandidate) -> Built
     return (
         "failing-callee→swallowed-call",
         [deploy, probe],
-        "a reverting callee must revert the outer call; outer success only shows "
-        "the failure was swallowed and is not by itself a bounty finding",
+        "behavioral probe of a reverting callee: outer success shows the failure was "
+        "swallowed and is not by itself a security-property violation",
     )
 
 

@@ -15,11 +15,12 @@ cannot forge an observation (events from any other address are ignored), and it
 cannot choose a Forge flag or a config value: execution policy is server-owned.
 
 Outcomes are distinct and never collapse to a generic failure: PROPERTY_VIOLATED,
-PROPERTY_HELD, SEQUENCE_EXECUTED_NO_ORACLE, SEQUENCE_REVERTED, COMPILE_FAILED,
-EXECUTION_FAILED, TIMEOUT, IDENTITY_MISMATCH, INCONCLUSIVE, UNAVAILABLE. A revert
-is not a finding. A sequence that ran without an oracle is not a finding. Two
-agreeing local observations are at most a CORROBORATED_CANDIDATE. Nothing here
-marks anything verified.
+PROPERTY_HELD, MECHANISM_OBSERVED, FAILURE_PROPAGATED, SEQUENCE_EXECUTED_NO_ORACLE,
+SEQUENCE_REVERTED, COMPILE_FAILED, EXECUTION_FAILED, TIMEOUT, IDENTITY_MISMATCH,
+INCONCLUSIVE, UNAVAILABLE. A revert is not a finding. A mechanism observation is
+not a security-property violation. A sequence that ran without an oracle is not
+a finding. Two agreeing local observations are at most a CORROBORATED_CANDIDATE.
+Nothing here marks anything verified.
 """
 
 from __future__ import annotations
@@ -96,6 +97,10 @@ K_DONE = 9
 class Outcome(StrEnum):
     PROPERTY_VIOLATED = "property_violated"
     PROPERTY_HELD = "property_held"
+    # The callee reverted and the outer call returned. Not a security verdict.
+    MECHANISM_OBSERVED = "mechanism_observed"
+    # The outer call reverted too, so the swallowed-call mechanism was not reproduced.
+    FAILURE_PROPAGATED = "failure_propagated"
     SEQUENCE_EXECUTED_NO_ORACLE = "sequence_executed_no_oracle"
     SEQUENCE_REVERTED = "sequence_reverted"
     COMPILE_FAILED = "compile_failed"
@@ -111,6 +116,8 @@ RUNNABLE = frozenset(
     {
         Outcome.PROPERTY_VIOLATED,
         Outcome.PROPERTY_HELD,
+        Outcome.MECHANISM_OBSERVED,
+        Outcome.FAILURE_PROPAGATED,
         Outcome.SEQUENCE_EXECUTED_NO_ORACLE,
         Outcome.SEQUENCE_REVERTED,
     }
@@ -1472,6 +1479,7 @@ class StatefulObservation:
             return FeedbackSignal(
                 kind="coverage_gain", sequence_id=self.sequence_id, engine="foundry"
             )
+        # A mechanism probe is evidence, not a near-miss to mutate into a finding.
         return None
 
     def as_dict(self) -> dict[str, Any]:
@@ -1527,6 +1535,10 @@ def classify(
         return Outcome.PROPERTY_VIOLATED, evaluation, evaluation.reason
     if evaluation.verdict is PropertyVerdict.PROPERTY_HELD:
         return Outcome.PROPERTY_HELD, evaluation, evaluation.reason
+    if evaluation.verdict is PropertyVerdict.MECHANISM_OBSERVED:
+        return Outcome.MECHANISM_OBSERVED, evaluation, evaluation.reason
+    if evaluation.verdict is PropertyVerdict.FAILURE_PROPAGATED:
+        return Outcome.FAILURE_PROPAGATED, evaluation, evaluation.reason
     return Outcome.INCONCLUSIVE, evaluation, evaluation.reason
 
 
@@ -1947,6 +1959,8 @@ def interpret(
     property_status = {
         PropertyVerdict.PROPERTY_VIOLATED: "violated",
         PropertyVerdict.PROPERTY_HELD: "held",
+        PropertyVerdict.MECHANISM_OBSERVED: "mechanism_observed",
+        PropertyVerdict.FAILURE_PROPAGATED: "failure_propagated",
         PropertyVerdict.EXECUTION_ONLY_OBSERVATION: "no_oracle",
     }.get(evaluation.verdict, "not_evaluated")
     result = ExecutionResult(
@@ -2186,6 +2200,15 @@ class FeedbackLoopResult:
     @property
     def violations(self) -> tuple[StatefulObservation, ...]:
         return tuple(o for o in self.observations if o.outcome is Outcome.PROPERTY_VIOLATED)
+
+    @property
+    def mechanism_observations(self) -> tuple[StatefulObservation, ...]:
+        """Completed behavioral probes. Evidence only; not security violations."""
+        return tuple(
+            o
+            for o in self.observations
+            if o.outcome in {Outcome.MECHANISM_OBSERVED, Outcome.FAILURE_PROPAGATED}
+        )
 
     def outcome_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

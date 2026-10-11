@@ -234,6 +234,8 @@ def _one(
     execution = execution_summary(candidate, executions)
     if execution.strength in {"strong_candidate", "corroborated_candidate"} and poc == "none":
         poc = "local_harness_violation_unverified"
+    elif execution.strength == "mechanism_observation" and poc == "none":
+        poc = "mechanism_observation_unproven"
     own = tuple(
         s
         for s in sequences
@@ -337,6 +339,8 @@ class ExecutionSummary:
 _STATUS_ORDER = (
     "property_violated",
     "property_held",
+    "mechanism_observed",
+    "failure_propagated",
     "sequence_executed_no_oracle",
     "sequence_reverted",
     "inconclusive",
@@ -396,6 +400,17 @@ def execution_summary(
         strength = "corroborated_candidate"
     elif strong:
         strength = "strong_candidate"
+    elif any(item.get("outcome") == "mechanism_observed" for item in fresh):
+        strength = "mechanism_observation"
+        notes.append(
+            "the callee reverted and the outer call returned normally; "
+            "application-level impact and intentional design remain unproven"
+        )
+    elif any(item.get("outcome") == "failure_propagated" for item in fresh):
+        strength = "mechanism_not_reproduced"
+        notes.append(
+            "the outer call also reverted, so the swallowed-call mechanism was not reproduced"
+        )
     elif any(item.get("outcome") == "sequence_executed_no_oracle" for item in fresh):
         strength = "weak_execution_only"
         notes.append("the sequence executed without an oracle; execution is not a finding")
@@ -427,6 +442,8 @@ def quality_of(candidate_strength: str, corroboration: str) -> dict[str, Any]:
             "corroborated_candidate": "corroborated",
             "strong_candidate": "single_path_execution",
             "weak_execution_only": "execution_only",
+            "mechanism_observation": "mechanism_only",
+            "mechanism_not_reproduced": "none",
         }.get(candidate_strength, "none")
     return {
         "candidate": "static_candidate",
@@ -529,6 +546,13 @@ def qualify(
         )
     if duplicate:
         reasons.append(f"shares a root cause with {duplicate}; possible duplicate, not safe")
+    if poc.startswith("mechanism_observation"):
+        reasons.append(
+            "the callee reverted and the outer call returned normally; "
+            "application-level impact and intentional design remain unproven; "
+            "this is not a validated security-property violation"
+        )
+        return Qualification("mechanism_observation", tuple(reasons))
     if manifest.poc_requirement is PocRequirement.REQUIRED and poc == "none":
         reasons.append("the program requires a proof of concept and none exists")
         return Qualification("needs_poc", tuple(reasons))

@@ -1203,6 +1203,7 @@ class BountyCampaignService:
                     "outcomes": result.outcome_counts(),
                     "observations": len(result.observations),
                     "violations": len(result.violations),
+                    "mechanism_observations": len(result.mechanism_observations),
                     "mutated": len(result.mutated),
                     "forge_runs": executor.runs,
                     "tools": tools.as_dict(),

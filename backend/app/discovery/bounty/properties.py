@@ -8,9 +8,11 @@ declares exactly one of:
 * ``property_unsupported``  -- a property exists but the bounded local harness
   cannot express its oracle (it needs a signer, a market, an EntryPoint, ...).
 
-After execution the property is ``property_violated``, ``property_held`` or an
-``execution_only_observation``. A sequence that executed without an oracle is
-``SEQUENCE_EXECUTED_NO_ORACLE`` and is never a strong vulnerability candidate.
+After execution a security property is ``property_violated``, ``property_held``
+or an ``execution_only_observation``. A behavioral probe can instead record
+``mechanism_observed`` or ``failure_propagated``; neither is a security verdict.
+A sequence that executed without an oracle is ``SEQUENCE_EXECUTED_NO_ORACLE``
+and is never a strong vulnerability candidate.
 
 Every property is built from the static candidate *and* code evidence (the
 function body, the state variable it writes, its public getter) and carries
@@ -43,6 +45,7 @@ class PropertyFamily(StrEnum):
     GOVERNANCE = "governance"
     BRIDGE_MESSAGE_BINDING = "bridge_message_binding"
     ACCESS_CONTROL_HIERARCHY = "access_control_hierarchy"
+    MECHANISM = "mechanism"
     EIP7702 = "eip7702"
     ERC4337 = "erc4337"
     TRANSIENT_STORAGE = "transient_storage"
@@ -52,11 +55,16 @@ class PropertyDeclaration(StrEnum):
     PROPERTY_UNDER_TEST = "property_under_test"
     NO_PROPERTY_AVAILABLE = "no_property_available"
     PROPERTY_UNSUPPORTED = "property_unsupported"
+    # An executable behavioral probe. Not a security invariant.
+    MECHANISM_OBSERVATION = "mechanism_observation"
 
 
 class PropertyVerdict(StrEnum):
     PROPERTY_VIOLATED = "property_violated"
     PROPERTY_HELD = "property_held"
+    # Behavioral probe results. They are not security-property verdicts.
+    MECHANISM_OBSERVED = "mechanism_observed"
+    FAILURE_PROPAGATED = "failure_propagated"
     EXECUTION_ONLY_OBSERVATION = "execution_only_observation"
     NOT_EVALUATED = "not_evaluated"
 
@@ -77,6 +85,9 @@ class OracleKind(StrEnum):
     CREDIT_LE_RECEIVED = "credit_le_received"
     # solvency formulation: the actor's credit must not exceed what the contract holds
     CREDIT_LE_HOLDINGS = "credit_le_holdings"
+    # Behavioral probe: did a reverting callee's failure reach the outer call?
+    # Outer success is evidence of a mechanism, not a security-property violation.
+    MECHANISM_PROBE = "mechanism_probe"
 
 
 EXECUTABLE_ORACLES = frozenset(OracleKind) - {OracleKind.NONE}
@@ -159,7 +170,12 @@ class PropertySpec:
     @property
     def executable(self) -> bool:
         return (
-            self.declaration is PropertyDeclaration.PROPERTY_UNDER_TEST and self.oracle.executable
+            self.declaration
+            in {
+                PropertyDeclaration.PROPERTY_UNDER_TEST,
+                PropertyDeclaration.MECHANISM_OBSERVATION,
+            }
+            and self.oracle.executable
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -183,7 +199,7 @@ class PropertySpec:
 _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("aa.unprotected_account_initializer", PropertyFamily.INITIALIZATION),
     ("aa.", PropertyFamily.ERC4337),
-    ("caller_context.swallowed_call_failure", PropertyFamily.AUTHORIZATION),
+    ("caller_context.swallowed_call_failure", PropertyFamily.MECHANISM),
     ("caller_context.unrestricted_dispatch_with_approval_authority", PropertyFamily.TOKEN_MOVEMENT),
     ("caller_context.trusted_intermediary_actor_parameter", PropertyFamily.AUTHORIZATION),
     ("caller_context.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
@@ -331,7 +347,9 @@ def build_property(
         oracle, alternates, variables, reason, assumptions, unsupported = builder(
             sequence, model, function, detector
         )
-    if oracle.executable:
+    if oracle.kind is OracleKind.MECHANISM_PROBE and oracle.executable:
+        declaration = PropertyDeclaration.MECHANISM_OBSERVATION
+    elif oracle.executable:
         declaration = PropertyDeclaration.PROPERTY_UNDER_TEST
     elif unsupported:
         declaration = PropertyDeclaration.PROPERTY_UNSUPPORTED
@@ -547,7 +565,7 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
 
 
 def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
-    """Outer success against a reverting callee means the failure was swallowed."""
+    """Observe whether a reverting callee's failure is swallowed. Not a security invariant."""
     bound = any(call.primitive and call.function == "deploy_reverting()" for call in sequence.calls)
     probe = next((call for call in sequence.calls if call.role == "probe"), None)
     if not bound or probe is None:
@@ -561,13 +579,13 @@ def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) ->
         )
     return (
         OracleSpec(
-            kind=OracleKind.CALL_MUST_FAIL,
+            kind=OracleKind.MECHANISM_PROBE,
             probe_role="probe",
             probe_function=probe.function,
             precondition_roles=("failing_callee",),
             expression=(
-                f"{fn.name}() must revert when its low-level callee reverts; "
-                "success only shows the failure was swallowed"
+                f"behavioral probe of {fn.name}(): whether a reverting callee's failure "
+                "is swallowed. Outer success is not a security-property violation"
             ),
         ),
         (),
@@ -576,7 +594,7 @@ def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) ->
         (
             "the local callee reverts on every call",
             "outer success is a mechanism observation, not a bounty-eligible finding",
-            "upstream reliance and impact are unknown",
+            "application-level impact and intentional design remain unproven",
         ),
         "",
     )
@@ -714,6 +732,29 @@ def evaluate(
             PropertyVerdict.NOT_EVALUATED, "the probe call was not reached", probe
         )
     kind = oracle.kind
+    if kind is OracleKind.MECHANISM_PROBE:
+        if probe_ok == 1:
+            return PropertyEvaluation(
+                PropertyVerdict.MECHANISM_OBSERVED,
+                (
+                    f"the callee reverted and {oracle.probe_function} returned normally. "
+                    "Application-level impact and intentional design remain unproven. "
+                    "This is a mechanism observation, not a validated security-property violation."
+                ),
+                probe,
+                True,
+                True,
+            )
+        return PropertyEvaluation(
+            PropertyVerdict.FAILURE_PROPAGATED,
+            (
+                "the outer call also reverted, so the swallowed-call mechanism was not "
+                "reproduced. This is not a security-property result."
+            ),
+            probe,
+            True,
+            True,
+        )
     if kind in {OracleKind.CALL_MUST_FAIL, OracleKind.SECOND_CALL_MUST_FAIL}:
         if probe_ok == 1:
             return PropertyEvaluation(

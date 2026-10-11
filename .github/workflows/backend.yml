@@ -80,3 +80,63 @@ jobs:
       - name: Run mypy type check
         working-directory: backend
         run: mypy app/ --ignore-missing-imports
+
+  stateful-integration:
+    name: Stateful integration (Foundry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install Python dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Install Foundry 1.8.5
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+      - name: Install solc 0.8.28
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/solc" \
+            https://github.com/ethereum/solidity/releases/download/v0.8.28/solc-static-linux
+          chmod 755 "$HOME/.local/bin/solc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Require the executor to see forge and solc
+        working-directory: backend
+        run: |
+          command -v forge
+          command -v solc
+          test -x "$(command -v forge)"
+          test -x "$(command -v solc)"
+          forge --version
+          solc --version
+          python - <<'PY'
+          from pathlib import Path
+          from app.discovery.process import tool_path
+          from app.discovery.bounty.stateful import tool_status
+          forge, solc = tool_path("forge"), tool_path("solc")
+          status = tool_status()
+          if not forge or not solc or not Path(forge).is_file() or not Path(solc).is_file():
+              raise SystemExit(f"executor cannot see forge/solc: {forge!r} {solc!r}")
+          if not status.available:
+              raise SystemExit(f"tool status is not available: {status.as_dict()}")
+          print(status.as_dict())
+          PY
+      - name: Run the swallowed-call campaign integration
+        working-directory: backend
+        env:
+          BUGFORGE_REQUIRE_FOUNDRY: "1"
+          FOUNDRY_OFFLINE: "true"
+          FOUNDRY_FFI: "false"
+        run: |
+          pytest \
+            tests/test_phase52/test_swallowed_call_campaign.py \
+            tests/test_phase52/test_swallowed_call_v3_corrections.py::test_mechanism_probe_is_not_a_security_violation \
+            tests/test_phase52/test_swallowed_call_v3_corrections.py::test_swallowed_call_candidate_reaches_the_existing_harness \
+            -vv --tb=short
