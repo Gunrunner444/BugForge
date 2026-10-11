@@ -72,6 +72,13 @@ PROPAGATED = "propagated"
 SWALLOWED = "swallowed"
 UNCERTAIN = "uncertain"
 
+# How to read a candidate. Emission is agreement with this detector, never a
+# measured vulnerability and never a precision score.
+EMISSION = "detector_emission"
+POSSIBLE_FP = "possible_false_positive"
+AMBIGUOUS = "ambiguous"
+NO_VULNERABILITY_CLAIM = "none"
+
 
 @dataclass(frozen=True)
 class FailureOutcome:
@@ -260,6 +267,54 @@ def gas_guard(
         NO_GUARD,
         "a gasleft() check exists but does not protect this call (after it or on another path)",
     )
+
+
+def parameter_binding(function: RFunction, expression: str, type_hint: str) -> str:
+    """Parameter name when ``expression`` is that parameter, else ``unknown``.
+
+    ``payable(name)`` and ``address(name)`` unwrap. Anything else, including
+    ``msg.sender`` and ``address(this)``, stays unknown: the harness must not
+    invent a callee for a receiver the caller does not supply.
+    """
+    text = expression.strip()
+    for _ in range(3):
+        match = re.fullmatch(r"(?:payable|address)\s*\(\s*(.+)\s*\)", text)
+        if match is None:
+            break
+        text = match.group(1).strip()
+    if not re.fullmatch(r"[A-Za-z_]\w*", text):
+        return "unknown"
+    for param in function.params:
+        if param.name != text:
+            continue
+        declared = param.type_name.strip()
+        if type_hint == "address" and "address" in declared:
+            return text
+        if type_hint == "bytes" and re.match(r"bytes(?!\d)", declared):
+            return text
+    return "unknown"
+
+
+def evidence_classification(
+    function: RFunction, call: MemberCall, kind: str, outcome: str
+) -> tuple[str, str]:
+    """(evidence_class, pattern). Neither value is a vulnerability verdict."""
+    transfer = kind in {"eth_transfer_literal", "eth_transfer_variable"}
+    if not transfer:
+        if outcome == UNCERTAIN:
+            return AMBIGUOUS, "ambiguous_failure_path"
+        return EMISSION, "swallowed_low_level_call"
+    receiver = call.receiver
+    options = call.options or ""
+    if (
+        "msg.sender" in receiver
+        or function.name.startswith("validate")
+        or "fund" in options.lower()
+    ):
+        return POSSIBLE_FP, "prefund_style_transfer"
+    if "hook" in function.contract.lower() or "hook" in function.name.lower():
+        return POSSIBLE_FP, "best_effort_hook"
+    return POSSIBLE_FP, "best_effort_transfer"
 
 
 def swallowed_call_failures(model: ResearchModel) -> list[SemanticCandidate]:
@@ -709,6 +764,13 @@ def _function_candidate(
     line = function.line + function.body[: call.start].count("\n")
     gas_behavior = _gas_behavior(call, guard)
     transfer = kind[0] in {"eth_transfer_literal", "eth_transfer_variable"}
+    evidence_class, pattern = evidence_classification(function, call, kind[0], outcome.status)
+    target_parameter = parameter_binding(function, call.receiver, "address")
+    data_argument = re.sub(r"\s+", "", call.arguments[0]) if call.arguments else ""
+    if not data_argument or data_argument in _EMPTY_DATA:
+        calldata_parameter = "empty"
+    else:
+        calldata_parameter = parameter_binding(function, call.arguments[0], "bytes")
     if outcome.status == SWALLOWED:
         failure_text = (
             "on at least one path taken when the call fails, the function neither reverts "
@@ -739,6 +801,12 @@ def _function_candidate(
         ("calldata", kind[1]),
         ("call_sites", " | ".join(sites)[:400]),
         ("bounded_call_paths", str(sum(1 for site in sites if GUARD_PROVEN in site))),
+        ("call_receiver", call.receiver[:120] or "unknown"),
+        ("target_parameter", target_parameter),
+        ("calldata_parameter", calldata_parameter),
+        ("evidence_class", evidence_class),
+        ("pattern", pattern),
+        ("vulnerability_claim", NO_VULNERABILITY_CLAIM),
         (
             "analysis",
             "statement-level CFG over source text; bounded gas model "

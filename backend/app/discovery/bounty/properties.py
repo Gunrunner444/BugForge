@@ -183,6 +183,7 @@ class PropertySpec:
 _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("aa.unprotected_account_initializer", PropertyFamily.INITIALIZATION),
     ("aa.", PropertyFamily.ERC4337),
+    ("caller_context.swallowed_call_failure", PropertyFamily.AUTHORIZATION),
     ("caller_context.unrestricted_dispatch_with_approval_authority", PropertyFamily.TOKEN_MOVEMENT),
     ("caller_context.trusted_intermediary_actor_parameter", PropertyFamily.AUTHORIZATION),
     ("caller_context.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
@@ -545,6 +546,42 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
     )
 
 
+def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
+    """Outer success against a reverting callee means the failure was swallowed."""
+    bound = any(call.primitive and call.function == "deploy_reverting()" for call in sequence.calls)
+    probe = next((call for call in sequence.calls if call.role == "probe"), None)
+    if not bound or probe is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            "no failing callee is bound to a caller-supplied address parameter",
+            ("upstream reliance and impact are unknown",),
+            "the call receiver is not a parameter the harness can replace",
+        )
+    return (
+        OracleSpec(
+            kind=OracleKind.CALL_MUST_FAIL,
+            probe_role="probe",
+            probe_function=probe.function,
+            precondition_roles=("failing_callee",),
+            expression=(
+                f"{fn.name}() must revert when its low-level callee reverts; "
+                "success only shows the failure was swallowed"
+            ),
+        ),
+        (),
+        (),
+        f"{fn.name} stores a low-level call success flag and a failure path returns normally",
+        (
+            "the local callee reverts on every call",
+            "outer success is a mechanism observation, not a bounty-eligible finding",
+            "upstream reliance and impact are unknown",
+        ),
+        "",
+    )
+
+
 def _first_role(sequence: Vfcs) -> str:
     for call in sequence.calls:
         if not call.primitive:
@@ -584,6 +621,7 @@ _ORACLE_BUILDERS: dict[str, Any] = {
     "boundary-batch": _no_property(
         "{name}'s totals are internal; no public observable distinguishes a wrap"
     ),
+    "failing-callee→swallowed-call": _swallowed,
 }
 
 

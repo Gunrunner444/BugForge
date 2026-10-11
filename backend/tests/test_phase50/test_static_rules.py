@@ -45,8 +45,8 @@ def test_vulnerable_fixture_fires_its_research_rule(tmp_path, name: str, rule: s
 def test_safe_fixture_fires_no_research_rule(tmp_path, name: str) -> None:
     result = _scan(tmp_path, name)
     research = [i for i in result.observations if i.rule_id.startswith("sol.research.")]
-    # aa_safe.sol's ERC-4337 prefund ignores its transfer result by design; the
-    # swallowed-call detector reports it as one potential best-effort candidate.
+    # aa_safe.sol's ERC-4337 prefund ignores its transfer result by design. The
+    # detector may emit one potential candidate. Emission is not a vulnerability.
     prefund = [
         i
         for i in research

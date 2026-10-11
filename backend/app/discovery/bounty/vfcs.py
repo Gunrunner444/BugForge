@@ -385,6 +385,49 @@ def _account_validation(model: ResearchModel, candidate: SemanticCandidate) -> B
     return "AA validation→execution", calls, "execution requires a valid operation"
 
 
+def _swallowed_call(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """Bind a swallowed low-level call to a local failing callee when the source allows it.
+
+    Possible false positives and ambiguous propagation are not turned into exploit
+    sequences. A receiver that is not a caller-supplied address stays unknown.
+    """
+    function = _own(model, candidate)
+    if isinstance(function, str):
+        return function
+    evidence = candidate.fact("evidence_class", "unknown")
+    pattern = candidate.fact("pattern", "unknown")
+    if evidence == "possible_false_positive":
+        return f"possible false positive ({pattern}); not synthesized as an exploit sequence"
+    if evidence == "ambiguous":
+        return "failure propagation is ambiguous; a sequence is not synthesized"
+    if evidence != "detector_emission":
+        return "evidence class is unknown; a sequence is not synthesized"
+    target = candidate.fact("target_parameter", "unknown")
+    if target in {"", "unknown"}:
+        return (
+            "the call receiver is not a caller-supplied address parameter; "
+            "a failing callee is not invented"
+        )
+    why = (
+        f"failure {candidate.fact('failure_propagation', 'unknown')}; "
+        f"gas guard {candidate.fact('gas_guard', 'unknown')}; "
+        f"call kind {candidate.fact('call_kind', 'unknown')}; "
+        f"receiver parameter {target}"
+    )[:240]
+    deploy = _primitive("callee", "deploy_reverting()", "failing_callee", ATTACKER, why)
+    overrides = {target: "reverting_callee"}
+    data_param = candidate.fact("calldata_parameter", "unknown")
+    if data_param not in {"", "unknown", "empty"}:
+        overrides[data_param] = "reverting_calldata"
+    probe = _call(function, "probe", ATTACKER, overrides, UNCONSTRAINED)
+    return (
+        "failing-callee→swallowed-call",
+        [deploy, probe],
+        "a reverting callee must revert the outer call; outer success only shows "
+        "the failure was swallowed and is not by itself a bounty finding",
+    )
+
+
 def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -396,6 +439,7 @@ def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
 _BUILDERS: dict[str, Builder] = {
     "v4_hooks.callback_without_pool_manager_check": _account_validation,
     "bridge.receiver_without_endpoint_check": _account_validation,
+    "caller_context.swallowed_call_failure": _swallowed_call,
     "caller_context.self_call_elevation": _dispatch,
     "caller_context.forwarded_sender_delegatecall": _dispatch,
     "caller_context.unrestricted_dispatch_with_approval_authority": _approval_dispatch,

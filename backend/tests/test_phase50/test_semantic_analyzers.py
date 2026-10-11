@@ -27,9 +27,10 @@ SAFE_FIXTURES = (
 )
 
 
-# The ERC-4337 prefund in aa_safe.sol ignores its transfer result by design. Since the
-# swallowed-call detector no longer exempts value transfers, it is reported as one
-# labelled, low-confidence best-effort candidate (a documented possible false positive).
+# The ERC-4337 prefund in aa_safe.sol ignores its transfer result by design. The
+# detector emits one low-confidence candidate. That emission is a possible false
+# positive, not evidence that the safe fixture has a vulnerability, and not a
+# precision hit.
 def _without_labelled_prefund(candidates):
     rest, prefund = [], []
     for item in candidates:
@@ -41,6 +42,10 @@ def _without_labelled_prefund(candidates):
             and "best-effort" in facts.get("intent", "")
             and item.function.startswith("validateUserOp")
         ):
+            assert facts.get("evidence_class") == "possible_false_positive"
+            assert facts.get("pattern") == "prefund_style_transfer"
+            assert facts.get("vulnerability_claim") == "none"
+            assert item.verified is False
             prefund.append(item)
         else:
             rest.append(item)

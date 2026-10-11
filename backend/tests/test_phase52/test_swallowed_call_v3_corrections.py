@@ -4,8 +4,10 @@
    GUARD_PROVEN_SUFFICIENT under a bounded source-text model (stipend, EIP-150 63/64,
    fixed CALL overhead). Only a proven guard removes a call site.
 2. Empty-calldata value calls are analysed, not exempt; ambiguity is labelled.
-
-Static candidates only; nothing here runs a tool or touches a network.
+3. Expected emission is not a vulnerability-detection precision score.
+4. A detector emission with a caller-supplied address reaches the existing VFCS
+   and local harness path. Forge runs only when it is installed; a missing
+   compiler is UNAVAILABLE, never a fabricated pass.
 """
 
 from __future__ import annotations
@@ -223,3 +225,209 @@ def test_deliberate_best_effort_transfer_stays_low_confidence_and_explained() ->
     assert item.title.startswith("Ether transfer failure may be ignored")
     assert "possible false positive" in facts["intent"]
     assert "possible false positive" in item.summary
+    assert facts["evidence_class"] == "possible_false_positive"
+    assert facts["pattern"] == "prefund_style_transfer"
+    assert facts["vulnerability_claim"] == "none"
+    assert item.verified is False
+
+
+# ---- emission is not precision ------------------------------------------------------------------
+
+HEAD_HOOK = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n"
+
+
+def _classified(text: str) -> tuple[bool, dict[str, str]]:
+    found = (
+        _found(text)
+        if text.startswith(HEAD)
+        else [
+            c for c in analyze_text(text, ("caller_context",)).candidates if c.detector == DETECTOR
+        ]
+    )
+    if not found:
+        return False, {}
+    item = found[0]
+    assert item.verified is False and item.confidence == "low"
+    assert item.status == "candidate"
+    return True, dict(item.facts)
+
+
+def test_expected_emission_is_not_a_vulnerability_precision_score() -> None:
+    """Agreement with the detector is not a precision score and not a confirmed flaw.
+
+    The two hook cases and the four prefund-style transfers are expected emissions
+    and possible false positives. None of them is counted as a genuine vulnerability.
+    """
+    from tests.test_phase50.phase50_support import read
+
+    prefund_safe = {"aa_safe.sol": read("aa_safe.sol")}
+    prefund_loose = {"aa_vulnerable.sol": read("aa_vulnerable.sol")}
+    literal = _fn('    (bool ok, ) = payable(msg.sender).call{value: 1 ether}("");\n    ok;')
+    variable = _fn('    (bool ok, ) = payable(msg.sender).call{value: amount}("");\n    ok;')
+    hook_refund = HEAD_HOOK + (
+        "contract RefundHook {\n"
+        "  function afterSwap(address target) external {\n"
+        '    (bool ok, ) = target.call{value: 1 ether}("");\n    ok;\n  }\n}\n'
+    )
+    hook_notify = HEAD_HOOK + (
+        "contract NotifyHook {\n"
+        "  function beforeSwap(address target, uint256 amount) external {\n"
+        '    (bool ok, ) = target.call{value: amount}("");\n    ok;\n  }\n}\n'
+    )
+    rows = [
+        ("prefund_safe", prefund_safe, "prefund_style_transfer"),
+        ("prefund_loose", prefund_loose, "prefund_style_transfer"),
+        ("prefund_literal", literal, "prefund_style_transfer"),
+        ("prefund_variable", variable, "prefund_style_transfer"),
+        ("hook_refund", hook_refund, "best_effort_hook"),
+        ("hook_notify", hook_notify, "best_effort_hook"),
+    ]
+    emitted_as_intended = 0
+    genuine_flaws = 0
+    for name, source, pattern in rows:
+        if isinstance(source, dict):
+            from app.parsing.solidity_research import build_research_model
+            from app.parsing.solidity_research_suite import run_suite
+
+            hits = [
+                c
+                for c in run_suite(build_research_model(source)).candidates
+                if c.detector == DETECTOR and c.function.startswith("validateUserOp")
+            ]
+            assert len(hits) == 1, name
+            facts = dict(hits[0].facts)
+            assert hits[0].verified is False and hits[0].confidence == "low"
+        else:
+            emitted, facts = _classified(source)
+            assert emitted, name
+        assert facts["evidence_class"] == "possible_false_positive", name
+        assert facts["pattern"] == pattern, name
+        assert facts["vulnerability_claim"] == "none", name
+        emitted_as_intended += 1
+        # An expected candidate is not proof of a security flaw.
+        genuine_flaws += 0
+    propagated = _fn("    (bool ok, ) = target.call(data);\n    require(ok);")
+    assert _found(propagated) == []
+    assert emitted_as_intended == 6 and genuine_flaws == 0
+
+
+def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
+    """Positive fixture becomes a sequence and a local harness. Negative control does not.
+
+    Forge executes the harness when it is installed. Otherwise the executor reports
+    UNAVAILABLE and the test does not treat that as a completed run or a finding.
+    """
+    from app.discovery.bounty.properties import PropertyDeclaration, build_property
+    from app.discovery.bounty.stateful import Outcome, StatefulExecutor, build_harness
+    from app.discovery.bounty.vfcs import generate
+    from app.parsing.solidity_research import build_research_model
+
+    positive = HEAD_HOOK + (
+        "contract Relay {\n"
+        "  function relay(address target, bytes calldata data) external {\n"
+        "    (bool ok, ) = target.call(data);\n    ok;\n  }\n}\n"
+    )
+    negative = HEAD_HOOK + (
+        "contract Relay {\n"
+        "  function relay(address target, bytes calldata data) external {\n"
+        '    (bool ok, ) = target.call(data);\n    require(ok, "propagated");\n  }\n}\n'
+    )
+    sources = {"Relay.sol": positive}
+    model = build_research_model(sources)
+    hits = [
+        c for c in analyze_text(positive, ("caller_context",)).candidates if c.detector == DETECTOR
+    ]
+    assert len(hits) == 1
+    candidate = hits[0]
+    facts = dict(candidate.facts)
+    assert facts["evidence_class"] == "detector_emission"
+    assert facts["vulnerability_claim"] == "none"
+    assert facts["target_parameter"] == "target"
+    assert facts["calldata_parameter"] == "data"
+    assert facts["failure_propagation"] == "swallowed"
+    assert candidate.verified is False and candidate.confidence == "low"
+
+    built = generate(model, [candidate])
+    assert len(built.sequences) == 1, built.skipped
+    sequence = built.sequences[0]
+    assert sequence.template == "failing-callee→swallowed-call"
+    assert sequence.verified is False
+    assert sequence.calls[0].primitive and sequence.calls[0].function == "deploy_reverting()"
+    assert any(value == "reverting_callee" for _name, value in sequence.calls[1].arguments)
+
+    spec = build_property(sequence, model, candidate)
+    assert spec.declaration is PropertyDeclaration.PROPERTY_UNDER_TEST
+    assert spec.oracle.executable
+    assert spec.as_dict()["verified"] is False
+
+    harness = build_harness(sequence, model, oracle=spec.oracle, sources=sources)
+    assert harness.buildable, harness.reason
+    assert "BugForgeRevertingCallee" in harness.source
+    assert "relay(address,bytes)" in harness.source
+    assert "ffi" not in harness.source
+
+    safe_hits = [
+        c for c in analyze_text(negative, ("caller_context",)).candidates if c.detector == DETECTOR
+    ]
+    assert safe_hits == []
+
+    executor = StatefulExecutor()
+    observation = executor.execute(sequence, model, sources, spec=spec)
+    assert observation.verified is False
+    if not executor.available():
+        assert observation.outcome is Outcome.UNAVAILABLE
+        assert observation.result is None or observation.result.test_status == "not_run"
+        assert observation.strong_candidate is False
+        return
+
+    assert observation.outcome is Outcome.PROPERTY_VIOLATED, observation.reason
+    result = observation.result
+    assert result is not None
+    assert result.compiler_status == "ok"
+    assert result.test_status == "passed"
+    assert result.process_status == "completed"
+    assert result.call_results[1] == 1  # outer call succeeded; the callee revert was swallowed
+    held = executor.execute(
+        sequence, build_research_model({"Relay.sol": negative}), {"Relay.sol": negative}, spec=spec
+    )
+    assert held.outcome is Outcome.PROPERTY_HELD, held.reason
+    assert held.verified is False
+    assert held.result is not None and held.result.compiler_status == "ok"
+
+
+def test_unknown_receiver_and_constructor_are_limitations() -> None:
+    from app.discovery.bounty.stateful import build_harness
+    from app.discovery.bounty.vfcs import generate
+    from app.parsing.solidity_research import build_research_model
+
+    self_call = HEAD_HOOK + (
+        "contract Box {\n  function poke(bytes calldata data) external {\n"
+        "    (bool ok, ) = address(this).call(data);\n    ok;\n  }\n}\n"
+    )
+    model = build_research_model({"Box.sol": self_call})
+    hits = [
+        c for c in analyze_text(self_call, ("caller_context",)).candidates if c.detector == DETECTOR
+    ]
+    assert len(hits) == 1
+    assert dict(hits[0].facts)["target_parameter"] == "unknown"
+    skipped = generate(model, hits)
+    assert skipped.sequences == ()
+    assert "not invented" in skipped.skipped[0][1]
+
+    needs_oracle = HEAD_HOOK + (
+        "interface IOracle { function price() external view returns (uint256); }\n"
+        "contract Relay {\n  constructor(IOracle oracle) {}\n"
+        "  function relay(address target, bytes calldata data) external {\n"
+        "    (bool ok, ) = target.call(data);\n    ok;\n  }\n}\n"
+    )
+    sources = {"Relay.sol": needs_oracle}
+    relay_model = build_research_model(sources)
+    relay_hits = [
+        c
+        for c in analyze_text(needs_oracle, ("caller_context",)).candidates
+        if c.detector == DETECTOR
+    ]
+    sequence = generate(relay_model, relay_hits).sequences[0]
+    harness = build_harness(sequence, relay_model, sources=sources)
+    assert harness.buildable is False
+    assert harness.reason_code == "unknown_constructor_argument"

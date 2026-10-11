@@ -666,6 +666,7 @@ class _Synth:
         self.relationships: list[Relationship] = []
         self.token_kind = ""  # standard | fee_on_transfer | false_return
         self.token_bound = False  # the target can see the fixture token
+        self.failing_callee = False
         self.funded: set[str] = set()
         self.approved: set[str] = set()
         self.counter = 0
@@ -769,6 +770,13 @@ class _Synth:
                 "fixed-size arrays are not expressible", "param_not_expressible"
             )
         if abi == "address":
+            if override == "reverting_callee":
+                if not self.failing_callee:
+                    raise _UnbuildableError(
+                        "a reverting callee was requested before the harness deployed one",
+                        "unsupported_primitive",
+                    )
+                return "address(bfCallee)"
             if override in {VICTIM, "victim", "second_owner"}:
                 return VICTIM_ADDR
             if override in {"attacker_controlled", "attacker_substituted", ATTACKER}:
@@ -791,6 +799,7 @@ class _Synth:
         if abi == "string":
             return '""'
         if abi == "bytes":
+            # Empty calldata still hits the reverting callee's fallback.
             return 'bytes("")'
         if abi.startswith("bytes"):
             return f"{abi}(0)"
@@ -924,6 +933,23 @@ class _Synth:
     # -- primitives ------------------------------------------------------------------------
     def primitive(self, index: int, call: VfcsCall) -> None:
         actor_addr = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        if call.function == "deploy_reverting()":
+            self.failing_callee = True
+            self.steps.append(
+                "        BugForgeRevertingCallee bfCallee = new BugForgeRevertingCallee();"
+            )
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="test_deploy:reverting_callee",
+                    purpose="a local callee that reverts on every call",
+                    actor="harness",
+                    value="fallback revert",
+                    property_relevance=call.established_by,
+                    established_by=call.established_by,
+                )
+            )
+            return
         if call.function == "warp(uint256)":
             self.steps.append("        vm.warp(block.timestamp + 1 days);")
             self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
@@ -1059,6 +1085,7 @@ class _Synth:
             schema=HARNESS_SCHEMA,
             imports="".join(f'import "src/{path}";\n' for path in self.imports()),
             fixture=_FIXTURE_TOKEN if self.token_kind else "",
+            reverting=_REVERTING_CALLEE if self.failing_callee else "",
             body=body,
         )
 
@@ -1141,7 +1168,7 @@ _HARNESS_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.7.0;
 
 import {{Test}} from "forge-std/Test.sol";
-{imports}{fixture}
+{imports}{fixture}{reverting}
 contract VfcsHarness is Test {{
     event BugForgeObservation(uint256 kind, uint256 index, uint256 value);
 
@@ -1204,6 +1231,14 @@ contract BugForgeFixtureToken {
         balanceOf[to] += amount - fee;
         totalSupply -= fee;
         return true;
+    }
+}
+"""
+
+_REVERTING_CALLEE = """
+contract BugForgeRevertingCallee {
+    fallback() external payable {
+        revert("bf-revert");
     }
 }
 """
