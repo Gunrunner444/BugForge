@@ -12,9 +12,11 @@ fact the source does not show stays absent or ``unknown``.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 MAX_FILES = 64
 MAX_FILE_BYTES = 400_000
@@ -122,6 +124,11 @@ class ResearchModel:
     truncated: bool = False
     notes: tuple[str, ...] = ()
     digest: str = ""
+    # path -> sha256 of every file this model was built from, in canonical order.
+    # Empty means the model has no source attestation. A later caller must not
+    # treat that as a match for whatever source text is supplied.
+    source_hashes: tuple[tuple[str, str], ...] = ()
+    source_set_digest: str = ""
 
     def bases_of(self, contract: str) -> tuple[str, ...]:
         """Base contracts, nearest first, bounded and cycle-safe."""
@@ -377,8 +384,11 @@ def build_research_model(
         model.truncated = True
         notes.append(f"only {max_files} of {len(ordered)} files were read")
     hasher = hashlib.sha256()
-    for path in ordered[:max_files]:
+    considered = ordered[:max_files]
+    file_hashes: list[tuple[str, str]] = []
+    for path in considered:
         text = sources[path]
+        file_hashes.append((path, hashlib.sha256(text.encode("utf-8")).hexdigest()))
         hasher.update(path.encode())
         hasher.update(hashlib.sha256(text.encode()).digest())
         if len(text) > MAX_FILE_BYTES:
@@ -399,7 +409,68 @@ def build_research_model(
     model.ambiguous = frozenset(ambiguous)
     model.notes = tuple(notes)
     model.digest = hasher.hexdigest()[:16]
+    model.source_hashes = tuple(file_hashes)
+    model.source_set_digest = canonical_source_digest(dict(file_hashes))
     return model
+
+
+def _posix_repo_path(path: str) -> str:
+    """A relative POSIX path. Absolute paths and ``..`` aliases are rejected."""
+    pure = PurePosixPath(str(path).replace("\\", "/"))
+    if pure.is_absolute() or ".." in pure.parts or not pure.parts:
+        return ""
+    text = pure.as_posix()
+    return text[2:] if text.startswith("./") else text
+
+
+def canonical_source_digest(hashes: Mapping[str, str]) -> str:
+    """Deterministic digest of a path→sha256 map. Path order cannot change it."""
+    payload = json.dumps(sorted(hashes.items()), separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def model_source_problems(model: ResearchModel, sources: Mapping[str, str]) -> tuple[str, ...]:
+    """Why ``sources`` is not the text this model was parsed from.
+
+    A model parsed from source A must not be trusted with a mapping of source B,
+    even when the contract name and function signature are unchanged. Missing
+    attestation is not treated as a match.
+    """
+    problems: list[str] = []
+    normalized: dict[str, str] = {}
+    for path, text in sources.items():
+        key = _posix_repo_path(path)
+        if not key:
+            problems.append(f"{path} is not a normalized relative path")
+            continue
+        if key in normalized:
+            problems.append(f"{path} duplicates the source path {key}")
+            continue
+        normalized[key] = text
+    recorded = dict(model.source_hashes)
+    if not recorded:
+        if model.contracts or normalized:
+            problems.append("the parsed model has no source attestation")
+        return tuple(problems[:12])
+    current = {
+        path: hashlib.sha256(text.encode("utf-8")).hexdigest() for path, text in normalized.items()
+    }
+    for path, digest_value in current.items():
+        expected = recorded.get(path)
+        if expected is None:
+            problems.append(f"{path} is not part of the model's parsed source")
+        elif expected != digest_value:
+            problems.append(f"{path} does not match the model's parsed source")
+    for path in recorded:
+        if path not in current:
+            problems.append(f"{path} from the model's parsed source is missing")
+    if (
+        model.source_set_digest
+        and canonical_source_digest(recorded) != canonical_source_digest(current)
+        and not problems
+    ):
+        problems.append("the model source-set digest does not match the supplied sources")
+    return tuple(problems[:12])
 
 
 def _contracts_in_file(path: str, text: str) -> Iterator[RContract]:

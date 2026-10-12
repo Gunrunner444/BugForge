@@ -753,11 +753,69 @@ class BountyCampaignService:
 
     # ---- analysis-backed reads ----------------------------------------------------------
 
+    def _snapshot_token(self, campaign: BountyCampaign) -> str:
+        """Content and inventory identity for the campaign's current source snapshot."""
+        import hashlib
+
+        from app.discovery.bounty.analysis import read_sources
+        from app.discovery.orchestration.codec import digest
+
+        root = campaign.spec.repo_root
+        listing: list[str] = []
+        skip = {
+            ".git",
+            "node_modules",
+            "lib",
+            "out",
+            "cache",
+            "artifacts",
+            "broadcast",
+            "test",
+            "tests",
+        }
+        if root.is_dir():
+            for path in sorted(root.rglob("*.sol")):
+                rel = path.relative_to(root)
+                if set(rel.parts) & skip:
+                    continue
+                listing.append(rel.as_posix())
+                if len(listing) >= 2000:
+                    break
+        sources = read_sources(root, campaign.request.files)
+        hashes = tuple(
+            sorted(
+                (path, hashlib.sha256(text.encode("utf-8")).hexdigest())
+                for path, text in sources.items()
+            )
+        )
+        return digest(
+            {
+                "listing": listing,
+                "hashes": hashes,
+                "compiler": campaign.manifest.compiler.fingerprint(),
+                "contract": campaign.spec.contract,
+                "address": campaign.spec.address.lower(),
+                "chain_id": campaign.spec.chain_id,
+                "selected": list(campaign.selection.selected),
+                "mode": campaign.selection.mode,
+            }
+        )
+
+    def analysis_stale(self, campaign: BountyCampaign) -> bool:
+        """True when a cached analysis no longer matches the files on disk."""
+        if campaign.cache.get("analysis") is None:
+            return False
+        return bool(campaign.cache.get("analysis_stale"))
+
     def _analysis(self, campaign: BountyCampaign) -> CampaignAnalysis:
         from app.discovery.bounty.analysis import analyze_campaign
 
+        token = self._snapshot_token(campaign)
         cached = campaign.cache.get("analysis")
         if cached is not None:
+            # Keep the plan that was built. A changed snapshot is stale and must
+            # not be restamped; execution fails closed until reanalyze().
+            campaign.cache["analysis_stale"] = campaign.cache.get("analysis_token") != token
             return cast("CampaignAnalysis", cached)
         analysis = analyze_campaign(
             manifest=campaign.manifest,
@@ -770,7 +828,31 @@ class BountyCampaignService:
             chain_id=campaign.spec.chain_id,
         )
         campaign.cache["analysis"] = analysis
+        campaign.cache["analysis_token"] = token
+        campaign.cache["analysis_stale"] = False
         return analysis
+
+    def reanalyze(self, campaign_id: str) -> CampaignAnalysis:
+        """Build a new plan from the current snapshot. Old executions are not copied onto it."""
+        from dataclasses import replace
+
+        from app.discovery.bounty.source_selection import select_sources
+
+        campaign = self.get(campaign_id)
+        if campaign.selection.mode != "explicit":
+            fresh = select_sources(
+                campaign.spec.repo_root,
+                manifest=campaign.manifest,
+                focus_contract=campaign.spec.contract,
+                focus_file=campaign.spec.source_file,
+                limit=max(1, min(campaign.spec.source_limit, MAX_FILES_PER_REQUEST)),
+            )
+            campaign.selection = fresh
+            campaign.request = replace(campaign.request, files=fresh.selected)
+        campaign.cache.pop("analysis", None)
+        campaign.cache.pop("analysis_token", None)
+        campaign.cache.pop("analysis_stale", None)
+        return self._analysis(campaign)
 
     def findings(self, campaign_id: str) -> dict[str, Any]:
         from app.discovery.bounty.findings import build_findings
@@ -1142,10 +1224,20 @@ class BountyCampaignService:
             "verified": False,
         }
         if not execution_enabled():
-            return {**unavailable, "reason": "local stateful execution is disabled"}
+            return {
+                **unavailable,
+                "reason": "local stateful execution is disabled",
+                "blocker": "local stateful execution is disabled",
+                "dynamic_foundry_execution_demonstrated": False,
+            }
         if not tools.available:
             missing = "forge" if tools.forge != "available" else "solc"
-            return {**unavailable, "reason": f"{missing} is not installed; unavailable"}
+            return {
+                **unavailable,
+                "reason": f"{missing} is not installed; unavailable",
+                "blocker": "Foundry or solc is unavailable",
+                "dynamic_foundry_execution_demonstrated": False,
+            }
         analysis = self._analysis(campaign)
         context = self._identity_context(campaign, analysis)
         runnable: list[Any] = []
@@ -1211,6 +1303,27 @@ class BountyCampaignService:
             ),
         )
         campaign.cache.pop("coverage", None)
+        from app.discovery.bounty.research_ledger import campaign_coverage
+
+        summary = campaign_coverage(
+            files_discovered=campaign.selection.considered,
+            files_selected=len(campaign.selection.selected),
+            files_read=len(analysis.sources),
+            truncated=bool(analysis.truncated or campaign.selection.truncated),
+            dependency_status=str(campaign.selection.as_dict().get("dependency_status", "unknown")),
+            contracts_modeled=(len(analysis.model.contracts) if analysis.model is not None else 0),
+            functions_modeled=(
+                len(analysis.model.all_functions()) if analysis.model is not None else 0
+            ),
+            candidates=len(analysis.candidates),
+            sequences=len(analysis.sequences),
+            skipped=analysis.sequence_skipped,
+            executions=executions,
+            forge_runs=executor.runs,
+            engines=registry_snapshot,
+            persistence_status=str(persistence.get("status", "")),
+            analysis_stale=self.analysis_stale(campaign),
+        )
         return {
             "campaign_id": campaign_id,
             "available": True,
@@ -1221,6 +1334,11 @@ class BountyCampaignService:
             "bundles": sorted(bundles),
             "persistence": persistence,
             "engines": registry_snapshot,
+            "campaign_summary": summary,
+            "blocker": summary["blocker"],
+            "dynamic_foundry_execution_demonstrated": summary[
+                "dynamic_foundry_execution_demonstrated"
+            ],
             **result.as_dict(),
         }
 
@@ -1376,17 +1494,42 @@ class BountyCampaignService:
         campaign = self.get(campaign_id)
         analysis = self._analysis(campaign)
         specs = self._property_specs(analysis)
+        executions = self.stored_executions(campaign, analysis)
         ledger = build_ledger(
             models=analysis.all_models(),
             candidates=analysis.candidates,
             sequences=analysis.sequences,
             specs=specs,
             skipped=analysis.sequence_skipped,
-            executions=self.stored_executions(campaign, analysis),
+            executions=executions,
             engines=self._engine_snapshot(campaign),
             manifest=campaign.manifest,
         )
-        return {"campaign_id": campaign_id, **ledger}
+        from app.discovery.bounty.research_ledger import campaign_coverage
+
+        stored = dict(campaign.record.artifacts.get("stateful", {}))
+        runs = list(stored.get("runs", []))
+        forge_runs = sum(int(item.get("forge_runs") or 0) for item in runs) if runs else None
+        model = analysis.model
+        summary = campaign_coverage(
+            files_discovered=campaign.selection.considered,
+            files_selected=len(campaign.selection.selected),
+            files_read=len(analysis.sources),
+            truncated=bool(analysis.truncated or campaign.selection.truncated),
+            truncation_notes=tuple(model.notes) if model is not None else (),
+            dependency_status=str(campaign.selection.as_dict().get("dependency_status", "unknown")),
+            contracts_modeled=len(model.contracts) if model is not None else 0,
+            functions_modeled=len(model.all_functions()) if model is not None else 0,
+            candidates=len(analysis.candidates),
+            sequences=len(analysis.sequences),
+            skipped=analysis.sequence_skipped,
+            executions=executions,
+            forge_runs=forge_runs,
+            engines=self._engine_snapshot(campaign),
+            persistence_status="persisted" if stored else "not_recorded",
+            analysis_stale=self.analysis_stale(campaign),
+        )
+        return {"campaign_id": campaign_id, "campaign_summary": summary, **ledger}
 
     def evidence_graph(self, campaign_id: str) -> dict[str, Any]:
         """The derived evidence graph: provenance on every edge, contradictions visible."""

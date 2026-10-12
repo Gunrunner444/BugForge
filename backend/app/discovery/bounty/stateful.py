@@ -64,7 +64,7 @@ from app.discovery.bounty.vfcs import (
     mutate,
 )
 from app.discovery.process import tool_path
-from app.parsing.solidity_research import Param, ResearchModel, RFunction
+from app.parsing.solidity_research import Param, ResearchModel, RFunction, model_source_problems
 
 MAX_CALLS = 8
 MAX_FEEDBACK_ROUNDS = 3
@@ -331,6 +331,74 @@ def source_set_digest(hashes: Mapping[str, str]) -> str:
     return sha256_text(json.dumps(sorted(hashes.items()), separators=(",", ":")))
 
 
+def _deployment_problem(sequence_deployment: str, context_deployment: str) -> str:
+    """Source-only, unspecified, and a pinned deployment are not interchangeable.
+
+    ``""`` on a sequence is source-oriented (no deployment was known when it was
+    built). ``"source"`` is an explicit source-only declaration. Any other value
+    is a pinned ``chain:address``. An unspecified context may run a source-oriented
+    sequence. It may not run a pinned one, because the deployment was not established.
+    """
+    seq_source = sequence_deployment in ("", "source")
+    if context_deployment == "":
+        if seq_source:
+            return ""
+        return (
+            f"the sequence is bound to {sequence_deployment}, and the execution context "
+            "does not establish that deployment"
+        )
+    if context_deployment == "source":
+        if seq_source:
+            return ""
+        return f"a source-only execution cannot run a sequence bound to {sequence_deployment}"
+    if seq_source:
+        return (
+            f"a deployment-specific execution ({context_deployment}) cannot run a "
+            "source-only sequence"
+        )
+    if sequence_deployment != context_deployment:
+        return (
+            f"the sequence is bound to {sequence_deployment}, not the target {context_deployment}"
+        )
+    return ""
+
+
+def _identity_agreement(label: str, recorded: str, supplied: str) -> str:
+    """A required compiler or implementation value must be established, not assumed.
+
+    Empty on both sides means the operation does not require that field. A value on
+    only one side cannot be verified. Two different values never match.
+    """
+    if not recorded and not supplied:
+        return ""
+    if recorded and supplied and recorded == supplied:
+        return ""
+    if recorded and not supplied:
+        return (
+            f"the sequence requires {label} {recorded}, and the execution context "
+            "does not establish it"
+        )
+    if supplied and not recorded:
+        return (
+            f"the execution context requires {label} {supplied}, and the sequence "
+            "does not record it"
+        )
+    return f"the {label} does not match the sequence ({recorded} != {supplied})"
+
+
+def _reported_deployment(sequence_deployment: str, context_deployment: str) -> str:
+    """The deployment this execution actually represents. Source-only stays ``source``."""
+    if context_deployment == "source" or (
+        context_deployment == "" and sequence_deployment in ("", "source")
+    ):
+        return "source"
+    if context_deployment:
+        return context_deployment
+    if sequence_deployment and sequence_deployment != "source":
+        return sequence_deployment
+    return "source"
+
+
 def bind_identity(
     sequence: Vfcs,
     model: ResearchModel,
@@ -398,23 +466,25 @@ def bind_identity(
     if context.campaign_id and seq_campaign and seq_campaign != context.campaign_id:
         problems.append("the sequence belongs to another campaign")
     seq_deployment = sequence.identity.deployment
-    ctx_deployment = "" if context.deployment == "source" else context.deployment
-    if seq_deployment and ctx_deployment and seq_deployment != ctx_deployment:
-        problems.append(
-            f"the sequence is bound to {seq_deployment}, not the target {ctx_deployment}"
-        )
-    seq_compiler = sequence.identity.compiler_configuration
-    if (
-        context.compiler_configuration
-        and seq_compiler
-        and context.compiler_configuration != seq_compiler
-    ):
-        problems.append("the compiler configuration does not match the sequence")
-    seq_impl = sequence.identity.implementation
-    if context.implementation and seq_impl and context.implementation != seq_impl:
-        problems.append(
-            f"the sequence is bound to implementation {seq_impl}, not {context.implementation}"
-        )
+    deployment_problem = _deployment_problem(seq_deployment, context.deployment)
+    if deployment_problem:
+        problems.append(deployment_problem)
+    compiler_problem = _identity_agreement(
+        "compiler configuration",
+        sequence.identity.compiler_configuration,
+        context.compiler_configuration,
+    )
+    if compiler_problem:
+        problems.append(compiler_problem)
+    implementation_problem = _identity_agreement(
+        "implementation",
+        sequence.identity.implementation,
+        context.implementation,
+    )
+    if implementation_problem:
+        problems.append(implementation_problem)
+    problems.extend(model_source_problems(model, sources))
+    reported = _reported_deployment(seq_deployment, context.deployment)
     return ExecutionIdentity(
         campaign_id=context.campaign_id or seq_campaign,
         source_snapshot=context.source_snapshot or sequence.identity.source_snapshot,
@@ -425,7 +495,7 @@ def bind_identity(
         contract_file=contract_file,
         chain_id=context.chain_id,
         address=context.address,
-        deployment=ctx_deployment or seq_deployment or "source",
+        deployment=reported,
         runtime_digest=context.runtime_digest,
         proxy_kind=context.proxy_kind or "none",
         implementation=context.implementation,

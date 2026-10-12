@@ -31,6 +31,36 @@ FAMILY = "caller_context"
 _SENDER = r"(?:msg\.sender|_msgSender\(\))"
 _ROLE_WORDS = ("hasRole", "_checkRole", "onlyRole")
 _SELF_EXPRESSIONS = frozenset({"address(this)", "this", "address(this).balance"})
+_HELPER_DEPTH = 2
+_SKIP_CALLS = frozenset(
+    {
+        "if",
+        "for",
+        "while",
+        "do",
+        "return",
+        "require",
+        "assert",
+        "revert",
+        "emit",
+        "new",
+        "delete",
+        "unchecked",
+        "try",
+        "catch",
+        "else",
+        "abi",
+        "keccak256",
+        "sha256",
+        "ecrecover",
+        "addmod",
+        "mulmod",
+        "super",
+        "_",
+    }
+)
+_AUTH_HINT = re.compile(r"check|only|auth|owner|role|guard", re.I)
+_INTERNAL_CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
 
 
 @dataclass(frozen=True)
@@ -56,20 +86,73 @@ class ContextEdge:
 
 
 def sender_checks(model: ResearchModel, function: RFunction) -> tuple[list[AuthCheck], bool]:
-    """Authorization checks on a function and whether any modifier could not be resolved."""
+    """Authorization checks on a function and whether any modifier could not be resolved.
+
+    An inherited modifier is visible through ``model.modifier``. A check that lives
+    in an internal helper called from that modifier or from the function body is
+    inlined for a bounded number of hops. An auth-shaped helper that cannot be
+    resolved stays unresolved, so a protected function is not reported as unprotected.
+    """
     checks: list[AuthCheck] = []
     unresolved = False
     state = model.state_vars(function.contract)
     params = set(function.param_names())
+    seen: set[tuple[str, str]] = set()
+    regions: list[tuple[str, str]] = []
     for raw in function.modifiers:
         name = raw.split("(", 1)[0]
         modifier = model.modifier(function.contract, name)
         if modifier is None:
             unresolved = True
             continue
-        checks.extend(_checks_in(modifier.body, state, params, f"modifier:{name}"))
-    checks.extend(_checks_in(function.body, state, params, "body"))
+        regions.append((modifier.body, f"modifier:{name}"))
+    regions.append((function.body, "body"))
+    for text, origin in regions:
+        checks.extend(_checks_in(text, state, params, origin))
+        extra, missing = _helper_checks(
+            model, function.contract, text, state, params, seen, _HELPER_DEPTH
+        )
+        checks.extend(extra)
+        unresolved = unresolved or missing
     return checks, unresolved
+
+
+def _helper_checks(
+    model: ResearchModel,
+    contract: str,
+    text: str,
+    state: dict[str, str],
+    params: set[str],
+    seen: set[tuple[str, str]],
+    depth: int,
+) -> tuple[list[AuthCheck], bool]:
+    """Checks inside internal helpers, and whether an auth-shaped helper was missing."""
+    if depth <= 0:
+        return [], False
+    found: list[AuthCheck] = []
+    unresolved = False
+    for match in _INTERNAL_CALL.finditer(text):
+        name = match.group(1)
+        if name in _SKIP_CALLS or name.startswith("abi"):
+            continue
+        key = (contract, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        helper = model.function(contract, name)
+        if helper is None or not helper.has_body or helper.kind != "function":
+            if name.startswith("_") and _AUTH_HINT.search(name):
+                unresolved = True
+            continue
+        if helper.visibility in {"public", "external"} and not name.startswith("_"):
+            continue
+        found.extend(_checks_in(helper.body, state, params, f"helper:{name}"))
+        nested, missing = _helper_checks(
+            model, helper.contract, helper.body, state, params, seen, depth - 1
+        )
+        found.extend(nested)
+        unresolved = unresolved or missing
+    return found, unresolved
 
 
 def _checks_in(text: str, state: dict[str, str], params: set[str], origin: str) -> list[AuthCheck]:

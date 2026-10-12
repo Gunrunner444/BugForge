@@ -21,6 +21,8 @@ from app.discovery.bounty.campaign import BountyManifest
 MAX_CANDIDATE_FILES = 2000
 DEFAULT_LIMIT = 64
 MAX_FILE_BYTES = 400_000
+MAX_DEPENDENCY_DEPTH = 4
+MAX_DEPENDENCY_FILES = 32
 # Bounded follow-up for high-priority files that did not fit the primary budget.
 MAX_FOLLOWUP_BATCHES = 2
 FOLLOWUP_PRIORITY = 4  # Priority.SECURITY_SENSITIVE and better
@@ -29,6 +31,7 @@ _SKIP_DIRS = frozenset(
 )
 _IMPORT = re.compile(r"""import\s+(?:[^\"';]*\s+from\s+)?["']([^"']+)["']""")
 _CONTRACT_DECL = re.compile(r"\b(?:contract|library|interface)\s+([A-Za-z_]\w*)")
+_BASES = re.compile(r"\b(?:abstract\s+)?contract\s+[A-Za-z_]\w*(?:\s+is\s+([^{;]+))?\s*\{")
 _SENSITIVE = (
     re.compile(r"\.delegatecall\s*\("),
     re.compile(r"\bselfdestruct\s*\(|\bsuicide\s*\("),
@@ -70,6 +73,11 @@ class SourceSelection:
     # name is never silently bound to the first file in alphabetical order.
     ambiguous_contracts: tuple[tuple[str, tuple[str, ...]], ...] = ()
     mode: str = "ranked"  # ranked | explicit
+    # Imports and bases that could not be tied to one file inside the repository.
+    unresolved_imports: tuple[tuple[str, str], ...] = ()
+    ambiguous_imports: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    escaped_imports: tuple[tuple[str, str], ...] = ()
+    dependency_notes: tuple[str, ...] = ()
 
     @staticmethod
     def explicit(files: tuple[str, ...]) -> SourceSelection:
@@ -122,6 +130,12 @@ class SourceSelection:
             extra["source_selection_ambiguous"] = ",".join(
                 name for name, _ in self.ambiguous_contracts
             )[:300]
+        if self.unresolved_imports or self.ambiguous_imports or self.escaped_imports:
+            extra["source_dependency_status"] = "partial"
+        elif self.dependency_notes:
+            extra["source_dependency_status"] = "bounded"
+        else:
+            extra["source_dependency_status"] = "traced"
         return extra
 
     def as_dict(self) -> dict[str, Any]:
@@ -139,6 +153,23 @@ class SourceSelection:
             "followup_batches": [list(batch) for batch in batches],
             "never_read": [p for p in self.dropped_high_priority if p not in followed][:200],
             "ambiguous_contracts": {name: list(files) for name, files in self.ambiguous_contracts},
+            "unresolved_imports": [
+                {"file": src, "import": target} for src, target in self.unresolved_imports
+            ],
+            "ambiguous_imports": [
+                {"import": target, "files": list(files)} for target, files in self.ambiguous_imports
+            ],
+            "escaped_imports": [
+                {"file": src, "import": target} for src, target in self.escaped_imports
+            ],
+            "dependency_notes": list(self.dependency_notes),
+            "dependency_status": (
+                "partial"
+                if self.unresolved_imports or self.ambiguous_imports or self.escaped_imports
+                else "bounded"
+                if self.dependency_notes or self.truncated
+                else "traced"
+            ),
             "note": (
                 "truncated=true means files were not read under the budget; a dropped file "
                 "is not implied to be clean, safe, or out of scope"
@@ -197,7 +228,9 @@ def select_sources(
     )
     contract_to_files = _contract_index(texts)
     scope_files = _files_for(scope_contracts, scope_paths, contract_to_files, focus_file)
-    imported = _imports_of(scope_files, texts, root)
+    dependencies, unresolved, ambiguous_imports, escaped, dependency_notes = _trace_dependencies(
+        scope_files, texts, root, contract_to_files
+    )
     ambiguous = tuple(
         (name, tuple(files))
         for name, files in sorted(contract_to_files.items())
@@ -208,7 +241,7 @@ def select_sources(
     ranked: list[RankedFile] = []
     for rel in rel_paths:
         text = texts[rel]
-        priority, reason = _rank_one(rel, text, scope_files, deployed_contracts, imported)
+        priority, reason = _rank_one(rel, text, scope_files, deployed_contracts, dependencies)
         if rel in ambiguous_files and priority.value <= Priority.DEPLOYED.value:
             reason = f"{reason}; contract name {ambiguous_files[rel]} is declared in several files"
         ranked.append(RankedFile(rel, priority, reason))
@@ -224,6 +257,10 @@ def select_sources(
         truncated=len(ranked) > limit,
         dropped=dropped,
         ambiguous_contracts=ambiguous,
+        unresolved_imports=tuple(unresolved),
+        ambiguous_imports=tuple(ambiguous_imports),
+        escaped_imports=tuple(escaped),
+        dependency_notes=tuple(dependency_notes),
     )
 
 
@@ -276,21 +313,121 @@ def _files_for(
     return files
 
 
-def _imports_of(scope_files: set[str], texts: dict[str, str], root: Path) -> set[str]:
-    imported: set[str] = set()
-    for rel in scope_files:
+def _base_names(text: str) -> list[str]:
+    names: list[str] = []
+    for match in _BASES.finditer(text):
+        clause = match.group(1) or ""
+        for part in clause.split(","):
+            found = re.match(r"\s*([A-Za-z_][\w.]*)", part)
+            if found:
+                names.append(found.group(1).split(".")[-1])
+    return names
+
+
+def _resolve_import(
+    target: str, rel: str, texts: dict[str, str], root: Path
+) -> tuple[str, str | tuple[str, ...]]:
+    """Resolve one import to a single repository path, or report why it cannot.
+
+    A non-relative import matches the full suffix first. A bare basename is used
+    only when exactly one file has that name. Several matches stay ambiguous.
+    """
+    if target.startswith("."):
+        resolved = ((root / rel).parent / target).resolve()
+        try:
+            posix = resolved.relative_to(root).as_posix()
+        except ValueError:
+            return "escaped", target
+        if posix in texts:
+            return "resolved", posix
+        return "unresolved", target
+    suffix = target.lstrip("/")
+    matches = [path for path in texts if path == suffix or path.endswith("/" + suffix)]
+    if len(matches) == 1:
+        return "resolved", matches[0]
+    if len(matches) > 1:
+        return "ambiguous", tuple(sorted(matches))
+    base = suffix.split("/")[-1]
+    if base and base != suffix:
+        base_matches = [path for path in texts if path == base or path.endswith("/" + base)]
+        if len(base_matches) == 1:
+            return "resolved", base_matches[0]
+        if len(base_matches) > 1:
+            return "ambiguous", tuple(sorted(base_matches))
+    base_matches = [path for path in texts if path == base or path.endswith("/" + base)]
+    if len(base_matches) == 1:
+        return "resolved", base_matches[0]
+    if len(base_matches) > 1:
+        return "ambiguous", tuple(sorted(base_matches))
+    return "unresolved", target
+
+
+def _trace_dependencies(
+    scope_files: set[str],
+    texts: dict[str, str],
+    root: Path,
+    contract_to_files: dict[str, list[str]],
+) -> tuple[
+    set[str],
+    list[tuple[str, str]],
+    list[tuple[str, tuple[str, ...]]],
+    list[tuple[str, str]],
+    list[str],
+]:
+    """Bounded imports and unique bases of the in-scope files. Uncertainty stays visible."""
+    resolved: set[str] = set()
+    unresolved: list[tuple[str, str]] = []
+    ambiguous: list[tuple[str, tuple[str, ...]]] = []
+    escaped: list[tuple[str, str]] = []
+    notes: list[str] = []
+    seen_imports: set[tuple[str, str]] = set()
+    queue = [(path, 0) for path in sorted(scope_files) if path in texts]
+    visited: set[str] = set()
+    while queue:
+        rel, depth = queue.pop(0)
+        if rel in visited:
+            continue
+        visited.add(rel)
+        if depth > 0 and len(resolved) >= MAX_DEPENDENCY_FILES:
+            notes.append(
+                f"dependency trace stopped after {MAX_DEPENDENCY_FILES} files; "
+                "further imports were not followed"
+            )
+            break
+        if depth >= MAX_DEPENDENCY_DEPTH:
+            notes.append(f"dependency depth limit {MAX_DEPENDENCY_DEPTH} reached at {rel}")
+            continue
         text = texts.get(rel, "")
-        base = (root / rel).parent
         for target in _IMPORT.findall(text):
-            if target.startswith("."):
-                resolved = (base / target).resolve()
-                try:
-                    imported.add(resolved.relative_to(root).as_posix())
-                except ValueError:
-                    continue
+            key = (rel, target)
+            if key in seen_imports:
+                continue
+            seen_imports.add(key)
+            status, payload = _resolve_import(target, rel, texts, root)
+            if status == "resolved" and isinstance(payload, str):
+                if payload not in scope_files:
+                    resolved.add(payload)
+                if payload not in visited:
+                    queue.append((payload, depth + 1))
+            elif status == "ambiguous" and isinstance(payload, tuple):
+                ambiguous.append((target, payload))
+            elif status == "escaped":
+                escaped.append((rel, target))
             else:
-                imported.add(target.split("/")[-1])
-    return imported
+                unresolved.append((rel, target))
+        for base in _base_names(text):
+            declaring = contract_to_files.get(base, [])
+            if len(declaring) == 1:
+                path = declaring[0]
+                if path not in scope_files:
+                    resolved.add(path)
+                if path not in visited:
+                    queue.append((path, depth + 1))
+            elif len(declaring) > 1:
+                ambiguous.append((base, tuple(declaring)))
+            else:
+                unresolved.append((rel, base))
+    return resolved, unresolved, ambiguous, escaped, notes
 
 
 def _rank_one(
@@ -307,8 +444,8 @@ def _rank_one(
         return Priority.DEPLOYED, "declares a deployed contract"
     if _is_proxy_like(text):
         return Priority.PROXY, "proxy / implementation code (delegatecall + slot/base)"
-    if rel in imported or any(rel.endswith("/" + name) or rel == name for name in imported):
-        return Priority.IMPORTED_BY_SCOPE, "imported by an in-scope file"
+    if rel in imported:
+        return Priority.IMPORTED_BY_SCOPE, "import or base required by an in-scope contract"
     if any(pattern.search(text) for pattern in _SENSITIVE):
         return Priority.SECURITY_SENSITIVE, "security-sensitive construct present"
     return Priority.OTHER, "not prioritized"

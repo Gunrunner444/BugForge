@@ -64,6 +64,7 @@ def test_a_detector_regression_shows_up_as_a_failed_case(tmp_path: Path) -> None
     assert report["totals"]["fp"] == 1
     failed = [c["id"] for c in report["cases"] if c["static"] == "fail"]
     assert failed == ["bridge_receiver"]
+    assert report["digest"] != run_benchmark(HISTORY)["digest"]
 
 
 @requires_forge
@@ -72,9 +73,10 @@ def test_stateful_twins_agree_with_their_expected_outcomes() -> None:
     cases = json.loads((HISTORY / "benchmark.json").read_text())["cases"]
     assert report["stateful"]["disagree"] == 0
     assert report["stateful"]["agree"] == sum(1 for case in cases if case.get("stateful"))
-    assert report["stateful"]["identity_rejection"] == "identity_mismatch"
-    assert report["stateful"]["identity_rejection_executed"] is False
-    assert report["stateful"]["identity_rejection_forge_delta"] == 0
+    assert "identity_rejection" not in report["stateful"]
+    assert report["identity_validation"]["outcome"] == "identity_mismatch"
+    assert report["identity_validation"]["executed"] is False
+    assert report["identity_validation"]["forge_delta"] == 0
     assert report["fixture_precision"] != report.get("real_world_rate")
     lines = ["benchmark (emission is not vulnerability precision)"]
     for case in report["cases"]:

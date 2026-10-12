@@ -49,6 +49,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
     cases: list[dict[str, Any]] = []
     totals = {"tp": 0, "fn": 0, "fp": 0, "tn": 0}
     stateful = {"agree": 0, "disagree": 0, "not_run": 0}
+    identity_validation = {"outcome": "not_run", "executed": None, "forge_delta": None}
     for case in list(spec.get("cases", []))[:MAX_CASES]:
         detector = str(case["detector"])
         contract = str(case.get("contract", ""))
@@ -119,7 +120,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 outcomes.get("vulnerable", ""), "unclassified"
             )
             vulnerable_obs = observed.get("vulnerable")
-            if vulnerable_sequence is not None and "identity_rejection" not in stateful:
+            if vulnerable_sequence is not None and identity_validation["outcome"] == "not_run":
                 altered = {files["vulnerable"].name: texts["vulnerable"] + "\n"}
                 before = getattr(executor, "runs", None)
                 rejected = executor.execute(
@@ -128,10 +129,11 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                     altered,
                     spec=build_property(vulnerable_sequence, vuln_model),
                 )
-                stateful["identity_rejection"] = rejected.outcome.value
-                stateful["identity_rejection_executed"] = rejected.executed
-                if before is not None:
-                    stateful["identity_rejection_forge_delta"] = executor.runs - before
+                identity_validation = {
+                    "outcome": rejected.outcome.value,
+                    "executed": rejected.executed,
+                    "forge_delta": (None if before is None else executor.runs - before),
+                }
                 result["identity_rejection"] = rejected.outcome.value
             agreed = all(outcomes.get(role) == want for role, want in expected.items())
             executed = any(getattr(item, "executed", False) for item in observed.values())
@@ -177,10 +179,80 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             totals["tp"] / (totals["tp"] + totals["fn"]) if (totals["tp"] + totals["fn"]) else None
         ),
         "stateful": stateful,
+        "identity_validation": identity_validation,
         "disclaimer": DISCLAIMER,
         "emission_is_not_vulnerability_precision": True,
         "real_world_rate": None,
         "verified": False,
     }
-    report["digest"] = digest({"cases": cases, "totals": totals})
+    report["digest"] = digest(
+        {
+            "cases": [
+                {
+                    "id": case["id"],
+                    "static": case["static"],
+                    "vulnerable_fires": case["vulnerable_fires"],
+                    "safe_fires": case["safe_fires"],
+                    "execution": case["execution"],
+                    "vulnerability_label": case["vulnerability_label"],
+                    "ground_truth": case["ground_truth"],
+                    "stateful": case.get("stateful"),
+                    "identity_rejection": case.get("identity_rejection"),
+                }
+                for case in cases
+            ],
+            "totals": totals,
+            "stateful": stateful,
+            "identity_validation": identity_validation,
+            "fixture_precision": report["fixture_precision"],
+            "fixture_recall": report["fixture_recall"],
+            "real_world_rate": None,
+            "verified": False,
+        }
+    )
     return report
+
+
+def pipeline_coverage_matrix(directory: Path | None = None) -> dict[str, Any]:
+    """Registry-derived view of which detectors have fixtures and executable oracles.
+
+    Untested cells stay ``untested``. This does not run Foundry and does not turn
+    a fixture into a passing execution result.
+    """
+    from app.discovery.bounty.properties import _ORACLE_BUILDERS
+    from app.discovery.bounty.vfcs import _BUILDERS
+
+    cases: list[dict[str, Any]] = []
+    if directory is not None and (directory / "benchmark.json").is_file():
+        spec = json.loads((directory / "benchmark.json").read_text(encoding="utf-8"))
+        cases = list(spec.get("cases", []))
+    by_detector = {str(case.get("detector")): case for case in cases}
+    rows = []
+    for detector in sorted(_BUILDERS):
+        case = by_detector.get(detector)
+        stateful = bool(case and case.get("stateful"))
+        rows.append(
+            {
+                "detector": detector,
+                "registered": True,
+                "sequence_builder": True,
+                "positive_fixture": "present" if case else "untested",
+                "safe_control": "present" if case else "untested",
+                "oracle_expected": "specified" if stateful else "untested",
+                "foundry_execution": "untested",
+                "persistence": "untested",
+                "qualification": "untested",
+            }
+        )
+    return {
+        "rows": rows,
+        "oracle_templates": sorted(_ORACLE_BUILDERS),
+        "builders_without_fixture": [
+            row["detector"] for row in rows if row["positive_fixture"] == "untested"
+        ],
+        "note": (
+            "foundry_execution, persistence, and qualification stay untested in this "
+            "view; a present fixture is not an execution result and not a vulnerability"
+        ),
+        "verified": False,
+    }

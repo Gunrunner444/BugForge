@@ -18,7 +18,7 @@ import app.discovery.bounty.service as service_module
 from app.core.config import get_settings
 from app.discovery.bounty.properties import build_property
 from app.discovery.bounty.service import BountyCampaignService, CampaignSpec
-from app.discovery.bounty.stateful import Outcome, StatefulExecutor, tool_status
+from app.discovery.bounty.stateful import IdentityContext, Outcome, StatefulExecutor, tool_status
 from app.discovery.bounty.vfcs import stamp_source_identity
 from app.discovery.process import tool_path
 from app.parsing.solidity_call_outcome import DETECTOR
@@ -247,7 +247,18 @@ def test_campaign_observes_swallowed_call_without_confirming_a_vulnerability(
     assert [c for c in run_suite(control_model).candidates if c.detector == DETECTOR] == []
     control = stamp_source_identity(sequence, negative_sources)
     control_spec = build_property(control, control_model)
-    propagated = executor.execute(control, control_model, negative_sources, spec=control_spec)
+    # The campaign plan records a compiler configuration. The control has to
+    # establish that same configuration; it does not drop the requirement.
+    propagated = executor.execute(
+        control,
+        control_model,
+        negative_sources,
+        spec=control_spec,
+        context=IdentityContext(
+            compiler_configuration=control.identity.compiler_configuration,
+            implementation=control.identity.implementation,
+        ),
+    )
     assert executor.runs == 1
     assert propagated.outcome is Outcome.FAILURE_PROPAGATED, propagated.reason
     assert propagated.verified is False and propagated.strong_candidate is False

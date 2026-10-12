@@ -721,6 +721,185 @@ def build_ledger(
     }
 
 
+def campaign_coverage(
+    *,
+    files_discovered: int | None = None,
+    files_selected: int = 0,
+    files_read: int = 0,
+    truncated: bool = False,
+    truncation_notes: Sequence[str] = (),
+    dependency_status: str = "unknown",
+    contracts_modeled: int | None = None,
+    functions_modeled: int | None = None,
+    candidates: int = 0,
+    sequences: int = 0,
+    skipped: Mapping[str, str] | None = None,
+    executions: Mapping[str, Mapping[str, Any]] | None = None,
+    forge_runs: int | None = None,
+    engines: Sequence[Mapping[str, Any]] = (),
+    persistence_status: str = "",
+    analysis_stale: bool = False,
+) -> dict[str, Any]:
+    """What a campaign actually completed, and the first blocker if execution did not.
+
+    Counts come from the caller. Missing values stay null rather than becoming zero.
+    Local results are never production verification.
+    """
+    skipped = dict(skipped or {})
+    executions = dict(executions or {})
+    by_reason: dict[str, int] = {}
+    for reason in skipped.values():
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    by_outcome: dict[str, int] = {}
+    for record in executions.values():
+        outcome = str(record.get("outcome") or "unknown")
+        by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+    invoked: set[str] = set()
+    if forge_runs:
+        invoked.add("foundry")
+    for record in executions.values():
+        for path in record.get("check_paths") or []:
+            engine = str(path.get("engine") or "")
+            verdict = str(path.get("verdict") or "")
+            reason = str(path.get("reason") or "")
+            if not engine or engine == "foundry":
+                continue
+            if "not installed" in reason or verdict in {"", "not_evaluated"}:
+                continue
+            invoked.add(engine)
+    engine_rows = []
+    not_invoked: list[dict[str, str]] = []
+    for entry in engines:
+        name = str(entry.get("name") or "")
+        status = str(entry.get("status") or "")
+        did = name in invoked
+        row = {
+            "name": name,
+            "role": str(entry.get("role") or ""),
+            "status": status,
+            "reason": str(entry.get("reason") or ""),
+            "invoked": did,
+        }
+        engine_rows.append(row)
+        if status == "usable" and not did and name not in {"bugforge-static"}:
+            not_invoked.append(
+                {
+                    "name": name,
+                    "reason": "usable for this environment, but not invoked on this campaign",
+                }
+            )
+    demonstrated = bool(forge_runs)
+    blocker = _blocker(
+        files_selected=files_selected,
+        files_read=files_read,
+        truncated=truncated,
+        candidates=candidates,
+        sequences=sequences,
+        skipped=skipped,
+        by_outcome=by_outcome,
+        forge_runs=forge_runs,
+        demonstrated=demonstrated,
+        analysis_stale=analysis_stale,
+        executions=len(executions),
+    )
+    return {
+        "files_discovered": files_discovered,
+        "files_selected": files_selected,
+        "files_read": files_read,
+        "truncated": truncated,
+        "analysis_complete": not truncated and not analysis_stale,
+        "analysis_stale": analysis_stale,
+        "truncation_notes": list(truncation_notes)[:12],
+        "dependency_status": dependency_status,
+        "contracts_modeled": contracts_modeled,
+        "functions_modeled": functions_modeled,
+        "candidates": candidates,
+        "sequences": sequences,
+        "sequences_skipped": len(skipped),
+        "skipped_by_reason": dict(sorted(by_reason.items())),
+        "executions": len(executions),
+        "by_outcome": dict(sorted(by_outcome.items())),
+        "forge_runs": forge_runs,
+        "dynamic_foundry_execution_demonstrated": demonstrated,
+        "engines": engine_rows,
+        "engines_not_invoked": not_invoked,
+        "persistence_status": persistence_status or "not_recorded",
+        "blocker": blocker,
+        "local_results_are_not_production_verification": True,
+        "verified": False,
+    }
+
+
+def _blocker(
+    *,
+    files_selected: int,
+    files_read: int,
+    truncated: bool,
+    candidates: int,
+    sequences: int,
+    skipped: Mapping[str, str],
+    by_outcome: Mapping[str, int],
+    forge_runs: int | None,
+    demonstrated: bool,
+    analysis_stale: bool,
+    executions: int,
+) -> str:
+    """The single most useful reason a campaign did not demonstrate dynamic execution."""
+    if analysis_stale:
+        return (
+            "the analyzed snapshot no longer matches the repository; reanalyze "
+            "before treating any plan as current"
+        )
+    if files_selected <= 0:
+        return "no files selected"
+    if files_read <= 0:
+        return "no relevant source was successfully read"
+    if truncated and candidates <= 0 and sequences <= 0:
+        return "analysis was truncated before the target was modeled"
+    if candidates <= 0 and sequences <= 0:
+        return "no detector emitted a candidate"
+    if sequences <= 0 and skipped:
+        reasons = " ".join(skipped.values()).lower()
+        if "model source attestation" in reasons or "identity" in reasons:
+            return "sequence generation was rejected because identity was incomplete"
+        if all("no sequence template" in reason for reason in skipped.values()):
+            return "candidates had no supported sequence template"
+        if any(
+            "not in the model" in reason or "could not" in reason for reason in skipped.values()
+        ):
+            return "the builders applied but could not resolve necessary calls"
+        return "no sequence was generated: " + next(iter(skipped.values()))
+    if sequences <= 0:
+        return "no sequence was generated"
+    if executions <= 0 or forge_runs is None:
+        return "no dynamic Foundry execution was demonstrated"
+    if demonstrated:
+        return ""
+    if by_outcome.get("identity_mismatch"):
+        return "execution was blocked by an identity or source mismatch"
+    if by_outcome.get("unavailable") and not any(
+        key not in {"unavailable", "identity_mismatch"} for key in by_outcome
+    ):
+        return "Foundry or solc is unavailable"
+    if by_outcome.get("compile_failed") and sum(by_outcome.values()) == by_outcome.get(
+        "compile_failed", 0
+    ):
+        return "compilation failed"
+    if any("harness" in reason for reason in skipped.values()):
+        return "the harness could not be constructed"
+    if by_outcome.get("property_unsupported") or any(
+        "unsupported" in reason for reason in skipped.values()
+    ):
+        return "properties were unsupported"
+    if any("budget" in str(key) for key in by_outcome):
+        return "tool or execution budget was exhausted"
+    if by_outcome and set(by_outcome) <= {"inconclusive"}:
+        return "the campaign reached the execution stage but every run was inconclusive"
+    if forge_runs == 0:
+        return "no dynamic Foundry execution was demonstrated"
+    return ""
+
+
 # ---- cost-aware planner -----------------------------------------------------------------------
 
 

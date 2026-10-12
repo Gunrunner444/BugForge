@@ -132,7 +132,7 @@ jobs:
               raise SystemExit(f"tool status is not available: {status.as_dict()}")
           print(status.as_dict())
           PY
-      - name: Run the swallowed-call campaign integration
+      - name: Run stateful integration tests
         working-directory: backend
         env:
           BUGFORGE_REQUIRE_FOUNDRY: "1"
@@ -148,4 +148,7 @@ jobs:
             tests/test_phase52/test_stateful_execution.py \
             tests/test_phase52/test_benchmark.py::test_stateful_twins_agree_with_their_expected_outcomes \
             tests/test_phase52/test_campaign_stateful.py::test_a_source_changed_after_analysis_is_an_identity_mismatch \
+            tests/test_phase55/test_identity_contract.py \
+            tests/test_phase55/test_model_provenance.py \
+            tests/test_phase55/test_multifile_campaign.py \
             -vv --tb=short

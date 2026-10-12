@@ -138,6 +138,7 @@ def analyze_campaign(
         fork_reference=manifest.fork_reference(),
         program_context=manifest.identity_digest(),
         deployment=target.key if target.known else "",
+        implementation=target.implementation,
     )
     candidates: list[SemanticCandidate] = []
     sequences: list[Vfcs] = []

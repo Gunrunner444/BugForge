@@ -17,7 +17,12 @@ from dataclasses import dataclass, field, replace
 from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
-from app.parsing.solidity_research import ResearchModel, RFunction, SemanticCandidate
+from app.parsing.solidity_research import (
+    ResearchModel,
+    RFunction,
+    SemanticCandidate,
+    model_source_problems,
+)
 
 MAX_VFCS_LENGTH = _EXISTING_LENGTH
 MAX_VFCS_CANDIDATES = 16
@@ -147,15 +152,30 @@ def generate(
     limit: int = MAX_VFCS_CANDIDATES,
     sources: Mapping[str, str] | None = None,
 ) -> VfcsResult:
-    """Build sequences. ``sources`` records the content identity those sequences may execute against."""
-    if sources is not None:
-        identity = replace(identity, source_hashes=source_hashes_of(sources))
+    """Build sequences. ``sources`` records the content identity those sequences may execute against.
+
+    When ``sources`` is supplied it must be the text the model was parsed from.
+    A mismatch does not restamp the model or the plan against the new text.
+    """
     limit = max(0, min(limit, MAX_VFCS_CANDIDATES))
     found: dict[str, Vfcs] = {}
     skipped: list[tuple[str, str]] = []
     truncated = False
+    if sources is not None:
+        problems = model_source_problems(model, sources)
+        if problems:
+            reason = "model source attestation does not match the supplied sources: " + problems[0]
+            for candidate in candidates:
+                key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+                skipped.append((key, reason))
+            return VfcsResult((), tuple(skipped), False)
+        identity = replace(identity, source_hashes=source_hashes_of(sources))
     for candidate in candidates:
         key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+        if len(found) >= limit:
+            truncated = True
+            skipped.append((key, "the sequence limit was reached"))
+            continue
         builder = _BUILDERS.get(candidate.detector)
         if builder is None:
             skipped.append((key, "no sequence template applies to this detector"))
@@ -178,10 +198,8 @@ def generate(
             identity=identity,
         )
         if sequence.sequence_id in found:
+            skipped.append((key, "deduplicated: an equivalent sequence was already generated"))
             continue
-        if len(found) >= limit:
-            truncated = True
-            break
         found[sequence.sequence_id] = sequence
     return VfcsResult(tuple(found.values()), tuple(skipped), truncated)
 
