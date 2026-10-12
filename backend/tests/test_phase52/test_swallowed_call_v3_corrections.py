@@ -431,7 +431,7 @@ def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
         build_property,
     )
     from app.discovery.bounty.stateful import Outcome, StatefulExecutor, build_harness
-    from app.discovery.bounty.vfcs import generate
+    from app.discovery.bounty.vfcs import generate, stamp_source_identity
     from app.parsing.solidity_research import build_research_model
 
     positive = HEAD_HOOK + (
@@ -459,7 +459,7 @@ def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
     assert facts["failure_propagation"] == "swallowed"
     assert candidate.verified is False and candidate.confidence == "low"
 
-    built = generate(model, [candidate])
+    built = generate(model, [candidate], sources=sources)
     assert len(built.sequences) == 1, built.skipped
     sequence = built.sequences[0]
     assert sequence.template == "failing-callee→swallowed-call"
@@ -507,9 +507,24 @@ def test_swallowed_call_candidate_reaches_the_existing_harness() -> None:
     assert result.process_status == "completed"
     assert result.property_status == "mechanism_observed"
     assert result.call_results[1] == 1  # outer call succeeded; the callee revert was swallowed
-    propagated = executor.execute(
-        sequence, build_research_model({"Relay.sol": negative}), {"Relay.sol": negative}, spec=spec
+    negative_sources = {"Relay.sol": negative}
+    runs_after_positive = executor.runs
+    mismatched = executor.execute(
+        sequence,
+        build_research_model(negative_sources),
+        negative_sources,
+        spec=spec,
     )
+    assert mismatched.outcome is Outcome.IDENTITY_MISMATCH, mismatched.reason
+    assert mismatched.verified is False and mismatched.strong_candidate is False
+    assert executor.runs == runs_after_positive  # changed source never reaches Forge
+    # The propagating body is not a detector hit. This control rebinds the same
+    # plan to that text; it is not a claim that analysis discovered it.
+    assert safe_hits == []
+    control = stamp_source_identity(sequence, negative_sources)
+    control_model = build_research_model(negative_sources)
+    control_spec = build_property(control, control_model)
+    propagated = executor.execute(control, control_model, negative_sources, spec=control_spec)
     assert propagated.outcome is Outcome.FAILURE_PROPAGATED, propagated.reason
     assert propagated.verified is False
     assert propagated.strong_candidate is False

@@ -28,6 +28,7 @@ from app.discovery.bounty.stateful import (
     scaffold,
     untrusted_cheatcode_use,
 )
+from app.discovery.bounty.vfcs import stamp_source_identity
 from tests.test_phase51.phase51_support import manifest
 from tests.test_phase52.phase52_support import VULNERABLE_INIT, init_sequence, model_of
 
@@ -124,7 +125,7 @@ def test_sources_that_reach_for_cheatcodes_are_refused_before_running() -> None:
     # mentioned only in a comment: not a reference
     assert untrusted_cheatcode_use({"A.sol": "// createFork(\ncontract A {}"}) == ()
     model = model_of(sources)
-    seq = init_sequence()
+    seq = stamp_source_identity(init_sequence(), sources)
     executor = StatefulExecutor(tools=ToolStatus("available", "available", "1", "0.8.37"))
     obs = executor.execute(seq, model, sources, spec=build_property(seq, model))
     assert obs.outcome is Outcome.INCONCLUSIVE

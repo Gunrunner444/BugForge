@@ -362,6 +362,24 @@ def bind_identity(
             f"expected source file {context.expected_file} but {contract} is declared in "
             f"{contract_file}"
         )
+    # The sequence's own hashes are the content identity it was built from. The
+    # caller's snapshot is checked too when present. Neither side is filled in
+    # from the text about to be executed.
+    # A caller-supplied snapshot is not a substitute for the sequence's own
+    # content identity, and missing hashes are never filled from ``sources``.
+    recorded = dict(sequence.identity.source_hashes)
+    if not recorded:
+        problems.append("source content identity was not recorded; execution is refused")
+    else:
+        for path, digest_value in hashes.items():
+            expected = recorded.get(path)
+            if expected is None:
+                problems.append(f"{path} is not part of the sequence's source identity")
+            elif expected != digest_value:
+                problems.append(f"{path} changed since the sequence was created")
+        for path in recorded:
+            if path not in hashes:
+                problems.append(f"{path} from the sequence's source identity is missing")
     if context.expected_hashes:
         for path, digest_value in hashes.items():
             expected = context.expected_hashes.get(path)
@@ -369,6 +387,13 @@ def bind_identity(
                 problems.append(f"{path} is not part of the analyzed snapshot")
             elif expected != digest_value:
                 problems.append(f"{path} changed since it was analyzed")
+        if recorded:
+            for path, expected in recorded.items():
+                snapshot = context.expected_hashes.get(path)
+                if snapshot is None:
+                    problems.append(f"{path} is not part of the analyzed snapshot")
+                elif snapshot != expected:
+                    problems.append(f"{path} does not match the analyzed snapshot")
     seq_campaign = sequence.identity.campaign_id
     if context.campaign_id and seq_campaign and seq_campaign != context.campaign_id:
         problems.append("the sequence belongs to another campaign")
@@ -377,6 +402,18 @@ def bind_identity(
     if seq_deployment and ctx_deployment and seq_deployment != ctx_deployment:
         problems.append(
             f"the sequence is bound to {seq_deployment}, not the target {ctx_deployment}"
+        )
+    seq_compiler = sequence.identity.compiler_configuration
+    if (
+        context.compiler_configuration
+        and seq_compiler
+        and context.compiler_configuration != seq_compiler
+    ):
+        problems.append("the compiler configuration does not match the sequence")
+    seq_impl = sequence.identity.implementation
+    if context.implementation and seq_impl and context.implementation != seq_impl:
+        problems.append(
+            f"the sequence is bound to implementation {seq_impl}, not {context.implementation}"
         )
     return ExecutionIdentity(
         campaign_id=context.campaign_id or seq_campaign,
@@ -2018,6 +2055,8 @@ class Corroboration:
     note: str = ""
     engine_runs: tuple[Mapping[str, Any], ...] = ()
     verified: bool = False
+    # same_toolchain_alternate | second_engine | single_path | disagreement | not_applicable
+    independence: str = "not_applicable"
 
     @property
     def agreeing(self) -> tuple[str, ...]:
@@ -2034,6 +2073,7 @@ class Corroboration:
             "agreeing": list(self.agreeing),
             "note": self.note,
             "engine_runs": [dict(item) for item in self.engine_runs],
+            "independence": self.independence,
             "verified": False,
         }
 
@@ -2160,15 +2200,32 @@ def independent_check(
     judged = [p for p in paths[1:] if p.verdict in {"property_violated", "property_held"}]
     held = [p for p in judged if p.verdict == "property_held"]
     material = [p for p in judged if p.material and p.verdict == "property_violated"]
+    engines = {p.engine for p in material}
     if held:
         status = "disagreement"
         note = "an independent path held the property: the contradiction stays visible"
     elif material:
         status = "corroborated_candidate"
-        note = "a materially independent oracle agrees; still a candidate, not verified"
+        if engines <= {"foundry"}:
+            note = (
+                "another Foundry formulation agrees; same toolchain, not a second engine; "
+                "still a candidate, not verified"
+            )
+        else:
+            note = (
+                "a different engine agrees with the local property; still a candidate, not verified"
+            )
     else:
         status = "single_path"
         note = "no materially independent path could judge this property"
+    if status == "disagreement":
+        independence = "disagreement"
+    elif status != "corroborated_candidate":
+        independence = "not_applicable" if status == "not_applicable" else "single_path"
+    elif engines <= {"foundry"}:
+        independence = "same_toolchain_alternate"
+    else:
+        independence = "second_engine"
     return (
         Corroboration(
             sequence.sequence_id,
@@ -2177,6 +2234,7 @@ def independent_check(
             tuple(paths),
             note,
             tuple(engine_runs),
+            independence=independence,
         ),
         tuple(runs),
     )
@@ -2231,6 +2289,7 @@ class FeedbackLoopResult:
                     "completed": result.completed,
                     "reason": result.reason,
                     "calls": [c.identity for c in result.minimized],
+                    "preserved_property": result.preserved_property,
                 }
                 for sid, result in self.minimized.items()
             },
@@ -2445,6 +2504,8 @@ def build_bundle(
                 "fork_reference": sequence.identity.fork_reference,
                 "program_context": sequence.identity.program_context,
                 "deployment": sequence.identity.deployment,
+                "source_hashes": dict(sequence.identity.source_hashes),
+                "implementation": sequence.identity.implementation,
             },
         },
         "minimized": (

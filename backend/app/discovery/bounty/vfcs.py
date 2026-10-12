@@ -10,6 +10,7 @@ minimization never produce verification.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
@@ -42,6 +43,11 @@ class SequenceIdentity:
     program_context: str = ""
     # chain:address of the deployment the sequence targets ("" = source only).
     deployment: str = ""
+    # path -> sha256 of the source set the calls were built from. Empty means the
+    # sequence has no content identity; execution must refuse it. Not part of the
+    # sequence id, so existing ids stay stable.
+    source_hashes: tuple[tuple[str, str], ...] = ()
+    implementation: str = ""
 
 
 @dataclass(frozen=True)
@@ -92,17 +98,35 @@ class FeedbackSignal:
     call_instance: str = ""  # stable call-instance id, resolved to call_index when given
 
 
+def source_hashes_of(sources: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """sha256 of each source file. This is content identity, not a snapshot label."""
+    return tuple(
+        sorted(
+            (path, hashlib.sha256(text.encode("utf-8")).hexdigest())
+            for path, text in sources.items()
+        )
+    )
+
+
+def stamp_source_identity(sequence: Vfcs, sources: Mapping[str, str]) -> Vfcs:
+    """Bind a sequence to source text. The caller supplies the text it claims, not the executor."""
+    return replace(
+        sequence, identity=replace(sequence.identity, source_hashes=source_hashes_of(sources))
+    )
+
+
 def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceIdentity) -> str:
-    bound: object = identity
-    if not identity.deployment:
-        # Sequences without a deployment keep the ids they had before the field existed.
-        bound = {
-            "campaign_id": identity.campaign_id,
-            "source_snapshot": identity.source_snapshot,
-            "compiler_configuration": identity.compiler_configuration,
-            "fork_reference": identity.fork_reference,
-            "program_context": identity.program_context,
-        }
+    # Content hashes and implementation are not part of the id. A deployment still is,
+    # and sequences without one keep the id shape from before that field existed.
+    bound: dict[str, str] = {
+        "campaign_id": identity.campaign_id,
+        "source_snapshot": identity.source_snapshot,
+        "compiler_configuration": identity.compiler_configuration,
+        "fork_reference": identity.fork_reference,
+        "program_context": identity.program_context,
+    }
+    if identity.deployment:
+        bound["deployment"] = identity.deployment
     return "vf_" + digest(
         (
             [(c.contract, c.function, c.role, c.actor, c.arguments, c.primitive) for c in calls],
@@ -121,7 +145,11 @@ def generate(
     identity: SequenceIdentity = SequenceIdentity(),
     *,
     limit: int = MAX_VFCS_CANDIDATES,
+    sources: Mapping[str, str] | None = None,
 ) -> VfcsResult:
+    """Build sequences. ``sources`` records the content identity those sequences may execute against."""
+    if sources is not None:
+        identity = replace(identity, source_hashes=source_hashes_of(sources))
     limit = max(0, min(limit, MAX_VFCS_CANDIDATES))
     found: dict[str, Vfcs] = {}
     skipped: list[tuple[str, str]] = []

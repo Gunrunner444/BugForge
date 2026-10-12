@@ -1,21 +1,103 @@
 {
   "schema": "bugforge.local_benchmark/1",
-  "note": "Compact local reconstructions of incident classes. A regression benchmark for these fixtures only; it says nothing about a real-world detection rate.",
+  "note": "Compact local reconstructions. Candidate emission is scored separately from vulnerability labels. This is not a real-world detection rate.",
   "cases": [
-    {"id": "bridge_receiver", "vulnerable": "bridge_receiver_vulnerable.sol", "safe": "bridge_receiver_safe.sol",
-     "detector": "bridge.receiver_without_endpoint_check", "contract": "OpenReceiver",
-     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}},
-    {"id": "v4_hook", "vulnerable": "v4_hook_vulnerable.sol", "safe": "v4_hook_safe.sol",
-     "detector": "v4_hooks.callback_without_pool_manager_check", "contract": "CounterHook",
-     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}},
-    {"id": "read_only_reentrancy", "vulnerable": "ro_reentrancy_vulnerable.sol", "safe": "ro_reentrancy_safe.sol",
-     "detector": "read_only_reentrancy.view_observes_mid_update", "contract": "PoolShares"},
-    {"id": "eoa_gate", "vulnerable": "eoa_gate_vulnerable.sol", "safe": "eoa_gate_safe.sol",
-     "detector": "eip7702.eoa_assumption", "contract": "Minter"},
-    {"id": "transient_lock", "vulnerable": "transient_lock_vulnerable.sol", "safe": "transient_lock_safe.sol",
-     "detector": "transient_storage.not_cleared", "contract": "Router"},
-    {"id": "fee_on_transfer", "vulnerable": "fee_on_transfer_vulnerable.sol", "safe": "fee_on_transfer_safe.sol",
-     "detector": "accounting.fee_on_transfer_mismatch", "contract": "Vault",
-     "stateful": {"vulnerable": "property_violated", "safe": "property_held"}}
+    {
+      "id": "bridge_receiver",
+      "vulnerable": "bridge_receiver_vulnerable.sol",
+      "safe": "bridge_receiver_safe.sol",
+      "detector": "bridge.receiver_without_endpoint_check",
+      "contract": "OpenReceiver",
+      "ground_truth": "local_property_violation_unverified",
+      "rationale": "An arbitrary caller reaches receiveMessage on the vulnerable fixture; the safe fixture requires the endpoint. Local property only.",
+      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+    },
+    {
+      "id": "v4_hook",
+      "vulnerable": "v4_hook_vulnerable.sol",
+      "safe": "v4_hook_safe.sol",
+      "detector": "v4_hooks.callback_without_pool_manager_check",
+      "contract": "CounterHook",
+      "ground_truth": "local_property_violation_unverified",
+      "rationale": "afterSwap has no pool-manager check on the vulnerable fixture and reverts otherwise. Same call-must-fail oracle as the bridge receiver.",
+      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+    },
+    {
+      "id": "read_only_reentrancy",
+      "vulnerable": "ro_reentrancy_vulnerable.sol",
+      "safe": "ro_reentrancy_safe.sol",
+      "detector": "read_only_reentrancy.view_observes_mid_update",
+      "contract": "PoolShares",
+      "ground_truth": "unknown",
+      "rationale": "Static emission only. No supported VFCS property executes this detector, so the vulnerability label stays unknown."
+    },
+    {
+      "id": "eoa_gate",
+      "vulnerable": "eoa_gate_vulnerable.sol",
+      "safe": "eoa_gate_safe.sol",
+      "detector": "eip7702.eoa_assumption",
+      "contract": "Minter",
+      "ground_truth": "unknown",
+      "rationale": "Static emission only. No supported harness executes this detector, so the vulnerability label stays unknown."
+    },
+    {
+      "id": "transient_lock",
+      "vulnerable": "transient_lock_vulnerable.sol",
+      "safe": "transient_lock_safe.sol",
+      "detector": "transient_storage.not_cleared",
+      "contract": "Router",
+      "ground_truth": "unknown",
+      "rationale": "Static emission only. No supported harness executes this detector, so the vulnerability label stays unknown."
+    },
+    {
+      "id": "fee_on_transfer",
+      "vulnerable": "fee_on_transfer_vulnerable.sol",
+      "safe": "fee_on_transfer_safe.sol",
+      "detector": "accounting.fee_on_transfer_mismatch",
+      "contract": "Vault",
+      "ground_truth": "local_property_violation_unverified",
+      "rationale": "The vulnerable vault credits the requested amount; the safe vault credits the measured delta. Local accounting property only.",
+      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+    },
+    {
+      "id": "initializer",
+      "vulnerable": "initializer_vulnerable.sol",
+      "safe": "initializer_safe.sol",
+      "detector": "aa.unprotected_account_initializer",
+      "contract": "Acct",
+      "ground_truth": "local_property_violation_unverified",
+      "rationale": "initialize can run twice on the vulnerable account and the second call reverts once a guard is present. Local initialization property only.",
+      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+    },
+    {
+      "id": "swallowed_call",
+      "vulnerable": "swallowed_call_vulnerable.sol",
+      "safe": "swallowed_call_safe.sol",
+      "detector": "caller_context.swallowed_call_failure",
+      "contract": "Relay",
+      "ground_truth": "mechanism_only",
+      "rationale": "Outer success shows a swallowed callee revert. That is a mechanism observation, not a security-property violation. The safe body propagates the failure.",
+      "stateful": {"vulnerable": "mechanism_observed", "safe": "failure_propagated"}
+    },
+    {
+      "id": "swallowed_ambiguous",
+      "vulnerable": "swallowed_ambiguous.sol",
+      "safe": "swallowed_ambiguous_safe.sol",
+      "detector": "caller_context.swallowed_call_failure",
+      "contract": "Relay",
+      "ground_truth": "ambiguous",
+      "rationale": "The failure path is ambiguous, so no sequence is synthesized. Emission is not a vulnerability label.",
+      "stateful": {"vulnerable": "no_sequence", "safe": "no_sequence"}
+    },
+    {
+      "id": "prefund_transfer",
+      "vulnerable": "prefund_transfer.sol",
+      "safe": "prefund_transfer_safe.sol",
+      "detector": "caller_context.swallowed_call_failure",
+      "contract": "Account",
+      "ground_truth": "not_a_confirmed_vulnerability",
+      "rationale": "A validateUserOp value transfer to msg.sender is an intentional best-effort prefund. The candidate is a possible false positive and is not synthesized.",
+      "stateful": {"vulnerable": "no_sequence", "safe": "no_sequence"}
+    }
   ]
 }

@@ -245,7 +245,7 @@ class BugforgeResearchEngine(DiscoveryEngine):
             suite.candidates,
             key=lambda c: (order.get(f"{c.contract}.{c.function}", len(order)), c.detector, c.line),
         )
-        built = generate(model, candidates, identity, limit=MAX_VFCS_CANDIDATES)
+        built = generate(model, candidates, identity, limit=MAX_VFCS_CANDIDATES, sources=sources)
         ids = [item.sequence_id for item in built.sequences]
         metadata = {
             "vfcs_count": str(len(ids)),

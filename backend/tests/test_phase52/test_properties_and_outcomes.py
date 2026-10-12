@@ -27,7 +27,7 @@ from app.discovery.bounty.stateful import (
     interpret,
     target_contract,
 )
-from app.discovery.bounty.vfcs import SequenceIdentity, Vfcs, VfcsCall
+from app.discovery.bounty.vfcs import SequenceIdentity, Vfcs, VfcsCall, stamp_source_identity
 from app.parsing.solidity_research import SemanticCandidate
 from tests.test_phase52.phase52_support import (
     RAW_VAULT,
@@ -163,6 +163,7 @@ def test_no_oracle_runs_are_execution_only_and_reverts_are_not_findings() -> Non
 
 def _base(seq: Vfcs, sources: dict[str, str]) -> tuple[_Base, object]:
     model = model_of(sources)
+    seq = stamp_source_identity(seq, sources)
     spec = build_property(seq, model)
     identity = bind_identity(seq, model, sources, IdentityContext(), property_id=spec.property_id)
     harness = build_harness(seq, model, oracle=spec.oracle, sources=sources)
@@ -280,7 +281,12 @@ def test_identity_mismatches_fail_closed_before_anything_runs() -> None:
 def test_unavailable_tools_stay_unavailable() -> None:
     sources = {"Acct.sol": VULNERABLE_INIT}
     executor = StatefulExecutor(tools=ToolStatus("unavailable", "available"))
-    obs = executor.execute(init_sequence(), model_of(sources), sources)
+    missing = executor.execute(init_sequence(), model_of(sources), sources)
+    assert missing.outcome is Outcome.IDENTITY_MISMATCH
+    assert "not recorded" in missing.reason
+    assert executor.runs == 0
+    seq = stamp_source_identity(init_sequence(), sources)
+    obs = executor.execute(seq, model_of(sources), sources)
     assert obs.outcome is Outcome.UNAVAILABLE and obs.reason_code == "tool_missing"
     assert not obs.executed and executor.runs == 0
 
@@ -328,6 +334,33 @@ def test_no_oracle_execution_cannot_become_a_strong_candidate() -> None:
     summary = execution_summary(_candidate(), (forged,))
     assert summary.strength == "weak_execution_only"
     assert summary.status == "sequence_executed_no_oracle"
+
+
+def test_mechanism_and_identity_mismatch_are_not_violations() -> None:
+    mechanism = _record(
+        outcome="mechanism_observed",
+        declaration="mechanism_observation",
+        verdict="mechanism_observed",
+        oracle_kind="mechanism_probe",
+    )
+    assert not is_strong(mechanism)
+    summary = execution_summary(_candidate(), (mechanism,))
+    assert summary.status == "mechanism_observed"
+    assert summary.strength == "mechanism_observation"
+    assert any("unproven" in note for note in summary.uncertainties)
+    mismatch = _record(
+        outcome="identity_mismatch",
+        verdict="not_evaluated",
+        identity_status="identity_mismatch",
+        oracle_kind="second_call_must_fail",
+    )
+    assert not is_strong(mismatch)
+    mismatched = execution_summary(_candidate(), (mismatch,))
+    assert mismatched.status == "identity_mismatch"
+    assert mismatched.strength == "static_candidate"
+    held = _record(outcome="property_held", verdict="property_held")
+    assert execution_summary(_candidate(), (held,)).status == "property_held"
+    assert not is_strong(held)
 
 
 def test_strength_requires_bound_fresh_oracle_violation() -> None:

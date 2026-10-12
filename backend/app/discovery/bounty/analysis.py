@@ -166,6 +166,7 @@ def analyze_campaign(
             _ordered(part, manifest, found),
             seq_identity,
             limit=min(room, MAX_VFCS_CANDIDATES),
+            sources=part_sources,
         )
         for key, reason in built.skipped:
             sequence_skipped.setdefault(key, reason)

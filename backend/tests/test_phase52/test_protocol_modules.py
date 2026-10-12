@@ -107,9 +107,11 @@ def test_module_candidates_execute_to_violated_and_safe_twin_holds() -> None:
             from dataclasses import replace
 
             twin = replace(candidate, file=name)
-            sequence = generate(model, [twin]).sequences[0]
+            text = (HISTORY / name).read_text()
+            role_sources = {name: text}
+            sequence = generate(model, [twin], sources=role_sources).sequences[0]
             spec = build_property(sequence, model, twin)
-            obs = executor.execute(sequence, model, {name: (HISTORY / name).read_text()}, spec=spec)
+            obs = executor.execute(sequence, model, role_sources, spec=spec)
             outcomes[role] = obs.outcome
         assert outcomes == {
             "vulnerable": Outcome.PROPERTY_VIOLATED,

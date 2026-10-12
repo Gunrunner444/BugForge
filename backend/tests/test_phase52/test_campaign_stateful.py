@@ -179,3 +179,9 @@ def test_a_source_changed_after_analysis_is_an_identity_mismatch(repo: Path) -> 
     result = svc.stateful_execute(campaign.campaign_id, rounds=1)
     outcomes = {o["outcome"] for o in result["observations"]}
     assert outcomes == {"identity_mismatch"}
+    assert result["forge_runs"] == 0
+    assert result["outcomes"].get("property_violated", 0) == 0
+    assert all(
+        item["verified"] is False and item["strong_candidate"] is False
+        for item in result["observations"]
+    )

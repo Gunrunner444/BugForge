@@ -1292,6 +1292,7 @@ class BountyCampaignService:
                 "source_set_digest": identity.source_set_digest if identity else "",
                 "replay_mode": identity.replay_mode.value if identity else "",
                 "corroboration": corroboration.status if corroboration else "not_applicable",
+                "independence": (corroboration.independence if corroboration else "not_applicable"),
                 "agreeing_paths": list(corroboration.agreeing) if corroboration else [],
                 "check_paths": (
                     [

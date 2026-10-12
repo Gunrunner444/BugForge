@@ -19,9 +19,11 @@ from app.core.config import get_settings
 from app.discovery.bounty.properties import build_property
 from app.discovery.bounty.service import BountyCampaignService, CampaignSpec
 from app.discovery.bounty.stateful import Outcome, StatefulExecutor, tool_status
+from app.discovery.bounty.vfcs import stamp_source_identity
 from app.discovery.process import tool_path
 from app.parsing.solidity_call_outcome import DETECTOR
 from app.parsing.solidity_research import build_research_model
+from app.parsing.solidity_research_suite import run_suite
 from tests.test_phase51.phase51_support import manifest
 
 SOURCE_REVISION = "fixture-swallowed-call-1"
@@ -137,6 +139,7 @@ def test_campaign_observes_swallowed_call_without_confirming_a_vulnerability(
     sequence = sequences[0]
     assert sequence.derived_from.startswith(f"{DETECTOR}@Relay.")
     assert sequence.identity.source_snapshot == SOURCE_REVISION
+    assert dict(sequence.identity.source_hashes)["Relay.sol"] == source_hash
     plans = svc.repro(campaign.campaign_id)["sequences"]
     assert [plan["template"] for plan in plans] == [TEMPLATE]
 
@@ -226,14 +229,25 @@ def test_campaign_observes_swallowed_call_without_confirming_a_vulnerability(
     assert ledger["by_outcome"].get("property_violated", 0) == 0
     assert ledger["by_family"]["mechanism"]["violated"] == 0
 
-    spec = build_property(sequence, analysis.models[sequence.sequence_id], candidate)
+    negative_text = negative.read_text(encoding="utf-8")
+    negative_sources = {"Relay.sol": negative_text}
     executor = StatefulExecutor()
-    propagated = executor.execute(
+    mismatched = executor.execute(
         sequence,
-        build_research_model({"Relay.sol": negative.read_text(encoding="utf-8")}),
-        {"Relay.sol": negative.read_text(encoding="utf-8")},
-        spec=spec,
+        build_research_model(negative_sources),
+        negative_sources,
+        spec=build_property(sequence, analysis.models[sequence.sequence_id], candidate),
     )
+    assert mismatched.outcome is Outcome.IDENTITY_MISMATCH, mismatched.reason
+    assert mismatched.strong_candidate is False and mismatched.verified is False
+    assert executor.runs == 0
+    # The propagating body is not a detector hit. The control rebinds the campaign
+    # plan to that text; it is not a claim that analysis discovered the candidate.
+    control_model = build_research_model(negative_sources)
+    assert [c for c in run_suite(control_model).candidates if c.detector == DETECTOR] == []
+    control = stamp_source_identity(sequence, negative_sources)
+    control_spec = build_property(control, control_model)
+    propagated = executor.execute(control, control_model, negative_sources, spec=control_spec)
     assert executor.runs == 1
     assert propagated.outcome is Outcome.FAILURE_PROPAGATED, propagated.reason
     assert propagated.verified is False and propagated.strong_candidate is False

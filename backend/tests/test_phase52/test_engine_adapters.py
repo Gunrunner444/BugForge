@@ -242,6 +242,7 @@ def test_engine_agreement_is_material_corroboration_never_verification() -> None
     corroboration, _ = _check([engine])
     assert engine.calls == 1
     assert corroboration.status == "corroborated_candidate"
+    assert corroboration.independence == "second_engine"
     assert "echidna:property" in corroboration.agreeing
     path = next(p for p in corroboration.paths if p.path == "echidna:property")
     assert path.material and path.engine == "echidna"

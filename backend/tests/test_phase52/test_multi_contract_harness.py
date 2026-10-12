@@ -9,6 +9,7 @@ from app.discovery.bounty.stateful import (
     StatefulExecutor,
     build_harness,
 )
+from app.discovery.bounty.vfcs import stamp_source_identity
 from tests.test_phase52.phase52_support import (
     MULTI_ACCT,
     REGISTRY_FILE,
@@ -122,7 +123,7 @@ def test_address_constructor_argument_is_never_invented() -> None:
 def test_multi_contract_harness_executes_against_the_exact_source_set() -> None:
     sources = multi_sources()
     model = model_of(sources)
-    seq = init_sequence()
+    seq = stamp_source_identity(init_sequence(), sources)
     spec = build_property(seq, model)
     obs = StatefulExecutor().execute(seq, model, sources, spec=spec)
     assert obs.outcome is Outcome.PROPERTY_VIOLATED, obs.reason

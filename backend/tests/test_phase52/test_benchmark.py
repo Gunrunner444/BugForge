@@ -24,6 +24,7 @@ def test_static_benchmark_detects_every_vulnerable_case_and_no_safe_twin() -> No
     assert report["real_world_rate"] is None and report["verified"] is False
     assert report["disclaimer"] == DISCLAIMER and "not a real-world" in DISCLAIMER
     assert report["stateful"]["not_run"] == sum(1 for c in cases if c.get("stateful"))
+    assert report["emission_is_not_vulnerability_precision"] is True
     assert run_benchmark(HISTORY)["digest"] == report["digest"]
 
 
@@ -68,8 +69,25 @@ def test_a_detector_regression_shows_up_as_a_failed_case(tmp_path: Path) -> None
 @requires_forge
 def test_stateful_twins_agree_with_their_expected_outcomes() -> None:
     report = run_benchmark(HISTORY, executor=StatefulExecutor())
+    cases = json.loads((HISTORY / "benchmark.json").read_text())["cases"]
     assert report["stateful"]["disagree"] == 0
-    assert report["stateful"]["agree"] == 3
+    assert report["stateful"]["agree"] == sum(1 for case in cases if case.get("stateful"))
+    assert report["stateful"]["identity_rejection"] == "identity_mismatch"
+    assert report["stateful"]["identity_rejection_executed"] is False
+    assert report["stateful"]["identity_rejection_forge_delta"] == 0
+    assert report["fixture_precision"] != report.get("real_world_rate")
+    lines = ["benchmark (emission is not vulnerability precision)"]
     for case in report["cases"]:
         if "stateful" in case:
             assert case["stateful"] == case["stateful_expected"]
+            assert case["checks"]["overstated"] is False
+            assert case["vulnerability_label"] != "verified"
+        else:
+            assert case["execution"] == "unsupported_or_not_requested"
+            assert case["vulnerability_label"] == "unknown"
+            assert case["ground_truth"] == "unknown"
+        lines.append(
+            f"{case['id']}: static={case['static']} label={case['vulnerability_label']} "
+            f"execution={case['execution']} truth={case['ground_truth']}"
+        )
+    print("\n".join(lines))
