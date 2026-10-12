@@ -349,6 +349,7 @@ _STATUS_ORDER = (
     "execution_failed",
     "timeout",
     "unavailable",
+    "skipped",
 )
 
 
@@ -414,6 +415,15 @@ def execution_summary(
     elif any(item.get("outcome") == "sequence_executed_no_oracle" for item in fresh):
         strength = "weak_execution_only"
         notes.append("the sequence executed without an oracle; execution is not a finding")
+    elif any(item.get("outcome") == "skipped" for item in fresh):
+        strength = "static_candidate"
+        skipped_record = next(item for item in fresh if item.get("outcome") == "skipped")
+        reason = str(
+            skipped_record.get("reason")
+            or skipped_record.get("reason_code")
+            or "skipped before Forge"
+        )
+        notes.append(reason)
     else:
         strength = "static_candidate"
     if strong:

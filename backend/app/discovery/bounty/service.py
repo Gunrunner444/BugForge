@@ -1204,6 +1204,7 @@ class BountyCampaignService:
             usable_property_engines,
         )
         from app.discovery.bounty.properties import build_property
+        from app.discovery.bounty.solc_resolve import exact_version, resolve_solc
         from app.discovery.bounty.stateful import (
             StatefulExecutor,
             execution_enabled,
@@ -1211,6 +1212,7 @@ class BountyCampaignService:
             target_contract,
             tool_status,
         )
+        from app.discovery.process import tool_path
 
         campaign = self.get(campaign_id)
         self._check_runnable(campaign)
@@ -1234,8 +1236,12 @@ class BountyCampaignService:
                 "blocker": "local stateful execution is disabled",
                 "dynamic_foundry_execution_demonstrated": False,
             }
-        if not tools.available:
-            missing = "forge" if tools.forge != "available" else "solc"
+        required = exact_version(campaign.manifest.compiler.version)
+        compiler = resolve_solc(required) if required else None
+        if tool_path("forge") is None or (
+            compiler is None and not required and tools.solc != "available"
+        ):
+            missing = "forge" if tool_path("forge") is None else "solc"
             return {
                 **unavailable,
                 "reason": f"{missing} is not installed; unavailable",
@@ -1251,14 +1257,25 @@ class BountyCampaignService:
         for sequence in analysis.sequences:
             contract = target_contract(sequence)
             candidate = analysis.candidate_for(sequence.derived_from)
-            scope = campaign.manifest.scope_of(
-                contract=contract, file=candidate.file if candidate is not None else ""
-            )
-            if scope.status is ScopeStatus.OUT_OF_SCOPE:
+            source_file = candidate.file if candidate is not None else ""
+            scope = campaign.manifest.scope_of(contract=contract, file=source_file)
+            refusal = _execution_refusal(campaign, candidate, scope)
+            if refusal is not None:
+                code, detail = refusal
                 skipped.append(
                     {
                         "sequence_id": sequence.sequence_id,
-                        "reason": "blocked_by_policy:out_of_scope",
+                        "derived_from": sequence.derived_from,
+                        "contract": contract,
+                        "file": source_file,
+                        "detector": candidate.detector if candidate is not None else "",
+                        "scope_status": scope.status.value,
+                        "outcome": "skipped",
+                        "reason": detail,
+                        "reason_code": code,
+                        "disposition": "skipped",
+                        "forge_invoked": "false",
+                        "campaign_id": campaign_id,
                     }
                 )
                 continue
@@ -1272,7 +1289,12 @@ class BountyCampaignService:
         registry = engine_registry()
         engine_status = engine_status_map(registry)
         engines = [PropertyEngine(name) for name in usable_property_engines(registry)]
-        executor = StatefulExecutor()
+        project = _project_settings(campaign.manifest.compiler) if compiler is not None else None
+        executor = StatefulExecutor(
+            compiler=compiler,
+            project=project,
+            compiler_required=required,
+        )
         result = run_feedback_loop(
             executor,
             tuple(runnable),
@@ -1296,6 +1318,7 @@ class BountyCampaignService:
                 blobs=blobs,
                 feedback=result.feedback,
                 engines=registry_snapshot,
+                skipped={item["sequence_id"]: item for item in skipped},
                 run={
                     "at": _now(),
                     "outcomes": result.outcome_counts(),
@@ -1304,7 +1327,7 @@ class BountyCampaignService:
                     "mechanism_observations": len(result.mechanism_observations),
                     "mutated": len(result.mutated),
                     "forge_runs": executor.runs,
-                    "tools": tools.as_dict(),
+                    "tools": _run_tools(tools, compiler, executor, required),
                 },
             ),
         )
@@ -1313,7 +1336,7 @@ class BountyCampaignService:
 
         summary = campaign_coverage(
             **self._coverage_facts(campaign, analysis),
-            executions=executions,
+            executions={**{item["sequence_id"]: item for item in skipped}, **executions},
             forge_runs=executor.runs,
             engines=registry_snapshot,
             persistence_status=str(persistence.get("status", "")),
@@ -1451,6 +1474,7 @@ class BountyCampaignService:
             "campaign_id": campaign_id,
             "runs": list(stored.get("runs", [])),
             "executions": dict(stored.get("executions", {})),
+            "skipped_sequences": dict(stored.get("skipped_sequences", {})),
             "feedback": dict(stored.get("feedback", {})),
             "engines": list(stored.get("engines", [])),
             "replay_modes": replay_modes(),
@@ -1514,8 +1538,16 @@ class BountyCampaignService:
         )
         if not analysis.file_reads:
             read_selected = len(analysis.sources)
+        selected_roles = {item.role: 0 for item in selection.ranked if item.path in selected}
+        for item in selection.ranked:
+            if item.path in selected:
+                selected_roles[item.role] = selected_roles.get(item.role, 0) + 1
         return {
             "files_discovered": selection.considered,
+            "target_files": selected_roles.get("target", 0),
+            "compile_dependencies": selected_roles.get("compile_dependency", 0),
+            "analysis_only_files": selected_roles.get("analysis_context", 0),
+            "scope_excluded": len(selection.scope_excluded),
             "files_selected": len(selection.selected),
             "files_read": read_selected,
             "truncated": bool(analysis.truncated or selection.truncated),
@@ -1722,13 +1754,18 @@ class BountyCampaignService:
         self, campaign: BountyCampaign, analysis: CampaignAnalysis
     ) -> dict[str, dict[str, Any]]:
         """Persisted executions whose source set still matches the analyzed snapshot."""
-        stored = dict(dict(campaign.record.artifacts.get("stateful", {})).get("executions", {}))
+        stateful = dict(campaign.record.artifacts.get("stateful", {}))
+        stored = dict(stateful.get("executions", {}))
+        skipped = dict(stateful.get("skipped_sequences", {}))
         current = {sid: _digest_of(analysis.sources_for(sid)) for sid in analysis.sequence_sources}
         valid_digests = set(current.values())
         found: dict[str, dict[str, Any]] = {}
-        for sid, item in stored.items():
+        for sid, item in {**skipped, **stored}.items():
             record = dict(item)
-            record["stale"] = record.get("source_set_digest") not in valid_digests
+            if record.get("disposition") == "skipped" or record.get("outcome") == "skipped":
+                record["stale"] = False
+            else:
+                record["stale"] = record.get("source_set_digest") not in valid_digests
             found[sid] = record
         return found
 
@@ -1738,6 +1775,90 @@ MAX_STORED_BUNDLES = 24
 MAX_BLOB_BYTES = 600_000
 MAX_STORED_RUNS = 16
 MAX_STORED_FEEDBACK = 256
+
+
+def _run_tools(ambient: Any, compiler: Any, executor: Any, required: str) -> dict[str, str]:
+    """The compiler this run bound, kept distinct from whatever ``solc`` is on PATH."""
+    project = executor.project
+    selected = str(compiler.reported_version) if compiler is not None else ""
+    bound_version = str(executor.tools.solc_version) if selected else str(ambient.solc_version)
+
+    def flag(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return {
+        **ambient.as_dict(),
+        "solc_path": str(compiler.path) if compiler is not None else "",
+        "solc_selected_version": selected,
+        "solc_version": bound_version,
+        "solc_ambient_version": str(ambient.solc_version),
+        "compiler_required": required,
+        "evm_requested": str(executor.evm_requested),
+        "evm_exact": "true" if executor.evm_exact else "false",
+        "evm_version": "" if project is None else str(project.evm_version),
+        "optimizer": "" if project is None else flag(project.optimizer),
+        "optimizer_runs": "" if project is None else flag(project.optimizer_runs),
+        "via_ir": "" if project is None else flag(project.via_ir),
+    }
+
+
+def _project_settings(compiler: Any) -> Any:
+    from app.discovery.bounty.stateful import ProjectSettings
+
+    optimizer = {"enabled": True, "disabled": False}.get(compiler.optimizer)
+    via_ir = {"true": True, "false": False}.get(compiler.via_ir)
+    runs = int(compiler.optimizer_runs) if str(compiler.optimizer_runs).isdigit() else None
+    evm = compiler.evm_version if compiler.evm_version not in {"", "unknown"} else ""
+    return ProjectSettings(
+        optimizer=optimizer,
+        optimizer_runs=runs,
+        via_ir=via_ir,
+        evm_version=evm,
+        evm_exact=True,
+        evm_requested=evm,
+    )
+
+
+def _execution_refusal(campaign: Any, candidate: Any, scope: Any) -> tuple[str, str] | None:
+    """Why a generated sequence must not reach Forge, or None when it may."""
+    from app.discovery.bounty.campaign import ScopeStatus
+    from app.discovery.bounty.findings import match_known_issue
+
+    if scope.status is ScopeStatus.OUT_OF_SCOPE:
+        return "blocked_by_policy:out_of_scope", scope.reason or "excluded by the manifest"
+    if campaign.manifest.in_scope and scope.status is not ScopeStatus.IN_SCOPE:
+        role = campaign.selection.role_of(candidate.file if candidate is not None else "")
+        if role == "compile_dependency":
+            return (
+                "blocked_by_policy:dependency_only",
+                "the file is a compile dependency and is not an eligible target",
+            )
+        if role == "analysis_context":
+            return (
+                "blocked_by_policy:analysis_only",
+                "the file was read as additional context and is not an eligible target",
+            )
+        return (
+            "blocked_by_policy:unknown_scope",
+            "scope for this candidate is not established",
+        )
+    if candidate is not None:
+        known = match_known_issue(campaign.manifest.known_issues, candidate)
+        if known is not None:
+            return (
+                "blocked_by_policy:known_issue",
+                f"matches known issue {known.issue_id}",
+            )
+        if str(candidate.detector).startswith("oracle."):
+            return (
+                "blocked_by_policy:oracle_testing_prohibited",
+                "dynamic oracle testing is prohibited for this campaign",
+            )
+    return None
 
 
 def _digest_of(sources: dict[str, str]) -> str:
@@ -1755,6 +1876,7 @@ def _merge_stateful(
     feedback: tuple[dict[str, Any], ...],
     run: dict[str, Any],
     engines: list[dict[str, Any]] | None = None,
+    skipped: dict[str, Any] | None = None,
 ) -> list[str]:
     """Additive, idempotent merge of one stateful run into persisted artifacts.
 
@@ -1778,6 +1900,11 @@ def _merge_stateful(
             record = {**record, "history": history}
         stored_exec[sid] = record
     stateful["executions"] = stored_exec
+    if skipped is not None:
+        stored_skips = dict(stateful.get("skipped_sequences", {}))
+        for sid, record in skipped.items():
+            stored_skips[sid] = dict(record)
+        stateful["skipped_sequences"] = stored_skips
     stored_feedback = dict(stateful.get("feedback", {}))
     for item in feedback:
         key = str(item.get("key", ""))

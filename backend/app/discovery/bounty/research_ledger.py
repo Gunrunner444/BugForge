@@ -741,6 +741,14 @@ _STAGE_KEYS = (
 )
 
 
+def _reason_counts(records: Mapping[str, Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records.values():
+        code = str(record.get("reason_code") or "skipped")
+        counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def campaign_coverage(
     *,
     files_discovered: int | None = None,
@@ -766,6 +774,10 @@ def campaign_coverage(
     excluded_count: int | None = None,
     enumeration_capped: bool = False,
     unreadable_files: Sequence[Mapping[str, str]] = (),
+    target_files: int | None = None,
+    compile_dependencies: int | None = None,
+    analysis_only_files: int | None = None,
+    scope_excluded: int | None = None,
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
@@ -774,7 +786,13 @@ def campaign_coverage(
     production verification.
     """
     skipped = dict(skipped or {})
-    records = dict(executions or {})
+    raw_records = dict(executions or {})
+    policy_skips = {
+        key: value
+        for key, value in raw_records.items()
+        if value.get("disposition") == "skipped" or value.get("outcome") == "skipped"
+    }
+    records = {key: value for key, value in raw_records.items() if key not in policy_skips}
     executions_known = executions is not None or forge_runs is not None
     by_reason: dict[str, int] = {}
     for reason in skipped.values():
@@ -858,6 +876,12 @@ def campaign_coverage(
         executions=len(records),
         unreadable_files=unread,
         reason_codes={str(record.get("reason_code") or "") for record in records.values()},
+        policy_skips=policy_skips,
+        compiler_reasons=tuple(
+            str(record.get("reason") or "")
+            for record in records.values()
+            if str(record.get("reason_code") or "") == "compiler_unavailable"
+        ),
     )
     return {
         "files_discovered": files_discovered,
@@ -880,7 +904,14 @@ def campaign_coverage(
         "candidates": candidates,
         "sequences": sequences,
         "sequences_skipped": len(skipped),
+        "sequences_excluded": len(policy_skips) if executions is not None else None,
+        "sequences_submitted": len(records) if executions is not None else None,
         "skipped_by_reason": dict(sorted(by_reason.items())),
+        "exclusion_reasons": _reason_counts(policy_skips),
+        "target_files": target_files,
+        "compile_dependencies": compile_dependencies,
+        "analysis_only_files": analysis_only_files,
+        "scope_excluded": scope_excluded,
         "executions": len(records) if executions is not None else None,
         "by_outcome": dict(sorted(by_outcome.items())),
         "forge_runs": forge_runs,
@@ -1186,6 +1217,8 @@ def _blocker(
     executions: int,
     unreadable_files: Sequence[Mapping[str, str]],
     reason_codes: set[str] | None = None,
+    policy_skips: Mapping[str, Mapping[str, Any]] | None = None,
+    compiler_reasons: Sequence[str] = (),
 ) -> str:
     """The single most useful reason a campaign did not evaluate a property.
 
@@ -1237,16 +1270,25 @@ def _blocker(
     if executions <= 0:
         if forge_runs:
             return "Foundry was invoked but no execution record was produced"
+        if policy_skips and sequences > 0:
+            codes = sorted(
+                {str(item.get("reason_code") or "skipped") for item in policy_skips.values()}
+            )
+            if len(codes) == 1:
+                return f"every generated sequence was skipped before Forge ({codes[0]})"
+            return "every generated sequence was skipped before Forge"
         return "no dynamic Foundry execution was demonstrated"
     if forge_runs is None and not stages.get("foundry_invoked"):
         return "no dynamic Foundry execution was demonstrated"
     counters = stages.get("counters") or {}
     if by_outcome.get("identity_mismatch") and not stages.get("sequence_executed"):
         return "execution was blocked by an identity or source mismatch"
-    codes = {code for code in (reason_codes or set()) if code}
-    if codes and all(code.startswith("blocked_by_policy") for code in codes):
+    execution_codes = {code for code in (reason_codes or set()) if code}
+    if execution_codes and all(code.startswith("blocked_by_policy") for code in execution_codes):
         return "execution was blocked by policy before Forge was invoked"
-    if "compiler_unavailable" in codes and not stages.get("sequence_executed"):
+    if "compiler_unavailable" in execution_codes and not stages.get("sequence_executed"):
+        if any("not installed" in reason for reason in compiler_reasons):
+            return "the required Solidity compiler is not installed, so the test was not run"
         return "the installed compiler does not satisfy the source pragma, so the test was not run"
     if by_outcome.get("unavailable") and not any(
         key not in {"unavailable", "identity_mismatch"} for key in by_outcome
@@ -1276,6 +1318,15 @@ def _blocker(
     if counters.get("process_failed") and not stages.get("sequence_executed"):
         return "the harness compiled but did not reach the intended target operation"
     if by_outcome and set(by_outcome) <= {"inconclusive"}:
+        inconclusive_codes = {code for code in (reason_codes or set()) if code}
+        if inconclusive_codes and inconclusive_codes <= {
+            "unknown_constructor_argument",
+            "param_not_expressible",
+        }:
+            return (
+                "the harness could not be constructed because a constructor argument "
+                "is not expressible"
+            )
         return "the campaign reached the execution stage but every run was inconclusive"
     if counters.get("mechanism_observations") and not stages.get("property_evaluated"):
         return "a mechanism was observed; no property verdict was produced"

@@ -70,6 +70,7 @@ class RankedFile:
     path: str
     priority: Priority
     reason: str
+    role: str = "unclassified"  # target | compile_dependency | analysis_context | excluded
 
 
 @dataclass(frozen=True)
@@ -105,11 +106,16 @@ class SourceSelection:
     repository_candidates: int = 0
     excluded_count: int = 0
     enumeration_capped: bool = False
+    # True when every traced dependency of the target was kept in ``selected``.
+    closure_complete: bool = True
+    scope_excluded: tuple[str, ...] = ()
 
     @staticmethod
     def explicit(files: tuple[str, ...]) -> SourceSelection:
         """The operator named the files; nothing was ranked or dropped."""
-        ranked = tuple(RankedFile(path, Priority.SCOPE, "named by the operator") for path in files)
+        ranked = tuple(
+            RankedFile(path, Priority.SCOPE, "named by the operator", "target") for path in files
+        )
         return SourceSelection(
             selected=tuple(files),
             ranked=ranked,
@@ -150,6 +156,12 @@ class SourceSelection:
     def files_not_read(self) -> int:
         return sum(1 for item in self.reads if item.status != "read")
 
+    def role_of(self, path: str) -> str:
+        for item in self.ranked:
+            if item.path == path:
+                return item.role
+        return ""
+
     def dependency_status(self) -> str:
         """traced, partial, bounded, or unknown.
 
@@ -165,7 +177,7 @@ class SourceSelection:
         unread = any(item.status != "read" and item.reason != "excluded" for item in self.reads)
         if unread or self.unresolved_imports or self.ambiguous_imports or self.escaped_imports:
             return "partial"
-        if self.dependency_notes or self.truncated or self.enumeration_capped:
+        if not self.closure_complete or self.dependency_notes or self.enumeration_capped:
             return "bounded"
         if self.mode == "explicit" and not self.reads:
             return "unknown"
@@ -223,6 +235,10 @@ class SourceSelection:
             "repository_candidates": self.repository_candidates,
             "excluded_count": self.excluded_count,
             "enumeration_capped": self.enumeration_capped,
+            "closure_complete": self.closure_complete,
+            "scope_excluded_count": len(self.scope_excluded),
+            "scope_excluded": list(self.scope_excluded[:200]),
+            "role_counts": _role_counts(self.ranked),
             "note": (
                 "truncated=true means files were not read under the budget; a dropped file "
                 "is not implied to be clean, safe, or out of scope"
@@ -230,7 +246,12 @@ class SourceSelection:
             if self.truncated
             else "all candidate files fit within the budget",
             "ranking": [
-                {"path": item.path, "priority": item.priority.name.lower(), "reason": item.reason}
+                {
+                    "path": item.path,
+                    "priority": item.priority.name.lower(),
+                    "reason": item.reason,
+                    "role": item.role,
+                }
                 for item in self.ranked
             ],
         }
@@ -376,15 +397,31 @@ def select_sources(
             reason = f"{reason}; contract name {ambiguous_files[rel]} is declared in several files"
         ranked.append(RankedFile(rel, priority, reason))
 
-    ranked.sort(key=lambda item: (item.priority.value, item.path))
-    selected = tuple(item.path for item in ranked[:limit])
-    dropped = tuple(item.path for item in ranked[limit:])
+    ranked = _assign_roles(ranked, scope_files, dependencies, _excluded_prefixes(manifest))
+    selectable = [item for item in ranked if item.role != "excluded"]
+    selectable.sort(
+        key=lambda item: (_ROLE_ORDER.get(item.role, 9), item.priority.value, item.path)
+    )
+    selected_list = [item.path for item in selectable[:limit]]
+    selected = tuple(selected_list)
+    dropped = tuple(item.path for item in selectable[limit:])
+    missing_dependencies = sorted(path for path in dependencies if path not in set(selected))
+    if missing_dependencies:
+        notes.append(
+            "required dependencies were outside the selection budget: "
+            + ", ".join(missing_dependencies[:8])
+        )
+    limited = any(
+        "dependency trace stopped" in note or "dependency depth limit" in note for note in notes
+    )
+    closure_complete = not missing_dependencies and not limited and not capped
+    scope_excluded = tuple(item.path for item in ranked if item.role == "excluded")
     return SourceSelection(
         selected=selected,
         ranked=tuple(ranked),
         considered=len(ranked),
         limit=limit,
-        truncated=len(ranked) > limit,
+        truncated=len(selectable) > limit,
         dropped=dropped,
         ambiguous_contracts=ambiguous,
         unresolved_imports=tuple(unresolved),
@@ -395,6 +432,8 @@ def select_sources(
         repository_candidates=len(paths),
         excluded_count=excluded,
         enumeration_capped=capped,
+        closure_complete=closure_complete,
+        scope_excluded=scope_excluded,
     )
 
 
@@ -422,7 +461,9 @@ def select_named(repo_root: Path, files: tuple[str, ...]) -> SourceSelection:
             )
     if capped:
         notes.append(f"repository enumeration stopped at {MAX_CANDIDATE_FILES} Solidity files")
-    ranked = tuple(RankedFile(path, Priority.SCOPE, "named by the operator") for path in files)
+    ranked = tuple(
+        RankedFile(path, Priority.SCOPE, "named by the operator", "target") for path in files
+    )
     return SourceSelection(
         selected=tuple(files),
         ranked=ranked,
@@ -606,6 +647,61 @@ def _trace_dependencies(
             else:
                 unresolved.append((rel, base))
     return resolved, unresolved, ambiguous, escaped, notes
+
+
+_ROLE_ORDER = {
+    "target": 0,
+    "compile_dependency": 1,
+    "analysis_context": 2,
+    "excluded": 3,
+}
+
+
+def _role_counts(ranked: tuple[RankedFile, ...] | list[RankedFile]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in ranked:
+        counts[item.role] = counts.get(item.role, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _excluded_prefixes(manifest: BountyManifest | None) -> tuple[str, ...]:
+    if manifest is None:
+        return ()
+    prefixes: list[str] = []
+    for asset in manifest.out_of_scope:
+        if asset.kind != "path":
+            continue
+        text = asset.identifier.replace("\\", "/").strip().strip("/")
+        if text and ".." not in text.split("/"):
+            prefixes.append(text)
+    return tuple(prefixes)
+
+
+def _path_excluded(rel: str, prefixes: tuple[str, ...]) -> bool:
+    return any(rel == prefix or rel.startswith(prefix + "/") for prefix in prefixes)
+
+
+def _assign_roles(
+    ranked: list[RankedFile],
+    scope_files: set[str],
+    dependencies: set[str],
+    prefixes: tuple[str, ...],
+) -> list[RankedFile]:
+    """Target and its compile closure outrank extra files. Excluded paths stay out
+    of the budget unless the target actually imports them."""
+    assigned: list[RankedFile] = []
+    for item in ranked:
+        if item.path in scope_files:
+            role = "target"
+        elif item.path in dependencies:
+            role = "compile_dependency"
+        elif _path_excluded(item.path, prefixes):
+            role = "excluded"
+        else:
+            role = "analysis_context"
+        assigned.append(RankedFile(item.path, item.priority, item.reason, role))
+    assigned.sort(key=lambda item: (item.priority.value, item.path))
+    return assigned
 
 
 def _rank_one(

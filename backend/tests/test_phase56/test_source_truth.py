@@ -242,7 +242,6 @@ def test_an_out_of_scope_path_is_excluded_before_execution(tmp_path: Path, monke
     from app.core.config import get_settings
     from app.discovery.bounty.campaign import ScopeStatus
     from app.discovery.bounty.service import BountyCampaignService, CampaignSpec
-    from app.discovery.bounty.stateful import target_contract
     from tests.test_phase51.phase51_support import manifest
 
     account = """// SPDX-License-Identifier: MIT
@@ -279,24 +278,16 @@ contract {name} {{
             source_file="src/Good.sol",
         )
     )
+    assert "vendor/Bad.sol" not in campaign.selection.selected
+    assert campaign.selection.role_of("vendor/Bad.sol") == "excluded"
+    assert campaign.selection.role_of("src/Good.sol") == "target"
     analysis = svc._analysis(campaign)
     bad = [item for item in analysis.sequences if "Bad." in item.derived_from]
     good = [item for item in analysis.sequences if "Good." in item.derived_from]
-    assert bad and good
-    for sequence in bad:
-        candidate = analysis.candidate_for(sequence.derived_from)
-        assert candidate is not None
-        decision = campaign.manifest.scope_of(
-            contract=target_contract(sequence), file=candidate.file
-        )
-        assert decision.status is ScopeStatus.OUT_OF_SCOPE
-    result = svc.stateful_execute(campaign.campaign_id, rounds=1)
-    if result.get("available"):
-        skipped = {item["sequence_id"] for item in result["skipped"]}
-        assert {item.sequence_id for item in bad} <= skipped
-        assert all(item["reason"] == "blocked_by_policy:out_of_scope" for item in result["skipped"])
-        observed = {item.get("sequence_id") for item in result.get("observations", [])}
-        assert observed.isdisjoint(skipped)
+    assert not bad
+    assert good
+    decision = campaign.manifest.scope_of(contract="Bad", file="vendor/Bad.sol")
+    assert decision.status is ScopeStatus.OUT_OF_SCOPE
 
 
 def test_permission_errors_are_recorded(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

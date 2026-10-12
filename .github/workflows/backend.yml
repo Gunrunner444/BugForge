@@ -111,6 +111,19 @@ jobs:
           echo "${expected}  $HOME/.local/bin/solc" | sha256sum -c -
           chmod 755 "$HOME/.local/bin/solc"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install solc 0.8.15
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.bugforge/solc/0.8.15"
+          # Published checksum from https://binaries.soliditylang.org/linux-amd64/list.json
+          url="https://binaries.soliditylang.org/linux-amd64/solc-linux-amd64-v0.8.15+commit.e14f2714"
+          expected="5189155ce322d57fb75e8518d9b39139627edea4fb25b5f0ebed0391c52e74cc"
+          curl -fsSL -o "$HOME/.bugforge/solc/0.8.15/solc" "$url"
+          echo "${expected}  $HOME/.bugforge/solc/0.8.15/solc" | sha256sum -c -
+          chmod 755 "$HOME/.bugforge/solc/0.8.15/solc"
+          "$HOME/.bugforge/solc/0.8.15/solc" --version | grep "0.8.15"
+          # PATH keeps solc 0.8.28 for the existing integration suite.
+          solc --version | grep "0.8.28"
       - name: Require the executor to see forge and solc
         working-directory: backend
         run: |
@@ -154,4 +167,7 @@ jobs:
             tests/test_phase56/test_compile_failure_campaign.py \
             tests/test_phase56/test_campaign_consistency.py \
             tests/test_phase56/test_source_truth.py::test_an_out_of_scope_path_is_excluded_before_execution \
+            tests/test_phase57/test_compiler_resolution.py \
+            tests/test_phase57/test_scope_selection.py \
+            tests/test_phase57/test_skip_persistence.py \
             -vv --tb=short

@@ -1684,10 +1684,44 @@ def untrusted_cheatcode_use(sources: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(found[:8])
 
 
-def foundry_config(pipeline: str, solc: str) -> str:
-    """Server-owned Foundry config. Nothing from the analyzed repository reaches it."""
+@dataclass(frozen=True)
+class ProjectSettings:
+    """Compiler settings copied from the campaign manifest, not from source text."""
+
+    optimizer: bool | None = None
+    optimizer_runs: int | None = None
+    via_ir: bool | None = None
+    evm_version: str = ""
+    evm_exact: bool = True
+    evm_requested: str = ""
+
+
+def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = None) -> str:
+    """Server-owned Foundry config. Nothing from the analyzed repository reaches it.
+
+    ``pipeline`` may force a corroboration variant. It is never interpolated.
+    An unsupported requested EVM version is omitted rather than rewritten into
+    a different version the compiler happens to accept.
+    """
     via_ir = "true" if pipeline == "via_ir" else "false"
     optimizer = "false" if pipeline == "no_optimizer" else "true"
+    runs_line = ""
+    evm_line = ""
+    if settings is not None and pipeline not in {"via_ir", "no_optimizer"}:
+        if settings.via_ir is not None:
+            via_ir = "true" if settings.via_ir else "false"
+        if settings.optimizer is not None:
+            optimizer = "true" if settings.optimizer else "false"
+    if settings is not None and pipeline != "no_optimizer" and settings.optimizer_runs is not None:
+        runs = settings.optimizer_runs
+        if 0 <= runs <= 1_000_000:
+            runs_line = f"optimizer_runs = {runs}\n"
+    if (
+        settings is not None
+        and settings.evm_exact
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,31}", settings.evm_version or "")
+    ):
+        evm_line = f"evm_version = {json.dumps(settings.evm_version)}\n"
     solc_line = f"solc = {json.dumps(solc)}\n" if solc else ""
     return (
         "[profile.default]\n"
@@ -1699,10 +1733,14 @@ def foundry_config(pipeline: str, solc: str) -> str:
         "auto_detect_solc = false\n"
         "offline = true\n"
         "no_storage_caching = true\n"
-        "rpc_endpoints = {}\n" + solc_line + f"via_ir = {via_ir}\n"
-        f"optimizer = {optimizer}\n"
-        'remappings = ["forge-std/=lib/forge-std/src/"]\n'
-        "\n[lint]\nlint_on_build = false\n"
+        "rpc_endpoints = {}\n"
+        + solc_line
+        + evm_line
+        + f"via_ir = {via_ir}\n"
+        + f"optimizer = {optimizer}\n"
+        + runs_line
+        + 'remappings = ["forge-std/=lib/forge-std/src/"]\n'
+        + "\n[lint]\nlint_on_build = false\n"
     )
 
 
@@ -1756,9 +1794,31 @@ class StatefulExecutor:
         timeout: int | None = None,
         tools: ToolStatus | None = None,
         max_runs: int = MAX_RUNS,
+        compiler: Any = None,
+        project: ProjectSettings | None = None,
+        compiler_required: str = "",
     ) -> None:
         self.timeout = timeout if timeout is not None else _timeout_setting()
         self.tools = tools if tools is not None else tool_status()
+        self.compiler = compiler
+        self.project = project
+        self.compiler_required = compiler_required
+        self.evm_exact = True
+        self.evm_requested = ""
+        if compiler is not None:
+            self.tools = replace(
+                self.tools, solc="available", solc_version=str(compiler.reported_version)
+            )
+            if project is not None and project.evm_version:
+                from app.discovery.bounty.solc_resolve import evm_version_for
+
+                _applied, exact = evm_version_for(str(compiler.path), project.evm_version)
+                self.evm_exact = exact
+                self.evm_requested = project.evm_version
+                if not exact:
+                    self.project = replace(
+                        project, evm_version="", evm_exact=False, evm_requested=project.evm_version
+                    )
         self.runs = 0
         # A server-owned run budget; nothing a caller sends can raise it.
         self.max_runs = max(0, min(max_runs, MAX_RUNS))
@@ -1808,6 +1868,12 @@ class StatefulExecutor:
                 f"cheatcode access ({'; '.join(cheats)})",
                 "blocked_by_policy:cheatcode_in_source",
             )
+        if self.compiler_required and self.compiler is None:
+            return base.done(
+                Outcome.UNAVAILABLE,
+                f"solc {self.compiler_required} is not installed",
+                "compiler_unavailable",
+            )
         if not self.tools.available:
             missing = "forge" if self.tools.forge != "available" else "solc"
             return base.done(Outcome.UNAVAILABLE, f"{missing} is not installed", "tool_missing")
@@ -1848,8 +1914,8 @@ class StatefulExecutor:
     ) -> StatefulObservation:
         self.runs += 1
         forge = tool_path("forge") or "forge"
-        solc = tool_path("solc") or ""
-        config = foundry_config(harness.pipeline, solc)
+        solc = str(self.compiler.path) if self.compiler is not None else (tool_path("solc") or "")
+        config = foundry_config(harness.pipeline, solc, self.project)
         common: dict[str, Any] = {
             "pipeline": harness.pipeline,
             "forge_version": self.tools.forge_version,

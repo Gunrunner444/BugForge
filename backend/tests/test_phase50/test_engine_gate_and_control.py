@@ -375,8 +375,14 @@ def test_bounty_package_has_no_network_model_or_submission_code() -> None:
                 if name == "subprocess" or name.startswith("subprocess."):
                     # compiler_diff.py shells out to solc; stateful.py (Phase 52)
                     # shells out to forge for local stateful execution;
-                    # engine_adapters.py runs echidna/medusa offline on the same plan.
-                    assert path.name in {"compiler_diff.py", "stateful.py", "engine_adapters.py"}
+                    # engine_adapters.py runs echidna/medusa offline on the same plan;
+                    # solc_resolve.py asks a local solc binary for --version and --help.
+                    assert path.name in {
+                        "compiler_diff.py",
+                        "stateful.py",
+                        "engine_adapters.py",
+                        "solc_resolve.py",
+                    }
     # the manifest legitimately names credential words in order to refuse them
     text = "\n".join(
         p.read_text(encoding="utf-8") for p in PACKAGE.glob("*.py") if p.name != "campaign.py"
