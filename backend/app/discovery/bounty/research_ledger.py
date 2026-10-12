@@ -721,6 +721,26 @@ def build_ledger(
     }
 
 
+_PROPERTY_OUTCOMES = frozenset({"property_violated", "property_held"})
+_RAN_OUTCOMES = frozenset(
+    {
+        "property_violated",
+        "property_held",
+        "mechanism_observed",
+        "failure_propagated",
+        "sequence_executed_no_oracle",
+        "sequence_reverted",
+    }
+)
+_STAGE_KEYS = (
+    "process_status",
+    "compiler_status",
+    "test_status",
+    "sequence_status",
+    "property_status",
+)
+
+
 def campaign_coverage(
     *,
     files_discovered: int | None = None,
@@ -739,25 +759,35 @@ def campaign_coverage(
     engines: Sequence[Mapping[str, Any]] = (),
     persistence_status: str = "",
     analysis_stale: bool = False,
+    selection_truncated: bool = False,
+    parser_limited: bool = False,
+    selection_mode: str = "",
+    repository_candidates: int | None = None,
+    excluded_count: int | None = None,
+    enumeration_capped: bool = False,
+    unreadable_files: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
     Counts come from the caller. Missing values stay null rather than becoming zero.
-    Local results are never production verification.
+    A Forge invocation is not a property evaluation. Local results are never
+    production verification.
     """
     skipped = dict(skipped or {})
-    executions = dict(executions or {})
+    records = dict(executions or {})
+    executions_known = executions is not None or forge_runs is not None
     by_reason: dict[str, int] = {}
     for reason in skipped.values():
         by_reason[reason] = by_reason.get(reason, 0) + 1
     by_outcome: dict[str, int] = {}
-    for record in executions.values():
+    for record in records.values():
         outcome = str(record.get("outcome") or "unknown")
         by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+    stages = _execution_stages(records, forge_runs=forge_runs, known=executions_known)
     invoked: set[str] = set()
-    if forge_runs:
+    if stages["foundry_invoked"] is True:
         invoked.add("foundry")
-    for record in executions.values():
+    for record in records.values():
         for path in record.get("check_paths") or []:
             engine = str(path.get("engine") or "")
             verdict = str(path.get("verdict") or "")
@@ -788,46 +818,354 @@ def campaign_coverage(
                     "reason": "usable for this environment, but not invoked on this campaign",
                 }
             )
-    demonstrated = bool(forge_runs)
+    unread = [dict(item) for item in unreadable_files]
+    snapshot_fresh = not analysis_stale
+    repository_coverage = _repository_coverage(
+        files_discovered=files_discovered,
+        files_selected=files_selected,
+        selection_mode=selection_mode,
+        selection_truncated=selection_truncated or truncated,
+        parser_limited=parser_limited,
+        dependency_status=dependency_status,
+        repository_candidates=repository_candidates,
+        excluded_count=excluded_count,
+        enumeration_capped=enumeration_capped,
+    )
+    selected_complete = (
+        snapshot_fresh
+        and not selection_truncated
+        and not parser_limited
+        and not truncated
+        and dependency_status == "traced"
+        and not unread
+        and files_read >= files_selected
+        and files_selected > 0
+    )
     blocker = _blocker(
         files_selected=files_selected,
         files_read=files_read,
         truncated=truncated,
+        selection_truncated=selection_truncated,
+        parser_limited=parser_limited,
+        dependency_status=dependency_status,
         candidates=candidates,
         sequences=sequences,
         skipped=skipped,
         by_outcome=by_outcome,
         forge_runs=forge_runs,
-        demonstrated=demonstrated,
+        stages=stages,
         analysis_stale=analysis_stale,
-        executions=len(executions),
+        executions=len(records),
+        unreadable_files=unread,
+        reason_codes={str(record.get("reason_code") or "") for record in records.values()},
     )
     return {
         "files_discovered": files_discovered,
         "files_selected": files_selected,
         "files_read": files_read,
         "truncated": truncated,
-        "analysis_complete": not truncated and not analysis_stale,
+        "selection_truncated": selection_truncated,
+        "parser_limited": parser_limited,
+        "snapshot_fresh": snapshot_fresh,
+        "analysis_complete": selected_complete,
         "analysis_stale": analysis_stale,
+        "repository_coverage": repository_coverage,
         "truncation_notes": list(truncation_notes)[:12],
         "dependency_status": dependency_status,
+        "unreadable_files": unread[:32],
+        "repository_candidates": repository_candidates,
+        "excluded_count": excluded_count,
         "contracts_modeled": contracts_modeled,
         "functions_modeled": functions_modeled,
         "candidates": candidates,
         "sequences": sequences,
         "sequences_skipped": len(skipped),
         "skipped_by_reason": dict(sorted(by_reason.items())),
-        "executions": len(executions),
+        "executions": len(records) if executions is not None else None,
         "by_outcome": dict(sorted(by_outcome.items())),
         "forge_runs": forge_runs,
-        "dynamic_foundry_execution_demonstrated": demonstrated,
+        "foundry_invoked": stages["foundry_invoked"],
+        "execution_stages": stages["counters"],
+        "dynamic_foundry_execution_demonstrated": stages["sequence_executed"],
+        "property_evaluation_demonstrated": stages["property_evaluated"],
         "engines": engine_rows,
         "engines_not_invoked": not_invoked,
         "persistence_status": persistence_status or "not_recorded",
+        "results_persisted": persistence_status == "persisted",
         "blocker": blocker,
         "local_results_are_not_production_verification": True,
         "verified": False,
     }
+
+
+def _repository_coverage(
+    *,
+    files_discovered: int | None,
+    files_selected: int,
+    selection_mode: str,
+    selection_truncated: bool,
+    parser_limited: bool,
+    dependency_status: str,
+    repository_candidates: int | None,
+    excluded_count: int | None,
+    enumeration_capped: bool,
+) -> str:
+    """complete, selected_subset, bounded, or unknown. Never complete for a subset."""
+    if files_discovered is None and repository_candidates is None:
+        return "unknown"
+    if (
+        selection_truncated
+        or parser_limited
+        or enumeration_capped
+        or dependency_status == "bounded"
+    ):
+        return "bounded"
+    discovered = repository_candidates if repository_candidates is not None else files_discovered
+    if discovered is None:
+        return "unknown"
+    excluded = excluded_count or 0
+    if (
+        selection_mode != "explicit"
+        and not excluded
+        and discovered == files_selected
+        and files_selected > 0
+        and dependency_status == "traced"
+    ):
+        return "complete"
+    return "selected_subset"
+
+
+def _execution_stages(
+    records: Mapping[str, Mapping[str, Any]], *, forge_runs: int | None, known: bool
+) -> dict[str, Any]:
+    """Stage counters from execution records. One record increments each stage at most once."""
+    names = (
+        "tool_unavailable",
+        "compiler_unavailable",
+        "identity_mismatch",
+        "build_invoked",
+        "build_succeeded",
+        "build_failed",
+        "test_invoked",
+        "test_completed",
+        "test_timed_out",
+        "process_failed",
+        "probe_reached",
+        "observations_collected",
+        "property_verdicts",
+        "mechanism_observations",
+        "no_oracle",
+    )
+    if not records and forge_runs is None:
+        return {
+            "foundry_invoked": None,
+            "sequence_executed": False,
+            "property_evaluated": False,
+            "counters": {name: None for name in names},
+            "probe_reached": False,
+            "property_evaluated_flag": False,
+        }
+    counts = {name: 0 for name in names}
+    any_invoked = False
+    any_sequence = False
+    any_property = False
+    for record in records.values():
+        flags = _record_flags(record)
+        if flags["invoked"]:
+            any_invoked = True
+        if flags["sequence"]:
+            any_sequence = True
+        if flags["property"]:
+            any_property = True
+        for name in names:
+            if flags[name]:
+                counts[name] += 1
+    if forge_runs:
+        any_invoked = True
+    foundry_invoked: bool | None
+    if forge_runs is None and not records:
+        foundry_invoked = None
+    else:
+        foundry_invoked = any_invoked
+    if not known and not records:
+        counted: dict[str, int | None] = {name: None for name in names}
+    else:
+        counted = dict(counts)
+    return {
+        "foundry_invoked": foundry_invoked,
+        "sequence_executed": any_sequence,
+        "property_evaluated": any_property,
+        "counters": counted,
+        "probe_reached": any_sequence,
+        "property_evaluated_flag": any_property,
+    }
+
+
+def _record_flags(record: Mapping[str, Any]) -> dict[str, bool]:
+    outcome = str(record.get("outcome") or "")
+    present = {key: record.get(key) for key in _STAGE_KEYS}
+    has_stage = any(value is not None for value in present.values())
+    process = str(present["process_status"] or "")
+    compiler = str(present["compiler_status"] or "")
+    test = str(present["test_status"] or "")
+    sequence = str(present["sequence_status"] or "")
+    prop = str(present["property_status"] or "")
+    flags = {
+        "invoked": False,
+        "sequence": False,
+        "property": False,
+        "tool_unavailable": False,
+        "compiler_unavailable": False,
+        "identity_mismatch": False,
+        "build_invoked": False,
+        "build_succeeded": False,
+        "build_failed": False,
+        "test_invoked": False,
+        "test_completed": False,
+        "test_timed_out": False,
+        "process_failed": False,
+        "probe_reached": False,
+        "observations_collected": False,
+        "property_verdicts": False,
+        "mechanism_observations": False,
+        "no_oracle": False,
+    }
+    if outcome == "identity_mismatch":
+        flags["identity_mismatch"] = True
+        return flags
+    if outcome == "unavailable":
+        if str(record.get("reason_code") or "") == "compiler_unavailable":
+            flags["compiler_unavailable"] = True
+        else:
+            flags["tool_unavailable"] = True
+        return flags
+    if not has_stage:
+        return _flags_from_outcome(flags, outcome)
+    if process == "timeout":
+        flags["invoked"] = True
+        flags["test_timed_out"] = True
+        if compiler == "ok":
+            flags["build_invoked"] = True
+            flags["build_succeeded"] = True
+            flags["test_invoked"] = True
+        else:
+            flags["build_invoked"] = True
+        return flags
+    if process == "spawn_failed":
+        flags["invoked"] = True
+        flags["process_failed"] = True
+        if compiler == "ok":
+            flags["build_invoked"] = True
+            flags["build_succeeded"] = True
+            flags["test_invoked"] = True
+        else:
+            flags["build_invoked"] = True
+        return flags
+    if compiler == "failed" or outcome == "compile_failed":
+        flags["invoked"] = True
+        flags["build_invoked"] = True
+        flags["build_failed"] = True
+        return flags
+    if compiler == "ok":
+        flags["invoked"] = True
+        flags["build_invoked"] = True
+        flags["build_succeeded"] = True
+    if test in {"passed", "failed", "missing"}:
+        flags["invoked"] = True
+        flags["test_invoked"] = True
+    if test in {"passed", "failed"}:
+        flags["test_completed"] = True
+    reached = sequence in {"completed", "reverted"} or outcome in _RAN_OUTCOMES
+    if reached:
+        flags["probe_reached"] = True
+        flags["observations_collected"] = True
+        flags["sequence"] = True
+        flags["invoked"] = True
+    if prop in {"violated", "held"} or (
+        outcome in _PROPERTY_OUTCOMES and prop in {"", "violated", "held"}
+    ):
+        flags["property_verdicts"] = True
+        flags["property"] = True
+        flags["sequence"] = True
+        flags["probe_reached"] = True
+        flags["observations_collected"] = True
+    if prop == "mechanism_observed" or outcome == "mechanism_observed":
+        flags["mechanism_observations"] = True
+    if prop in {"no_oracle", "not_evaluated"} and outcome == "sequence_executed_no_oracle":
+        flags["no_oracle"] = True
+    if prop == "no_oracle" or outcome == "sequence_executed_no_oracle":
+        flags["no_oracle"] = True
+    if outcome == "execution_failed" and not reached:
+        flags["process_failed"] = True
+    return flags
+
+
+def _flags_from_outcome(flags: dict[str, bool], outcome: str) -> dict[str, bool]:
+    """Legacy records that stored an outcome and no stage fields."""
+    if outcome in _PROPERTY_OUTCOMES:
+        flags.update(
+            invoked=True,
+            sequence=True,
+            property=True,
+            build_invoked=True,
+            build_succeeded=True,
+            test_invoked=True,
+            test_completed=True,
+            probe_reached=True,
+            observations_collected=True,
+            property_verdicts=True,
+        )
+        return flags
+    if outcome == "mechanism_observed":
+        flags.update(
+            invoked=True,
+            sequence=True,
+            build_invoked=True,
+            build_succeeded=True,
+            test_invoked=True,
+            test_completed=True,
+            probe_reached=True,
+            observations_collected=True,
+            mechanism_observations=True,
+        )
+        return flags
+    if outcome in {"failure_propagated", "sequence_reverted"}:
+        flags.update(
+            invoked=True,
+            sequence=True,
+            build_invoked=True,
+            build_succeeded=True,
+            test_invoked=True,
+            test_completed=True,
+            probe_reached=True,
+            observations_collected=True,
+        )
+        return flags
+    if outcome == "sequence_executed_no_oracle":
+        flags.update(
+            invoked=True,
+            sequence=True,
+            build_invoked=True,
+            build_succeeded=True,
+            test_invoked=True,
+            test_completed=True,
+            probe_reached=True,
+            observations_collected=True,
+            no_oracle=True,
+        )
+        return flags
+    if outcome == "compile_failed":
+        flags.update(invoked=True, build_invoked=True, build_failed=True)
+        return flags
+    if outcome == "timeout":
+        flags.update(invoked=True, test_timed_out=True, build_invoked=True)
+        return flags
+    if outcome == "execution_failed":
+        flags.update(invoked=True, process_failed=True, build_invoked=True, build_succeeded=True)
+        return flags
+    if outcome == "inconclusive":
+        return flags
+    return flags
 
 
 def _blocker(
@@ -835,16 +1173,24 @@ def _blocker(
     files_selected: int,
     files_read: int,
     truncated: bool,
+    selection_truncated: bool,
+    parser_limited: bool,
+    dependency_status: str,
     candidates: int,
     sequences: int,
     skipped: Mapping[str, str],
     by_outcome: Mapping[str, int],
     forge_runs: int | None,
-    demonstrated: bool,
+    stages: Mapping[str, Any],
     analysis_stale: bool,
     executions: int,
+    unreadable_files: Sequence[Mapping[str, str]],
+    reason_codes: set[str] | None = None,
 ) -> str:
-    """The single most useful reason a campaign did not demonstrate dynamic execution."""
+    """The single most useful reason a campaign did not evaluate a property.
+
+    A nonzero Forge invocation does not hide a more specific failure.
+    """
     if analysis_stale:
         return (
             "the analyzed snapshot no longer matches the repository; reanalyze "
@@ -853,9 +1199,24 @@ def _blocker(
     if files_selected <= 0:
         return "no files selected"
     if files_read <= 0:
+        if unreadable_files:
+            item = unreadable_files[0]
+            return (
+                "no relevant source was successfully read "
+                f"({item.get('path', '')}: {item.get('reason', 'unreadable')})"
+            )
         return "no relevant source was successfully read"
+    if unreadable_files and candidates <= 0 and sequences <= 0:
+        item = unreadable_files[0]
+        return (
+            f"in-scope source could not be read ({item.get('path', '')}: {item.get('reason', '')})"
+        )
     if truncated and candidates <= 0 and sequences <= 0:
+        if parser_limited and not selection_truncated:
+            return "the parser reached a limit before the target was modeled"
         return "analysis was truncated before the target was modeled"
+    if dependency_status == "partial" and candidates <= 0 and sequences <= 0:
+        return "required source dependencies were not traced"
     if candidates <= 0 and sequences <= 0:
         return "no detector emitted a candidate"
     if sequences <= 0 and skipped:
@@ -871,20 +1232,39 @@ def _blocker(
         return "no sequence was generated: " + next(iter(skipped.values()))
     if sequences <= 0:
         return "no sequence was generated"
-    if executions <= 0 or forge_runs is None:
-        return "no dynamic Foundry execution was demonstrated"
-    if demonstrated:
+    if stages.get("property_evaluated"):
         return ""
-    if by_outcome.get("identity_mismatch"):
+    if executions <= 0:
+        if forge_runs:
+            return "Foundry was invoked but no execution record was produced"
+        return "no dynamic Foundry execution was demonstrated"
+    if forge_runs is None and not stages.get("foundry_invoked"):
+        return "no dynamic Foundry execution was demonstrated"
+    counters = stages.get("counters") or {}
+    if by_outcome.get("identity_mismatch") and not stages.get("sequence_executed"):
         return "execution was blocked by an identity or source mismatch"
+    codes = {code for code in (reason_codes or set()) if code}
+    if codes and all(code.startswith("blocked_by_policy") for code in codes):
+        return "execution was blocked by policy before Forge was invoked"
+    if "compiler_unavailable" in codes and not stages.get("sequence_executed"):
+        return "the installed compiler does not satisfy the source pragma, so the test was not run"
     if by_outcome.get("unavailable") and not any(
         key not in {"unavailable", "identity_mismatch"} for key in by_outcome
     ):
         return "Foundry or solc is unavailable"
+    if counters.get("build_failed") and not stages.get("sequence_executed"):
+        if not any(
+            key not in {"compile_failed", "identity_mismatch", "unavailable"} for key in by_outcome
+        ):
+            return "compilation failed"
     if by_outcome.get("compile_failed") and sum(by_outcome.values()) == by_outcome.get(
         "compile_failed", 0
     ):
         return "compilation failed"
+    if counters.get("test_timed_out") and not stages.get("sequence_executed"):
+        return "a Forge process timed out before the test completed"
+    if by_outcome.get("timeout") and not stages.get("sequence_executed"):
+        return "a Forge process timed out before the test completed"
     if any("harness" in reason for reason in skipped.values()):
         return "the harness could not be constructed"
     if by_outcome.get("property_unsupported") or any(
@@ -893,11 +1273,21 @@ def _blocker(
         return "properties were unsupported"
     if any("budget" in str(key) for key in by_outcome):
         return "tool or execution budget was exhausted"
+    if counters.get("process_failed") and not stages.get("sequence_executed"):
+        return "the harness compiled but did not reach the intended target operation"
     if by_outcome and set(by_outcome) <= {"inconclusive"}:
         return "the campaign reached the execution stage but every run was inconclusive"
-    if forge_runs == 0:
+    if counters.get("mechanism_observations") and not stages.get("property_evaluated"):
+        return "a mechanism was observed; no property verdict was produced"
+    if counters.get("no_oracle") and not stages.get("property_evaluated"):
+        return "the sequence ran but no executable oracle produced a property verdict"
+    if stages.get("sequence_executed") and not stages.get("property_evaluated"):
+        return "the test completed without a property verdict"
+    if forge_runs == 0 or stages.get("foundry_invoked") is False:
         return "no dynamic Foundry execution was demonstrated"
-    return ""
+    if forge_runs:
+        return "Foundry was invoked but no property was evaluated"
+    return "no dynamic Foundry execution was demonstrated"
 
 
 # ---- cost-aware planner -----------------------------------------------------------------------

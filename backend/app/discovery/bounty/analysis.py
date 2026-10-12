@@ -31,7 +31,7 @@ from app.discovery.bounty.deployment_identity import (
     deployment_identity,
 )
 from app.discovery.bounty.priority import prioritize
-from app.discovery.bounty.source_selection import MAX_FILE_BYTES, SourceSelection
+from app.discovery.bounty.source_selection import FileRead, SourceSelection, read_source_files
 from app.discovery.bounty.vfcs import MAX_VFCS_CANDIDATES, SequenceIdentity, Vfcs, generate
 from app.discovery.orchestration.model import CampaignIdentity
 from app.parsing.solidity_research import (
@@ -65,6 +65,8 @@ class CampaignAnalysis:
     source_hashes: dict[str, str] = field(default_factory=dict)
     # "detector@Contract.signature" -> why no sequence template applied (coverage gaps)
     sequence_skipped: dict[str, str] = field(default_factory=dict)
+    # Every file the analysis tried to read. Skipped files are not in ``sources``.
+    file_reads: tuple[FileRead, ...] = ()
 
     def all_models(self) -> tuple[ResearchModel, ...]:
         """The main model first, then each distinct follow-up model (stable order)."""
@@ -89,19 +91,16 @@ class CampaignAnalysis:
 
 
 def read_sources(repo_root: Path, files: tuple[str, ...]) -> dict[str, str]:
-    root = repo_root.resolve()
-    sources: dict[str, str] = {}
-    for name in files:
-        path = (root / name).resolve()
-        if not path.is_file() or root not in path.parents or path.suffix != ".sol":
-            continue
-        try:
-            if path.stat().st_size > MAX_FILE_BYTES:
-                continue
-            sources[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError, ValueError):
-            continue
+    """Successfully read Solidity sources. Unreadable paths are omitted, not blanked."""
+    sources, _reads = read_source_files(repo_root, files)
     return sources
+
+
+def _merge_reads(existing: list[FileRead], extra: tuple[FileRead, ...]) -> list[FileRead]:
+    by_path = {item.path: item for item in existing}
+    for item in extra:
+        by_path[item.path] = item
+    return [by_path[path] for path in sorted(by_path)]
 
 
 def _ordered(
@@ -126,7 +125,8 @@ def analyze_campaign(
     address: str = "",
     chain_id: str = "",
 ) -> CampaignAnalysis:
-    sources = read_sources(repo_root, files)
+    sources, primary_reads = read_source_files(repo_root, files)
+    read_log: list[FileRead] = list(primary_reads)
     model = build_research_model(sources) if sources else None
     target = deployment_identity(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
@@ -185,7 +185,10 @@ def analyze_campaign(
     batches = selection.followup_batches()
     covered = set(sources)
     for batch in batches:
-        batch_sources = read_sources(repo_root, tuple(p for p in batch if p not in covered))
+        batch_sources, batch_reads = read_source_files(
+            repo_root, tuple(p for p in batch if p not in covered)
+        )
+        read_log = _merge_reads(read_log, batch_reads)
         if not batch_sources:
             continue
         covered |= set(batch_sources)
@@ -218,7 +221,8 @@ def analyze_campaign(
         for path in extra_files:
             if len(followup["ambiguous_passes"]) >= MAX_AMBIGUOUS_PASSES:
                 break
-            alone = read_sources(repo_root, (path,))
+            alone, alone_reads = read_source_files(repo_root, (path,))
+            read_log = _merge_reads(read_log, alone_reads)
             if not alone:
                 continue
             part = build_research_model(alone)
@@ -260,6 +264,7 @@ def analyze_campaign(
         sequence_sources=sequence_sources,
         sequence_skipped=sequence_skipped,
         source_hashes=hashes,
+        file_reads=tuple(read_log),
     )
 
 

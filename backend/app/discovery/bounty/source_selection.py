@@ -27,7 +27,18 @@ MAX_DEPENDENCY_FILES = 32
 MAX_FOLLOWUP_BATCHES = 2
 FOLLOWUP_PRIORITY = 4  # Priority.SECURITY_SENSITIVE and better
 _SKIP_DIRS = frozenset(
-    {".git", "node_modules", "lib", "out", "cache", "artifacts", "broadcast", "test", "tests"}
+    {
+        ".git",
+        "node_modules",
+        "lib",
+        "out",
+        "cache",
+        "artifacts",
+        "broadcast",
+        "script",
+        "test",
+        "tests",
+    }
 )
 _IMPORT = re.compile(r"""import\s+(?:[^\"';]*\s+from\s+)?["']([^"']+)["']""")
 _CONTRACT_DECL = re.compile(r"\b(?:contract|library|interface)\s+([A-Za-z_]\w*)")
@@ -62,6 +73,18 @@ class RankedFile:
 
 
 @dataclass(frozen=True)
+class FileRead:
+    """One bounded file-read outcome. Empty text is never a stand-in for a failure."""
+
+    path: str
+    status: str  # read | skipped
+    reason: str  # read | size_limit | filesystem_error | invalid_encoding | disappeared | path_rejected | excluded
+
+    def as_dict(self) -> dict[str, str]:
+        return {"path": self.path, "status": self.status, "reason": self.reason}
+
+
+@dataclass(frozen=True)
 class SourceSelection:
     selected: tuple[str, ...]
     ranked: tuple[RankedFile, ...]
@@ -72,12 +95,16 @@ class SourceSelection:
     # contract name -> every file that declares it, when more than one does. Such a
     # name is never silently bound to the first file in alphabetical order.
     ambiguous_contracts: tuple[tuple[str, tuple[str, ...]], ...] = ()
-    mode: str = "ranked"  # ranked | explicit
+    mode: str = "ranked"  # ranked | explicit | unassessed
     # Imports and bases that could not be tied to one file inside the repository.
     unresolved_imports: tuple[tuple[str, str], ...] = ()
     ambiguous_imports: tuple[tuple[str, tuple[str, ...]], ...] = ()
     escaped_imports: tuple[tuple[str, str], ...] = ()
     dependency_notes: tuple[str, ...] = ()
+    reads: tuple[FileRead, ...] = ()
+    repository_candidates: int = 0
+    excluded_count: int = 0
+    enumeration_capped: bool = False
 
     @staticmethod
     def explicit(files: tuple[str, ...]) -> SourceSelection:
@@ -115,6 +142,35 @@ class SourceSelection:
             pending = pending[size:]
         return tuple(batches)
 
+    @property
+    def files_read(self) -> int:
+        return sum(1 for item in self.reads if item.status == "read")
+
+    @property
+    def files_not_read(self) -> int:
+        return sum(1 for item in self.reads if item.status != "read")
+
+    def dependency_status(self) -> str:
+        """traced, partial, bounded, or unknown.
+
+        traced: every examined file was read and its imports and bases resolved.
+        partial: an import or base is unresolved, ambiguous, or outside the
+        repository, or a file that was supposed to be read was not.
+        bounded: a selection, enumeration, or dependency-traversal limit stopped
+        the trace and nothing above is unresolved.
+        unknown: the repository was not assessed, or a named set was never read.
+        """
+        if self.mode == "unassessed":
+            return "unknown"
+        unread = any(item.status != "read" and item.reason != "excluded" for item in self.reads)
+        if unread or self.unresolved_imports or self.ambiguous_imports or self.escaped_imports:
+            return "partial"
+        if self.dependency_notes or self.truncated or self.enumeration_capped:
+            return "bounded"
+        if self.mode == "explicit" and not self.reads:
+            return "unknown"
+        return "traced"
+
     def request_extra(self) -> dict[str, str]:
         """Selection facts that travel with the analysis request and its evidence."""
         extra = {
@@ -130,12 +186,9 @@ class SourceSelection:
             extra["source_selection_ambiguous"] = ",".join(
                 name for name, _ in self.ambiguous_contracts
             )[:300]
-        if self.unresolved_imports or self.ambiguous_imports or self.escaped_imports:
-            extra["source_dependency_status"] = "partial"
-        elif self.dependency_notes:
-            extra["source_dependency_status"] = "bounded"
-        else:
-            extra["source_dependency_status"] = "traced"
+        extra["source_dependency_status"] = self.dependency_status()
+        extra["source_files_read"] = str(self.files_read)
+        extra["source_files_not_read"] = str(self.files_not_read)
         return extra
 
     def as_dict(self) -> dict[str, Any]:
@@ -163,13 +216,13 @@ class SourceSelection:
                 {"file": src, "import": target} for src, target in self.escaped_imports
             ],
             "dependency_notes": list(self.dependency_notes),
-            "dependency_status": (
-                "partial"
-                if self.unresolved_imports or self.ambiguous_imports or self.escaped_imports
-                else "bounded"
-                if self.dependency_notes or self.truncated
-                else "traced"
-            ),
+            "dependency_status": self.dependency_status(),
+            "files_read": self.files_read,
+            "files_not_read": self.files_not_read,
+            "file_reads": [item.as_dict() for item in self.reads if item.status != "read"][:200],
+            "repository_candidates": self.repository_candidates,
+            "excluded_count": self.excluded_count,
+            "enumeration_capped": self.enumeration_capped,
             "note": (
                 "truncated=true means files were not read under the budget; a dropped file "
                 "is not implied to be clean, safe, or out of scope"
@@ -183,26 +236,88 @@ class SourceSelection:
         }
 
 
-def _gather(repo_root: Path) -> list[Path]:
+def _enumerate(repo_root: Path) -> tuple[list[Path], int, bool]:
+    """Solidity files eligible for analysis, how many directory policy excluded, and
+    whether the candidate cap stopped the walk."""
     files: list[Path] = []
+    excluded = 0
+    capped = False
     for path in sorted(repo_root.rglob("*.sol")):
-        rel = path.relative_to(repo_root)
-        if set(rel.parts) & _SKIP_DIRS:
+        try:
+            rel = path.relative_to(repo_root)
+        except ValueError:
             continue
-        if path.is_file():
-            files.append(path)
+        if set(rel.parts) & _SKIP_DIRS:
+            excluded += 1
+            continue
         if len(files) >= MAX_CANDIDATE_FILES:
+            capped = True
             break
-    return files
+        files.append(path)
+    return files, excluded, capped
 
 
-def _read(path: Path) -> str:
-    try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            return ""
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError, ValueError):
+def _relative_name(name: str) -> str:
+    text = str(name).replace("\\", "/").strip()
+    if text.startswith("./"):
+        text = text[2:]
+    pure_parts = tuple(part for part in text.split("/") if part not in {"", "."})
+    if not text or text.startswith("/") or ".." in pure_parts:
         return ""
+    return "/".join(pure_parts)
+
+
+def inspect_named(root: Path, name: str) -> tuple[FileRead, str]:
+    """Read one repository-relative Solidity file.
+
+    The text is returned only when the file was actually read. A skipped file
+    yields an empty string and a reason; that empty string is not source text.
+    """
+    rel = _relative_name(name)
+    if not rel or not rel.endswith(".sol"):
+        return FileRead(str(name), "skipped", "path_rejected"), ""
+    path = (root / rel).resolve()
+    try:
+        inside = path == root or root in path.parents
+    except ValueError:
+        inside = False
+    if not inside:
+        return FileRead(rel, "skipped", "path_rejected"), ""
+    return _inspect_path(root, path, rel)
+
+
+def _inspect_path(root: Path, path: Path, rel: str) -> tuple[FileRead, str]:
+    try:
+        if path.is_symlink():
+            target = path.resolve()
+            if root not in target.parents:
+                return FileRead(rel, "skipped", "path_rejected"), ""
+        if not path.is_file():
+            return FileRead(rel, "skipped", "disappeared"), ""
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return FileRead(rel, "skipped", "size_limit"), ""
+        return FileRead(rel, "read", "read"), path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return FileRead(rel, "skipped", "invalid_encoding"), ""
+    except FileNotFoundError:
+        return FileRead(rel, "skipped", "disappeared"), ""
+    except (OSError, ValueError):
+        return FileRead(rel, "skipped", "filesystem_error"), ""
+
+
+def read_source_files(
+    repo_root: Path, names: tuple[str, ...]
+) -> tuple[dict[str, str], tuple[FileRead, ...]]:
+    """Successfully read sources, plus a record for every requested path."""
+    root = repo_root.resolve()
+    sources: dict[str, str] = {}
+    reads: list[FileRead] = []
+    for name in names:
+        record, text = inspect_named(root, name)
+        reads.append(record)
+        if record.status == "read":
+            sources[record.path] = text
+    return sources, tuple(reads)
 
 
 def select_sources(
@@ -217,10 +332,16 @@ def select_sources(
 
     root = repo_root.resolve()
     if not root.is_dir():
-        return SourceSelection((), (), 0, limit, False, ())
-    paths = _gather(root)
+        return SourceSelection((), (), 0, limit, False, (), mode="unassessed")
+    paths, excluded, capped = _enumerate(root)
     rel_paths = [p.relative_to(root).as_posix() for p in paths]
-    texts = {rel: _read(path) for rel, path in zip(rel_paths, paths, strict=True)}
+    reads: list[FileRead] = []
+    texts: dict[str, str] = {}
+    for rel, path in zip(rel_paths, paths, strict=True):
+        record, text = _inspect_path(root, path, rel)
+        reads.append(record)
+        if record.status == "read":
+            texts[rel] = text
 
     scope_contracts, scope_paths = _scope_targets(manifest, focus_contract, focus_file)
     deployed_contracts = (
@@ -231,6 +352,15 @@ def select_sources(
     dependencies, unresolved, ambiguous_imports, escaped, dependency_notes = _trace_dependencies(
         scope_files, texts, root, contract_to_files
     )
+    notes = list(dependency_notes)
+    for record in reads:
+        if record.status != "read":
+            notes.append(
+                f"{record.path} was not read ({record.reason}); "
+                "its declarations and imports were not traced"
+            )
+    if capped:
+        notes.append(f"repository enumeration stopped at {MAX_CANDIDATE_FILES} Solidity files")
     ambiguous = tuple(
         (name, tuple(files))
         for name, files in sorted(contract_to_files.items())
@@ -240,7 +370,7 @@ def select_sources(
 
     ranked: list[RankedFile] = []
     for rel in rel_paths:
-        text = texts[rel]
+        text = texts.get(rel, "")
         priority, reason = _rank_one(rel, text, scope_files, deployed_contracts, dependencies)
         if rel in ambiguous_files and priority.value <= Priority.DEPLOYED.value:
             reason = f"{reason}; contract name {ambiguous_files[rel]} is declared in several files"
@@ -260,7 +390,55 @@ def select_sources(
         unresolved_imports=tuple(unresolved),
         ambiguous_imports=tuple(ambiguous_imports),
         escaped_imports=tuple(escaped),
-        dependency_notes=tuple(dependency_notes),
+        dependency_notes=tuple(notes),
+        reads=tuple(reads),
+        repository_candidates=len(paths),
+        excluded_count=excluded,
+        enumeration_capped=capped,
+    )
+
+
+def select_named(repo_root: Path, files: tuple[str, ...]) -> SourceSelection:
+    """The operator named the files. Imports are traced inside that set only.
+
+    A named file that cannot be read is recorded and is not replaced with empty
+    source. An import that is not part of the named set stays unresolved.
+    """
+    root = repo_root.resolve()
+    if not root.is_dir():
+        return SourceSelection((), (), 0, len(files), False, (), mode="unassessed")
+    candidates, excluded, capped = _enumerate(root)
+    sources, reads = read_source_files(root, files)
+    contract_to_files = _contract_index(sources)
+    _resolved, unresolved, ambiguous_imports, escaped, dependency_notes = _trace_dependencies(
+        set(sources), sources, root, contract_to_files
+    )
+    notes = list(dependency_notes)
+    for record in reads:
+        if record.status != "read":
+            notes.append(
+                f"{record.path} was not read ({record.reason}); "
+                "its declarations and imports were not traced"
+            )
+    if capped:
+        notes.append(f"repository enumeration stopped at {MAX_CANDIDATE_FILES} Solidity files")
+    ranked = tuple(RankedFile(path, Priority.SCOPE, "named by the operator") for path in files)
+    return SourceSelection(
+        selected=tuple(files),
+        ranked=ranked,
+        considered=len(files),
+        limit=len(files),
+        truncated=False,
+        dropped=(),
+        mode="explicit",
+        unresolved_imports=tuple(unresolved),
+        ambiguous_imports=tuple(ambiguous_imports),
+        escaped_imports=tuple(escaped),
+        dependency_notes=tuple(notes),
+        reads=reads,
+        repository_candidates=len(candidates),
+        excluded_count=excluded,
+        enumeration_capped=capped,
     )
 
 

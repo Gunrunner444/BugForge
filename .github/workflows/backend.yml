@@ -151,4 +151,7 @@ jobs:
             tests/test_phase55/test_identity_contract.py \
             tests/test_phase55/test_model_provenance.py \
             tests/test_phase55/test_multifile_campaign.py \
+            tests/test_phase56/test_compile_failure_campaign.py \
+            tests/test_phase56/test_campaign_consistency.py \
+            tests/test_phase56/test_source_truth.py::test_an_out_of_scope_path_is_excluded_before_execution \
             -vv --tb=short

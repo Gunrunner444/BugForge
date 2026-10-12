@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 from app.discovery.bounty.source_selection import (
     DEFAULT_LIMIT,
     SourceSelection,
+    select_named,
     select_sources,
 )
 from app.discovery.engine import AnalysisRequest, DiscoveryEngine
@@ -298,7 +299,7 @@ class BountyCampaignService:
 
     def _selection(self, spec: CampaignSpec, files: tuple[str, ...]) -> SourceSelection:
         if files:
-            return SourceSelection.explicit(files)
+            return select_named(spec.repo_root, files)
         return select_sources(
             spec.repo_root,
             manifest=spec.manifest,
@@ -770,6 +771,7 @@ class BountyCampaignService:
             "cache",
             "artifacts",
             "broadcast",
+            "script",
             "test",
             "tests",
         }
@@ -847,8 +849,10 @@ class BountyCampaignService:
                 focus_file=campaign.spec.source_file,
                 limit=max(1, min(campaign.spec.source_limit, MAX_FILES_PER_REQUEST)),
             )
-            campaign.selection = fresh
             campaign.request = replace(campaign.request, files=fresh.selected)
+        else:
+            fresh = select_named(campaign.spec.repo_root, campaign.request.files)
+        campaign.selection = fresh
         campaign.cache.pop("analysis", None)
         campaign.cache.pop("analysis_token", None)
         campaign.cache.pop("analysis_stale", None)
@@ -1246,7 +1250,10 @@ class BountyCampaignService:
         specs: dict[str, Any] = {}
         for sequence in analysis.sequences:
             contract = target_contract(sequence)
-            scope = campaign.manifest.scope_of(contract=contract)
+            candidate = analysis.candidate_for(sequence.derived_from)
+            scope = campaign.manifest.scope_of(
+                contract=contract, file=candidate.file if candidate is not None else ""
+            )
             if scope.status is ScopeStatus.OUT_OF_SCOPE:
                 skipped.append(
                     {
@@ -1259,7 +1266,6 @@ class BountyCampaignService:
                 campaign, analysis, sequence.sequence_id
             )
             model = analysis.models[sequence.sequence_id]
-            candidate = analysis.candidate_for(sequence.derived_from)
             specs[sequence.sequence_id] = build_property(sequence, model, candidate)
             runnable.append(sequence)
         supporting = self._supporting_detectors(analysis)
@@ -1306,18 +1312,7 @@ class BountyCampaignService:
         from app.discovery.bounty.research_ledger import campaign_coverage
 
         summary = campaign_coverage(
-            files_discovered=campaign.selection.considered,
-            files_selected=len(campaign.selection.selected),
-            files_read=len(analysis.sources),
-            truncated=bool(analysis.truncated or campaign.selection.truncated),
-            dependency_status=str(campaign.selection.as_dict().get("dependency_status", "unknown")),
-            contracts_modeled=(len(analysis.model.contracts) if analysis.model is not None else 0),
-            functions_modeled=(
-                len(analysis.model.all_functions()) if analysis.model is not None else 0
-            ),
-            candidates=len(analysis.candidates),
-            sequences=len(analysis.sequences),
-            skipped=analysis.sequence_skipped,
+            **self._coverage_facts(campaign, analysis),
             executions=executions,
             forge_runs=executor.runs,
             engines=registry_snapshot,
@@ -1435,6 +1430,12 @@ class BountyCampaignService:
                     else None
                 ),
                 "bundle_id": bundle_id,
+                "process_status": obs.result.process_status if obs.result else None,
+                "compiler_status": obs.result.compiler_status if obs.result else None,
+                "test_status": obs.result.test_status if obs.result else None,
+                "sequence_status": obs.result.sequence_status if obs.result else None,
+                "property_status": obs.result.property_status if obs.result else None,
+                "property_checked": obs.property_checked,
                 "verified": False,
             }
         return bundles, blobs, executions
@@ -1487,6 +1488,53 @@ class BountyCampaignService:
             "verified": False,
         }
 
+    def _coverage_facts(
+        self, campaign: BountyCampaign, analysis: CampaignAnalysis
+    ) -> dict[str, Any]:
+        """Selection, read, and model facts shared by the execute summary and the ledger."""
+        from app.discovery.bounty.source_selection import Priority
+
+        selection = campaign.selection
+        model = analysis.model
+        selected = set(selection.selected)
+        scope = {item.path for item in selection.ranked if item.priority == Priority.SCOPE}
+        unreadable: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for record in (*analysis.file_reads, *selection.reads):
+            if record.status == "read" or record.reason == "excluded" or record.path in seen:
+                continue
+            if record.path not in selected and record.path not in scope:
+                continue
+            seen.add(record.path)
+            unreadable.append(record.as_dict())
+        read_selected = sum(
+            1
+            for record in analysis.file_reads
+            if record.path in selected and record.status == "read"
+        )
+        if not analysis.file_reads:
+            read_selected = len(analysis.sources)
+        return {
+            "files_discovered": selection.considered,
+            "files_selected": len(selection.selected),
+            "files_read": read_selected,
+            "truncated": bool(analysis.truncated or selection.truncated),
+            "selection_truncated": selection.truncated,
+            "parser_limited": bool(model is not None and model.truncated),
+            "truncation_notes": tuple(model.notes) if model is not None else (),
+            "dependency_status": selection.dependency_status(),
+            "selection_mode": selection.mode,
+            "repository_candidates": selection.repository_candidates,
+            "excluded_count": selection.excluded_count,
+            "enumeration_capped": selection.enumeration_capped,
+            "unreadable_files": unreadable,
+            "contracts_modeled": len(model.contracts) if model is not None else 0,
+            "functions_modeled": len(model.all_functions()) if model is not None else 0,
+            "candidates": len(analysis.candidates),
+            "sequences": len(analysis.sequences),
+            "skipped": analysis.sequence_skipped,
+        }
+
     def research_ledger(self, campaign_id: str) -> dict[str, Any]:
         """RESEARCH_COVERAGE + RESEARCH_GAPS from typed state. Read-only; nothing verified."""
         from app.discovery.bounty.research_ledger import build_ledger
@@ -1510,19 +1558,8 @@ class BountyCampaignService:
         stored = dict(campaign.record.artifacts.get("stateful", {}))
         runs = list(stored.get("runs", []))
         forge_runs = sum(int(item.get("forge_runs") or 0) for item in runs) if runs else None
-        model = analysis.model
         summary = campaign_coverage(
-            files_discovered=campaign.selection.considered,
-            files_selected=len(campaign.selection.selected),
-            files_read=len(analysis.sources),
-            truncated=bool(analysis.truncated or campaign.selection.truncated),
-            truncation_notes=tuple(model.notes) if model is not None else (),
-            dependency_status=str(campaign.selection.as_dict().get("dependency_status", "unknown")),
-            contracts_modeled=len(model.contracts) if model is not None else 0,
-            functions_modeled=len(model.all_functions()) if model is not None else 0,
-            candidates=len(analysis.candidates),
-            sequences=len(analysis.sequences),
-            skipped=analysis.sequence_skipped,
+            **self._coverage_facts(campaign, analysis),
             executions=executions,
             forge_runs=forge_runs,
             engines=self._engine_snapshot(campaign),
