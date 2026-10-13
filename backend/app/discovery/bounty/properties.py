@@ -607,6 +607,65 @@ def _first_role(sequence: Vfcs) -> str:
     return ""
 
 
+def _body_compact(body: str) -> str:
+    text = re.sub(r"/\*.*?\*/", " ", body, flags=re.S)
+    text = re.sub(r"//.*?$", " ", text, flags=re.M)
+    return re.sub(r"\s+", "", text)
+
+
+def _unauthorized_pause(
+    sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
+) -> OracleBuilt:
+    """Unauthorized pause must revert and must not change the supply-pause flag.
+
+    The check is read from the function body. A renamed template cannot claim
+    this property when the source does not contain the authorization condition.
+    """
+    del sequence, det
+    compact = _body_compact(fn.body)
+    authorized = (
+        "msg.sender!=governor&&msg.sender!=pauseGuardian" in compact
+        or "msg.sender==governor||msg.sender==pauseGuardian" in compact
+    )
+    getter = next(
+        (
+            item
+            for item in model.functions_of(fn.contract)
+            if item.signature == "isSupplyPaused()" and item.has_body
+        ),
+        None,
+    )
+    if not authorized or getter is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{fn.name} does not check governor and pauseGuardian against isSupplyPaused()",
+            (),
+            "the authorization check or isSupplyPaused() is not in this source",
+        )
+    return (
+        OracleSpec(
+            kind=OracleKind.CALL_MUST_FAIL,
+            probe_role="execute",
+            probe_function=fn.signature,
+            getter="isSupplyPaused()",
+            expression=(
+                "an account that is neither governor nor pauseGuardian must not "
+                "change the supply pause flag"
+            ),
+        ),
+        (),
+        ("pauseFlags",),
+        f"{fn.name} reverts unless msg.sender is governor or pauseGuardian",
+        (
+            "the attacker is neither the configured governor nor the pause guardian",
+            "a revert with an unchanged pause flag holds only for this local configuration",
+        ),
+        "",
+    )
+
+
 _ORACLE_BUILDERS: dict[str, Any] = {
     "initialize→reinitialize": _initializer,
     "unauthenticated-execution": _unauthenticated,
@@ -636,6 +695,7 @@ _ORACLE_BUILDERS: dict[str, Any] = {
         "{name} reads an external price; judging it needs a controlled price source",
         "needs a controlled oracle/market fixture wired as the price source",
     ),
+    "unauthorized-call": _unauthorized_pause,
     "boundary-batch": _no_property(
         "{name}'s totals are internal; no public observable distinguishes a wrap"
     ),
@@ -756,6 +816,22 @@ def evaluate(
             True,
         )
     if kind in {OracleKind.CALL_MUST_FAIL, OracleKind.SECOND_CALL_MUST_FAIL}:
+        if oracle.getter:
+            if not observation.readable or not observation.before or not observation.after:
+                return PropertyEvaluation(
+                    PropertyVerdict.NOT_EVALUATED,
+                    f"{oracle.getter} could not be read, so the probe result is not a verdict",
+                    probe,
+                )
+            if observation.before != observation.after:
+                return PropertyEvaluation(
+                    PropertyVerdict.PROPERTY_VIOLATED,
+                    f"{oracle.getter} changed across the probe ({observation.before} -> "
+                    f"{observation.after})",
+                    probe,
+                    True,
+                    True,
+                )
         if probe_ok == 1:
             return PropertyEvaluation(
                 PropertyVerdict.PROPERTY_VIOLATED,

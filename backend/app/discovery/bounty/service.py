@@ -118,6 +118,8 @@ class CampaignSpec:
     address: str = ""
     chain_id: str = ""
     source_limit: int = DEFAULT_LIMIT
+    # Typed constructor configuration. None keeps the fail-closed constructor builder.
+    constructor_profile: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -133,6 +135,7 @@ class CampaignSpec:
             "address": self.address,
             "chain_id": self.chain_id,
             "source_limit": self.source_limit,
+            "constructor_profile": self.constructor_profile,
         }
 
     @staticmethod
@@ -151,6 +154,7 @@ class CampaignSpec:
             address=str(data.get("address", "")),
             chain_id=str(data.get("chain_id", "")),
             source_limit=int(data.get("source_limit", DEFAULT_LIMIT)),
+            constructor_profile=_profile_record(data.get("constructor_profile")),
         )
 
 
@@ -210,6 +214,33 @@ def _validate_target(spec: CampaignSpec) -> None:
         raise CampaignError(f"chain id {spec.chain_id!r} is not a decimal chain id")
     if spec.chain_id and not spec.address:
         raise CampaignError("a chain id without an address names no deployment")
+
+
+def _profile_record(raw: Any) -> dict[str, Any] | None:
+    """A stored profile document, or None. Parsing happens later and fails closed."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return dict(raw)
+
+
+def _accepted_profile(campaign: BountyCampaign) -> tuple[dict[str, Any] | None, Any]:
+    """The profile analysis accepted, parsed again for the executor.
+
+    A rejected or missing profile does not invent constructor arguments.
+    """
+    from app.discovery.bounty.constructor_profile import ProfileError, parse_profile
+
+    cached = campaign.cache.get("constructor_profile")
+    record = dict(cached) if isinstance(cached, dict) else None
+    raw = campaign.spec.constructor_profile
+    if record is None or record.get("validation") != "accepted" or not isinstance(raw, dict):
+        return record, None
+    try:
+        return record, parse_profile(raw)
+    except ProfileError as exc:
+        rejected = {"validation": "rejected", "reason_code": exc.code, "reason": exc.reason}
+        campaign.cache["constructor_profile"] = rejected
+        return rejected, None
 
 
 class BountyCampaignService:
@@ -829,6 +860,9 @@ class BountyCampaignService:
             address=campaign.spec.address,
             chain_id=campaign.spec.chain_id,
         )
+        from app.discovery.bounty.constructor_profile import attach_profile_seed
+
+        attach_profile_seed(campaign, analysis)
         campaign.cache["analysis"] = analysis
         campaign.cache["analysis_token"] = token
         campaign.cache["analysis_stale"] = False
@@ -1290,10 +1324,12 @@ class BountyCampaignService:
         engine_status = engine_status_map(registry)
         engines = [PropertyEngine(name) for name in usable_property_engines(registry)]
         project = _project_settings(campaign.manifest.compiler) if compiler is not None else None
+        profile_record, profile = _accepted_profile(campaign)
         executor = StatefulExecutor(
             compiler=compiler,
             project=project,
             compiler_required=required,
+            profile=profile,
         )
         result = run_feedback_loop(
             executor,
@@ -1328,6 +1364,7 @@ class BountyCampaignService:
                     "mutated": len(result.mutated),
                     "forge_runs": executor.runs,
                     "tools": _run_tools(tools, compiler, executor, required),
+                    "constructor_profile": profile_record,
                 },
             ),
         )
@@ -1341,6 +1378,7 @@ class BountyCampaignService:
             engines=registry_snapshot,
             persistence_status=str(persistence.get("status", "")),
             analysis_stale=self.analysis_stale(campaign),
+            constructor_profile=profile_record,
         )
         return {
             "campaign_id": campaign_id,
@@ -1590,6 +1628,7 @@ class BountyCampaignService:
         stored = dict(campaign.record.artifacts.get("stateful", {}))
         runs = list(stored.get("runs", []))
         forge_runs = sum(int(item.get("forge_runs") or 0) for item in runs) if runs else None
+        stored_profile = runs[-1].get("constructor_profile") if runs else None
         summary = campaign_coverage(
             **self._coverage_facts(campaign, analysis),
             executions=executions,
@@ -1597,6 +1636,7 @@ class BountyCampaignService:
             engines=self._engine_snapshot(campaign),
             persistence_status="persisted" if stored else "not_recorded",
             analysis_stale=self.analysis_stale(campaign),
+            constructor_profile=stored_profile if isinstance(stored_profile, dict) else None,
         )
         return {"campaign_id": campaign_id, "campaign_summary": summary, **ledger}
 

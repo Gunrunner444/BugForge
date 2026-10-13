@@ -73,6 +73,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 50 | Production bounty-research workflow | ✅ Implemented |
 | Phase 51 | Operational bounty campaigns: durable persistence, real pause/stop/resume, full API + MCP over the Phase 49/50 stack | ✅ Implemented |
 | Phase 52 | Closed-loop stateful verification: VFCS → Foundry execution, feedback-directed, reproducible bundles | ✅ Implemented |
+| Phase 58 | Trusted constructor profiles and a local property evaluation of pinned Comet `pause` | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -431,6 +432,7 @@ nothing is verified or submitted automatically.
 Phase 51 makes that stack *operational*: a bounty campaign is reachable from the REST API (`/api/v1/bounty/campaigns/...`) and the Cursor MCP server (`bugforge_create_campaign`, `bugforge_campaign_analyze`, and the read tools). A campaign reuses the Phase 49 orchestrator, the Phase 50 engines, the campaign manifest identity, `BountyGate`, findings, VFCS plans, advisories, and the report pack. Every route requires an authenticated local operator; fork validation stays gated on an operator approval the AI and the MCP server cannot grant; and no result is ever marked verified or submitted. Phase 51 campaigns now persist on the existing SQL store (they survive a restart), and an operator can pause, resume, or stop a running campaign through the real Phase 49 state machine from either the API or the loopback MCP server.
 
 Phase 52 closes the research loop. The deterministic VFCS call sequences a campaign discovers are compiled into a local Foundry harness (pinned host `solc`, offline, no FFI) and actually executed with `forge`. Each run is interpreted honestly — property violated, property held, sequence executed, reverted, or inconclusive — and the result feeds VFCS mutation, re-execution, minimisation, and a second independent (no-optimizer) check before a reproducible artifact bundle is written. Nothing runs against any network, and when `forge`/`solc` are absent the executor reports `UNAVAILABLE` rather than fabricating a result.
+Phase 58 adds a typed constructor profile so a campaign can deploy a contract whose constructor takes a struct, without inventing arguments when no profile is approved. The profile is bound to source hashes and local fixtures. On the pinned Compound Comet source (`f766f515`, `CometWithExtendedAssetList`), an unauthorized `pause` reverted and `isSupplyPaused()` stayed unchanged: one property held. That is a local property result, not a vulnerability and not a deployed-bytecode match. Solidity 0.8.15 does not apply the requested Cancun EVM.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
@@ -438,7 +440,8 @@ See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-
 [docs/phase49-adaptive-multi-engine-research-orchestration.md](docs/phase49-adaptive-multi-engine-research-orchestration.md),
 [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md),
 [docs/phase51-operational-bounty-campaigns.md](docs/phase51-operational-bounty-campaigns.md),
-and [docs/phase52-stateful-closed-loop.md](docs/phase52-stateful-closed-loop.md).
+[docs/phase52-stateful-closed-loop.md](docs/phase52-stateful-closed-loop.md),
+and [docs/phase58-trusted-constructor-profiles.md](docs/phase58-trusted-constructor-profiles.md).
 
 ### Security testing roadmap
 

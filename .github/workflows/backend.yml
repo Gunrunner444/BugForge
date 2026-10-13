@@ -170,4 +170,7 @@ jobs:
             tests/test_phase57/test_compiler_resolution.py \
             tests/test_phase57/test_scope_selection.py \
             tests/test_phase57/test_skip_persistence.py \
+            tests/test_phase58/test_constructor_profile.py \
+            tests/test_phase58/test_profile_campaign.py \
+            tests/test_phase58/test_comet_pause_campaign.py \
             -vv --tb=short

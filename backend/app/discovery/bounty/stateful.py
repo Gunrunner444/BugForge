@@ -766,12 +766,16 @@ class _Synth:
         contract: str,
         oracle: OracleSpec,
         sources: Mapping[str, str] | None,
+        profile: Any = None,
     ) -> None:
         self.model = model
         self.sequence = sequence
         self.contract = contract
         self.oracle = oracle
         self.sources = sources
+        self.profile = profile
+        self.profile_contracts = ""
+        self.profile_imports: tuple[str, ...] = ()
         self.pre_deploy: list[str] = []
         self.post_deploy: list[str] = []
         self.steps: list[str] = []
@@ -909,6 +913,8 @@ class _Synth:
                 return "1"
             return "0"
         if abi == "bool":
+            if override in {"true", "false"}:
+                return override
             return "false"
         if abi == "string":
             return '""'
@@ -945,6 +951,48 @@ class _Synth:
             for param in function.params
         ]
         return f"abi.encodeWithSignature({', '.join([json.dumps(canonical), *args])})"
+
+    def _from_profile(self, owner: str, param: Param) -> str | None:
+        """A typed profile expression, or None when no profile was supplied.
+
+        A profile that names this contract and then fails its binding is an error.
+        It is not permission to fill the argument with a guessed value.
+        """
+        profile = self.profile
+        if profile is None or profile.contract != owner:
+            return None
+        if param.name != profile.parameter:
+            raise _UnbuildableError(
+                f"constructor parameter {param.name or '?'} is not the field profile "
+                f"{profile.profile_id} configures",
+                "profile_parameter_mismatch",
+            )
+        from app.discovery.bounty.constructor_profile import ProfileError, prepare_profile
+
+        try:
+            prepared = prepare_profile(profile, self.sources or {})
+        except ProfileError as exc:
+            raise _UnbuildableError(exc.reason, exc.code) from exc
+        stripped = _strip_type(param.type_name)
+        if stripped != profile.model_type:
+            raise _UnbuildableError(
+                f"{param.name} is {stripped}, not profile type {profile.model_type}",
+                "profile_type_mismatch",
+            )
+        self.pre_deploy.extend(prepared.deploy_lines)
+        self.profile_contracts = prepared.contracts
+        self.profile_imports = prepared.import_paths
+        self.primitives.append(
+            Primitive(
+                name=f"constructor_profile:{profile.profile_id}",
+                purpose=f"apply trusted profile {profile.profile_id} to {param.name}",
+                actor="harness",
+                value=profile.source_sha256,
+                property_relevance=profile.property_statement,
+                established_by="the profile hashes match the source set",
+            )
+        )
+        return prepared.expression
 
     # -- constructor ---------------------------------------------------------------------
     def constructor_args(self) -> list[str]:
@@ -998,6 +1046,9 @@ class _Synth:
         declared = self.model.contract_for_type(type_text)
         deployed, basis = self._implementation(declared) if declared else ("", "")
         if not deployed:
+            rendered = self._from_profile(owner, param)
+            if rendered is not None:
+                return rendered
             raise _UnbuildableError(
                 f"constructor argument {param.name or '?'} ({param.type_name}) of {owner} is "
                 "unknown; it is not invented",
@@ -1157,7 +1208,15 @@ class _Synth:
                     "a call is not a function of the target contract", "call_outside_target"
                 )
             encoded = self.encode(call, function)
-            if index == probe and oracle.kind is OracleKind.STATE_UNCHANGED:
+            if (
+                index == probe
+                and oracle.getter
+                and oracle.kind
+                in {
+                    OracleKind.STATE_UNCHANGED,
+                    OracleKind.CALL_MUST_FAIL,
+                }
+            ):
                 self.read_getter(K_BEFORE, index)
             if index == probe and oracle.kind in TOKEN_ORACLES:
                 self.read_balance(index, 0)
@@ -1172,7 +1231,15 @@ class _Synth:
             self.steps.append(
                 f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
             )
-            if index == probe and oracle.kind is OracleKind.STATE_UNCHANGED:
+            if (
+                index == probe
+                and oracle.getter
+                and oracle.kind
+                in {
+                    OracleKind.STATE_UNCHANGED,
+                    OracleKind.CALL_MUST_FAIL,
+                }
+            ):
                 self.read_getter(K_AFTER, index)
             if index == probe and oracle.kind in TOKEN_ORACLES:
                 self.read_balance(index, 1)
@@ -1195,11 +1262,17 @@ class _Synth:
             ]
         )
         self.body = body
+        import_lines = [f'import "src/{path}";\n' for path in self.imports()]
+        for path in self.profile_imports:
+            line = f'import "src/{path}";\n'
+            if line not in import_lines:
+                import_lines.append(line)
         return _HARNESS_TEMPLATE.format(
             schema=HARNESS_SCHEMA,
-            imports="".join(f'import "src/{path}";\n' for path in self.imports()),
+            imports="".join(import_lines),
             fixture=_FIXTURE_TOKEN if self.token_kind else "",
             reverting=_REVERTING_CALLEE if self.failing_callee else "",
+            profile_contracts=self.profile_contracts,
             body=body,
         )
 
@@ -1221,6 +1294,7 @@ def build_harness(
     pipeline: str = "default",
     sources: Mapping[str, str] | None = None,
     source_file: str = "",
+    profile: Any = None,
 ) -> HarnessArtifact:
     """Compile a VFCS plan (and its oracle) into a Foundry test, or explain why not.
 
@@ -1254,7 +1328,7 @@ def build_harness(
         )
     if item is None or not _deployable(model, contract, sources):
         return fail("target contract is not a deployable source", "not_deployable")
-    synth = _Synth(model, sequence, contract, oracle, sources)
+    synth = _Synth(model, sequence, contract, oracle, sources, profile)
     try:
         source = synth.build()
     except _UnbuildableError as exc:
@@ -1282,7 +1356,7 @@ _HARNESS_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.7.0;
 
 import {{Test}} from "forge-std/Test.sol";
-{imports}{fixture}{reverting}
+{imports}{fixture}{reverting}{profile_contracts}
 contract VfcsHarness is Test {{
     event BugForgeObservation(uint256 kind, uint256 index, uint256 value);
 
@@ -1797,12 +1871,14 @@ class StatefulExecutor:
         compiler: Any = None,
         project: ProjectSettings | None = None,
         compiler_required: str = "",
+        profile: Any = None,
     ) -> None:
         self.timeout = timeout if timeout is not None else _timeout_setting()
         self.tools = tools if tools is not None else tool_status()
         self.compiler = compiler
         self.project = project
         self.compiler_required = compiler_required
+        self.profile = profile
         self.evm_exact = True
         self.evm_requested = ""
         if compiler is not None:
@@ -1899,7 +1975,14 @@ class StatefulExecutor:
                 f"the local run budget ({self.max_runs}) is exhausted",
                 "budget_exhausted",
             )
-        harness = build_harness(sequence, model, oracle=chosen, pipeline=pipeline, sources=sources)
+        harness = build_harness(
+            sequence,
+            model,
+            oracle=chosen,
+            pipeline=pipeline,
+            sources=sources,
+            profile=self.profile,
+        )
         if not harness.buildable:
             outcome = (
                 Outcome.IDENTITY_MISMATCH

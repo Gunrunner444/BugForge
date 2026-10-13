@@ -778,6 +778,7 @@ def campaign_coverage(
     compile_dependencies: int | None = None,
     analysis_only_files: int | None = None,
     scope_excluded: int | None = None,
+    constructor_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
@@ -924,6 +925,7 @@ def campaign_coverage(
         "persistence_status": persistence_status or "not_recorded",
         "results_persisted": persistence_status == "persisted",
         "blocker": blocker,
+        "constructor_profile": dict(constructor_profile) if constructor_profile else None,
         "local_results_are_not_production_verification": True,
         "verified": False,
     }

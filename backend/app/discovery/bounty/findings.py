@@ -415,6 +415,11 @@ def execution_summary(
     elif any(item.get("outcome") == "sequence_executed_no_oracle" for item in fresh):
         strength = "weak_execution_only"
         notes.append("the sequence executed without an oracle; execution is not a finding")
+    elif any(item.get("outcome") == "property_held" for item in fresh):
+        strength = "property_held"
+        notes.append(
+            "the probe reverted and the observed state held; a held property is not a vulnerability"
+        )
     elif any(item.get("outcome") == "skipped" for item in fresh):
         strength = "static_candidate"
         skipped_record = next(item for item in fresh if item.get("outcome") == "skipped")
