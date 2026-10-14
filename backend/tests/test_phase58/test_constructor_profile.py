@@ -31,6 +31,8 @@ contract PauseVault {
         pauseGuardian = config.pauseGuardian;
     }
 
+    error Unauthorized();
+
     function pause(
         bool supplyPaused,
         bool transferPaused,
@@ -38,7 +40,7 @@ contract PauseVault {
         bool absorbPaused,
         bool buyPaused
     ) external {
-        if (msg.sender != governor && msg.sender != pauseGuardian) revert("unauthorized");
+        if (msg.sender != governor && msg.sender != pauseGuardian) revert Unauthorized();
         pauseFlags =
             (supplyPaused ? 1 : 0) |
             (transferPaused ? 2 : 0) |
@@ -143,6 +145,7 @@ def test_nested_struct_and_empty_array_bind_fixture_addresses() -> None:
     text = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 contract PauseVault {
+    struct AssetConfig { address asset; }
     struct Inner { address who; }
     struct Configuration {
         address governor;
@@ -155,9 +158,17 @@ contract PauseVault {
 }
 """
     digest = sha256_text(text)
+    stubs = {
+        "contracts/CometCore.sol": "contract CometCore {}",
+        "contracts/interfaces/IAssetListFactory.sol": "interface IAssetListFactory {}",
+        "contracts/interfaces/IAssetListFactoryHolder.sol": "interface IAssetListFactoryHolder {}",
+    }
     raw = _profile(
         source_sha256=digest,
-        bound_files=[{"path": FILE, "sha256": digest}],
+        bound_files=[
+            {"path": FILE, "sha256": digest},
+            *({"path": path, "sha256": sha256_text(body)} for path, body in stubs.items()),
+        ],
         fixtures=[
             {"fixture_id": "baseToken", "kind": "decimals_token", "decimals": 6},
             {"fixture_id": "factory", "kind": "asset_list_factory"},
@@ -195,12 +206,7 @@ contract PauseVault {
             ],
         },
     )
-    sources = {
-        FILE: text,
-        "contracts/CometCore.sol": "contract CometCore {}",
-        "contracts/interfaces/IAssetListFactory.sol": "interface IAssetListFactory {}",
-        "contracts/interfaces/IAssetListFactoryHolder.sol": "interface IAssetListFactoryHolder {}",
-    }
+    sources = {FILE: text, **stubs}
     prepared = prepare_profile(parse_profile(raw), sources)
     assert "governor: address(0xC0FE)" in prepared.expression
     assert "who: address(bf_holder)" in prepared.expression

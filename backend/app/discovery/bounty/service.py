@@ -1497,6 +1497,9 @@ class BountyCampaignService:
                 "sequence_status": obs.result.sequence_status if obs.result else None,
                 "property_status": obs.result.property_status if obs.result else None,
                 "property_checked": obs.property_checked,
+                "positive_control": (
+                    obs.evaluation.positive_control if obs.evaluation is not None else ""
+                ),
                 "verified": False,
             }
         return bundles, blobs, executions

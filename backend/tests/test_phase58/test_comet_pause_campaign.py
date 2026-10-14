@@ -26,6 +26,7 @@ from app.discovery.bounty.constructor_profile import (
 )
 from app.discovery.bounty.service import BountyCampaignService, CampaignSpec
 from app.discovery.bounty.solc_resolve import resolve_solc
+from app.parsing.keccak import function_selector
 from tests.test_phase51.phase51_support import manifest
 from tests.test_phase52.phase52_support import requires_forge
 from tests.test_phase58.comet_support import CLOSURE, comet_root, comet_sources
@@ -181,6 +182,9 @@ def test_comet_pause_campaign_evaluates_the_authorization_property(
     assert held[0]["verdict"] == "property_held"
     assert held[0]["strong_candidate"] is False
     assert "probe call reverted" in held[0]["reason"]
+    assert "expected authorization error" in held[0]["reason"]
+    evaluation = held[0].get("evaluation") or {}
+    assert evaluation.get("positive_control") == "changed"
     props = [
         spec
         for spec in result["properties"].values()
@@ -190,6 +194,15 @@ def test_comet_pause_campaign_evaluates_the_authorization_property(
     assert props
     assert props[0]["oracle"]["getter"] == "isSupplyPaused()"
     assert props[0]["oracle"]["kind"] == "call_must_fail"
+    assert props[0]["oracle"]["revert_selector"] == function_selector("Unauthorized()")
+    assert props[0]["oracle"]["control_sender"] == "address(0xC0FE)"
+    reclassified = [
+        item for item in result["observations"] if item["reason_code"] == "constructor_not_a_call"
+    ]
+    assert len(reclassified) == 1
+    assert reclassified[0]["outcome"] == "inconclusive"
+    assert "constructor()" in reclassified[0]["reason"]
+    assert summary["by_outcome"].get("inconclusive", 0) >= 1
     assert props[0]["verified"] is False
     assert "governor" in props[0]["statement"]
     runs = BountyCampaignService().stateful_status(campaign.campaign_id)["runs"]
@@ -208,6 +221,9 @@ def test_comet_pause_campaign_evaluates_the_authorization_property(
     assert reloaded["property_evaluation_demonstrated"] is True
     assert reloaded["by_outcome"].get("property_held", 0) >= 1
     assert reloaded["constructor_profile"]["source_sha256"] == profile.source_sha256
+    assert reloaded["positive_controls"] == summary["positive_controls"]
+    assert reloaded["positive_controls"] >= 1
+    assert reloaded["reason_codes"].get("constructor_not_a_call", 0) >= 1
     assert reloaded["verified"] is False
     assert reloaded["constructor_profile"]["establishes_deployed_state"] is False
     findings = BountyCampaignService().findings(campaign.campaign_id)["findings"]

@@ -1,10 +1,16 @@
 """Trusted constructor profiles.
 
 A profile is a typed, campaign-supplied configuration for one constructor argument.
-It can name roles, integers, booleans, empty arrays, and a fixed set of local
-fixtures. It cannot carry Solidity source. A profile binds to file hashes, so a
-changed snapshot cannot reuse it. With no profile, the harness still refuses to
-invent a struct.
+It can name roles, integers, booleans, bounded arrays, nested structs, and a fixed
+set of local fixtures. It cannot carry Solidity source. Values are checked against
+the struct declarations in the bound source closure, including integer width.
+A profile binds to those file hashes, so a changed dependency cannot reuse it.
+With no profile, the harness still refuses to invent a struct.
+
+The schema parser resolves elementary types, arrays, and structs declared in the
+bound files. It does not resolve enums or user-defined value types, and it says
+so with ``profile_type_unsupported`` instead of accepting a value that merely
+compiles.
 """
 
 from __future__ import annotations
@@ -31,8 +37,6 @@ _TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,
 _UINT = re.compile(r"^[0-9]{1,78}$")
 _PATH = re.compile(r"^[A-Za-z0-9_./+-]{1,180}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
-_FIELD = re.compile(r"([A-Za-z_][A-Za-z0-9_]*(?:\[[0-9]*\])?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
-
 MAX_FIELDS = 32
 MAX_DEPTH = 4
 MAX_ARRAY = 24
@@ -50,8 +54,16 @@ ROLE_EXPRESSION = {
 PRIVILEGED_ROLES = frozenset({"governor", "pause_guardian"})
 _KINDS = frozenset({"uint", "bool", "role", "fixture", "struct", "array"})
 _FIXTURE_KINDS = frozenset(
-    {"decimals_token", "decimals_feed", "asset_list_factory", "factory_holder"}
+    {
+        "decimals_token",
+        "decimals_feed",
+        "asset_list_factory",
+        "factory_holder",
+        "source_contract",
+    }
 )
+_ADDRESS_FIXTURES = _FIXTURE_KINDS
+_PROPERTY_TEMPLATES = frozenset({"unauthorized-call", "configured-asset"})
 
 COMET_CONTRACT = "CometWithExtendedAssetList"
 COMET_FILE = "contracts/CometWithExtendedAssetList.sol"
@@ -104,6 +116,7 @@ class ProfileFixture:
     kind: str
     decimals: int | None = None
     depends_on: str = ""
+    contract: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {"fixture_id": self.fixture_id, "kind": self.kind}
@@ -111,6 +124,8 @@ class ProfileFixture:
             body["decimals"] = self.decimals
         if self.depends_on:
             body["depends_on"] = self.depends_on
+        if self.contract:
+            body["contract"] = self.contract
         return body
 
 
@@ -135,6 +150,10 @@ class ConstructorProfile:
     property_function: str
     property_statement: str
     property_getter: str
+    source_commit: str = ""
+    property_template: str = "unauthorized-call"
+    probe_argument: str = ""
+    observed_fixture: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +174,10 @@ class ConstructorProfile:
             "property_function": self.property_function,
             "property_statement": self.property_statement,
             "property_getter": self.property_getter,
+            "source_commit": self.source_commit,
+            "property_template": self.property_template,
+            "probe_argument": self.probe_argument,
+            "observed_fixture": self.observed_fixture,
         }
 
     def public_dict(self) -> dict[str, Any]:
@@ -174,6 +197,9 @@ class ConstructorProfile:
             "property_function": self.property_function,
             "property_statement": self.property_statement,
             "property_getter": self.property_getter,
+            "source_commit": self.source_commit,
+            "property_template": self.property_template,
+            "observed_fixture": self.observed_fixture,
             "configuration": self.value.to_dict(),
             "local_environment": True,
             "establishes_deployed_state": False,
@@ -215,6 +241,10 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         "property_function",
         "property_statement",
         "property_getter",
+        "source_commit",
+        "property_template",
+        "probe_argument",
+        "observed_fixture",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -257,9 +287,35 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
     property_statement = _required_text(raw, "property_statement")
     if len(property_statement) > 400 or any(ch in property_statement for ch in "{};`"):
         raise ProfileError("profile_malformed", "property_statement is not plain text")
-    property_getter = _required_text(raw, "property_getter")
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", property_getter):
-        raise ProfileError("profile_malformed", "property_getter is not a no-argument signature")
+    template = str(raw.get("property_template", "unauthorized-call") or "unauthorized-call")
+    if template not in _PROPERTY_TEMPLATES:
+        raise ProfileError("profile_malformed", "property_template is not supported")
+    getter_raw = raw.get("property_getter", "")
+    if not isinstance(getter_raw, str):
+        raise ProfileError("profile_malformed", "property_getter is not text")
+    property_getter = getter_raw.strip()
+    if template == "unauthorized-call":
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", property_getter):
+            raise ProfileError(
+                "profile_malformed", "property_getter is not a no-argument signature"
+            )
+    elif property_getter and not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*\((?:[A-Za-z0-9_,\[\]]*)\)", property_getter
+    ):
+        raise ProfileError("profile_malformed", "property_getter is not a signature")
+    source_commit = str(raw.get("source_commit", "") or "")
+    if source_commit and not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ProfileError("profile_malformed", "source_commit is not a 40-character revision")
+    probe_argument = str(raw.get("probe_argument", "") or "")
+    if probe_argument and not _UINT.fullmatch(probe_argument):
+        raise ProfileError("profile_malformed", "probe_argument is not a decimal integer")
+    observed_fixture = str(raw.get("observed_fixture", "") or "")
+    if observed_fixture and not _IDENT.fullmatch(observed_fixture):
+        raise ProfileError("profile_malformed", "observed_fixture is not an identifier")
+    if template == "configured-asset" and (not observed_fixture or not probe_argument):
+        raise ProfileError(
+            "profile_malformed", "a configured-asset profile needs a fixture and a probe argument"
+        )
     return ConstructorProfile(
         profile_id=profile_id,
         contract=contract,
@@ -278,19 +334,23 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         property_function=property_function,
         property_statement=property_statement,
         property_getter=property_getter,
+        source_commit=source_commit,
+        property_template=template,
+        probe_argument=probe_argument,
+        observed_fixture=observed_fixture,
     )
 
 
-def struct_field_names(text: str, struct_name: str) -> tuple[str, ...] | None:
-    """Field names of ``struct Name { ... }``, or None when that struct is absent."""
-    if not _IDENT.fullmatch(struct_name):
-        return None
-    match = re.search(rf"\bstruct\s+{re.escape(struct_name)}\s*\{{", text)
-    if match is None:
-        return None
-    start = match.end()
+_STRUCT_FIELD = re.compile(
+    r"^\s*((?:uint[0-9]*|int[0-9]*|bool|address|bytes[0-9]*|"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\[[0-9]*\])?)\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*$"
+)
+
+
+def _struct_at(text: str, struct_name: str, open_end: int) -> tuple[tuple[str, str], ...]:
     depth = 1
-    index = start
+    index = open_end
     while index < len(text) and depth:
         if text[index] == "{":
             depth += 1
@@ -298,36 +358,88 @@ def struct_field_names(text: str, struct_name: str) -> tuple[str, ...] | None:
             depth -= 1
         index += 1
     if depth:
-        return None
-    body = _strip_comments(text[start : index - 1])
-    names = tuple(item.group(2) for item in _FIELD.finditer(body))
-    if not names or len(names) > MAX_FIELDS:
-        return None
-    return names
+        raise ProfileError("profile_type_unparsed", f"{struct_name} is not closed")
+    body = _strip_comments(text[open_end : index - 1])
+    fields: list[tuple[str, str]] = []
+    for piece in body.split(";"):
+        if not piece.strip():
+            continue
+        found = _STRUCT_FIELD.fullmatch(piece)
+        if found is None:
+            raise ProfileError(
+                "profile_type_unparsed",
+                f"{struct_name} contains a declaration the schema parser cannot read",
+            )
+        fields.append((found.group(1), found.group(2)))
+    if not fields or len(fields) > MAX_FIELDS:
+        raise ProfileError("profile_type_unparsed", f"{struct_name} has no usable fields")
+    if len({name for _type_name, name in fields}) != len(fields):
+        raise ProfileError("profile_type_unparsed", f"{struct_name} repeats a field name")
+    return tuple(fields)
 
 
-def _expect_struct(value: ProfileValue, text: str) -> None:
-    """Nested struct fields must be the fields declared in the bound source."""
-    if value.kind == "array":
-        for item in value.items:
-            _expect_struct(item, text)
-        return
-    if value.kind != "struct":
-        return
-    name = value.type_name.split(".")[-1]
-    declared = struct_field_names(text, name)
-    expected = tuple(field_name for field_name, _child in value.fields)
-    if declared is None or declared != expected:
+def iter_struct_fields(text: str, struct_name: str) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Every ``struct Name`` in ``text``. An absent name is an empty tuple."""
+    if not _IDENT.fullmatch(struct_name):
+        return ()
+    found: list[tuple[tuple[str, str], ...]] = []
+    pattern = re.compile(rf"\bstruct\s+{re.escape(struct_name)}\s*\{{")
+    for match in pattern.finditer(text):
+        found.append(_struct_at(text, struct_name, match.end()))
+    return tuple(found)
+
+
+def parse_struct_fields(text: str, struct_name: str) -> tuple[tuple[str, str], ...] | None:
+    """``(type, name)`` fields, or None when ``struct Name`` is not in ``text``.
+
+    A struct that is present but contains a declaration this parser cannot read
+    raises ``profile_type_unparsed``. Two different layouts of the same name in
+    one file raise ``profile_type_ambiguous``.
+    """
+    found = iter_struct_fields(text, struct_name)
+    if not found:
+        return None
+    if any(item != found[0] for item in found):
         raise ProfileError(
-            "profile_struct_mismatch",
-            f"{name} fields do not match the bound source",
+            "profile_type_ambiguous",
+            f"{struct_name} is declared differently more than once",
         )
-    for _field_name, child in value.fields:
-        _expect_struct(child, text)
+    return found[0]
 
 
-def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> PreparedProfile:
-    """Solidity fragments for a profile that still matches ``sources``."""
+def struct_field_names(text: str, struct_name: str) -> tuple[str, ...] | None:
+    """Field names of ``struct Name { ... }``, or None when that struct is absent."""
+    try:
+        fields = parse_struct_fields(text, struct_name)
+    except ProfileError:
+        return None
+    if fields is None:
+        return None
+    return tuple(name for _type_name, name in fields)
+
+
+def _bound_texts(profile: ConstructorProfile, sources: Mapping[str, str]) -> dict[str, str]:
+    """The hashed closure, after every bound path and import matches."""
+    bound = dict(profile.bound_files)
+    if profile.struct_file not in bound:
+        raise ProfileError(
+            "profile_dependency_unbound",
+            f"{profile.struct_file} is not in the hashed dependency set",
+        )
+    if profile.source_file not in bound:
+        raise ProfileError(
+            "profile_dependency_unbound",
+            f"{profile.source_file} is not in the hashed dependency set",
+        )
+    for path in profile.imports:
+        if path not in sources:
+            raise ProfileError("profile_import_missing", f"{path} is not in the source set")
+        if path not in bound:
+            raise ProfileError(
+                "profile_dependency_unbound",
+                f"{path} is imported but not in the hashed dependency set",
+            )
+    texts: dict[str, str] = {}
     for path, digest in profile.bound_files:
         text = sources.get(path)
         if text is None or sha256_text(text) != digest:
@@ -335,26 +447,291 @@ def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> 
                 "profile_source_mismatch",
                 f"{path} does not match the hash this profile was bound to",
             )
-    declared = struct_field_names(sources.get(profile.struct_file, ""), profile.struct_name)
-    expected = tuple(name for name, _value in profile.value.fields)
-    if declared is None or declared != expected:
+        texts[path] = text
+    return texts
+
+
+def _classify_type(type_name: str) -> tuple[str, int, str]:
+    """``(category, width, nested)``. Unsupported categories stay explicit."""
+    text = type_name.strip()
+    if text.endswith("[]"):
+        return "array", 0, text[:-2]
+    if "[" in text:
+        return "unsupported", 0, text
+    match = re.fullmatch(r"uint([0-9]*)", text)
+    if match:
+        width = int(match.group(1) or "256")
+        if width == 0 or width > 256 or width % 8:
+            return "unsupported", 0, text
+        return "uint", width, ""
+    match = re.fullmatch(r"int([0-9]*)", text)
+    if match:
+        width = int(match.group(1) or "256")
+        if width == 0 or width > 256 or width % 8:
+            return "unsupported", 0, text
+        return "int", width, ""
+    if text == "bool":
+        return "bool", 0, ""
+    if text == "address":
+        return "address", 0, ""
+    if text == "bytes" or re.fullmatch(r"bytes[0-9]+", text):
+        return "unsupported", 0, text
+    if _TYPE_NAME.fullmatch(text):
+        return "struct", 0, text.split(".")[-1]
+    return "unsupported", 0, text
+
+
+def _lookup_declared(
+    texts: Mapping[str, str], short: str
+) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+    """``(kind, path, fields)`` for a user-defined name in the bound closure."""
+    structs: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    enums: list[str] = []
+    values: list[str] = []
+    enum_re = re.compile(rf"\benum\s+{re.escape(short)}\b")
+    value_re = re.compile(rf"\btype\s+{re.escape(short)}\s+is\b")
+    for path, text in texts.items():
+        for fields in iter_struct_fields(text, short):
+            structs.append((path, fields))
+        if enum_re.search(text):
+            enums.append(path)
+        if value_re.search(text):
+            values.append(path)
+    if enums or values:
+        kind = "enum" if enums else "user-defined value type"
+        raise ProfileError(
+            "profile_type_unsupported",
+            f"{short} is a {kind}. The schema parser resolves elementary types, arrays, "
+            "and structs in the bound sources, and does not resolve this kind",
+        )
+    if not structs:
+        raise ProfileError(
+            "profile_type_unresolved",
+            f"{short} is not declared in the bound source closure",
+        )
+    first = structs[0][1]
+    if any(item[1] != first for item in structs):
+        raise ProfileError(
+            "profile_type_ambiguous",
+            f"{short} is declared differently in more than one bound file",
+        )
+    return "struct", structs[0][0], first
+
+
+def _types_match(declared: str, supplied: str) -> bool:
+    return declared.split(".")[-1] == supplied.split(".")[-1]
+
+
+def _check_value(
+    value: ProfileValue,
+    declared_type: str,
+    texts: Mapping[str, str],
+    fixtures: Mapping[str, ProfileFixture],
+    depth: int,
+) -> None:
+    if depth > MAX_DEPTH:
+        raise ProfileError("profile_bound_exceeded", "the configuration is nested too deeply")
+    category, width, nested = _classify_type(declared_type)
+    if category == "uint":
+        if value.kind != "uint":
+            raise ProfileError(
+                "profile_type_mismatch", f"{declared_type} requires an integer, not {value.kind}"
+            )
+        if int(value.value) >= 2**width:
+            raise ProfileError(
+                "profile_integer_bounds",
+                f"{value.value} does not fit {declared_type}",
+            )
+        return
+    if category == "int":
+        if value.kind != "uint":
+            raise ProfileError(
+                "profile_type_mismatch", f"{declared_type} requires an integer, not {value.kind}"
+            )
+        number = int(value.value)
+        limit = 2 ** (width - 1)
+        if number >= limit:
+            raise ProfileError(
+                "profile_integer_bounds", f"{value.value} does not fit {declared_type}"
+            )
+        return
+    if category == "bool":
+        if value.kind != "bool":
+            raise ProfileError("profile_type_mismatch", f"{declared_type} requires a bool")
+        return
+    if category == "address":
+        if value.kind == "fixture":
+            fixture = fixtures.get(value.value)
+            if fixture is None or fixture.kind not in _ADDRESS_FIXTURES:
+                raise ProfileError(
+                    "profile_fixture_incompatible",
+                    f"{value.value} is not an address fixture",
+                )
+            return
+        if value.kind != "role":
+            raise ProfileError(
+                "profile_type_mismatch", f"{declared_type} requires a role or a fixture address"
+            )
+        return
+    if category == "array":
+        if value.kind != "array":
+            raise ProfileError("profile_type_mismatch", f"{declared_type} requires an array")
+        if not _types_match(nested, value.type_name):
+            raise ProfileError(
+                "profile_type_mismatch",
+                f"array element {value.type_name} is not {nested}",
+            )
+        if len(value.items) > MAX_ARRAY:
+            raise ProfileError("profile_bound_exceeded", "the array is longer than the bound")
+        _classify_element(nested, texts)
+        for item in value.items:
+            _check_value(item, nested, texts, fixtures, depth + 1)
+        return
+    if category == "struct":
+        _kind, _path, fields = _lookup_declared(texts, nested)
+        if value.kind != "struct" or not _types_match(nested, value.type_name):
+            raise ProfileError("profile_type_mismatch", f"{declared_type} requires struct {nested}")
+        expected = tuple(name for _type_name, name in fields)
+        supplied = tuple(name for name, _child in value.fields)
+        if supplied != expected:
+            raise ProfileError(
+                "profile_struct_mismatch",
+                f"{nested} fields do not match the declaration in the bound source",
+            )
+        for (type_name, _name), (_supplied_name, child) in zip(fields, value.fields, strict=True):
+            _check_value(child, type_name, texts, fixtures, depth + 1)
+        return
+    raise ProfileError(
+        "profile_type_unsupported",
+        f"{declared_type} is outside the schema parser. It resolves elementary types, "
+        "arrays, and structs declared in the bound sources",
+    )
+
+
+def _classify_element(type_name: str, texts: Mapping[str, str]) -> None:
+    category, _width, nested = _classify_type(type_name)
+    if category == "struct":
+        _lookup_declared(texts, nested)
+        return
+    if category in {"uint", "int", "bool", "address"}:
+        return
+    raise ProfileError(
+        "profile_type_unsupported",
+        f"array element {type_name} is not a supported element type",
+    )
+
+
+def _validate_tree(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
+    fixtures = {item.fixture_id: item for item in profile.fixtures}
+    _kind, _path, fields = _lookup_declared(texts, profile.struct_name)
+    declared_here = parse_struct_fields(texts.get(profile.struct_file, ""), profile.struct_name)
+    if declared_here is None or declared_here != fields:
+        raise ProfileError(
+            "profile_struct_mismatch",
+            f"{profile.struct_name} is not declared in {profile.struct_file}",
+        )
+    if profile.value.type_name.split(".")[-1] != profile.struct_name:
+        raise ProfileError(
+            "profile_type_mismatch", "the profile struct is not the constructor type"
+        )
+    expected = tuple(name for _type_name, name in fields)
+    supplied = tuple(name for name, _child in profile.value.fields)
+    if supplied != expected:
         raise ProfileError(
             "profile_struct_mismatch",
             f"{profile.struct_name} fields do not match the bound source",
         )
-    _expect_struct(profile.value, sources.get(profile.struct_file, ""))
-    for path in profile.imports:
-        if path not in sources:
-            raise ProfileError("profile_import_missing", f"{path} is not in the source set")
+    for (type_name, _name), (_supplied, child) in zip(fields, profile.value.fields, strict=True):
+        _check_value(child, type_name, texts, fixtures, depth=1)
+    _source_contracts(profile, texts)
+
+
+def _source_contracts(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
+    for item in profile.fixtures:
+        if item.kind != "source_contract":
+            continue
+        declaring = ""
+        for text in texts.values():
+            if re.search(rf"\bcontract\s+{re.escape(item.contract)}\b", text):
+                declaring = text
+                break
+        if not declaring:
+            raise ProfileError(
+                "profile_fixture_unresolved",
+                f"{item.contract} is not a contract in the bound source closure",
+            )
+        if re.search(r"\bconstructor\s*\([^)]*\S", declaring):
+            # A constructor in another contract in the same file can match. Require
+            # the named contract's own constructor, when it has one, to be empty.
+            own = _constructor_params(declaring, item.contract)
+            if own is None:
+                raise ProfileError(
+                    "profile_type_unparsed",
+                    f"the constructor of {item.contract} could not be read",
+                )
+            if own.strip():
+                raise ProfileError(
+                    "profile_fixture_incompatible",
+                    f"{item.contract} has constructor arguments the profile does not fill",
+                )
+
+
+def _constructor_params(text: str, contract: str) -> str | None:
+    """The constructor parameter text, or "" when the contract has none."""
+    match = re.search(rf"\bcontract\s+{re.escape(contract)}\b", text)
+    if match is None:
+        return None
+    open_at = text.find("{", match.end())
+    if open_at < 0:
+        return None
+    depth = 0
+    index = open_at
+    while index < len(text):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body = text[open_at + 1 : index]
+                found = re.search(r"\bconstructor\s*\(", body)
+                if found is None:
+                    return ""
+                paren = body.find("(", found.start())
+                close = _match_paren(body, paren)
+                if close < 0:
+                    return None
+                return body[paren + 1 : close]
+        index += 1
+    return None
+
+
+def _match_paren(text: str, open_at: int) -> int:
+    depth = 0
+    for index in range(open_at, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> PreparedProfile:
+    """Solidity fragments for a profile that still matches ``sources``."""
+    texts = _bound_texts(profile, sources)
+    _validate_tree(profile, texts)
     variables = _deploy_fixtures(profile.fixtures)
-    expression = _render(profile.value, variables)
+    statements: list[str] = []
+    expression = _render(profile.value, variables, statements)
     contracts = _fixture_contracts(profile.fixtures)
-    if len(expression) > 8_000 or len(contracts) > 8_000:
+    deploy_text = "\n".join(statements)
+    if len(expression) > 8_000 or len(contracts) > 8_000 or len(deploy_text) > 8_000:
         raise ProfileError("profile_bound_exceeded", "the rendered configuration is too large")
     deploy = tuple(line for _name, _variable, line in variables)
     return PreparedProfile(
         expression=expression,
-        deploy_lines=deploy,
+        deploy_lines=(*deploy, *statements),
         contracts=contracts,
         import_paths=profile.imports,
         provenance=profile.public_dict(),
@@ -399,11 +776,15 @@ def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
             "profile_source_unsupported",
             "Configuration fields are not the set this profile can fill",
         )
-    bound = (
-        (COMET_FILE, sha256_text(target)),
-        (COMET_CONFIGURATION, sha256_text(configuration)),
-        (COMET_CORE, sha256_text(core)),
+    dependencies = (
+        COMET_FILE,
+        COMET_CONFIGURATION,
+        COMET_CORE,
+        "contracts/CometMainInterface.sol",
+        "contracts/interfaces/IAssetListFactory.sol",
+        "contracts/interfaces/IAssetListFactoryHolder.sol",
     )
+    bound = _hash_bound(sources, dependencies)
     raw = {
         "profile_id": "comet-pause-authorization",
         "contract": COMET_CONTRACT,
@@ -448,8 +829,167 @@ def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
         "property_function": PAUSE_SIGNATURE,
         "property_statement": PAUSE_STATEMENT,
         "property_getter": "isSupplyPaused()",
+        "source_commit": COMET_PIN,
+        "property_template": "unauthorized-call",
     }
     return parse_profile(raw)
+
+
+ASSET_SIGNATURE = "getAssetInfo(uint8)"
+ASSET_STATEMENT = "getAssetInfo(0) returns the collateral asset address configured in assetConfigs"
+_COLLATERAL_DECIMALS = 18
+_BORROW_FACTOR = 500_000_000_000_000_000  # 0.5e18, below the liquidate factor
+_LIQUIDATE_FACTOR = 800_000_000_000_000_000  # 0.8e18, at most FACTOR_SCALE
+_LIQUIDATION_FACTOR = 900_000_000_000_000_000  # 0.9e18
+_SUPPLY_CAP = 1_000_000_000_000_000_000  # 1e18, one whole 18-decimal token after descale
+
+
+def comet_asset_profile(sources: Mapping[str, str]) -> ConstructorProfile:
+    """One local collateral asset against the pinned Comet source.
+
+    The factory is the pinned ``AssetListFactory``, which deploys the pinned
+    ``AssetList``. The target source is not modified. Factors are the values
+    ``AssetList`` accepts: borrow below liquidate, liquidate within
+    ``FACTOR_SCALE``, and the descaled factors still ordered.
+    """
+    pause = comet_pause_profile(sources)
+    asset_list = sources.get("contracts/AssetList.sol", "")
+    factory = sources.get("contracts/AssetListFactory.sol", "")
+    if "function createAssetList" not in factory or "new AssetList" not in factory:
+        raise ProfileError(
+            "profile_source_unsupported", "AssetListFactory is not the pinned factory"
+        )
+    if "borrowCollateralFactor >= assetConfig.liquidateCollateralFactor" not in asset_list:
+        raise ProfileError(
+            "profile_source_unsupported", "AssetList does not enforce the collateral-factor order"
+        )
+    if "getAssetInfo(uint8 i)" not in sources.get(COMET_FILE, ""):
+        raise ProfileError("profile_source_unsupported", "getAssetInfo(uint8) is not the target")
+    configuration = sources.get(COMET_CONFIGURATION, "")
+    asset_fields = struct_field_names(configuration, "AssetConfig")
+    expected = (
+        "asset",
+        "priceFeed",
+        "decimals",
+        "borrowCollateralFactor",
+        "liquidateCollateralFactor",
+        "liquidationFactor",
+        "supplyCap",
+    )
+    if asset_fields != expected:
+        raise ProfileError(
+            "profile_source_unsupported", "AssetConfig fields are not the set this profile can fill"
+        )
+    dependencies = (
+        COMET_FILE,
+        COMET_CONFIGURATION,
+        COMET_CORE,
+        "contracts/CometMainInterface.sol",
+        "contracts/interfaces/IAssetList.sol",
+        "contracts/interfaces/IAssetListFactory.sol",
+        "contracts/interfaces/IAssetListFactoryHolder.sol",
+        "contracts/interfaces/IERC20NonStandard.sol",
+        "contracts/interfaces/IPriceFeed.sol",
+        "contracts/AssetList.sol",
+        "contracts/AssetListFactory.sol",
+    )
+    bound = _hash_bound(sources, dependencies)
+    values = _comet_fields()
+    values["assetConfigs"] = {
+        "kind": "array",
+        "type_name": "CometConfiguration.AssetConfig",
+        "items": [
+            {
+                "kind": "struct",
+                "type_name": "CometConfiguration.AssetConfig",
+                "fields": [
+                    {"name": "asset", "value": {"kind": "fixture", "value": "collateral"}},
+                    {"name": "priceFeed", "value": {"kind": "fixture", "value": "collateralFeed"}},
+                    {
+                        "name": "decimals",
+                        "value": {"kind": "uint", "value": str(_COLLATERAL_DECIMALS)},
+                    },
+                    {
+                        "name": "borrowCollateralFactor",
+                        "value": {"kind": "uint", "value": str(_BORROW_FACTOR)},
+                    },
+                    {
+                        "name": "liquidateCollateralFactor",
+                        "value": {"kind": "uint", "value": str(_LIQUIDATE_FACTOR)},
+                    },
+                    {
+                        "name": "liquidationFactor",
+                        "value": {"kind": "uint", "value": str(_LIQUIDATION_FACTOR)},
+                    },
+                    {"name": "supplyCap", "value": {"kind": "uint", "value": str(_SUPPLY_CAP)}},
+                ],
+            }
+        ],
+    }
+    declared = struct_field_names(configuration, "Configuration")
+    if declared is None:
+        raise ProfileError("profile_source_unsupported", "Configuration is not declared")
+    raw = pause.to_dict()
+    raw.update(
+        {
+            "profile_id": "comet-asset-list",
+            "source_sha256": sha256_text(sources[COMET_FILE]),
+            "value": {
+                "kind": "struct",
+                "type_name": "CometConfiguration.Configuration",
+                "fields": [{"name": name, "value": values[name]} for name in declared],
+            },
+            "fixtures": [
+                {"fixture_id": "baseToken", "kind": "decimals_token", "decimals": 6},
+                {"fixture_id": "baseFeed", "kind": "decimals_feed", "decimals": 8},
+                {"fixture_id": "collateral", "kind": "decimals_token", "decimals": 18},
+                {"fixture_id": "collateralFeed", "kind": "decimals_feed", "decimals": 8},
+                {
+                    "fixture_id": "factory",
+                    "kind": "source_contract",
+                    "contract": "AssetListFactory",
+                },
+                {"fixture_id": "holder", "kind": "factory_holder", "depends_on": "factory"},
+            ],
+            "imports": [
+                "contracts/CometCore.sol",
+                "contracts/AssetListFactory.sol",
+                "contracts/interfaces/IAssetListFactory.sol",
+                "contracts/interfaces/IAssetListFactoryHolder.sol",
+            ],
+            "bound_files": [{"path": path, "sha256": digest} for path, digest in bound],
+            "assumptions": [
+                "governor and pauseGuardian are local harness addresses, distinct from the attacker",
+                "base token decimals are 6 so baseScale equals BASE_ACCRUAL_SCALE (1e6)",
+                "the base price feed and the collateral price feed report 8 decimals",
+                "the collateral token reports 18 decimals, matching its AssetConfig",
+                "borrow, liquidate, and liquidation factors are 5e17, 8e17, and 9e17",
+                "those factors pass the AssetList order checks before and after descaling",
+                "supplyCap is 1e18, which fits uint128 and descales to one whole token",
+                "the asset-list factory is the pinned AssetListFactory deploying the pinned AssetList",
+                "the collateral token and price feed are local fixtures, not live market contracts",
+                "this configuration is a local construction environment, not deployed bytecode",
+            ],
+            "property_function": ASSET_SIGNATURE,
+            "property_statement": ASSET_STATEMENT,
+            "property_getter": "",
+            "source_commit": COMET_PIN,
+            "property_template": "configured-asset",
+            "probe_argument": "0",
+            "observed_fixture": "collateral",
+        }
+    )
+    return parse_profile(raw)
+
+
+def _hash_bound(sources: Mapping[str, str], paths: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    found: list[tuple[str, str]] = []
+    for path in paths:
+        text = sources.get(path, "")
+        if not text:
+            raise ProfileError("profile_source_unsupported", f"{path} is not in the source closure")
+        found.append((path, sha256_text(text)))
+    return tuple(found)
 
 
 def seed_sources(
@@ -484,6 +1024,12 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
         return None
     try:
         profile = parse_profile(raw)
+        recorded = getattr(getattr(campaign, "manifest", None), "source_commit", "") or ""
+        if profile.source_commit and recorded != profile.source_commit:
+            raise ProfileError(
+                "profile_source_revision_mismatch",
+                "the profile source commit does not match the campaign source revision",
+            )
         chosen = seed_sources(campaign.selection, analysis.sources, profile)
         prepare_profile(profile, chosen)
     except ProfileError as exc:
@@ -531,6 +1077,8 @@ def _seed_sequence(
     )
     if function is None:
         return f"profile_property_unsupported: {profile.property_function} is not in the model"
+    if profile.property_template == "configured-asset":
+        return _seed_configured(model, identity, profile, sources, function)
     if not _authorizes(function.body):
         return (
             "profile_property_unsupported: the function does not check governor and pauseGuardian"
@@ -575,6 +1123,55 @@ def _seed_sequence(
         detector="profile.authorization",
         family="access_control",
         title="unauthorized pause",
+        summary=profile.property_statement,
+        file=profile.source_file,
+        line=function.line,
+        contract=profile.contract,
+        function=function.signature,
+        status="profile_seed",
+        confidence="source",
+    )
+    return sequence, candidate
+
+
+def _seed_configured(
+    model: ResearchModel,
+    identity: SequenceIdentity,
+    profile: ConstructorProfile,
+    sources: Mapping[str, str],
+    function: Any,
+) -> tuple[Vfcs, SemanticCandidate] | str:
+    del model
+    if len(function.params) != 1 or function.params[0].type_name not in {
+        "uint8",
+        "uint256",
+        "uint",
+    }:
+        return "profile_property_unsupported: the configured read does not take one integer index"
+    call = VfcsCall(
+        profile.contract,
+        function.signature,
+        "read",
+        ATTACKER,
+        arguments=((function.params[0].name or "arg0", profile.probe_argument),),
+        established_by=f"fixture:{profile.observed_fixture}",
+    )
+    sequence = stamp_source_identity(
+        Vfcs(
+            sequence_id=sequence_id_of((call,), "configured-asset", identity),
+            template="configured-asset",
+            origin=f"constructor_profile:{profile.profile_id}",
+            calls=(call,),
+            property_under_test=profile.property_statement,
+            derived_from=f"profile.configured_asset@{profile.contract}.{function.signature}",
+            identity=identity,
+        ),
+        sources,
+    )
+    candidate = SemanticCandidate(
+        detector="profile.configured_asset",
+        family="accounting",
+        title="configured asset preserved",
         summary=profile.property_statement,
         file=profile.source_file,
         line=function.line,
@@ -649,6 +1246,8 @@ def _deploy_fixtures(
         if item.kind == "factory_holder":
             dependency = names[item.depends_on]
             line = f"        {contract} {variable} = new {contract}(address({dependency}));"
+        elif item.kind == "source_contract":
+            line = f"        {contract} {variable} = new {contract}();"
         else:
             line = f"        {contract} {variable} = new {contract}();"
         rendered.append((item.fixture_id, variable, line))
@@ -692,6 +1291,12 @@ def _fixture_contracts(fixtures: tuple[ProfileFixture, ...]) -> str:
 
 
 def _contract_name(item: ProfileFixture) -> str:
+    if item.kind == "source_contract":
+        if not _IDENT.fullmatch(item.contract):
+            raise ProfileError(
+                "profile_malformed", "a source contract fixture needs a contract name"
+            )
+        return item.contract
     prefix = {
         "decimals_token": "BugForgeTok",
         "decimals_feed": "BugForgeFeed",
@@ -701,7 +1306,11 @@ def _contract_name(item: ProfileFixture) -> str:
     return f"{prefix}_{item.fixture_id}"
 
 
-def _render(value: ProfileValue, variables: list[tuple[str, str, str]]) -> str:
+def _render(
+    value: ProfileValue,
+    variables: list[tuple[str, str, str]],
+    statements: list[str],
+) -> str:
     if value.kind == "uint":
         return value.value
     if value.kind == "bool":
@@ -712,10 +1321,19 @@ def _render(value: ProfileValue, variables: list[tuple[str, str, str]]) -> str:
         name = next(variable for fid, variable, _line in variables if fid == value.value)
         return f"address({name})"
     if value.kind == "array":
-        if value.items:
-            raise ProfileError("profile_malformed", "only an empty array is rendered inline")
-        return f"new {value.type_name}[](0)"
-    fields = ", ".join(f"{name}: {_render(child, variables)}" for name, child in value.fields)
+        if not value.items:
+            return f"new {value.type_name}[](0)"
+        name = f"bf_arr{len(statements)}"
+        statements.append(
+            f"        {value.type_name}[] memory {name} = new {value.type_name}[]({len(value.items)});"
+        )
+        for index, item in enumerate(value.items):
+            rendered = _render(item, variables, statements)
+            statements.append(f"        {name}[{index}] = {rendered};")
+        return name
+    fields = ", ".join(
+        f"{name}: {_render(child, variables, statements)}" for name, child in value.fields
+    )
     return f"{value.type_name}({{ {fields} }})"
 
 
@@ -750,9 +1368,8 @@ def _value(raw: Any, fixture_ids: set[str], depth: int) -> ProfileValue:
         items = raw.get("items", [])
         if not isinstance(items, list) or len(items) > MAX_ARRAY:
             raise ProfileError("profile_malformed", "an array is missing or too long")
-        if items:
-            raise ProfileError("profile_malformed", "only an empty array is accepted in this phase")
-        return ProfileValue("array", type_name=type_name)
+        parsed = tuple(_value(item, fixture_ids, depth + 1) for item in items)
+        return ProfileValue("array", type_name=type_name, items=parsed)
     type_name = _type_name(str(raw.get("type_name", "")), "struct type")
     fields_raw = raw.get("fields", [])
     if not isinstance(fields_raw, list) or not fields_raw or len(fields_raw) > MAX_FIELDS:
@@ -778,6 +1395,9 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
     for item in raw:
         if not isinstance(item, Mapping):
             raise ProfileError("profile_malformed", "a fixture is not an object")
+        unknown = sorted(set(item) - {"fixture_id", "kind", "decimals", "depends_on", "contract"})
+        if unknown:
+            raise ProfileError("profile_malformed", f"unknown fixture fields: {', '.join(unknown)}")
         fixture_id = str(item.get("fixture_id", ""))
         kind = str(item.get("kind", ""))
         if not _IDENT.fullmatch(fixture_id) or kind not in _FIXTURE_KINDS:
@@ -796,17 +1416,26 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
         elif decimals is not None:
             raise ProfileError("profile_malformed", "this fixture does not take decimals")
         depends = str(item.get("depends_on", ""))
+        contract = str(item.get("contract", ""))
         if kind == "factory_holder":
             if not depends:
                 raise ProfileError("profile_unresolved_fixture", "a factory holder needs a factory")
         elif depends:
             raise ProfileError("profile_malformed", "this fixture does not take a dependency")
+        if kind == "source_contract":
+            if not _IDENT.fullmatch(contract):
+                raise ProfileError(
+                    "profile_malformed", "a source contract fixture needs a contract name"
+                )
+        elif contract:
+            raise ProfileError("profile_malformed", "this fixture does not name a source contract")
         found.append(
             ProfileFixture(
                 fixture_id,
                 kind,
                 decimals if isinstance(decimals, int) else None,
                 depends,
+                contract,
             )
         )
     ids = {item.fixture_id for item in found}

@@ -915,6 +915,12 @@ def campaign_coverage(
         "scope_excluded": scope_excluded,
         "executions": len(records) if executions is not None else None,
         "by_outcome": dict(sorted(by_outcome.items())),
+        "reason_codes": _reason_counts(records) if executions is not None else None,
+        "positive_controls": (
+            sum(1 for record in records.values() if record.get("positive_control") == "changed")
+            if executions is not None
+            else None
+        ),
         "forge_runs": forge_runs,
         "foundry_invoked": stages["foundry_invoked"],
         "execution_stages": stages["counters"],

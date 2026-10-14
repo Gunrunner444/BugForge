@@ -86,6 +86,8 @@ def test_pause_vault_campaign_holds_the_authorization_property(
     assert held
     assert held[0]["verdict"] == "property_held"
     assert held[0]["strong_candidate"] is False
+    assert "expected authorization error" in held[0]["reason"]
+    assert (held[0].get("evaluation") or {}).get("positive_control") == "changed"
     assert held[0]["property_under_test"] == STATEMENT
     assert all(item["strong_candidate"] is False for item in result["observations"])
     props = [

@@ -30,6 +30,7 @@ from typing import Any
 
 from app.discovery.bounty.vfcs import ATTACKER, Vfcs
 from app.discovery.orchestration.codec import digest
+from app.parsing.keccak import function_selector
 from app.parsing.solidity_research import ResearchModel, RFunction, SemanticCandidate
 
 
@@ -88,6 +89,8 @@ class OracleKind(StrEnum):
     # Behavioral probe: did a reverting callee's failure reach the outer call?
     # Outer success is evidence of a mechanism, not a security-property violation.
     MECHANISM_PROBE = "mechanism_probe"
+    # A configured value is still present in the return data of a read.
+    CONFIGURED_VALUE = "configured_value"
 
 
 EXECUTABLE_ORACLES = frozenset(OracleKind) - {OracleKind.NONE}
@@ -107,6 +110,15 @@ class OracleSpec:
     snapshot: str = "before_probe"  # before_probe | before_sequence
     expression: str = ""
     formulation: str = "primary"  # primary | alternate
+    # 0x plus 8 hex digits. Empty means a revert of any kind still satisfies
+    # CALL_MUST_FAIL. A selector is required only for an authorization oracle
+    # that names one custom error from the source.
+    revert_selector: str = ""
+    # Local positive-control sender, ``address(0x...)`` only. Empty means none.
+    control_sender: str = ""
+    # Word of a static return tuple. -1 means the oracle does not read one.
+    word_index: int = -1
+    observed_fixture: str = ""
 
     @property
     def executable(self) -> bool:
@@ -124,6 +136,10 @@ class OracleSpec:
             "snapshot": self.snapshot,
             "expression": self.expression,
             "formulation": self.formulation,
+            "revert_selector": self.revert_selector,
+            "control_sender": self.control_sender,
+            "word_index": self.word_index,
+            "observed_fixture": self.observed_fixture,
             "executable": self.executable,
         }
 
@@ -221,6 +237,7 @@ _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("governance.", PropertyFamily.GOVERNANCE),
     ("bridge.", PropertyFamily.BRIDGE_MESSAGE_BINDING),
     ("v4_hooks.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
+    ("profile.configured_asset", PropertyFamily.ACCOUNTING),
 )
 
 
@@ -613,13 +630,34 @@ def _body_compact(body: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _authorization_error(model: ResearchModel, fn: RFunction) -> tuple[str, str] | None:
+    """``(Name, selector)`` for ``revert Name()`` when that error is declared.
+
+    A string revert returns None. The caller then keeps the selector-less oracle.
+    A custom-error revert whose declaration is missing also returns None; the
+    property builder treats that as unsupported rather than as any revert.
+    """
+    compact = _body_compact(fn.body)
+    match = re.search(r"revert([A-Z][A-Za-z0-9_]*)\(\)", compact)
+    if match is None:
+        return None
+    name = match.group(1)
+    declared = re.compile(rf"\berror\s+{re.escape(name)}\s*\(\s*\)\s*;")
+    for contract in model.contracts.values():
+        if declared.search(contract.body) or declared.search(contract.head):
+            return name, function_selector(f"{name}()")
+    return None
+
+
 def _unauthorized_pause(
     sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
 ) -> OracleBuilt:
-    """Unauthorized pause must revert and must not change the supply-pause flag.
+    """Unauthorized pause must revert for the source's reason and leave state unchanged.
 
     The check is read from the function body. A renamed template cannot claim
     this property when the source does not contain the authorization condition.
+    When the body reverts a declared custom error, the oracle requires that
+    selector and a successful authorized call that changes the same getter.
     """
     del sequence, det
     compact = _body_compact(fn.body)
@@ -644,6 +682,30 @@ def _unauthorized_pause(
             (),
             "the authorization check or isSupplyPaused() is not in this source",
         )
+    named = _authorization_error(model, fn)
+    if re.search(r"revert[A-Z]", compact) and named is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{fn.name} reverts a custom error that is not declared in this source",
+            (),
+            "the authorization error is not declared in the modeled source",
+        )
+    selector = ""
+    assumptions = [
+        "the attacker is neither the configured governor nor the pause guardian",
+        "a revert with an unchanged pause flag holds only for this local configuration",
+    ]
+    if named is not None:
+        error_name, selector = named
+        assumptions.append(
+            f"the unauthorized caller reverts {error_name}() ({selector}), "
+            "which is declared in this source"
+        )
+        assumptions.append(
+            "the configured governor can call the same function and changes isSupplyPaused()"
+        )
     return (
         OracleSpec(
             kind=OracleKind.CALL_MUST_FAIL,
@@ -654,13 +716,88 @@ def _unauthorized_pause(
                 "an account that is neither governor nor pauseGuardian must not "
                 "change the supply pause flag"
             ),
+            revert_selector=selector,
+            control_sender="address(0xC0FE)" if selector else "",
         ),
         (),
         ("pauseFlags",),
         f"{fn.name} reverts unless msg.sender is governor or pauseGuardian",
+        tuple(assumptions),
+        "",
+    )
+
+
+def _struct_layout(model: ResearchModel, struct_name: str) -> tuple[tuple[str, str], ...] | None:
+    """Fields of one struct name. Differing declarations in the model are rejected."""
+    from app.discovery.bounty.constructor_profile import parse_struct_fields
+
+    found: list[tuple[tuple[str, str], ...]] = []
+    for contract in model.contracts.values():
+        for text in (contract.body, contract.head):
+            fields = parse_struct_fields(text, struct_name)
+            if fields:
+                found.append(fields)
+    if not found or any(item != found[0] for item in found):
+        return None
+    return found[0]
+
+
+def _configured_asset(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
+    """The asset address stored at construction is the address getAssetInfo returns."""
+    del det
+    fixture = ""
+    for call in sequence.calls:
+        if call.established_by.startswith("fixture:"):
+            fixture = call.established_by.split(":", 1)[1]
+    if not fixture or not fn.returns:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{fn.name} has no configured asset fixture to compare",
+            (),
+            "the configured-asset oracle needs one return struct and one fixture",
+        )
+    short = fn.returns[0].type_name.split(".")[-1]
+    fields = _struct_layout(model, short)
+    if fields is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{short} is not a single struct declaration in this source",
+            (),
+            "the return struct layout is missing or ambiguous",
+        )
+    index = next((i for i, (type_name, name) in enumerate(fields) if name == "asset"), None)
+    if index is None or fields[index][0] != "address":
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{short} does not expose an address field named asset",
+            (),
+            "the asset field is not an address in the declared struct",
+        )
+    return (
+        OracleSpec(
+            kind=OracleKind.CONFIGURED_VALUE,
+            probe_role=sequence.calls[0].role if sequence.calls else "read",
+            probe_function=fn.signature,
+            word_index=index,
+            observed_fixture=fixture,
+            expression=(
+                f"{fn.signature} word {index} is the address of fixture {fixture} "
+                "configured at construction"
+            ),
+        ),
+        (),
+        ("asset",),
+        f"{fn.name} returns the collateral asset stored from the constructor configuration",
         (
-            "the attacker is neither the configured governor nor the pause guardian",
-            "a revert with an unchanged pause flag holds only for this local configuration",
+            "the fixture token and price feed are local and report the decimals the constructor requires",
+            "the comparison is the returned asset address, not a price or a liquidation",
+            "a matching word holds only for this local configuration",
         ),
         "",
     )
@@ -696,6 +833,7 @@ _ORACLE_BUILDERS: dict[str, Any] = {
         "needs a controlled oracle/market fixture wired as the price source",
     ),
     "unauthorized-call": _unauthorized_pause,
+    "configured-asset": _configured_asset,
     "boundary-batch": _no_property(
         "{name}'s totals are internal; no public observable distinguishes a wrap"
     ),
@@ -718,6 +856,13 @@ class OracleObservation:
     credited: int | None = None  # credit the getter added for the actor across the probe
     holdings_after: int | None = None  # tokens the target holds after the probe
     credit_after: int | None = None  # the actor's credit after the probe
+    revert_selector: str = ""  # 0x plus 8 hex digits, or ""
+    revert_data_ok: bool = True
+    control_ok: int = -1  # -1 not run, 0 reverted, 1 succeeded
+    control_before: str = ""
+    control_after: str = ""
+    observed_word: str = ""
+    fixture_word: str = ""
 
 
 @dataclass(frozen=True)
@@ -727,6 +872,8 @@ class PropertyEvaluation:
     probe_index: int = -1
     precondition_ok: bool = True
     evaluated: bool = False
+    # "" | changed | failed | unchanged | not_run. Not a finding by itself.
+    positive_control: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -735,6 +882,7 @@ class PropertyEvaluation:
             "probe_index": self.probe_index,
             "precondition_ok": self.precondition_ok,
             "evaluated": self.evaluated,
+            "positive_control": self.positive_control,
             "verified": False,
         }
 
@@ -832,6 +980,8 @@ def evaluate(
                     True,
                     True,
                 )
+        if oracle.revert_selector or oracle.control_sender:
+            return _authorization_verdict(oracle, observation, probe, probe_ok)
         if probe_ok == 1:
             return PropertyEvaluation(
                 PropertyVerdict.PROPERTY_VIOLATED,
@@ -843,6 +993,8 @@ def evaluate(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD, "the probe call reverted as required", probe, True, True
         )
+    if kind is OracleKind.CONFIGURED_VALUE:
+        return _configured_verdict(oracle, observation, probe, probe_ok)
     if kind is OracleKind.STATE_UNCHANGED:
         if not observation.readable or not observation.before or not observation.after:
             return PropertyEvaluation(
@@ -913,6 +1065,125 @@ def evaluate(
             True,
         )
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
+
+
+def _selector_word(value: str) -> bool:
+    return bool(re.fullmatch(r"0x[0-9a-fA-F]{8}", value))
+
+
+def _authorization_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    """Authorization holds only for the expected error after a real control change.
+
+    A selector-less CALL_MUST_FAIL does not use this path, so an arbitrary revert
+    elsewhere in BugForge is not turned into an authorization verdict.
+    """
+    control = "not_run"
+    if oracle.control_sender:
+        if observation.control_ok != 1:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                "the authorized positive control did not succeed",
+                probe,
+                True,
+                False,
+                "failed",
+            )
+        if not observation.control_before or not observation.control_after:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                "the authorized positive control could not read state",
+                probe,
+                True,
+                False,
+                "failed",
+            )
+        if observation.control_before == observation.control_after:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                "the authorized call did not change the observed state",
+                probe,
+                True,
+                False,
+                "unchanged",
+            )
+        control = "changed"
+    if not oracle.getter:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the authorization oracle has no state getter",
+            probe,
+            True,
+            False,
+            control,
+        )
+    if probe_ok == 1:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"the probe call {oracle.probe_function} succeeded: {oracle.expression}",
+            probe,
+            True,
+            True,
+            control,
+        )
+    if (
+        not observation.revert_data_ok
+        or not _selector_word(observation.revert_selector)
+        or not _selector_word(oracle.revert_selector)
+        or observation.revert_selector.lower() != oracle.revert_selector.lower()
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the revert data was missing, truncated, or not the expected authorization error",
+            probe,
+            True,
+            False,
+            control,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        "the probe call reverted with the expected authorization error "
+        f"{oracle.revert_selector} and the observed state stayed unchanged after the "
+        "authorized positive control changed it",
+        probe,
+        True,
+        True,
+        control,
+    )
+
+
+def _configured_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    if probe_ok != 1 or oracle.word_index < 0:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the configured-value read did not return data",
+            probe,
+        )
+    if not observation.observed_word or not observation.fixture_word:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the returned word or the fixture address was not observed",
+            probe,
+        )
+    if observation.observed_word.lower() != observation.fixture_word.lower():
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"word {oracle.word_index} was {observation.observed_word}, not the configured "
+            f"fixture {observation.fixture_word}",
+            probe,
+            True,
+            True,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        f"word {oracle.word_index} is the configured fixture address {observation.fixture_word}",
+        probe,
+        True,
+        True,
+    )
 
 
 def property_index(specs: list[PropertySpec]) -> dict[str, Any]:

@@ -92,6 +92,12 @@ K_RECEIVED = 6
 K_CREDITED = 7
 K_PRIMITIVE = 8
 K_DONE = 9
+K_REVERT = 10
+K_CONTROL = 11
+K_CONTROL_BEFORE = 12
+K_CONTROL_AFTER = 13
+K_WORD = 14
+K_FIXTURE = 15
 
 
 class Outcome(StrEnum):
@@ -1189,8 +1195,93 @@ class _Synth:
     def read_credit(self, slot: int) -> None:
         self.read_getter(K_CREDITED, slot)
 
+    def _positive_control(self, index: int, encoded: str) -> None:
+        sender = self.oracle.control_sender
+        if not re.fullmatch(r"address\(0x[0-9A-Fa-f]{1,40}\)", sender):
+            raise _UnbuildableError(
+                "the positive-control sender is not a local address literal",
+                "control_sender_rejected",
+            )
+        self.read_getter(K_CONTROL_BEFORE, index)
+        self.steps.append(f"        vm.prank({sender});")
+        self.steps.append(f"        (bool ok_ctl_{index}, ) = address(t).call({encoded});")
+        self.steps.append(
+            f"        emit BugForgeObservation({K_CONTROL}, {index}, ok_ctl_{index} ? 1 : 0);"
+        )
+        self.read_getter(K_CONTROL_AFTER, index)
+
+    def _emit_call(self, index: int, sender: str, encoded: str) -> None:
+        oracle = self.oracle
+        capture = bool(oracle.revert_selector) or oracle.kind is OracleKind.CONFIGURED_VALUE
+        self.steps.append(f"        vm.prank({sender});")
+        if capture:
+            self.steps.append(
+                f"        (bool ok_{index}, bytes memory ret_{index}) = address(t).call({encoded});"
+            )
+        else:
+            self.steps.append(f"        (bool ok_{index}, ) = address(t).call({encoded});")
+        self.steps.append(
+            f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
+        )
+        if oracle.revert_selector:
+            self.steps.append(
+                f"        if (!ok_{index} && ret_{index}.length >= 4) {{"
+                f" emit BugForgeObservation({K_REVERT}, {index}, "
+                f"uint256(uint32(bytes4(ret_{index})))); }} else if (!ok_{index}) {{"
+                f" emit BugForgeObservation({K_REVERT}, {index}, 0); }}"
+            )
+        if oracle.kind is OracleKind.CONFIGURED_VALUE:
+            self._emit_word(index)
+
+    def _emit_word(self, index: int) -> None:
+        word = self.oracle.word_index
+        fixture = self.oracle.observed_fixture
+        if word < 0 or word > 16:
+            raise _UnbuildableError(
+                "the configured return word is not in the supported static layout",
+                "configured_word_unresolved",
+            )
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,40}", fixture):
+            raise _UnbuildableError(
+                "the configured fixture is not named", "configured_fixture_unresolved"
+            )
+        variable = f"bf_{fixture}"
+        if f"{variable} " not in "\n".join(self.pre_deploy):
+            raise _UnbuildableError(
+                f"fixture {fixture} was not deployed by the profile",
+                "configured_fixture_unresolved",
+            )
+        need = 32 * (word + 1)
+        offset = 32 * word
+        self.steps.append(f"        if (ok_{index} && ret_{index}.length >= {need}) {{")
+        self.steps.append(f"            bytes memory bfRet_{index} = ret_{index};")
+        self.steps.append(f"            uint256 bfWord_{index};")
+        self.steps.append(f"            uint256 bfOff_{index} = {offset};")
+        self.steps.append(
+            f"            assembly {{ bfWord_{index} := mload(add(add(bfRet_{index}, 0x20), "
+            f"bfOff_{index})) }}"
+        )
+        self.steps.append(
+            f"            emit BugForgeObservation({K_WORD}, {index}, bfWord_{index});"
+        )
+        self.steps.append("        }")
+        self.steps.append(
+            f"        emit BugForgeObservation({K_FIXTURE}, {index}, "
+            f"uint256(uint160(address({variable}))));"
+        )
+
     # -- assemble --------------------------------------------------------------------------
     def build(self) -> str:
+        for call in self.sequence.calls:
+            if call.primitive:
+                continue
+            function = _resolve(self.model, call.contract, call.function)
+            if function is not None and function.kind == "constructor":
+                raise _UnbuildableError(
+                    "constructor arguments are a deployment configuration, not an external-call "
+                    f"argument; {call.contract}.{call.function} was not encoded or executed",
+                    "constructor_not_a_call",
+                )
         oracle = self.oracle
         probe = probe_index(self.sequence, oracle) if oracle.executable else -1
         if oracle.kind in TOKEN_ORACLES:
@@ -1208,6 +1299,8 @@ class _Synth:
                     "a call is not a function of the target contract", "call_outside_target"
                 )
             encoded = self.encode(call, function)
+            if index == probe and oracle.control_sender:
+                self._positive_control(index, encoded)
             if (
                 index == probe
                 and oracle.getter
@@ -1226,11 +1319,7 @@ class _Synth:
                 raise _UnbuildableError(
                     f"actor {call.actor!r} is not a harness actor", "unknown_actor"
                 )
-            self.steps.append(f"        vm.prank({sender});")
-            self.steps.append(f"        (bool ok_{index}, ) = address(t).call({encoded});")
-            self.steps.append(
-                f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
-            )
+            self._emit_call(index, sender, encoded)
             if (
                 index == probe
                 and oracle.getter
@@ -1571,6 +1660,12 @@ def observation_from_events(
     received: dict[int, int] = {}
     credited: dict[int, int] = {}
     deployed = done = False
+    revert_selector = ""
+    revert_data_ok = True
+    saw_revert = False
+    control_ok = -1
+    control_before = control_after = ""
+    observed_word = fixture_word = ""
     for kind, index, value in events:
         if kind == K_DEPLOYED:
             deployed = True
@@ -1588,6 +1683,27 @@ def observation_from_events(
             credited[index] = value
         elif kind == K_DONE:
             done = index == count
+        elif kind == K_REVERT:
+            saw_revert = True
+            if value == 0:
+                revert_data_ok = False
+                revert_selector = ""
+            else:
+                revert_selector = f"0x{value & 0xFFFFFFFF:08x}"
+                revert_data_ok = True
+        elif kind == K_CONTROL:
+            control_ok = 1 if value == 1 else 0
+        elif kind == K_CONTROL_BEFORE:
+            control_before = f"0x{value:064x}"
+        elif kind == K_CONTROL_AFTER:
+            control_after = f"0x{value:064x}"
+        elif kind == K_WORD:
+            observed_word = f"0x{value:064x}"
+        elif kind == K_FIXTURE:
+            fixture_word = f"0x{value:064x}"
+    if not saw_revert:
+        # No 4-byte selector was reported. Selector-less oracles ignore this flag.
+        revert_data_ok = False
     observation = OracleObservation(
         call_ok=tuple(calls),
         before=before,
@@ -1597,6 +1713,13 @@ def observation_from_events(
         credited=credited[1] - credited[0] if {0, 1} <= set(credited) else None,
         holdings_after=received.get(1),
         credit_after=credited.get(1),
+        revert_selector=revert_selector,
+        revert_data_ok=revert_data_ok,
+        control_ok=control_ok,
+        control_before=control_before,
+        control_after=control_after,
+        observed_word=observed_word,
+        fixture_word=fixture_word,
     )
     return observation, deployed, done
 

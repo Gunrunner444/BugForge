@@ -43,7 +43,7 @@ The campaign compiles the target's import closure, eleven files, not the price-f
 
 `pause` reverts unless `msg.sender` is `governor` or `pauseGuardian`, then writes `pauseFlags`. The getter is `isSupplyPaused()`.
 
-The seed calls `pause(true, false, false, false, false)` as `address(0xA11CE)`. The oracle is `call_must_fail` plus a before/after read of `isSupplyPaused()`. The property is held only when the call reverts and the getter is unchanged. A constructor revert, a compile failure, or a skipped sequence is not that result. A held property is not a vulnerability and is not marked verified.
+The seed calls `pause(true, false, false, false, false)` as `address(0xA11CE)`. The oracle is `call_must_fail` plus a before/after read of `isSupplyPaused()`. In the Phase 58 run the property was held when the call reverted and the getter was unchanged. Phase 59 keeps that state check and also requires the source's `Unauthorized()` selector, plus a governor call that succeeds and changes the flag. A constructor revert, a compile failure, or a skipped sequence is not that result. A held property is not a vulnerability and is not marked verified.
 
 `getPrice` stays excluded by the existing oracle-testing prohibition. Public issues 1103 and 1104 are not executed and are not discoveries.
 
@@ -71,7 +71,7 @@ On this tree the closure campaign produced:
 - 2 submitted
 - 1 Foundry invocation
 - 1 completed property evaluation, verdict `property_held`
-- 1 inconclusive result: the constructor sequence's call argument is still not ABI-expressible, so that sequence did not invoke Foundry
+- 1 inconclusive result: the constructor sequence's call argument was not ABI-expressible, so that sequence did not invoke Foundry. Phase 59 keeps this sequence and reclassifies it as `constructor_not_a_call`. It is a deployment configuration, not an external call. The Phase 58 counts above are the Phase 58 run.
 
 Compiler `0.8.15+commit.e14f2714.Linux.g++` at `~/.bugforge/solc/0.8.15/solc`. Optimizer on, 1 run, `via_ir` on. Requested EVM `cancun`. Applied EVM none. `evm_exact` is false. This is not an exact upstream build and not a deployed-bytecode reproduction.
 

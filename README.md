@@ -74,6 +74,7 @@ BugForge analyzes software repositories, runs tests, performs static analysis, c
 | Phase 51 | Operational bounty campaigns: durable persistence, real pause/stop/resume, full API + MCP over the Phase 49/50 stack | ✅ Implemented |
 | Phase 52 | Closed-loop stateful verification: VFCS → Foundry execution, feedback-directed, reproducible bundles | ✅ Implemented |
 | Phase 58 | Trusted constructor profiles and a local property evaluation of pinned Comet `pause` | ✅ Implemented |
+| Phase 59 | Authorization-oracle hardening, typed constructor profiles, and a non-empty Comet asset list | ✅ Implemented |
 
 See [docs/architecture.md](docs/architecture.md) for the adapter/plugin architecture and how to add languages, AI providers, and future security tools.
 
@@ -433,6 +434,7 @@ Phase 51 makes that stack *operational*: a bounty campaign is reachable from the
 
 Phase 52 closes the research loop. The deterministic VFCS call sequences a campaign discovers are compiled into a local Foundry harness (pinned host `solc`, offline, no FFI) and actually executed with `forge`. Each run is interpreted honestly — property violated, property held, sequence executed, reverted, or inconclusive — and the result feeds VFCS mutation, re-execution, minimisation, and a second independent (no-optimizer) check before a reproducible artifact bundle is written. Nothing runs against any network, and when `forge`/`solc` are absent the executor reports `UNAVAILABLE` rather than fabricating a result.
 Phase 58 adds a typed constructor profile so a campaign can deploy a contract whose constructor takes a struct, without inventing arguments when no profile is approved. The profile is bound to source hashes and local fixtures. On the pinned Compound Comet source (`f766f515`, `CometWithExtendedAssetList`), an unauthorized `pause` reverted and `isSupplyPaused()` stayed unchanged: one property held. That is a local property result, not a vulnerability and not a deployed-bytecode match. Solidity 0.8.15 does not apply the requested Cancun EVM.
+Phase 59 checks that revert against the source's `Unauthorized()` selector and requires an authorized `pause` to succeed and change the flag before the unauthorized call can hold. It also type-checks constructor profiles against the bound source closure, reclassifies the constructor sequence as `constructor_not_a_call` instead of encoding it, and evaluates one local collateral asset on the same pinned contract through `getAssetInfo(0)`. A held property is still not a finding. The requested Cancun EVM is still not applied.
 See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-exploit-sequence-discovery.md),
 [docs/phase46-economic-defi-analysis.md](docs/phase46-economic-defi-analysis.md),
 [docs/phase47-protocol-wide-cross-contract-analysis.md](docs/phase47-protocol-wide-cross-contract-analysis.md),
@@ -441,7 +443,8 @@ See [docs/phase45-stateful-exploit-sequence-discovery.md](docs/phase45-stateful-
 [docs/phase50-production-bounty-research.md](docs/phase50-production-bounty-research.md),
 [docs/phase51-operational-bounty-campaigns.md](docs/phase51-operational-bounty-campaigns.md),
 [docs/phase52-stateful-closed-loop.md](docs/phase52-stateful-closed-loop.md),
-and [docs/phase58-trusted-constructor-profiles.md](docs/phase58-trusted-constructor-profiles.md).
+[docs/phase58-trusted-constructor-profiles.md](docs/phase58-trusted-constructor-profiles.md),
+and [docs/phase59-compound-integration-hardening.md](docs/phase59-compound-integration-hardening.md).
 
 ### Security testing roadmap
 
