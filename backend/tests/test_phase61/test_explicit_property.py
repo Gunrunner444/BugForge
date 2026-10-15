@@ -510,6 +510,22 @@ def test_a_second_deposit_label_decodes_as_a_number() -> None:
     assert observed == [{"label": "a0_preview", "value": "1000"}]
 
 
+def test_a_round_trip_label_decodes_as_a_number() -> None:
+    label = b"t1_remainder"
+    data = (
+        "0x" + f"{64:064x}" + f"{999004:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")
+    )
+    observed = _state_observations(json.dumps({"logs": [{"data": data}]}))
+    assert observed == [{"label": "t1_remainder", "value": "999004"}]
+
+
+def test_a_sequence_label_decodes_as_a_number() -> None:
+    label = b"q00_steps"
+    data = "0x" + f"{64:064x}" + f"{6:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")
+    observed = _state_observations(json.dumps({"logs": [{"data": data}]}))
+    assert observed == [{"label": "q00_steps", "value": "6"}]
+
+
 def test_a_withdrawal_label_decodes_as_a_number() -> None:
     label = b"w0_remainder"
     data = (
@@ -715,6 +731,87 @@ def test_a_partial_withdrawal_property_uses_the_ceil_share_formula(tmp_path: Pat
         normalize_explicit_properties(tmp_path, (missing,))
 
 
+def test_round_trip_and_zero_supply_properties_use_the_pinned_formulas(tmp_path: Path) -> None:
+    _write_withdrawal(tmp_path)
+    accepted = normalize_explicit_properties(
+        tmp_path,
+        (
+            _flow_property("silo.withdraw_redeposit_roundtrip", "withdraw_redeposit_roundtrip"),
+            _flow_property(
+                "silo.zero_share_supply_redeposit",
+                "zero_share_supply_redeposit",
+                entry="redeem",
+                getter="previewRedeem",
+                fixture="zero_share_supply",
+            ),
+        ),
+    )
+    assert accepted[0]["test_entry_point"] == "test_withdraw_redeposit_roundtrip"
+    assert accepted[1]["test_entry_point"] == "test_zero_share_supply_redeposit"
+    assert accepted[0]["vulnerability_finding"] is False
+    assert accepted[0]["sequence_generation"] is None
+    from app.discovery.bounty.explicit_property import render_round_trip_harness
+
+    texts = {path.name: path.read_text(encoding="utf-8") for path in tmp_path.glob("*.sol")}
+    rendered = render_round_trip_harness(
+        texts,
+        contract="Silo",
+        source_file="Silo.sol",
+        imports=dict(accepted[0]["imports"]),
+    )
+    assert "test_withdraw_redeposit_roundtrip" in rendered
+    assert "previewRedeem(uint256)" in rendered
+    assert "999004" not in rendered
+    assert "vm." not in rendered
+    mock = rendered.split("contract LocalActor")[0]
+    assert "require" not in mock
+    missing = _flow_property("silo.withdraw_redeposit_roundtrip", "withdraw_redeposit_roundtrip")
+    missing["fixture_dependencies"] = [
+        item for item in missing["fixture_dependencies"] if item != "round_trip"
+    ]
+    with pytest.raises(PropertyConfigError, match="round_trip"):
+        normalize_explicit_properties(tmp_path, (missing,))
+
+
+def _flow_property(
+    property_id: str,
+    kind: str,
+    *,
+    entry: str = "withdraw",
+    getter: str = "previewWithdraw",
+    fixture: str = "round_trip",
+) -> dict[str, object]:
+    raw = _deposit_property(
+        property_id=property_id,
+        kind=kind,
+        entry_point=entry,
+        state_getter=getter,
+        rationale=(
+            "Collateral deposit, mint, withdraw, and redeem round in the directions declared "
+            "by the pinned Silo source, including a zero share supply."
+        ),
+        locations=[
+            {"path": "Silo.sol", "symbol": "withdraw"},
+            {"path": "Silo.sol", "symbol": "previewWithdraw"},
+            {"path": "Actions.sol", "symbol": "withdraw"},
+            {"path": "SiloMathLib.sol", "symbol": "convertToShares"},
+            {"path": "ShareToken.sol", "symbol": "burn"},
+            {"path": "ISiloConfig.sol", "symbol": "getConfigsForWithdraw"},
+        ],
+        fixture_dependencies=[
+            "local_factory",
+            "local_silo_config",
+            "eip1167_clone",
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+            fixture,
+        ],
+    )
+    return raw
+
+
 def _write_withdrawal(root: Path) -> None:
     _write_deposit(root)
     (root / "Silo.sol").write_text(
@@ -741,6 +838,13 @@ def _write_withdrawal(root: Path) -> None:
                 "    }",
                 "    function mint(uint256 _shares, address _receiver) external returns (uint256 assets) {",
                 "        (assets,) = _deposit(0, _receiver);",
+                "    }",
+                "    function previewMint(uint256 _shares) external pure returns (uint256) { return _shares; }",
+                "    function previewRedeem(uint256 _shares) external pure returns (uint256) { return _shares; }",
+                "    function redeem(uint256 _shares, address _receiver, address _owner)",
+                "        external returns (uint256 assets)",
+                "    {",
+                "        (assets,) = _withdraw(_shares, _owner, ISilo.CollateralType.Collateral);",
                 "    }",
                 "    function previewWithdraw(uint256 _assets) external view returns (uint256 shares) {",
                 "        return _previewWithdraw(_assets);",
@@ -834,6 +938,7 @@ def _write_withdrawal(root: Path) -> None:
                 "    Math.Rounding internal constant WITHDRAW_TO_SHARES = Math.Rounding.Ceil;",
                 "    Math.Rounding internal constant WITHDRAW_TO_ASSETS = Math.Rounding.Floor;",
                 "    Math.Rounding internal constant DEPOSIT_TO_ASSETS = Math.Rounding.Ceil;",
+                "    Math.Rounding internal constant DEPOSIT_TO_SHARES = Math.Rounding.Floor;",
                 "}",
                 "library Interest {",
                 "    function accrue() internal pure {",

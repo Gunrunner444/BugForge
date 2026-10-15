@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.import_closure import resolve_import_closure
+from app.discovery.bounty.silo_collateral_sequences import (
+    generate_collateral_sequences,
+    render_round_trip_body,
+    render_sequence_body,
+    render_zero_supply_body,
+)
 from app.discovery.bounty.stateful import (
     ProjectSettings,
     foundry_config,
@@ -369,6 +375,9 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
         "erc4626_deposit_accounting",
         "deposit_twice_accounting",
         "partial_withdrawal_accounting",
+        "withdraw_redeposit_roundtrip",
+        "zero_share_supply_redeposit",
+        "collateral_sequence_explorer",
     }:
         raise PropertyConfigError("property_unsupported", f"unsupported property kind {kind!r}")
     property_id = str(raw.get("property_id", ""))
@@ -389,15 +398,37 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     source_file = _relative(raw.get("source_file"))
     locations = _locations(raw.get("locations"))
     imports = _imports(raw.get("imports"))
-    extra_fixtures = (
-        {"local_asset", "zero_interest_model", "second_depositor", "partial_withdraw"}
-        if kind == "partial_withdrawal_accounting"
-        else {"local_asset", "zero_interest_model", "second_depositor"}
-        if kind == "deposit_twice_accounting"
-        else {"local_asset", "zero_interest_model"}
-        if kind == "erc4626_deposit_accounting"
-        else set()
-    )
+    extra_fixtures = {
+        "partial_withdrawal_accounting": {
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+        },
+        "deposit_twice_accounting": {"local_asset", "zero_interest_model", "second_depositor"},
+        "erc4626_deposit_accounting": {"local_asset", "zero_interest_model"},
+        "withdraw_redeposit_roundtrip": {
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+            "round_trip",
+        },
+        "zero_share_supply_redeposit": {
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+            "zero_share_supply",
+        },
+        "collateral_sequence_explorer": {
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+            "sequence_explorer",
+        },
+    }.get(kind, set())
     fixtures = _fixtures(raw.get("fixture_dependencies"), extra_fixtures)
     texts = _read_cited(
         repo_root, (source_file, *imports.values(), *(item[0] for item in locations))
@@ -405,6 +436,7 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     for path, symbol in locations:
         if not re.search(rf"\b{re.escape(symbol)}\b", strip_comments(texts[path])):
             raise PropertyConfigError("property_source_mismatch", f"{symbol} is not in {path}")
+    sequence_generation: dict[str, Any] | None = None
     if kind == "initialization_once":
         _validate_initialization_once(
             texts,
@@ -477,6 +509,84 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
                 "totals, the receiver gets the requested assets, and share supply and stored "
                 "collateral decrease by the burned shares and withdrawn assets"
             )
+        elif kind == "withdraw_redeposit_roundtrip":
+            _validate_collateral_flow(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+                expected_entry="withdraw",
+                expected_getter="previewWithdraw",
+            )
+            harness = render_round_trip_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+            )
+            test_entry = "test_withdraw_redeposit_roundtrip"
+            test_file = "WithdrawRedepositRoundTrip.t.sol"
+            expected = (
+                "after a seeded market and a remainder-bearing mint, withdrawing one asset, "
+                "depositing that asset again, and redeeming the remaining shares each match "
+                "the pre-operation collateral conversion and move token, share, and stored "
+                "collateral balances by the rounded result"
+            )
+        elif kind == "zero_share_supply_redeposit":
+            _validate_collateral_flow(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+                expected_entry="redeem",
+                expected_getter="previewRedeem",
+            )
+            harness = render_zero_supply_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+            )
+            test_entry = "test_zero_share_supply_redeposit"
+            test_file = "ZeroShareSupplyRedeposit.t.sol"
+            expected = (
+                "redeeming every collateral share reaches a zero share supply, leaves any "
+                "rounded residual in stored collateral, and the next deposit converts as an "
+                "empty market while storage keeps that residual"
+            )
+        elif kind == "collateral_sequence_explorer":
+            _validate_collateral_flow(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+                expected_entry="deposit",
+                expected_getter="previewDeposit",
+            )
+            sequence_generation = generate_collateral_sequences()
+            harness = render_sequence_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+                generation=sequence_generation,
+            )
+            test_entry = "test_collateral_sequences"
+            test_file = "CollateralSequenceExplorer.t.sol"
+            expected = (
+                "each generated deposit, mint, withdraw, and redeem matches the pre-operation "
+                "collateral conversion, and token, share, supply, and stored-collateral deltas "
+                "stay consistent with that rounding"
+            )
         else:
             _validate_deposit_accounting(
                 texts,
@@ -520,6 +630,7 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
         "harness_sha256": sha256_text(harness),
         "validation": "accepted",
         "vulnerability_finding": False,
+        "sequence_generation": sequence_generation,
     }
 
 
@@ -1793,6 +1904,146 @@ contract PartialWithdrawalAccountingTest {{
     )
 
 
+def _validate_collateral_flow(
+    texts: Mapping[str, str],
+    *,
+    source_file: str,
+    contract: str,
+    entry: str,
+    getter: str,
+    deployment: str,
+    imports: Mapping[str, str],
+    expected_entry: str,
+    expected_getter: str,
+) -> None:
+    """Deposit, mint, withdraw, and redeem stay on the pinned collateral formulas."""
+    if entry != expected_entry or getter != expected_getter:
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            f"this property must target {expected_entry} and {expected_getter}",
+        )
+    _validate_partial_withdrawal(
+        texts,
+        source_file=source_file,
+        contract=contract,
+        entry="withdraw",
+        getter="previewWithdraw",
+        deployment=deployment,
+        imports=imports,
+    )
+    clean = {path: strip_comments(text) for path, text in texts.items()}
+    joined = "\n".join(clean.values())
+    contract_text = clean[source_file]
+    if not re.search(
+        r"function\s+redeem\s*\(\s*uint256\b[^)]*\baddress\b[^)]*\baddress\b", contract_text
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch", "redeem(uint256,address,address) is not declared"
+        )
+    if not re.search(r"function\s+previewRedeem\s*\(\s*uint256\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "previewRedeem(uint256) is not declared"
+        )
+    if not re.search(r"function\s+previewMint\s*\(\s*uint256\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "previewMint(uint256) is not declared"
+        )
+    if "DEPOSIT_TO_SHARES = Math.Rounding.Floor" not in joined:
+        raise PropertyConfigError("property_source_mismatch", "deposit does not round shares down")
+    if not re.search(
+        r"if\s*\(\s*_totalShares\s*==\s*0\s*\)[\s\S]{0,500}_totalAssets\s*=\s*0",
+        joined,
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "a zero collateral share supply does not reset the local asset total",
+        )
+
+
+def _market_prelude(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> tuple[str, str, str, str, str]:
+    first = render_deposit_harness(
+        texts,
+        contract=contract,
+        source_file=source_file,
+        imports=imports,
+        include_withdraw=True,
+    )
+    marker = "contract DepositAccountingTest {"
+    if marker not in first:
+        raise PropertyConfigError("property_malformed", "the deposit fixture could not be reused")
+    silo_iface = _declared_name(strip_comments(texts[imports["error_interface"]]), "interface")
+    factory = _declared_name(strip_comments(texts[imports["factory_interface"]]), "interface")
+    config = _declared_name(strip_comments(texts[imports["config_interface"]]), "interface")
+    if not silo_iface or not factory or not config:
+        raise PropertyConfigError("property_source_mismatch", "the Silo interface is missing")
+    return first.split(marker)[0], silo_iface, factory, config, _clone_expr(texts[source_file])
+
+
+def render_round_trip_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> str:
+    prelude, silo_iface, factory, config, clone_expr = _market_prelude(
+        texts, contract=contract, source_file=source_file, imports=imports
+    )
+    return prelude + render_round_trip_body(
+        contract=contract,
+        silo_iface=silo_iface,
+        factory=factory,
+        config=config,
+        clone_expr=clone_expr,
+    )
+
+
+def render_zero_supply_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> str:
+    prelude, silo_iface, factory, config, clone_expr = _market_prelude(
+        texts, contract=contract, source_file=source_file, imports=imports
+    )
+    return prelude + render_zero_supply_body(
+        contract=contract,
+        silo_iface=silo_iface,
+        factory=factory,
+        config=config,
+        clone_expr=clone_expr,
+    )
+
+
+def render_sequence_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+    generation: Mapping[str, Any],
+) -> str:
+    prelude, silo_iface, factory, config, clone_expr = _market_prelude(
+        texts, contract=contract, source_file=source_file, imports=imports
+    )
+    return prelude + render_sequence_body(
+        contract=contract,
+        silo_iface=silo_iface,
+        factory=factory,
+        config=config,
+        clone_expr=clone_expr,
+        generation=dict(generation),
+    )
+
+
 def _clone_expr(contract_text: str) -> str:
     clean = strip_comments(contract_text)
     payable = bool(
@@ -1844,6 +2095,9 @@ def _execute_one(
             "property_status": "not_run",
             "forge_invoked": False,
         }, 0
+    generation = current.get("sequence_generation")
+    if isinstance(generation, dict):
+        base["sequence_generation"] = generation
     if not tool_path("forge") or not compiler_path:
         missing = "forge" if not tool_path("forge") else "solc"
         return {
@@ -1889,6 +2143,33 @@ def _execute_one(
                 contract=str(current["contract"]),
                 source_file=str(current["source_file"]),
                 imports=dict(current["imports"]),
+            )
+        elif current["kind"] == "withdraw_redeposit_roundtrip":
+            harness = render_round_trip_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                imports=dict(current["imports"]),
+            )
+        elif current["kind"] == "zero_share_supply_redeposit":
+            harness = render_zero_supply_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                imports=dict(current["imports"]),
+            )
+        elif current["kind"] == "collateral_sequence_explorer":
+            generation = current.get("sequence_generation")
+            if not isinstance(generation, dict):
+                raise PropertyConfigError(
+                    "property_malformed", "the sequence explorer has no generation record"
+                )
+            harness = render_sequence_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                imports=dict(current["imports"]),
+                generation=generation,
             )
         else:
             harness = render_deposit_harness(
@@ -2216,6 +2497,12 @@ _WITHDRAW_LABEL = re.compile(
     r"collateral_delta|b_shares_after|mint_assets|mint_remainder|ratio_remainder|"
     r"view_before|boundary)$"
 )
+_FLOW_LABEL = re.compile(
+    r"^(?:m|t[0-3]|z[0-3])_(?:amount|assets_before|supply_before|preview|actual|formula|"
+    r"remainder|b_shares|b_tokens|silo_tokens|a_shares|supply_after|collateral_after|"
+    r"mint_assets|mint_remainder|ratio_remainder|residual|reset_shares|stored_after)$"
+)
+_SEQUENCE_LABEL = re.compile(r"^q[0-2][0-9]_(?:steps|nonzero|assets|supply)$")
 
 
 def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
@@ -2242,7 +2529,13 @@ def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
         if int(value, 16) == 0:
             return None
         return {"label": label, "value": value}
-    if label in _NUMBER_LABELS or _CASE_LABEL.fullmatch(label) or _WITHDRAW_LABEL.fullmatch(label):
+    if (
+        label in _NUMBER_LABELS
+        or _CASE_LABEL.fullmatch(label)
+        or _WITHDRAW_LABEL.fullmatch(label)
+        or _FLOW_LABEL.fullmatch(label)
+        or _SEQUENCE_LABEL.fullmatch(label)
+    ):
         return {"label": label, "value": str(int(words[1], 16))}
     return None
 
