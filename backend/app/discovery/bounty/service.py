@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -120,6 +120,8 @@ class CampaignSpec:
     source_limit: int = DEFAULT_LIMIT
     # Typed constructor configuration. None keeps the fail-closed constructor builder.
     constructor_profile: dict[str, Any] | None = None
+    # Researcher-supplied properties. They are not detector candidates.
+    explicit_properties: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +138,7 @@ class CampaignSpec:
             "chain_id": self.chain_id,
             "source_limit": self.source_limit,
             "constructor_profile": self.constructor_profile,
+            "explicit_properties": list(self.explicit_properties),
         }
 
     @staticmethod
@@ -155,6 +158,7 @@ class CampaignSpec:
             chain_id=str(data.get("chain_id", "")),
             source_limit=int(data.get("source_limit", DEFAULT_LIMIT)),
             constructor_profile=_profile_record(data.get("constructor_profile")),
+            explicit_properties=_explicit_record(data.get("explicit_properties")),
         )
 
 
@@ -214,6 +218,13 @@ def _validate_target(spec: CampaignSpec) -> None:
         raise CampaignError(f"chain id {spec.chain_id!r} is not a decimal chain id")
     if spec.chain_id and not spec.address:
         raise CampaignError("a chain id without an address names no deployment")
+
+
+def _explicit_record(raw: Any) -> tuple[dict[str, Any], ...]:
+    """Stored property documents. Validation runs again before execution."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(dict(item) for item in raw if isinstance(item, dict))
 
 
 def _profile_record(raw: Any) -> dict[str, Any] | None:
@@ -297,7 +308,16 @@ class BountyCampaignService:
         if not root.is_dir():
             raise CampaignError(f"repository root is not a directory: {root}")
         _validate_target(spec)
-        spec = CampaignSpec(**{**spec.__dict__, "repo_root": root})
+        from app.discovery.bounty.explicit_property import (
+            PropertyConfigError,
+            normalize_explicit_properties,
+        )
+
+        try:
+            explicit = normalize_explicit_properties(root, spec.explicit_properties)
+        except PropertyConfigError as exc:
+            raise CampaignError(f"{exc.code}: {exc.reason}") from exc
+        spec = CampaignSpec(**{**spec.__dict__, "repo_root": root, "explicit_properties": explicit})
         identity = self._identity(spec)
         existing = self._records.get(identity.campaign_id)
         if existing is not None:
@@ -1354,6 +1374,15 @@ class BountyCampaignService:
             property_engines=engines,
         )
         bundles, blobs, executions = self._bundles(result, sources)
+        explicit_exec, explicit_runs = _run_explicit_properties(
+            campaign,
+            analysis.sources,
+            compiler_path=str(compiler.path) if compiler is not None else "",
+            project=project,
+            timeout=max(executor.timeout, 180),
+        )
+        executions.update(explicit_exec)
+        forge_runs = executor.runs + explicit_runs
         registry_snapshot = [entry.as_dict() for entry in registry]
         persistence = self._persist_artifacts(
             campaign,
@@ -1372,7 +1401,8 @@ class BountyCampaignService:
                     "violations": len(result.violations),
                     "mechanism_observations": len(result.mechanism_observations),
                     "mutated": len(result.mutated),
-                    "forge_runs": executor.runs,
+                    "forge_runs": forge_runs,
+                    "explicit_properties": len(explicit_exec),
                     "tools": _run_tools(tools, compiler, executor, required),
                     "constructor_profile": profile_record,
                 },
@@ -1384,11 +1414,12 @@ class BountyCampaignService:
         summary = campaign_coverage(
             **self._coverage_facts(campaign, analysis),
             executions={**{item["sequence_id"]: item for item in skipped}, **executions},
-            forge_runs=executor.runs,
+            forge_runs=forge_runs,
             engines=registry_snapshot,
             persistence_status=str(persistence.get("status", "")),
             analysis_stale=self.analysis_stale(campaign),
             constructor_profile=profile_record,
+            explicit_properties=campaign.spec.explicit_properties,
         )
         return {
             "campaign_id": campaign_id,
@@ -1396,7 +1427,8 @@ class BountyCampaignService:
             "deployment": analysis.deployment.as_dict(),
             "scope_status": target_scope.status.value,
             "skipped": skipped,
-            "forge_runs": executor.runs,
+            "forge_runs": forge_runs,
+            "explicit_properties": explicit_exec,
             "bundles": sorted(bundles),
             "persistence": persistence,
             "engines": registry_snapshot,
@@ -1871,6 +1903,64 @@ def _run_tools(ambient: Any, compiler: Any, executor: Any, required: str) -> dic
         "optimizer_runs": "" if project is None else flag(project.optimizer_runs),
         "via_ir": "" if project is None else flag(project.via_ir),
     }
+
+
+def _run_explicit_properties(
+    campaign: BountyCampaign,
+    sources: Mapping[str, str],
+    *,
+    compiler_path: str,
+    project: Any,
+    timeout: int,
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """Run researcher-supplied properties that are inside the manifest scope."""
+    from app.discovery.bounty.campaign import ScopeStatus
+    from app.discovery.bounty.explicit_property import execute_explicit_properties
+
+    accepted: list[dict[str, Any]] = []
+    refused: dict[str, dict[str, Any]] = {}
+    for prop in campaign.spec.explicit_properties:
+        scope = campaign.manifest.scope_of(
+            contract=str(prop.get("contract", "")),
+            file=str(prop.get("source_file", "")),
+        )
+        blocked = scope.status is ScopeStatus.OUT_OF_SCOPE or (
+            bool(campaign.manifest.in_scope) and scope.status is not ScopeStatus.IN_SCOPE
+        )
+        if not blocked:
+            accepted.append(dict(prop))
+            continue
+        property_id = str(prop.get("property_id", "explicit"))
+        refused[property_id] = {
+            "sequence_id": property_id,
+            "origin": "researcher_supplied",
+            "property_source": "researcher_supplied",
+            "property_id": property_id,
+            "outcome": "inconclusive",
+            "reason": scope.reason,
+            "reason_code": "blocked_by_policy:out_of_scope",
+            "process_status": "not_run",
+            "compiler_status": "not_run",
+            "test_status": "not_run",
+            "sequence_status": "not_run",
+            "property_status": "not_run",
+            "forge_invoked": False,
+            "executed": False,
+            "verified": False,
+            "candidate": False,
+            "strong_candidate": False,
+            "vulnerability_finding": False,
+        }
+    executed, runs = execute_explicit_properties(
+        accepted,
+        campaign.spec.repo_root,
+        sources,
+        compiler_path=compiler_path,
+        project=project,
+        timeout=timeout,
+    )
+    refused.update(executed)
+    return refused, runs
 
 
 def _project_settings(compiler: Any) -> Any:

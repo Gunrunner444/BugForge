@@ -780,6 +780,7 @@ def campaign_coverage(
     scope_excluded: int | None = None,
     constructor_profile: Mapping[str, Any] | None = None,
     static_analysis_status: str = "",
+    explicit_properties: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
@@ -937,6 +938,8 @@ def campaign_coverage(
         "constructor_profile": dict(constructor_profile) if constructor_profile else None,
         "local_results_are_not_production_verification": True,
         "static_analysis_status": static_analysis_status or "not_recorded",
+        "explicit_properties": [dict(item) for item in explicit_properties or ()],
+        "explicit_properties_registered": len(tuple(explicit_properties or ())),
         "verified": False,
     }
 
@@ -1267,9 +1270,11 @@ def _blocker(
         return "analysis was truncated before the target was modeled"
     if dependency_status == "partial" and candidates <= 0 and sequences <= 0:
         return "required source dependencies were not traced"
-    if candidates <= 0 and sequences <= 0:
+    if stages.get("property_evaluated"):
+        return ""
+    if candidates <= 0 and sequences <= 0 and executions <= 0 and not forge_runs:
         return "no detector emitted a candidate"
-    if sequences <= 0 and skipped:
+    if sequences <= 0 and executions <= 0 and not forge_runs and skipped:
         reasons = " ".join(skipped.values()).lower()
         if "model source attestation" in reasons or "identity" in reasons:
             return "sequence generation was rejected because identity was incomplete"
@@ -1280,10 +1285,8 @@ def _blocker(
         ):
             return "the builders applied but could not resolve necessary calls"
         return "no sequence was generated: " + next(iter(skipped.values()))
-    if sequences <= 0:
+    if sequences <= 0 and executions <= 0 and not forge_runs:
         return "no sequence was generated"
-    if stages.get("property_evaluated"):
-        return ""
     if executions <= 0:
         if forge_runs:
             return "Foundry was invoked but no execution record was produced"
