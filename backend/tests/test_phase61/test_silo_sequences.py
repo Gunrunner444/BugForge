@@ -52,3 +52,11 @@ def test_round_trip_and_zero_supply_models_match_the_source_formula() -> None:
     assert zero["fresh_stored_assets"] == 2
     assert zero["no_reset_shares"] == 500
     assert zero["reset_observable"] is True
+    assert zero["exit_shares"] == 1000
+    assert zero["virtual_shares"] == 2000
+    assert zero["virtual_assets"] == 3
+    assert zero["exit_assets"] == 1
+    assert zero["exit_remainder"] == 1000
+    assert zero["stored_after_exit"] == 1
+    assert zero["supply_after_final_redeem"] == 0
+    assert zero["redeemer_shares"] == 0

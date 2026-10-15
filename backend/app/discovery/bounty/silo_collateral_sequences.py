@@ -288,7 +288,7 @@ def trace_round_trip() -> dict[str, object]:
 
 
 def trace_zero_supply() -> dict[str, object]:
-    """Redeem both positions, then deposit 1 asset into whatever collateral remains."""
+    """Exit both positions, deposit 1 asset, then redeem that new position."""
     market = initial_market()
     deposit = apply_op(market, MenuOp("deposit", 0, 1_000_000, "seed"))
     minted = apply_op(deposit.market, MenuOp("mint", 1, 2001, "mint"))
@@ -299,6 +299,10 @@ def trace_zero_supply() -> dict[str, object]:
     residual = a_exit.market.assets
     fresh = apply_op(a_exit.market, MenuOp("deposit", 1, 1, "fresh deposit"))
     no_reset, _remainder = _mul_div(1, OFFSET, residual + 1, ceil=False)
+    virtual_shares, virtual_assets = virtual_totals(fresh.market.assets, fresh.market.shares)
+    exited = apply_op(
+        fresh.market, MenuOp("redeem", 1, fresh.expected, "redeem the post-reset deposit")
+    )
     return {
         "supply_after_exit": a_exit.market.shares,
         "residual_assets": residual,
@@ -308,6 +312,14 @@ def trace_zero_supply() -> dict[str, object]:
         "fresh_stored_assets": fresh.market.assets,
         "no_reset_shares": no_reset,
         "reset_observable": residual != 0 and fresh.expected != no_reset,
+        "exit_shares": fresh.expected,
+        "exit_assets": exited.expected,
+        "exit_remainder": exited.remainder,
+        "virtual_shares": virtual_shares,
+        "virtual_assets": virtual_assets,
+        "stored_after_exit": exited.market.assets,
+        "supply_after_final_redeem": exited.market.shares,
+        "redeemer_shares": exited.market.balances[1],
     }
 
 
@@ -958,6 +970,7 @@ contract ZeroShareSupplyRedepositTest is @@KIND@@Accounting {
         if (activeSilo.totalSupply() != 0) revert BugForgeProperty("supply_not_zero");
         if (flow.supplyAfter != 0) revert BugForgeProperty("supply_not_zero");
         _freshDeposit();
+        _finalRedeem();
     }
 
     function _seed() internal {
@@ -1026,10 +1039,6 @@ contract ZeroShareSupplyRedepositTest is @@KIND@@Accounting {
     function _freshDeposit() internal {
         uint256 residual = activeSilo.getTotalAssetsStorage(@@SILO@@.AssetType.Collateral);
         if (activeAsset.balanceOf(address(activeSilo)) != residual) revert BugForgeProperty("silo_balance");
-        actorC = new LocalActor();
-        if (address(actorC) == address(actorA) || address(actorC) == address(actorB)) {
-            revert BugForgeFixture(bytes("same_actor"));
-        }
         uint256 deposited = 1;
         flow.assetsBefore = residual;
         flow.supplyBefore = activeSilo.totalSupply();
@@ -1039,14 +1048,18 @@ contract ZeroShareSupplyRedepositTest is @@KIND@@Accounting {
         uint256 ignoredResidual = deposited * OFFSET / (residual + 1);
         _preview(1, deposited);
         if (flow.previewed != resetShares) revert BugForgeProperty("formula_mismatch");
-        activeAsset.credit(address(actorC), deposited);
-        actorC.approveAll(activeAsset, address(activeSilo));
-        _take(actorC, 1, deposited);
+        _loadOwner(actorB);
+        if (flow.ownerTokens < deposited) revert BugForgeFixture(bytes("insufficient_tokens"));
+        actorB.approveAll(activeAsset, address(activeSilo));
+        _take(actorB, 1, deposited);
         _captureAssets();
-        _captureOwner(actorC);
+        _captureOwner(actorB);
         if (flow.actual != resetShares) revert BugForgeProperty("formula_mismatch");
+        if (flow.ownerTokensAfter + deposited != flow.ownerTokens) revert BugForgeProperty("asset_delta");
+        if (flow.ownerSharesAfter != resetShares) revert BugForgeProperty("share_delta");
         if (flow.assetsAfter != residual + deposited) revert BugForgeProperty("dust_storage");
         if (flow.supplyAfter != resetShares) revert BugForgeProperty("share_delta");
+        if (flow.siloAfter != flow.siloBefore + deposited) revert BugForgeProperty("asset_delta");
         if (flow.siloAfter != flow.assetsAfter) revert BugForgeProperty("silo_balance");
         if (residual != 0 && flow.actual == ignoredResidual) revert BugForgeProperty("reset_not_observable");
         _emit("z3_", "amount", deposited);
@@ -1057,6 +1070,26 @@ contract ZeroShareSupplyRedepositTest is @@KIND@@Accounting {
         _emit("z3_", "reset_shares", resetShares);
         _emit("z3_", "stored_after", flow.assetsAfter);
         _emit("z3_", "supply_after", flow.supplyAfter);
+        _emit("z3_", "b_shares", flow.ownerSharesAfter);
+        _emit("z3_", "b_tokens", flow.ownerTokensAfter);
+    }
+
+    function _finalRedeem() internal {
+        uint256 shares = activeSilo.balanceOf(address(actorB));
+        _exit(actorB, shares, "z4_");
+        _emit("z4_", "virtual_shares", flow.virtualShares);
+        _emit("z4_", "virtual_assets", flow.virtualAssets);
+        _emit("z4_", "owner_shares", flow.ownerSharesAfter);
+        _emit("z4_", "owner_tokens", flow.ownerTokensAfter);
+        _emit("z4_", "silo_tokens", flow.siloAfter);
+        if (flow.remainder == 0) revert BugForgeProperty("expected_remainder");
+        if (flow.supplyAfter != 0 || activeSilo.totalSupply() != 0) {
+            revert BugForgeProperty("supply_not_zero");
+        }
+        if (flow.ownerSharesAfter != 0) revert BugForgeProperty("exit_shares");
+        if (flow.assetsAfter == 0 || flow.siloAfter != flow.assetsAfter) {
+            revert BugForgeProperty("dust_storage");
+        }
     }
 }
 """

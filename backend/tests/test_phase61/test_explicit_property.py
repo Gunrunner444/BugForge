@@ -519,6 +519,13 @@ def test_a_round_trip_label_decodes_as_a_number() -> None:
     assert observed == [{"label": "t1_remainder", "value": "999004"}]
 
 
+def test_a_zero_supply_exit_label_decodes_as_a_number() -> None:
+    label = b"z4_remainder"
+    data = "0x" + f"{64:064x}" + f"{1000:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")
+    observed = _state_observations(json.dumps({"logs": [{"data": data}]}))
+    assert observed == [{"label": "z4_remainder", "value": "1000"}]
+
+
 def test_a_sequence_label_decodes_as_a_number() -> None:
     label = b"q00_steps"
     data = "0x" + f"{64:064x}" + f"{6:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")

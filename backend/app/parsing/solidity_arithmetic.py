@@ -16,8 +16,11 @@ from app.parsing.solidity_research import (
     RFunction,
     SemanticCandidate,
     cap,
+    match_close,
     member_calls,
     mentions,
+    skeleton,
+    split_top,
 )
 from app.parsing.solidity_version import solidity_language_facts
 
@@ -262,53 +265,123 @@ def _rounding_asymmetry(model: ResearchModel) -> list[SemanticCandidate]:
         for function in contract.functions:
             if not function.has_body or not function.exposed:
                 continue
-            for conversion in re.finditer(
-                r"\b(\w+)\s*=\s*([^;]*?)\s*\*\s*([^;/]+?)\s*/\s*([^;]+);", function.body
-            ):
-                shares, numerator, scale, denominator = (g.strip() for g in conversion.groups())
-                if _CEIL.search(conversion.group(0)):
-                    continue
-                paid = next(
-                    (
-                        p.name
-                        for p in function.params
-                        if p.name
-                        and mentions(numerator, p.name)
-                        and any(
-                            c.name in {"transfer", "safeTransfer"}
-                            and len(c.arguments) >= 2
-                            and c.arguments[1].strip() == p.name
-                            for c in member_calls(function.body)
-                        )
-                    ),
-                    "",
-                )
-                if not paid:
-                    continue
-                tail = function.body[conversion.end() :]
-                burns = bool(
-                    re.search(
-                        rf"-=\s*{re.escape(shares)}\b|\b_?burn\s*\([^;]*\b{re.escape(shares)}\b",
-                        tail,
-                    )
-                )
-                if not burns:
-                    continue
-                found.append(
-                    _candidate(
-                        function,
-                        "rounding_burn_floor",
-                        "Shares burned for a fixed asset payout are rounded down",
-                        f"{name}.{function.name} pays out exactly `{paid}` assets and burns "
-                        f"`{shares}` computed with floor division. The caller can withdraw assets "
-                        "for fewer shares than they are worth, and repeating the call extracts the "
-                        "rounding difference from other holders.",
-                        conversion.start(),
-                        (("shares_variable", shares), ("assets_parameter", paid)),
-                        ("fixed asset payout", "share burn uses floor division"),
-                        ("round-up conversion on the burn side",),
-                        "medium",
-                        tags=("vault_accounting", "value_transfer", "reserve_accounting"),
-                    )
-                )
+            for shares, numerator, start, end, form in _floor_conversions(function.body):
+                candidate = _floor_burn(name, function, shares, numerator, start, end, form)
+                if candidate is not None:
+                    found.append(candidate)
     return found
+
+
+def _floor_conversions(body: str) -> list[tuple[str, str, int, int, str]]:
+    """Floor share assignments: infix division, or mulDiv whose direction is floor."""
+    found: list[tuple[str, str, int, int, str]] = []
+    infix = re.compile(r"\b(\w+)\s*=\s*([^;]*?)\s*\*\s*([^;/]+?)\s*/\s*([^;]+);")
+    for conversion in infix.finditer(body):
+        if _CEIL.search(conversion.group(0)):
+            continue
+        shares, numerator, _scale, _denominator = (g.strip() for g in conversion.groups())
+        found.append((shares, numerator, conversion.start(), conversion.end(), "infix_floor"))
+    call = re.compile(r"\b(\w+)\s*=\s*([^;]*?)\bmulDiv\s*\(", re.IGNORECASE)
+    skel = skeleton(body)
+    for conversion in call.finditer(body):
+        prefix = conversion.group(2)
+        if ";" in prefix:
+            continue
+        open_at = conversion.end() - 1
+        if open_at >= len(skel) or skel[open_at] != "(":
+            continue
+        close = match_close(skel, open_at)
+        if close == -1:
+            continue
+        semi = body.find(";", close)
+        if semi == -1:
+            continue
+        factors = _muldiv_factors(prefix, split_top(body[open_at + 1 : close]))
+        if not _muldiv_is_floor(factors):
+            continue
+        found.append(
+            (conversion.group(1), factors[0].strip(), conversion.start(), semi + 1, "muldiv_floor")
+        )
+    return found
+
+
+def _muldiv_factors(prefix: str, arguments: list[str]) -> list[str]:
+    """Static ``Math.mulDiv(x, y, den)`` and ``x.mulDiv(y, den)`` share one factor list."""
+    receiver = prefix.strip()
+    if receiver.endswith("."):
+        receiver = receiver[:-1].strip()
+    tail = receiver.split(".")[-1].strip() if receiver else ""
+    if tail and tail[0].isupper():
+        return arguments
+    return [receiver, *arguments]
+
+
+def _muldiv_is_floor(factors: list[str]) -> bool:
+    """Three factors are the floor overload. A fourth factor counts only as a Floor literal.
+
+    A rounding variable is not assumed to be floor: the direction is chosen by the caller.
+    """
+    if len(factors) == 3:
+        return True
+    if len(factors) < 4:
+        return False
+    rounding = factors[3]
+    if re.search(r"Rounding\.(?:Ceil|Up)\b", rounding):
+        return False
+    return re.search(r"Rounding\.(?:Floor|Down)\b", rounding) is not None
+
+
+def _floor_burn(
+    name: str,
+    function: RFunction,
+    shares: str,
+    numerator: str,
+    start: int,
+    end: int,
+    form: str,
+) -> SemanticCandidate | None:
+    paid = next(
+        (
+            p.name
+            for p in function.params
+            if p.name
+            and mentions(numerator, p.name)
+            and any(
+                c.name in {"transfer", "safeTransfer"}
+                and len(c.arguments) >= 2
+                and c.arguments[1].strip() == p.name
+                for c in member_calls(function.body)
+            )
+        ),
+        "",
+    )
+    if not paid:
+        return None
+    burns = bool(
+        re.search(
+            rf"-=\s*{re.escape(shares)}\b|\b_?burn\s*\([^;]*\b{re.escape(shares)}\b",
+            function.body[end:],
+        )
+    )
+    if not burns:
+        return None
+    how = "floor mulDiv" if form == "muldiv_floor" else "floor division"
+    return _candidate(
+        function,
+        "rounding_burn_floor",
+        "Shares burned for a fixed asset payout are rounded down",
+        f"{name}.{function.name} pays out exactly `{paid}` assets and burns "
+        f"`{shares}` computed with {how}. The caller can withdraw assets "
+        "for fewer shares than they are worth, and repeating the call extracts the "
+        "rounding difference from other holders.",
+        start,
+        (
+            ("shares_variable", shares),
+            ("assets_parameter", paid),
+            ("conversion", form),
+        ),
+        ("fixed asset payout", f"share burn uses {how}"),
+        ("round-up conversion on the burn side",),
+        "medium",
+        tags=("vault_accounting", "value_transfer", "reserve_accounting"),
+    )

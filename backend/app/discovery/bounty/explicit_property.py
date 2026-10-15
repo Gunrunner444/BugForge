@@ -2498,9 +2498,10 @@ _WITHDRAW_LABEL = re.compile(
     r"view_before|boundary)$"
 )
 _FLOW_LABEL = re.compile(
-    r"^(?:m|t[0-3]|z[0-3])_(?:amount|assets_before|supply_before|preview|actual|formula|"
+    r"^(?:m|t[0-3]|z[0-4])_(?:amount|assets_before|supply_before|preview|actual|formula|"
     r"remainder|b_shares|b_tokens|silo_tokens|a_shares|supply_after|collateral_after|"
-    r"mint_assets|mint_remainder|ratio_remainder|residual|reset_shares|stored_after)$"
+    r"mint_assets|mint_remainder|ratio_remainder|residual|reset_shares|stored_after|"
+    r"virtual_shares|virtual_assets|owner_shares|owner_tokens)$"
 )
 _SEQUENCE_LABEL = re.compile(r"^q[0-2][0-9]_(?:steps|nonzero|assets|supply)$")
 
