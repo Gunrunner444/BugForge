@@ -510,6 +510,15 @@ def test_a_second_deposit_label_decodes_as_a_number() -> None:
     assert observed == [{"label": "a0_preview", "value": "1000"}]
 
 
+def test_a_withdrawal_label_decodes_as_a_number() -> None:
+    label = b"w0_remainder"
+    data = (
+        "0x" + f"{64:064x}" + f"{999005:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")
+    )
+    observed = _state_observations(json.dumps({"logs": [{"data": data}]}))
+    assert observed == [{"label": "w0_remainder", "value": "999005"}]
+
+
 def test_a_second_deposit_property_uses_the_funded_market_formula(tmp_path: Path) -> None:
     _write_deposit(tmp_path)
     (tmp_path / "SiloMathLib.sol").write_text(
@@ -625,6 +634,289 @@ def test_a_deposit_property_is_validated_against_the_source(tmp_path: Path) -> N
     incomplete["fixture_dependencies"] = ["local_factory", "local_silo_config", "eip1167_clone"]
     with pytest.raises(PropertyConfigError, match="local_asset"):
         normalize_explicit_properties(tmp_path, (incomplete,))
+
+
+def test_a_partial_withdrawal_property_uses_the_ceil_share_formula(tmp_path: Path) -> None:
+    _write_withdrawal(tmp_path)
+    raw = _deposit_property(
+        property_id="silo.partial_withdrawal_accounting",
+        kind="partial_withdrawal_accounting",
+        entry_point="withdraw",
+        state_getter="previewWithdraw",
+        rationale=(
+            "After minting shares rounds the deposit up, a partial collateral withdrawal "
+            "burns the ceil share conversion and transfers the requested assets."
+        ),
+        locations=[
+            {"path": "Silo.sol", "symbol": "withdraw"},
+            {"path": "Silo.sol", "symbol": "previewWithdraw"},
+            {"path": "Actions.sol", "symbol": "withdraw"},
+            {"path": "SiloMathLib.sol", "symbol": "convertToShares"},
+            {"path": "ShareToken.sol", "symbol": "burn"},
+            {"path": "ISiloConfig.sol", "symbol": "getConfigsForWithdraw"},
+        ],
+        fixture_dependencies=[
+            "local_factory",
+            "local_silo_config",
+            "eip1167_clone",
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+            "partial_withdraw",
+        ],
+    )
+    accepted = normalize_explicit_properties(tmp_path, (raw,))
+    assert accepted[0]["kind"] == "partial_withdrawal_accounting"
+    assert accepted[0]["test_entry_point"] == "test_partial_withdrawal_accounting"
+    assert accepted[0]["test_file"] == "PartialWithdrawalAccounting.t.sol"
+    assert accepted[0]["vulnerability_finding"] is False
+    assert accepted[0]["source"] == "researcher_supplied"
+    from app.discovery.bounty.explicit_property import (
+        render_deposit_harness,
+        render_partial_withdrawal_harness,
+    )
+
+    texts = {path.name: path.read_text(encoding="utf-8") for path in tmp_path.glob("*.sol")}
+    imports = dict(accepted[0]["imports"])
+    rendered = render_partial_withdrawal_harness(
+        texts, contract="Silo", source_file="Silo.sol", imports=imports
+    )
+    assert "test_partial_withdrawal_accounting" in rendered
+    assert "previewWithdraw(uint256)" in rendered
+    assert 'keccak256("withdraw(uint256,address,address)")' in rendered
+    asset = rendered.split("contract LocalAsset", 1)[1].split("contract LocalInterestRateModel", 1)[
+        0
+    ]
+    assert asset.count("function transfer(") == 1
+    assert rendered.count("contract LocalInterestRateModel") == 1
+    assert "accrueInterestForBothSilos" in rendered
+    assert "0x1544a6db" in rendered
+    assert "ratio_exact" in rendered
+    assert "preview_short" in rendered
+    assert "ERC20InsufficientBalance" in rendered
+    assert "vm." not in rendered
+    mock = rendered.split("contract LocalWithdrawer")[0]
+    assert "require" not in mock
+    deposit = render_deposit_harness(
+        texts, contract="Silo", source_file="Silo.sol", imports=imports
+    )
+    assert "function transfer(" not in deposit
+    assert "accrueInterestForBothSilos" not in deposit
+    missing = dict(raw)
+    missing["fixture_dependencies"] = [
+        "local_factory",
+        "local_silo_config",
+        "eip1167_clone",
+        "local_asset",
+        "zero_interest_model",
+        "second_depositor",
+    ]
+    with pytest.raises(PropertyConfigError, match="partial_withdraw"):
+        normalize_explicit_properties(tmp_path, (missing,))
+
+
+def _write_withdrawal(root: Path) -> None:
+    _write_deposit(root)
+    (root / "Silo.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                'import {ISiloFactory} from "./ISiloFactory.sol";',
+                'import {ISiloConfig} from "./ISiloConfig.sol";',
+                'import {ISilo} from "./ISilo.sol";',
+                'import {Actions} from "./Actions.sol";',
+                'import {ShareToken} from "./ShareToken.sol";',
+                "contract Silo is ShareToken {",
+                "    constructor(ISiloFactory) {}",
+                "    function initialize(ISiloConfig _config) external { Actions.initialize(_config); }",
+                "    function deposit(uint256 _assets, address _receiver) external returns (uint256 shares) {",
+                "        (, shares) = _deposit(_assets, _receiver);",
+                "    }",
+                "    function previewDeposit(uint256 _assets) external view returns (uint256 shares) {",
+                "        shares = _assets;",
+                "    }",
+                "    function _deposit(uint256 _assets, address) internal returns (uint256, uint256) {",
+                "        return Actions.deposit(_assets);",
+                "    }",
+                "    function mint(uint256 _shares, address _receiver) external returns (uint256 assets) {",
+                "        (assets,) = _deposit(0, _receiver);",
+                "    }",
+                "    function previewWithdraw(uint256 _assets) external view returns (uint256 shares) {",
+                "        return _previewWithdraw(_assets);",
+                "    }",
+                "    function _previewWithdraw(uint256) internal pure returns (uint256) {",
+                "        return uint256(Rounding.WITHDRAW_TO_SHARES);",
+                "    }",
+                "    function withdraw(uint256 _assets, address _receiver, address _owner)",
+                "        external returns (uint256 shares)",
+                "    {",
+                "        (, shares) = _withdraw(_assets, _owner, ISilo.CollateralType.Collateral);",
+                "    }",
+                "    function withdraw(uint256 _assets, address, address _owner, uint8 kind)",
+                "        external returns (uint256 shares)",
+                "    {",
+                "        (, shares) = _withdraw(_assets, _owner, kind);",
+                "    }",
+                "    function _withdraw(uint256 _assets, address, ISilo.CollateralType)",
+                "        internal returns (uint256, uint256)",
+                "    {",
+                "        return Actions.withdraw(_assets);",
+                "    }",
+                "    function _withdraw(uint256 _assets, address, uint8) internal returns (uint256, uint256) {",
+                "        return Actions.withdraw(_assets);",
+                "    }",
+                "    function config() external view returns (ISiloConfig) { return ISiloConfig(siloConfig()); }",
+                "    function siloConfig() internal view returns (address) { return address(0); }",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (root / "Actions.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                "library Actions {",
+                "    function initialize(address) internal {}",
+                "    function deposit(uint256 _assets) internal returns (uint256, uint256) {",
+                "        accrueInterestForSilo(address(0));",
+                "        getCollateralShareTokenAndAsset(address(0), 1);",
+                "        SiloERC4626Lib.deposit(_assets);",
+                "        return (_assets, _assets);",
+                "    }",
+                "    function withdraw(uint256 _assets) internal returns (uint256, uint256) {",
+                "        accrueInterestForBothSilos();",
+                "        getConfigsForWithdraw(address(this), address(0));",
+                "        SiloERC4626Lib.withdraw(_assets);",
+                "        if (depositConfig.silo == collateralConfig.silo) { return (_assets, _assets); }",
+                "        return (_assets, _assets);",
+                "    }",
+                "}",
+                "library SiloERC4626Lib {",
+                "    function withdraw(uint256) internal {",
+                "        token.burn(owner, spender, shares);",
+                "        token.safeTransfer(receiver, assets);",
+                "    }",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (root / "SiloMathLib.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                "library SiloMathLib {",
+                "    uint256 internal constant _DECIMALS_OFFSET = 3;",
+                "    uint256 internal constant _DECIMALS_OFFSET_POW = 1000;",
+                "    function convertToShares(uint256 _assets, uint256 _totalAssets, uint256 _totalShares)",
+                "        internal pure returns (uint256)",
+                "    {",
+                "        if (_totalShares == 0) { _totalAssets = 0; }",
+                "        return _assets * (_totalShares + _DECIMALS_OFFSET_POW) / (_totalAssets + 1);",
+                "    }",
+                "    function convertToAssets(uint256 _shares, uint256 _totalAssets, uint256 _totalShares)",
+                "        internal pure returns (uint256)",
+                "    {",
+                "        return convertToShares(_shares, _totalAssets, _totalShares);",
+                "    }",
+                "    function convertToAssetsOrToShares(uint256, uint256) internal pure returns (uint256, uint256) {",
+                "        return (0, 0);",
+                "    }",
+                "}",
+                "library Rounding {",
+                "    uint256 internal constant DEPOSIT_TO_SHARES = 0;",
+                "    Math.Rounding internal constant WITHDRAW_TO_SHARES = Math.Rounding.Ceil;",
+                "    Math.Rounding internal constant WITHDRAW_TO_ASSETS = Math.Rounding.Floor;",
+                "    Math.Rounding internal constant DEPOSIT_TO_ASSETS = Math.Rounding.Ceil;",
+                "}",
+                "library Interest {",
+                "    function accrue() internal pure {",
+                "        uint256 lastTimestamp = 0;",
+                "        if (lastTimestamp == 0) return;",
+                "    }",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    (root / "ShareToken.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                "contract ShareToken {",
+                "    function _disableInitializers() internal {}",
+                "    constructor() { _disableInitializers(); }",
+                "    function mint(address _owner, address, uint256) external {}",
+                "    function burn(address _owner, address, uint256) external {}",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    fields = "\n".join(
+        f"        {type_name} {name};"
+        for type_name, name in (
+            ("uint256", "daoFee"),
+            ("uint256", "deployerFee"),
+            ("address", "silo"),
+            ("address", "token"),
+            ("address", "protectedShareToken"),
+            ("address", "collateralShareToken"),
+            ("address", "debtShareToken"),
+            ("address", "solvencyOracle"),
+            ("address", "maxLtvOracle"),
+            ("address", "interestRateModel"),
+            ("uint256", "maxLtv"),
+            ("uint256", "lt"),
+            ("uint256", "liquidationTargetLtv"),
+            ("uint256", "liquidationFee"),
+            ("uint256", "flashloanFee"),
+            ("address", "hookReceiver"),
+            ("bool", "callBeforeQuote"),
+        )
+    )
+    deposit_fields = "\n".join(
+        (
+            "        address silo;",
+            "        address token;",
+            "        address collateralShareToken;",
+            "        address protectedShareToken;",
+            "        uint256 daoFee;",
+            "        uint256 deployerFee;",
+            "        address interestRateModel;",
+        )
+    )
+    (root / "ISiloConfig.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                "interface ISiloConfig {",
+                "    struct ConfigData {",
+                fields,
+                "    }",
+                "    struct DepositConfig {",
+                deposit_fields,
+                "    }",
+                "    function getConfig(address) external view returns (ConfigData memory);",
+                "    function getConfigsForWithdraw(address, address) external view returns (",
+                "        DepositConfig memory, ConfigData memory, ConfigData memory",
+                "    );",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
 
 
 def _scoped_manifest():

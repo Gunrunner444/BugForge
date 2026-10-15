@@ -40,6 +40,36 @@ _REQUIRE = re.compile(
 _ASSIGN = re.compile(
     r"_sharedStorage\s*\.\s*siloConfig\s*=\s*(?:address\s*\(\s*)?_siloConfig\s*\)?\s*;"
 )
+# ABI order of the pinned ISiloConfig structs. The withdraw fixture writes
+# DepositConfig and then two zero ConfigData records, matching a borrower with no debt.
+_DEPOSIT_CONFIG_FIELDS = (
+    ("address", "silo"),
+    ("address", "token"),
+    ("address", "collateralShareToken"),
+    ("address", "protectedShareToken"),
+    ("uint256", "daoFee"),
+    ("uint256", "deployerFee"),
+    ("address", "interestRateModel"),
+)
+_CONFIG_DATA_FIELDS = (
+    ("uint256", "daoFee"),
+    ("uint256", "deployerFee"),
+    ("address", "silo"),
+    ("address", "token"),
+    ("address", "protectedShareToken"),
+    ("address", "collateralShareToken"),
+    ("address", "debtShareToken"),
+    ("address", "solvencyOracle"),
+    ("address", "maxLtvOracle"),
+    ("address", "interestRateModel"),
+    ("uint256", "maxLtv"),
+    ("uint256", "lt"),
+    ("uint256", "liquidationTargetLtv"),
+    ("uint256", "liquidationFee"),
+    ("uint256", "flashloanFee"),
+    ("address", "hookReceiver"),
+    ("bool", "callBeforeQuote"),
+)
 
 
 class PropertyConfigError(ValueError):
@@ -338,6 +368,7 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
         "initialization_once",
         "erc4626_deposit_accounting",
         "deposit_twice_accounting",
+        "partial_withdrawal_accounting",
     }:
         raise PropertyConfigError("property_unsupported", f"unsupported property kind {kind!r}")
     property_id = str(raw.get("property_id", ""))
@@ -359,7 +390,9 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     locations = _locations(raw.get("locations"))
     imports = _imports(raw.get("imports"))
     extra_fixtures = (
-        {"local_asset", "zero_interest_model", "second_depositor"}
+        {"local_asset", "zero_interest_model", "second_depositor", "partial_withdraw"}
+        if kind == "partial_withdrawal_accounting"
+        else {"local_asset", "zero_interest_model", "second_depositor"}
         if kind == "deposit_twice_accounting"
         else {"local_asset", "zero_interest_model"}
         if kind == "erc4626_deposit_accounting"
@@ -419,6 +452,30 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
                 "after one deposit has funded the market, a second depositor's previewDeposit "
                 "and minted shares follow the floor conversion of the observed totals plus the "
                 "decimals offset, and the token, share, and collateral totals move by that deposit"
+            )
+        elif kind == "partial_withdrawal_accounting":
+            _validate_partial_withdrawal(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+            )
+            harness = render_partial_withdrawal_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+            )
+            test_entry = "test_partial_withdrawal_accounting"
+            test_file = "PartialWithdrawalAccounting.t.sol"
+            expected = (
+                "after a funded market is taken off the exact offset ratio by minting shares, "
+                "previewWithdraw and withdraw burn the ceil share conversion of the pre-operation "
+                "totals, the receiver gets the requested assets, and share supply and stored "
+                "collateral decrease by the burned shares and withdrawn assets"
             )
         else:
             _validate_deposit_accounting(
@@ -727,12 +784,135 @@ def _validate_second_deposit(
         )
 
 
+def _validate_partial_withdrawal(
+    texts: Mapping[str, str],
+    *,
+    source_file: str,
+    contract: str,
+    entry: str,
+    getter: str,
+    deployment: str,
+    imports: Mapping[str, str],
+) -> None:
+    """Collateral withdraw rounds shares up. The setup mint rounds assets up."""
+    if entry != "withdraw" or getter != "previewWithdraw":
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the withdrawal property must target withdraw and previewWithdraw",
+        )
+    _validate_deposit_accounting(
+        texts,
+        source_file=source_file,
+        contract=contract,
+        entry="deposit",
+        getter="previewDeposit",
+        deployment=deployment,
+        imports=imports,
+    )
+    clean = {path: strip_comments(text) for path, text in texts.items()}
+    joined = "\n".join(clean.values())
+    contract_text = clean[source_file]
+    if "function convertToShares" not in joined or "function convertToAssets" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "share conversion functions are not declared"
+        )
+    if "function convertToAssetsOrToShares" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "convertToAssetsOrToShares is not declared"
+        )
+    if "_totalShares + _DECIMALS_OFFSET_POW" not in joined or "_totalAssets + 1" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "collateral conversion does not add the decimals offset",
+        )
+    if not re.search(r"if\s*\(\s*_totalShares\s*==\s*0\s*\)", joined):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the empty-market conversion branch is not present",
+        )
+    if not re.search(
+        r"function\s+withdraw\s*\(\s*uint256\b[^)]*\baddress\b[^)]*\baddress\b", contract_text
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch", "withdraw(uint256,address,address) is not declared"
+        )
+    if not re.search(r"function\s+previewWithdraw\s*\(\s*uint256\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "previewWithdraw(uint256) is not declared"
+        )
+    if not re.search(r"function\s+mint\s*\(\s*uint256\b[^)]*\baddress\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "mint(uint256,address) is not declared"
+        )
+    withdraw_bodies = _function_bodies(contract_text, "withdraw")
+    if not any(
+        "_withdraw" in body and "CollateralType.Collateral" in body for body in withdraw_bodies
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "withdraw(uint256,address,address) does not withdraw collateral",
+        )
+    if not any("Actions.withdraw" in body for body in _function_bodies(contract_text, "_withdraw")):
+        raise PropertyConfigError(
+            "property_source_mismatch", "_withdraw does not call Actions.withdraw"
+        )
+    if not any(
+        "WITHDRAW_TO_SHARES" in body for body in _function_bodies(contract_text, "_previewWithdraw")
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch", "previewWithdraw does not use WITHDRAW_TO_SHARES"
+        )
+    action_bodies = [body for text in clean.values() for body in _function_bodies(text, "withdraw")]
+    if not any(
+        "SiloERC4626Lib.withdraw" in body
+        and "accrueInterestForBothSilos" in body
+        and "getConfigsForWithdraw" in body
+        and "depositConfig.silo == collateralConfig.silo" in body
+        for body in action_bodies
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "Actions.withdraw does not accrue, load withdraw config, and withdraw",
+        )
+    if not any(".burn(" in body and "safeTransfer" in body for body in action_bodies):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the withdraw library does not burn shares and transfer assets",
+        )
+    if "WITHDRAW_TO_SHARES = Math.Rounding.Ceil" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "asset withdrawal does not round shares up"
+        )
+    if "WITHDRAW_TO_ASSETS = Math.Rounding.Floor" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "share redemption does not round assets down"
+        )
+    if "DEPOSIT_TO_ASSETS = Math.Rounding.Ceil" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "minting shares does not round assets up"
+        )
+    if "function burn(address" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "the collateral share token does not burn"
+        )
+    config_text = clean[imports["config_interface"]]
+    if tuple(_struct_fields(config_text, "DepositConfig")) != _DEPOSIT_CONFIG_FIELDS:
+        raise PropertyConfigError(
+            "property_source_mismatch", "DepositConfig does not match the pinned field order"
+        )
+    if tuple(_struct_fields(config_text, "ConfigData")) != _CONFIG_DATA_FIELDS:
+        raise PropertyConfigError(
+            "property_source_mismatch", "ConfigData does not match the pinned field order"
+        )
+
+
 def render_deposit_harness(
     texts: Mapping[str, str],
     *,
     contract: str,
     source_file: str,
     imports: Mapping[str, str],
+    include_withdraw: bool = False,
 ) -> str:
     """Local empty-market deposit. Mocks do not implement Silo accounting."""
     factory = _declared_name(strip_comments(texts[imports["factory_interface"]]), "interface")
@@ -861,6 +1041,8 @@ contract LocalSiloConfig {{
     }}
 }}
 """
+    if include_withdraw:
+        mock = _with_withdraw_fixture(mock, silo_iface, len(fields))
     if "SiloInitialized" in mock or "require" in mock:
         raise PropertyConfigError(
             "property_malformed", "the deposit mock must not implement Silo's guards"
@@ -1183,6 +1365,434 @@ contract DepositTwiceAccountingTest {{
     )
 
 
+def _with_withdraw_fixture(mock: str, silo_iface: str, config_words: int) -> str:
+    """Add the token transfer and no-debt withdraw config the real path calls.
+
+    The paired silo is not deployed. Accrual runs only on the bound silo. With
+    zero debt and a zero rate, the other silo cannot change this silo's stored
+    collateral. The two ConfigData tails stay zero, so solvency is skipped the
+    same way ``getConfigsForSolvency`` returns empty configs when there is no debt.
+    """
+    if config_words != len(_CONFIG_DATA_FIELDS):
+        raise PropertyConfigError(
+            "property_source_mismatch", "withdraw config width does not match ConfigData"
+        )
+    transfer_anchor = """        return true;
+    }
+}
+
+contract LocalInterestRateModel {"""
+    transfer = """        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        if (balanceOf[msg.sender] < amount) revert LocalAssetError("balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract LocalInterestRateModel {"""
+    accrue_anchor = (
+        f"        {silo_iface}(silo_).accrueInterestForConfig(rateModel, 0, 0);\n    }}\n"
+    )
+    both = f"""
+    function accrueInterestForBothSilos() external {{
+        if (msg.sender != boundSilo) revert LocalConfig("both");
+        {silo_iface}(boundSilo).accrueInterestForConfig(rateModel, 0, 0);
+    }}
+"""
+    selector = '        if (msg.sig != bytes4(0xe48a5f7b)) revert LocalConfig("selector");'
+    selector_branch = """        if (msg.sig == bytes4(0x1544a6db)) {
+            _withdrawConfig();
+        }
+        if (msg.sig != bytes4(0xe48a5f7b)) revert LocalConfig("selector");"""
+    if (
+        mock.count(transfer_anchor) != 1
+        or mock.count(accrue_anchor) != 1
+        or mock.count(selector) != 1
+        or mock.count("    fallback() external {") != 1
+    ):
+        raise PropertyConfigError(
+            "property_malformed", "the deposit mock layout could not be extended"
+        )
+    total_words = len(_DEPOSIT_CONFIG_FIELDS) + 2 * config_words
+    slots = {name: index for index, (_type_name, name) in enumerate(_DEPOSIT_CONFIG_FIELDS)}
+    helper = f"""    function _withdrawConfig() internal view {{
+        address siloArg;
+        assembly {{
+            siloArg := calldataload(4)
+        }}
+        if (msg.sender != boundSilo || siloArg != boundSilo) revert LocalConfig("withdraw");
+        address silo_ = boundSilo;
+        address token_ = asset;
+        address rate_ = rateModel;
+        assembly {{
+            let ptr := mload(0x40)
+            for {{ let i := 0 }} lt(i, {total_words}) {{ i := add(i, 1) }} {{
+                mstore(add(ptr, mul(i, 32)), 0)
+            }}
+            mstore(add(ptr, {slots["silo"] * 32}), silo_)
+            mstore(add(ptr, {slots["token"] * 32}), token_)
+            mstore(add(ptr, {slots["collateralShareToken"] * 32}), silo_)
+            mstore(add(ptr, {slots["interestRateModel"] * 32}), rate_)
+            return(ptr, {total_words * 32})
+        }}
+    }}
+
+"""
+    mock = mock.replace(transfer_anchor, transfer, 1)
+    mock = mock.replace(accrue_anchor, accrue_anchor + both, 1)
+    mock = mock.replace("    fallback() external {", helper + "    fallback() external {", 1)
+    return mock.replace(selector, selector_branch, 1)
+
+
+def render_partial_withdrawal_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> str:
+    """Partial collateral withdraw after a mint breaks the exact offset ratio."""
+    first = render_deposit_harness(
+        texts,
+        contract=contract,
+        source_file=source_file,
+        imports=imports,
+        include_withdraw=True,
+    )
+    marker = "contract DepositAccountingTest {"
+    if marker not in first:
+        raise PropertyConfigError("property_malformed", "the deposit fixture could not be reused")
+    prelude = first.split(marker)[0]
+    silo_iface = _declared_name(strip_comments(texts[imports["error_interface"]]), "interface")
+    factory = _declared_name(strip_comments(texts[imports["factory_interface"]]), "interface")
+    config = _declared_name(strip_comments(texts[imports["config_interface"]]), "interface")
+    if not silo_iface or not factory or not config:
+        raise PropertyConfigError("property_source_mismatch", "the Silo interface is missing")
+    clone_expr = _clone_expr(texts[source_file])
+    return (
+        prelude
+        + f"""
+contract LocalWithdrawer {{
+    function fundAndDeposit(LocalAsset asset_, address silo, uint256 amount)
+        external
+        returns (uint256 minted)
+    {{
+        asset_.approve(silo, amount);
+        (bool ok, bytes memory data) = silo.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("deposit(uint256,address)")), amount, address(this)
+            )
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        minted = abi.decode(data, (uint256));
+    }}
+
+    function approveAndMint(LocalAsset asset_, address silo, uint256 shares)
+        external
+        returns (uint256 assets)
+    {{
+        asset_.approve(silo, asset_.balanceOf(address(this)));
+        (bool ok, bytes memory data) = silo.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("mint(uint256,address)")), shares, address(this)
+            )
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        assets = abi.decode(data, (uint256));
+    }}
+
+    function withdrawTo(address silo, uint256 amount, address receiver)
+        external
+        returns (bool ok, bytes memory data)
+    {{
+        (ok, data) = silo.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("withdraw(uint256,address,address)")),
+                amount,
+                receiver,
+                address(this)
+            )
+        );
+    }}
+}}
+
+contract PartialWithdrawalAccountingTest {{
+    uint256 internal constant SEED = 1_000_000;
+    uint256 internal constant OFFSET = 1000;
+    uint256 internal constant MINT_SHARES = 2_001;
+    event BugForgeState(string label, uint256 value);
+
+    struct Case {{
+        uint256 assetsBefore;
+        uint256 supplyBefore;
+        uint256 bShares;
+        uint256 bTokens;
+        uint256 siloTokens;
+        uint256 receiverBefore;
+        uint256 aShares;
+        uint256 viewBefore;
+        uint256 previewed;
+        uint256 burned;
+        uint256 formula;
+        uint256 remainder;
+        uint256 mintAssets;
+        uint256 mintRemainder;
+        uint256 ratioRemainder;
+        uint256 boundary;
+        uint256 receiverNow;
+        uint256 siloNow;
+        uint256 sharesNow;
+        uint256 supplyNow;
+        uint256 collateralNow;
+        uint256 viewNow;
+    }}
+
+    Case internal currentCase;
+
+    function test_partial_withdrawal_accounting() public {{
+        _case(0, 1);
+        _case(1, 2);
+        _case(2, 3);
+    }}
+
+    function _case(uint256 index, uint256 amount) internal {{
+        delete currentCase;
+        ({contract} silo, LocalAsset asset_) = _setup();
+        LocalWithdrawer first = new LocalWithdrawer();
+        LocalWithdrawer second = new LocalWithdrawer();
+        if (address(first) == address(second) || address(second) == address(this)) {{
+            revert BugForgeFixture(bytes("same_actor"));
+        }}
+        _seed(silo, asset_, first);
+        _mintNonExact(silo, asset_, second);
+        _prepare(silo, asset_, first, second, amount);
+        if (currentCase.previewed != currentCase.formula) {{
+            revert BugForgeProperty("formula_mismatch");
+        }}
+        if (currentCase.formula > currentCase.bShares) {{
+            if (index < 2) revert BugForgeProperty("expected_success");
+            _boundary(index, amount, silo, asset_, first, second);
+        }} else {{
+            if (index == 2) revert BugForgeProperty("expected_boundary");
+            if (currentCase.remainder == 0) revert BugForgeProperty("expected_remainder");
+            _success(index, amount, silo, asset_, first, second);
+        }}
+    }}
+
+    function _seed({contract} silo, LocalAsset asset_, LocalWithdrawer first) internal {{
+        asset_.credit(address(first), SEED);
+        uint256 minted = first.fundAndDeposit(asset_, address(silo), SEED);
+        uint256 assetsBefore = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 supplyBefore = silo.totalSupply();
+        if (minted == 0 || assetsBefore != SEED || supplyBefore != minted) {{
+            revert BugForgeProperty("seed_accounting");
+        }}
+        if (silo.balanceOf(address(first)) != minted) revert BugForgeProperty("seed_receiver");
+        if (supplyBefore + OFFSET != OFFSET * (assetsBefore + 1)) {{
+            revert BugForgeProperty("offset_identity");
+        }}
+    }}
+
+    function _mintNonExact({contract} silo, LocalAsset asset_, LocalWithdrawer second) internal {{
+        uint256 assetsBefore = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 supplyBefore = silo.totalSupply();
+        uint256 virtualShares = supplyBefore + OFFSET;
+        uint256 virtualAssets = assetsBefore + 1;
+        uint256 product = MINT_SHARES * virtualAssets;
+        uint256 remainder = product % virtualShares;
+        if (remainder == 0) revert BugForgeProperty("mint_exact");
+        uint256 mintAssets = product / virtualShares + 1;
+        asset_.credit(address(second), mintAssets);
+        uint256 pulled = second.approveAndMint(asset_, address(silo), MINT_SHARES);
+        if (pulled != mintAssets) revert BugForgeProperty("mint_assets");
+        uint256 assetsAfter = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 supplyAfter = silo.totalSupply();
+        if (assetsAfter != assetsBefore + pulled) revert BugForgeProperty("mint_collateral");
+        if (supplyAfter != supplyBefore + MINT_SHARES) revert BugForgeProperty("mint_supply");
+        if (silo.balanceOf(address(second)) != MINT_SHARES) revert BugForgeProperty("mint_receiver");
+        uint256 ratioRemainder = (supplyAfter + OFFSET) % (assetsAfter + 1);
+        if (ratioRemainder == 0) revert BugForgeProperty("ratio_exact");
+        currentCase.assetsBefore = assetsAfter;
+        currentCase.supplyBefore = supplyAfter;
+        currentCase.mintAssets = pulled;
+        currentCase.mintRemainder = remainder;
+        currentCase.ratioRemainder = ratioRemainder;
+    }}
+
+    function _prepare(
+        {contract} silo,
+        LocalAsset asset_,
+        LocalWithdrawer first,
+        LocalWithdrawer second,
+        uint256 amount
+    ) internal {{
+        currentCase.bShares = silo.balanceOf(address(second));
+        currentCase.bTokens = asset_.balanceOf(address(second));
+        currentCase.siloTokens = asset_.balanceOf(address(silo));
+        currentCase.receiverBefore = asset_.balanceOf(address(this));
+        currentCase.aShares = silo.balanceOf(address(first));
+        currentCase.viewBefore = silo.totalAssets();
+        if (currentCase.bTokens != 0) revert BugForgeProperty("mint_balance");
+        if (currentCase.siloTokens != SEED + currentCase.mintAssets) {{
+            revert BugForgeProperty("silo_balance");
+        }}
+        if (currentCase.receiverBefore != 0) revert BugForgeProperty("receiver_not_fresh");
+        if (currentCase.viewBefore != currentCase.assetsBefore) {{
+            revert BugForgeProperty("view_storage");
+        }}
+        uint256 virtualShares = currentCase.supplyBefore + OFFSET;
+        uint256 virtualAssets = currentCase.assetsBefore + 1;
+        uint256 product = amount * virtualShares;
+        currentCase.remainder = product % virtualAssets;
+        uint256 rounded = currentCase.remainder == 0 ? 0 : 1;
+        currentCase.formula = product / virtualAssets + rounded;
+        currentCase.previewed = _preview(silo, amount);
+    }}
+
+    function _success(
+        uint256 index,
+        uint256 amount,
+        {contract} silo,
+        LocalAsset asset_,
+        LocalWithdrawer first,
+        LocalWithdrawer second
+    ) internal {{
+        (bool ok, bytes memory data) = second.withdrawTo(address(silo), amount, address(this));
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        currentCase.burned = abi.decode(data, (uint256));
+        currentCase.boundary = 0;
+        _capture(silo, asset_, second);
+        _emitObserved(index, amount);
+        _assertOwner(silo, first);
+        _assertSuccess(amount);
+    }}
+
+    function _boundary(
+        uint256 index,
+        uint256 amount,
+        {contract} silo,
+        LocalAsset asset_,
+        LocalWithdrawer first,
+        LocalWithdrawer second
+    ) internal {{
+        (bool ok, bytes memory data) = second.withdrawTo(address(silo), amount, address(this));
+        if (ok) revert BugForgeProperty("boundary_succeeded");
+        bytes4 insufficient = bytes4(keccak256("ERC20InsufficientBalance(address,uint256,uint256)"));
+        if (data.length < 4 || bytes4(data) != insufficient) revert BugForgeFixture(data);
+        currentCase.burned = 0;
+        currentCase.boundary = 1;
+        _capture(silo, asset_, second);
+        _emitObserved(index, amount);
+        _assertOwner(silo, first);
+        _assertBoundary();
+    }}
+
+    function _capture({contract} silo, LocalAsset asset_, LocalWithdrawer second) internal {{
+        currentCase.receiverNow = asset_.balanceOf(address(this));
+        currentCase.siloNow = asset_.balanceOf(address(silo));
+        currentCase.sharesNow = silo.balanceOf(address(second));
+        currentCase.supplyNow = silo.totalSupply();
+        currentCase.collateralNow = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        currentCase.viewNow = silo.totalAssets();
+    }}
+
+    function _emitObserved(uint256 index, uint256 amount) internal {{
+        _emit(index, "amount", amount);
+        _emit(index, "assets_before", currentCase.assetsBefore);
+        _emit(index, "supply_before", currentCase.supplyBefore);
+        _emit(index, "b_shares", currentCase.bShares);
+        _emit(index, "b_tokens", currentCase.bTokens);
+        _emit(index, "silo_tokens", currentCase.siloTokens);
+        _emit(index, "preview", currentCase.previewed);
+        _emit(index, "burned", currentCase.burned);
+        _emit(index, "formula", currentCase.formula);
+        _emit(index, "remainder", currentCase.remainder);
+        _emitDeltas(index);
+    }}
+
+    function _emitDeltas(uint256 index) internal {{
+        _emit(index, "receiver_delta", currentCase.receiverNow - currentCase.receiverBefore);
+        _emit(index, "silo_delta", currentCase.siloTokens - currentCase.siloNow);
+        _emit(index, "supply_delta", currentCase.supplyBefore - currentCase.supplyNow);
+        _emit(index, "collateral_delta", currentCase.assetsBefore - currentCase.collateralNow);
+        _emit(index, "b_shares_after", currentCase.sharesNow);
+        _emit(index, "mint_assets", currentCase.mintAssets);
+        _emit(index, "mint_remainder", currentCase.mintRemainder);
+        _emit(index, "ratio_remainder", currentCase.ratioRemainder);
+        _emit(index, "view_before", currentCase.viewBefore);
+        _emit(index, "boundary", currentCase.boundary);
+    }}
+
+    function _assertOwner({contract} silo, LocalWithdrawer first) internal view {{
+        if (silo.balanceOf(address(first)) != currentCase.aShares) {{
+            revert BugForgeProperty("first_depositor");
+        }}
+    }}
+
+    function _assertBoundary() internal view {{
+        if (currentCase.receiverNow != currentCase.receiverBefore) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.siloNow != currentCase.siloTokens) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.supplyNow != currentCase.supplyBefore) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.collateralNow != currentCase.assetsBefore) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.sharesNow != currentCase.bShares) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.viewNow != currentCase.viewBefore) revert BugForgeProperty("boundary_mutated");
+        if (currentCase.burned != 0 || currentCase.sharesNow == 0) revert BugForgeProperty("boundary_mutated");
+    }}
+
+    function _assertSuccess(uint256 amount) internal view {{
+        if (currentCase.burned > currentCase.previewed) revert BugForgeProperty("preview_short");
+        if (currentCase.burned != currentCase.formula) revert BugForgeProperty("formula_mismatch");
+        if (currentCase.burned == 0 || currentCase.sharesNow == 0) revert BugForgeProperty("owner_exited");
+        if (currentCase.receiverNow != currentCase.receiverBefore + amount) revert BugForgeProperty("asset_delta");
+        if (currentCase.siloNow + amount != currentCase.siloTokens) revert BugForgeProperty("asset_delta");
+        if (currentCase.collateralNow + amount != currentCase.assetsBefore) revert BugForgeProperty("asset_delta");
+        if (currentCase.supplyNow + currentCase.burned != currentCase.supplyBefore) {{
+            revert BugForgeProperty("share_delta");
+        }}
+        if (currentCase.sharesNow + currentCase.burned != currentCase.bShares) {{
+            revert BugForgeProperty("share_delta");
+        }}
+        if (currentCase.viewNow + amount != currentCase.viewBefore) revert BugForgeProperty("view_after");
+    }}
+
+    function _setup() internal returns ({contract} silo, LocalAsset asset_) {{
+        asset_ = new LocalAsset();
+        LocalInterestRateModel rate = new LocalInterestRateModel();
+        LocalSiloConfig config_ = new LocalSiloConfig(address(asset_), address(rate));
+        LocalFactory deployedFactory = new LocalFactory();
+        {contract} implementation = new {contract}({factory}(address(deployedFactory)));
+        silo = {contract}({clone_expr});
+        config_.bind(address(silo));
+        (bool ok, bytes memory data) = address(silo).call(
+            abi.encodeCall({contract}.initialize, ({config}(address(config_))))
+        );
+        if (!ok) revert BugForgeFixture(data);
+    }}
+
+    function _preview({contract} silo, uint256 amount) internal view returns (uint256 previewed) {{
+        (bool ok, bytes memory data) = address(silo).staticcall(
+            abi.encodeWithSelector(bytes4(keccak256("previewWithdraw(uint256)")), amount)
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        previewed = abi.decode(data, (uint256));
+    }}
+
+    function _emit(uint256 index, string memory key, uint256 value) internal {{
+        string memory prefix = "w2_";
+        if (index == 0) prefix = "w0_";
+        else if (index == 1) prefix = "w1_";
+        else if (index != 2) revert BugForgeFixture(bytes("index"));
+        emit BugForgeState(string.concat(prefix, key), value);
+    }}
+}}
+"""
+    )
+
+
 def _clone_expr(contract_text: str) -> str:
     clean = strip_comments(contract_text)
     payable = bool(
@@ -1268,6 +1878,13 @@ def _execute_one(
             )
         elif current["kind"] == "deposit_twice_accounting":
             harness = render_second_deposit_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                imports=dict(current["imports"]),
+            )
+        elif current["kind"] == "partial_withdrawal_accounting":
+            harness = render_partial_withdrawal_harness(
                 texts,
                 contract=str(current["contract"]),
                 source_file=str(current["source_file"]),
@@ -1593,6 +2210,12 @@ _CASE_LABEL = re.compile(
     r"^a[0-3]_(?:amount|assets_before|supply_before|preview|minted|formula|remainder|"
     r"receiver_delta|silo_delta|supply_delta|collateral_delta|first_minted|view_before)$"
 )
+_WITHDRAW_LABEL = re.compile(
+    r"^w[0-2]_(?:amount|assets_before|supply_before|b_shares|b_tokens|silo_tokens|"
+    r"preview|burned|formula|remainder|receiver_delta|silo_delta|supply_delta|"
+    r"collateral_delta|b_shares_after|mint_assets|mint_remainder|ratio_remainder|"
+    r"view_before|boundary)$"
+)
 
 
 def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
@@ -1619,7 +2242,7 @@ def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
         if int(value, 16) == 0:
             return None
         return {"label": label, "value": value}
-    if label in _NUMBER_LABELS or _CASE_LABEL.fullmatch(label):
+    if label in _NUMBER_LABELS or _CASE_LABEL.fullmatch(label) or _WITHDRAW_LABEL.fullmatch(label):
         return {"label": label, "value": str(int(words[1], 16))}
     return None
 
