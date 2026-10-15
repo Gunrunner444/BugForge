@@ -503,6 +503,101 @@ def test_the_execution_record_keeps_the_property_test_entry() -> None:
     assert record["verified"] is False
 
 
+def test_a_second_deposit_label_decodes_as_a_number() -> None:
+    label = b"a0_preview"
+    data = "0x" + f"{64:064x}" + f"{1000:064x}" + f"{len(label):064x}" + label.hex().ljust(64, "0")
+    observed = _state_observations(json.dumps({"logs": [{"data": data}]}))
+    assert observed == [{"label": "a0_preview", "value": "1000"}]
+
+
+def test_a_second_deposit_property_uses_the_funded_market_formula(tmp_path: Path) -> None:
+    _write_deposit(tmp_path)
+    (tmp_path / "SiloMathLib.sol").write_text(
+        "\n".join(
+            (
+                "// SPDX-License-Identifier: MIT",
+                "pragma solidity 0.8.28;",
+                "library SiloMathLib {",
+                "    uint256 internal constant _DECIMALS_OFFSET = 3;",
+                "    uint256 internal constant _DECIMALS_OFFSET_POW = 1000;",
+                "    function convertToShares(",
+                "        uint256 _assets,",
+                "        uint256 _totalAssets,",
+                "        uint256 _totalShares",
+                "    ) internal pure returns (uint256) {",
+                "        if (_totalShares == 0) { _totalAssets = 0; }",
+                "        return _assets * (_totalShares + _DECIMALS_OFFSET_POW) / (_totalAssets + 1);",
+                "    }",
+                "}",
+                "library Rounding { uint256 internal constant DEPOSIT_TO_SHARES = 0; }",
+                "library Interest {",
+                "    function accrue() internal pure {",
+                "        uint256 lastTimestamp = 0;",
+                "        if (lastTimestamp == 0) return;",
+                "    }",
+                "}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    raw = _deposit_property(
+        property_id="silo.deposit_twice_accounting",
+        kind="deposit_twice_accounting",
+        rationale=(
+            "After the market holds assets and shares, the next deposit converts with the "
+            "observed totals plus the decimals offset."
+        ),
+        locations=[
+            {"path": "Silo.sol", "symbol": "deposit"},
+            {"path": "Actions.sol", "symbol": "deposit"},
+            {"path": "SiloMathLib.sol", "symbol": "convertToShares"},
+            {"path": "SiloMathLib.sol", "symbol": "_DECIMALS_OFFSET"},
+            {"path": "ShareToken.sol", "symbol": "mint"},
+        ],
+        fixture_dependencies=[
+            "local_factory",
+            "local_silo_config",
+            "eip1167_clone",
+            "local_asset",
+            "zero_interest_model",
+            "second_depositor",
+        ],
+    )
+    accepted = normalize_explicit_properties(tmp_path, (raw,))
+    assert accepted[0]["kind"] == "deposit_twice_accounting"
+    assert accepted[0]["test_entry_point"] == "test_deposit_twice_accounting"
+    assert accepted[0]["vulnerability_finding"] is False
+    from app.discovery.bounty.explicit_property import render_second_deposit_harness
+
+    texts = {path.name: path.read_text(encoding="utf-8") for path in tmp_path.glob("*.sol")}
+    rendered = render_second_deposit_harness(
+        texts,
+        contract="Silo",
+        source_file="Silo.sol",
+        imports=dict(accepted[0]["imports"]),
+    )
+    assert "contract LocalDepositor" in rendered
+    assert "still_empty" in rendered
+    assert "formula_mismatch" in rendered
+    assert "preview_exceeds_mint" in rendered
+    assert "1000000000" not in rendered
+    assert "vm." not in rendered
+    missing = _deposit_property(
+        property_id="silo.deposit_twice_accounting",
+        kind="deposit_twice_accounting",
+        fixture_dependencies=[
+            "local_factory",
+            "local_silo_config",
+            "eip1167_clone",
+            "local_asset",
+            "zero_interest_model",
+        ],
+    )
+    with pytest.raises(PropertyConfigError, match="second_depositor"):
+        normalize_explicit_properties(tmp_path, (missing,))
+
+
 def test_a_deposit_property_is_validated_against_the_source(tmp_path: Path) -> None:
     _write_deposit(tmp_path)
     accepted = normalize_explicit_properties(tmp_path, (_deposit_property(),))

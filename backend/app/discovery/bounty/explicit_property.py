@@ -334,7 +334,11 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     if source != "researcher_supplied":
         raise PropertyConfigError("property_incomplete", "source must be researcher_supplied")
     kind = str(raw.get("kind", ""))
-    if kind not in {"initialization_once", "erc4626_deposit_accounting"}:
+    if kind not in {
+        "initialization_once",
+        "erc4626_deposit_accounting",
+        "deposit_twice_accounting",
+    }:
         raise PropertyConfigError("property_unsupported", f"unsupported property kind {kind!r}")
     property_id = str(raw.get("property_id", ""))
     if not _ID.fullmatch(property_id):
@@ -355,7 +359,11 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     locations = _locations(raw.get("locations"))
     imports = _imports(raw.get("imports"))
     extra_fixtures = (
-        {"local_asset", "zero_interest_model"} if kind == "erc4626_deposit_accounting" else set()
+        {"local_asset", "zero_interest_model", "second_depositor"}
+        if kind == "deposit_twice_accounting"
+        else {"local_asset", "zero_interest_model"}
+        if kind == "erc4626_deposit_accounting"
+        else set()
     )
     fixtures = _fixtures(raw.get("fixture_dependencies"), extra_fixtures)
     texts = _read_cited(
@@ -389,28 +397,52 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
             "the first configuration"
         )
     else:
-        _validate_deposit_accounting(
-            texts,
-            source_file=source_file,
-            contract=contract,
-            entry=entry,
-            getter=getter,
-            deployment=deployment,
-            imports=imports,
-        )
-        harness = render_deposit_harness(
-            texts,
-            contract=contract,
-            source_file=source_file,
-            imports=imports,
-        )
-        test_entry = "test_deposit_accounting"
-        test_file = "DepositAccounting.t.sol"
-        expected = (
-            "on an empty zero-fee market, previewDeposit equals the shares minted by "
-            "deposit, the receiver balance increases by those shares, and the underlying "
-            "token and collateral total move by the deposited assets"
-        )
+        if kind == "deposit_twice_accounting":
+            _validate_second_deposit(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+            )
+            harness = render_second_deposit_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+            )
+            test_entry = "test_deposit_twice_accounting"
+            test_file = "DepositTwiceAccounting.t.sol"
+            expected = (
+                "after one deposit has funded the market, a second depositor's previewDeposit "
+                "and minted shares follow the floor conversion of the observed totals plus the "
+                "decimals offset, and the token, share, and collateral totals move by that deposit"
+            )
+        else:
+            _validate_deposit_accounting(
+                texts,
+                source_file=source_file,
+                contract=contract,
+                entry=entry,
+                getter=getter,
+                deployment=deployment,
+                imports=imports,
+            )
+            harness = render_deposit_harness(
+                texts,
+                contract=contract,
+                source_file=source_file,
+                imports=imports,
+            )
+            test_entry = "test_deposit_accounting"
+            test_file = "DepositAccounting.t.sol"
+            expected = (
+                "on an empty zero-fee market, previewDeposit equals the shares minted by "
+                "deposit, the receiver balance increases by those shares, and the underlying "
+                "token and collateral total move by the deposited assets"
+            )
     return {
         "property_id": property_id,
         "source": "researcher_supplied",
@@ -660,6 +692,41 @@ def _validate_deposit_accounting(
         )
 
 
+def _validate_second_deposit(
+    texts: Mapping[str, str],
+    *,
+    source_file: str,
+    contract: str,
+    entry: str,
+    getter: str,
+    deployment: str,
+    imports: Mapping[str, str],
+) -> None:
+    """The second deposit uses the same path, plus the offset conversion."""
+    _validate_deposit_accounting(
+        texts,
+        source_file=source_file,
+        contract=contract,
+        entry=entry,
+        getter=getter,
+        deployment=deployment,
+        imports=imports,
+    )
+    joined = "\n".join(strip_comments(text) for text in texts.values())
+    if "function convertToShares" not in joined:
+        raise PropertyConfigError("property_source_mismatch", "convertToShares is not declared")
+    if "_totalShares + _DECIMALS_OFFSET_POW" not in joined or "_totalAssets + 1" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "collateral conversion does not add the decimals offset",
+        )
+    if not re.search(r"if\s*\(\s*_totalShares\s*==\s*0\s*\)", joined):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the empty-market conversion branch is not present",
+        )
+
+
 def render_deposit_harness(
     texts: Mapping[str, str],
     *,
@@ -905,6 +972,227 @@ contract DepositAccountingTest {{
 """
 
 
+def render_second_deposit_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> str:
+    """A funded market, then a second depositor. The mock does not price shares."""
+    first = render_deposit_harness(
+        texts, contract=contract, source_file=source_file, imports=imports
+    )
+    marker = "contract DepositAccountingTest {"
+    if marker not in first:
+        raise PropertyConfigError("property_malformed", "the deposit fixture could not be reused")
+    prelude = first.split(marker)[0]
+    if "contract LocalDepositor" not in prelude:
+        prelude = (
+            prelude.rstrip()
+            + """
+
+contract LocalDepositor {
+    function fundAndDeposit(LocalAsset asset_, address silo, uint256 amount)
+        external
+        returns (uint256 minted)
+    {
+        asset_.approve(silo, amount);
+        (bool ok, bytes memory data) = silo.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("deposit(uint256,address)")), amount, address(this)
+            )
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        minted = abi.decode(data, (uint256));
+    }
+}
+"""
+        )
+    silo_iface = _declared_name(strip_comments(texts[imports["error_interface"]]), "interface")
+    factory = _declared_name(strip_comments(texts[imports["factory_interface"]]), "interface")
+    config = _declared_name(strip_comments(texts[imports["config_interface"]]), "interface")
+    if not silo_iface or not factory or not config:
+        raise PropertyConfigError("property_source_mismatch", "the Silo interface is missing")
+    clone_expr = _clone_expr(texts[source_file])
+    return (
+        prelude
+        + f"""
+contract DepositTwiceAccountingTest {{
+    uint256 internal constant SEED = 1_000_000;
+    uint256 internal constant OFFSET = 1000;
+    event BugForgeState(string label, uint256 value);
+
+    function test_deposit_twice_accounting() public {{
+        _case(0, 1);
+        _case(1, 7);
+        _case(2, 1_000_000);
+        _case(3, 1_000_001);
+    }}
+
+    struct Case {{
+        uint256 assetsBefore;
+        uint256 supplyBefore;
+        uint256 userBefore;
+        uint256 siloBefore;
+        uint256 receiverBefore;
+        uint256 firstBalance;
+        uint256 viewBefore;
+        uint256 previewed;
+        uint256 minted;
+        uint256 firstMinted;
+        uint256 formula;
+        uint256 remainder;
+    }}
+
+    Case internal currentCase;
+
+    function _case(uint256 index, uint256 amount) internal {{
+        ({contract} silo, LocalAsset asset_) = _setup();
+        LocalDepositor first = new LocalDepositor();
+        LocalDepositor second = new LocalDepositor();
+        if (address(first) == address(second)) revert BugForgeFixture(bytes("same_actor"));
+        _seed(silo, asset_, first);
+        _beforeSecond(silo, asset_, first, second, amount);
+        _afterSecond(index, amount, silo, asset_, first, second);
+    }}
+
+    function _seed({contract} silo, LocalAsset asset_, LocalDepositor first) internal {{
+        asset_.credit(address(first), SEED);
+        uint256 minted = first.fundAndDeposit(asset_, address(silo), SEED);
+        uint256 assetsBefore = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 supplyBefore = silo.totalSupply();
+        if (minted == 0 || assetsBefore == 0 || supplyBefore == 0) {{
+            revert BugForgeProperty("still_empty");
+        }}
+        if (assetsBefore != SEED || supplyBefore != minted) revert BugForgeProperty("seed_accounting");
+        if (silo.balanceOf(address(first)) != minted) revert BugForgeProperty("seed_receiver");
+        if (supplyBefore + OFFSET != OFFSET * (assetsBefore + 1)) {{
+            revert BugForgeProperty("offset_identity");
+        }}
+        currentCase.firstMinted = minted;
+        currentCase.assetsBefore = assetsBefore;
+        currentCase.supplyBefore = supplyBefore;
+    }}
+
+    function _beforeSecond(
+        {contract} silo,
+        LocalAsset asset_,
+        LocalDepositor first,
+        LocalDepositor second,
+        uint256 amount
+    ) internal {{
+        asset_.credit(address(second), amount);
+        currentCase.userBefore = asset_.balanceOf(address(second));
+        currentCase.siloBefore = asset_.balanceOf(address(silo));
+        currentCase.receiverBefore = silo.balanceOf(address(second));
+        currentCase.firstBalance = silo.balanceOf(address(first));
+        currentCase.viewBefore = silo.totalAssets();
+        currentCase.previewed = _preview(silo, amount);
+        currentCase.minted = second.fundAndDeposit(asset_, address(silo), amount);
+        uint256 virtualShares = currentCase.supplyBefore + OFFSET;
+        uint256 virtualAssets = currentCase.assetsBefore + 1;
+        uint256 product = amount * virtualShares;
+        currentCase.formula = product / virtualAssets;
+        currentCase.remainder = product % virtualAssets;
+    }}
+
+    function _afterSecond(
+        uint256 index,
+        uint256 amount,
+        {contract} silo,
+        LocalAsset asset_,
+        LocalDepositor first,
+        LocalDepositor second
+    ) internal {{
+        uint256 userAfter = asset_.balanceOf(address(second));
+        uint256 siloAfter = asset_.balanceOf(address(silo));
+        uint256 receiverAfter = silo.balanceOf(address(second));
+        uint256 supplyAfter = silo.totalSupply();
+        uint256 collateralAfter = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 viewAfter = silo.totalAssets();
+        _emit(index, "amount", amount);
+        _emit(index, "assets_before", currentCase.assetsBefore);
+        _emit(index, "supply_before", currentCase.supplyBefore);
+        _emit(index, "preview", currentCase.previewed);
+        _emit(index, "minted", currentCase.minted);
+        _emit(index, "formula", currentCase.formula);
+        _emit(index, "remainder", currentCase.remainder);
+        _emit(index, "receiver_delta", receiverAfter - currentCase.receiverBefore);
+        _emit(index, "silo_delta", siloAfter - currentCase.siloBefore);
+        _emit(index, "supply_delta", supplyAfter - currentCase.supplyBefore);
+        _emit(index, "collateral_delta", collateralAfter - currentCase.assetsBefore);
+        _emit(index, "first_minted", currentCase.firstMinted);
+        _emit(index, "view_before", currentCase.viewBefore);
+        if (currentCase.viewBefore != currentCase.assetsBefore || viewAfter != collateralAfter) {{
+            revert BugForgeProperty("view_storage");
+        }}
+        if (currentCase.minted < currentCase.previewed) revert BugForgeProperty("preview_exceeds_mint");
+        if (currentCase.minted != currentCase.formula || currentCase.previewed != currentCase.formula) {{
+            revert BugForgeProperty("formula_mismatch");
+        }}
+        if (userAfter != currentCase.userBefore - amount) revert BugForgeProperty("user_asset");
+        if (siloAfter != currentCase.siloBefore + amount) revert BugForgeProperty("silo_asset");
+        if (receiverAfter != currentCase.receiverBefore + currentCase.minted) {{
+            revert BugForgeProperty("share_balance");
+        }}
+        if (supplyAfter != currentCase.supplyBefore + currentCase.minted) {{
+            revert BugForgeProperty("total_supply");
+        }}
+        if (collateralAfter != currentCase.assetsBefore + amount) {{
+            revert BugForgeProperty("collateral_assets");
+        }}
+        if (silo.balanceOf(address(first)) != currentCase.firstBalance) {{
+            revert BugForgeProperty("first_depositor");
+        }}
+        if (currentCase.receiverBefore != 0) revert BugForgeProperty("receiver_not_fresh");
+    }}
+
+    function _setup() internal returns ({contract} silo, LocalAsset asset_) {{
+        asset_ = new LocalAsset();
+        LocalInterestRateModel rate = new LocalInterestRateModel();
+        LocalSiloConfig config_ = new LocalSiloConfig(address(asset_), address(rate));
+        LocalFactory deployedFactory = new LocalFactory();
+        {contract} implementation = new {contract}({factory}(address(deployedFactory)));
+        silo = {contract}({clone_expr});
+        config_.bind(address(silo));
+        (bool ok, bytes memory data) = address(silo).call(
+            abi.encodeCall({contract}.initialize, ({config}(address(config_))))
+        );
+        if (!ok) revert BugForgeFixture(data);
+    }}
+
+    function _preview({contract} silo, uint256 amount) internal view returns (uint256 previewed) {{
+        (bool ok, bytes memory data) = address(silo).staticcall(
+            abi.encodeWithSelector(bytes4(keccak256("previewDeposit(uint256)")), amount)
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        previewed = abi.decode(data, (uint256));
+    }}
+
+    function _emit(uint256 index, string memory key, uint256 value) internal {{
+        string memory prefix = "a3_";
+        if (index == 0) prefix = "a0_";
+        else if (index == 1) prefix = "a1_";
+        else if (index == 2) prefix = "a2_";
+        else if (index != 3) revert BugForgeFixture(bytes("index"));
+        emit BugForgeState(string.concat(prefix, key), value);
+    }}
+}}
+"""
+    )
+
+
+def _clone_expr(contract_text: str) -> str:
+    clean = strip_comments(contract_text)
+    payable = bool(
+        re.search(r"\breceive\s*\(\s*\)\s+external\s+payable\b", clean)
+        or re.search(r"\bfallback\s*\(\s*\)\s+external\s+payable\b", clean)
+    )
+    cloned = "Clones.clone(address(implementation))"
+    return f"payable({cloned})" if payable else cloned
+
+
 def _enum_index(text: str, enum: str, member: str) -> int | None:
     match = re.search(rf"enum\s+{enum}\s*\{{([^}}]*)\}}", text)
     if match is None:
@@ -976,6 +1264,13 @@ def _execute_one(
                 contract=str(current["contract"]),
                 source_file=str(current["source_file"]),
                 error=str(current["expected_error"]),
+                imports=dict(current["imports"]),
+            )
+        elif current["kind"] == "deposit_twice_accounting":
+            harness = render_second_deposit_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
                 imports=dict(current["imports"]),
             )
         else:
@@ -1269,12 +1564,12 @@ def _collect_states(node: Any, found: list[dict[str, str]]) -> None:
                         {"raw": json.dumps(item)[:300], "label": label, "topics": str(topics)[:120]}
                     )
         for value in node.values():
-            if len(found) >= 16:
+            if len(found) >= 64:
                 return
             _collect_states(value, found)
     elif isinstance(node, list):
         for value in node:
-            if len(found) >= 16:
+            if len(found) >= 64:
                 return
             _collect_states(value, found)
 
@@ -1293,6 +1588,10 @@ _NUMBER_LABELS = frozenset(
         "collateral_before",
         "collateral_after",
     }
+)
+_CASE_LABEL = re.compile(
+    r"^a[0-3]_(?:amount|assets_before|supply_before|preview|minted|formula|remainder|"
+    r"receiver_delta|silo_delta|supply_delta|collateral_delta|first_minted|view_before)$"
 )
 
 
@@ -1320,7 +1619,7 @@ def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
         if int(value, 16) == 0:
             return None
         return {"label": label, "value": value}
-    if label in _NUMBER_LABELS:
+    if label in _NUMBER_LABELS or _CASE_LABEL.fullmatch(label):
         return {"label": label, "value": str(int(words[1], 16))}
     return None
 
