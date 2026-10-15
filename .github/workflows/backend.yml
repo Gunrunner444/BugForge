@@ -3,7 +3,7 @@ name: Backend CI
 on:
   workflow_call:
   push:
-    branches: [main, develop]
+    branches: [main, develop, research/silo-finance-v3]
     paths:
       - "backend/**"
       - ".github/workflows/backend.yml"

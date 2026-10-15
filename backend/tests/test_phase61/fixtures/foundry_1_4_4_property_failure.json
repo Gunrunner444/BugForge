@@ -1,0 +1,1 @@
+{"test/Fail.t.sol:InitializeOnceTest":{"duration":"139µs 569ns","test_results":{"test_initialize_once()":{"status":"Failure","reason":"BugForgeProperty(\"config_replaced\")","counterexample":null,"logs":[],"decoded_logs":[],"kind":{"Unit":{"gas":223}},"traces":[],"labeled_addresses":{},"duration":"47µs 62ns","breakpoints":{},"gas_snapshots":{}}},"warnings":[]}}

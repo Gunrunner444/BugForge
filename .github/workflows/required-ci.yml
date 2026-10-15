@@ -23,10 +23,13 @@ jobs:
           git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
           backend=false
           frontend=false
-          if grep -Eq '^(backend/|\.github/workflows/(backend|required-ci)\.yml)$' "$RUNNER_TEMP/changed.txt"; then
+          # The `$` applies only to a workflow file. `backend/` must match every
+          # file under that directory; anchoring the whole alternation skipped
+          # every real backend change and let the required gate pass.
+          if grep -Eq '^(backend/|\.github/workflows/(backend|required-ci)\.yml$)' "$RUNNER_TEMP/changed.txt"; then
             backend=true
           fi
-          if grep -Eq '^(frontend/|\.github/workflows/(frontend|required-ci)\.yml)$' "$RUNNER_TEMP/changed.txt"; then
+          if grep -Eq '^(frontend/|\.github/workflows/(frontend|required-ci)\.yml$)' "$RUNNER_TEMP/changed.txt"; then
             frontend=true
           fi
           echo "backend=$backend" >> "$GITHUB_OUTPUT"

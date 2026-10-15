@@ -1,0 +1,1 @@
+{"test/Fail.t.sol:OtherTest":{"duration":"83µs 361ns","test_results":{"test_other()":{"status":"Success","reason":null,"counterexample":null,"logs":[],"decoded_logs":[],"kind":{"Unit":{"gas":97}},"traces":[],"labeled_addresses":{},"duration":"22µs 403ns","breakpoints":{},"gas_snapshots":{}}},"warnings":[]}}

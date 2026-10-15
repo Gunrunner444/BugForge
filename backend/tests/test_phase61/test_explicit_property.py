@@ -170,38 +170,67 @@ def test_incomplete_and_contradictory_properties_are_rejected(tmp_path: Path) ->
         normalize_explicit_properties(tmp_path, (missing,))
 
 
-def test_forge_results_stay_distinct_from_a_passing_property() -> None:
-    held = classify_explicit_result(
-        process_status="completed",
-        compiler_status="ok",
-        return_code=0,
-        stdout="Suite result: ok",
-        stderr="",
-    )
+def _forge(name: str) -> str:
+    return (Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")
+
+
+def _judge(stdout: str, *, return_code: int | None = 0, stderr: str = "", **overrides: object):
+    payload = {
+        "process_status": "completed",
+        "compiler_status": "ok",
+        "return_code": return_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "expected_test": "test_initialize_once",
+    }
+    payload.update(overrides)
+    return classify_explicit_result(**payload)
+
+
+def test_foundry_json_classifies_only_the_executed_test() -> None:
+    held = _judge(_forge("foundry_1_4_4_initialize_campaign.json"))
     assert held["outcome"] == "property_held"
     assert held["property_status"] == "held"
-    violated = classify_explicit_result(
-        process_status="completed",
-        compiler_status="ok",
-        return_code=1,
-        stdout="BugForgeProperty(second_initialize_succeeded)",
-        stderr="",
+    assert held["test_status"] == "passed"
+    assert held["matched_test"] == "test_initialize_once()"
+    plain = _judge(_forge("foundry_1_4_4_pass.json"))
+    assert plain["outcome"] == "property_held"
+    assert plain["matched_test"] == "test_initialize_once()"
+    unrelated = _judge(
+        _forge("foundry_1_4_4_pass.json"),
+        stderr='BugForgeProperty("config_replaced")',
     )
+    assert unrelated["outcome"] == "property_held"
+    missing = _judge("", stderr="Warning: no tests match the provided pattern:\n")
+    assert missing["outcome"] == "not_tested"
+    assert missing["reason_code"] == "no_tests_matched"
+    assert missing["property_status"] == "not_run"
+    other = _judge(_forge("foundry_1_4_4_other_test.json"))
+    assert other["outcome"] == "not_tested"
+    assert other["reason_code"] == "expected_test_missing"
+    skipped = _judge(_forge("foundry_1_4_4_skipped.json"))
+    assert skipped["outcome"] == "not_tested"
+    assert skipped["test_status"] == "skipped"
+    assert skipped["reason_code"] == "test_skipped"
+    violated = _judge(_forge("foundry_1_4_4_property_failure.json"), return_code=1)
     assert violated["outcome"] == "property_violated"
-    fixture = classify_explicit_result(
-        process_status="completed",
-        compiler_status="ok",
-        return_code=1,
-        stdout="BugForgeFixture",
-        stderr="",
-    )
+    assert violated["property_status"] == "violated"
+    assert "config_replaced" in violated["reason"]
+    fixture = _judge(_forge("foundry_1_4_4_fixture_failure.json"), return_code=1)
     assert fixture["outcome"] == "inconclusive"
+    assert fixture["reason_code"] == "fixture_failed"
     assert fixture["property_status"] == "not_evaluated"
-    compiled = classify_explicit_result(
-        process_status="completed",
+    text_only = _judge('BugForgeProperty("config_replaced")', return_code=1)
+    assert text_only["outcome"] == "inconclusive"
+    assert text_only["reason_code"] == "malformed_output"
+    assert text_only["property_status"] == "not_run"
+    malformed = _judge('{"test_results":')
+    assert malformed["outcome"] == "inconclusive"
+    assert malformed["reason_code"] == "malformed_output"
+    compiled = _judge(
+        "",
         compiler_status="failed",
         return_code=1,
-        stdout="",
         stderr="Compiler run failed",
     )
     assert compiled["outcome"] == "compile_failed"
@@ -211,8 +240,9 @@ def test_forge_results_stay_distinct_from_a_passing_property() -> None:
         process_status="timeout",
         compiler_status="ok",
         return_code=None,
-        stdout="",
+        stdout=_forge("foundry_1_4_4_pass.json"),
         stderr="",
+        expected_test="test_initialize_once",
     )
     assert timed["outcome"] == "timeout"
     assert timed["property_status"] == "not_run"
@@ -333,6 +363,158 @@ def test_an_explicit_property_reaches_foundry_without_a_detector_candidate(tmp_p
     assert summary["property_evaluation_demonstrated"] is True
     assert summary["foundry_invoked"] is True
     assert "property_held" in summary["by_outcome"]
+
+
+DEPOSIT_SILO = """
+import {ISiloFactory} from "./ISiloFactory.sol";
+import {ISiloConfig} from "./ISiloConfig.sol";
+import {Actions} from "./Actions.sol";
+import {ShareToken} from "./ShareToken.sol";
+contract Silo is ShareToken {
+    constructor(ISiloFactory) {}
+    function initialize(ISiloConfig _config) external { Actions.initialize(_config); }
+    function deposit(uint256 _assets, address _receiver) external returns (uint256 shares) {
+        (, shares) = _deposit(_assets, _receiver);
+    }
+    function previewDeposit(uint256 _assets) external view returns (uint256 shares) {
+        shares = _assets;
+    }
+    function _deposit(uint256 _assets, address) internal returns (uint256, uint256) {
+        return Actions.deposit(_assets);
+    }
+    function config() external view returns (ISiloConfig) { return ISiloConfig(siloConfig()); }
+    function siloConfig() internal view returns (address) { return address(0); }
+}
+"""
+DEPOSIT_ACTIONS = """
+library Actions {
+    function initialize(address) internal {}
+    function deposit(uint256 _assets) internal returns (uint256, uint256) {
+        accrueInterestForSilo(address(0));
+        getCollateralShareTokenAndAsset(address(0), 1);
+        SiloERC4626Lib.deposit(_assets);
+        return (_assets, _assets);
+    }
+}
+"""
+DEPOSIT_MATH = """
+library SiloMathLib { uint256 internal constant _DECIMALS_OFFSET = 3; }
+library Rounding { uint256 internal constant DEPOSIT_TO_SHARES = 0; }
+library Interest { function accrue() internal pure { uint256 lastTimestamp = 0; if (lastTimestamp == 0) return; } }
+"""
+DEPOSIT_SHARE = """
+contract ShareToken {
+    function _disableInitializers() internal {}
+    constructor() { _disableInitializers(); }
+    function mint(address _owner, address, uint256) external {}
+}
+"""
+DEPOSIT_CONFIG = """
+interface ISiloConfig {
+    struct ConfigData {
+        uint256 daoFee;
+        address silo;
+        address token;
+        address collateralShareToken;
+        address interestRateModel;
+        address hookReceiver;
+    }
+    function getConfig(address) external view returns (ConfigData memory);
+}
+"""
+DEPOSIT_SILO_IFACE = """
+interface ISilo {
+    enum AssetType { Protected, Collateral, Debt }
+    enum CollateralType { Protected, Collateral }
+    error SiloInitialized();
+}
+library FloorLib { function mark() internal pure returns (uint256) { return uint256(Math.Rounding.Floor); } }
+"""
+
+
+def _write_deposit(root: Path) -> None:
+    files = {
+        "Silo.sol": DEPOSIT_SILO,
+        "Actions.sol": DEPOSIT_ACTIONS,
+        "SiloMathLib.sol": DEPOSIT_MATH,
+        "ShareToken.sol": DEPOSIT_SHARE,
+        "ISiloConfig.sol": DEPOSIT_CONFIG,
+        "ISilo.sol": DEPOSIT_SILO_IFACE,
+        "ISiloFactory.sol": FACTORY,
+        "Clones.sol": CLONES,
+    }
+    for name, body in files.items():
+        (root / name).write_text(
+            f"// SPDX-License-Identifier: MIT\npragma solidity 0.8.28;\n{body}\n",
+            encoding="utf-8",
+        )
+
+
+def _deposit_property(**overrides: object) -> dict[str, object]:
+    raw: dict[str, object] = {
+        "property_id": "silo.deposit_accounting",
+        "source": "researcher_supplied",
+        "kind": "erc4626_deposit_accounting",
+        "contract": "Silo",
+        "source_file": "Silo.sol",
+        "entry_point": "deposit",
+        "state_getter": "previewDeposit",
+        "deployment": "eip1167_clone",
+        "rationale": (
+            "On an empty market, previewDeposit and deposit use the same floor conversion, "
+            "so minted shares match the preview and balances move by the deposited assets."
+        ),
+        "locations": [
+            {"path": "Silo.sol", "symbol": "deposit"},
+            {"path": "Actions.sol", "symbol": "deposit"},
+            {"path": "SiloMathLib.sol", "symbol": "_DECIMALS_OFFSET"},
+            {"path": "ShareToken.sol", "symbol": "mint"},
+        ],
+        "imports": {
+            "factory_interface": "ISiloFactory.sol",
+            "config_interface": "ISiloConfig.sol",
+            "error_interface": "ISilo.sol",
+            "clones": "Clones.sol",
+        },
+        "fixture_dependencies": [
+            "local_factory",
+            "local_silo_config",
+            "eip1167_clone",
+            "local_asset",
+            "zero_interest_model",
+        ],
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_a_deposit_property_is_validated_against_the_source(tmp_path: Path) -> None:
+    _write_deposit(tmp_path)
+    accepted = normalize_explicit_properties(tmp_path, (_deposit_property(),))
+    assert accepted[0]["kind"] == "erc4626_deposit_accounting"
+    assert accepted[0]["test_entry_point"] == "test_deposit_accounting"
+    assert accepted[0]["vulnerability_finding"] is False
+    assert accepted[0]["validation"] == "accepted"
+    harness = accepted[0]["harness_sha256"]
+    assert isinstance(harness, str) and len(harness) == 64
+    from app.discovery.bounty.explicit_property import render_deposit_harness
+
+    texts = {path.name: path.read_text(encoding="utf-8") for path in tmp_path.glob("*.sol")}
+    rendered = render_deposit_harness(
+        texts,
+        contract="Silo",
+        source_file="Silo.sol",
+        imports=dict(accepted[0]["imports"]),
+    )
+    mock = rendered.split("contract DepositAccountingTest")[0]
+    assert "require" not in mock
+    assert "SiloInitialized" not in mock
+    assert "preview_mismatch" in rendered
+    assert "Clones.clone" in rendered
+    incomplete = _deposit_property()
+    incomplete["fixture_dependencies"] = ["local_factory", "local_silo_config", "eip1167_clone"]
+    with pytest.raises(PropertyConfigError, match="local_asset"):
+        normalize_explicit_properties(tmp_path, (incomplete,))
 
 
 def _scoped_manifest():

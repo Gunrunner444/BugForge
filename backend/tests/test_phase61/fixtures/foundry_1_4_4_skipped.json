@@ -1,0 +1,1 @@
+{"test/Skip.t.sol:InitializeOnceTest":{"duration":"215µs 998ns","test_results":{"test_initialize_once()":{"status":"Skipped","reason":null,"counterexample":null,"logs":[],"decoded_logs":[],"kind":{"Unit":{"gas":0}},"traces":[],"labeled_addresses":{},"duration":"51µs 514ns","breakpoints":{},"gas_snapshots":{}}},"warnings":[]}}

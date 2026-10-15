@@ -1,0 +1,1 @@
+{"test/Sample.t.sol:InitializeOnceTest":{"duration":"127µs 998ns","test_results":{"test_initialize_once()":{"status":"Success","reason":null,"counterexample":null,"logs":[],"decoded_logs":[],"kind":{"Unit":{"gas":97}},"traces":[],"labeled_addresses":{},"duration":"31µs 330ns","breakpoints":{},"gas_snapshots":{}}},"warnings":[]}}

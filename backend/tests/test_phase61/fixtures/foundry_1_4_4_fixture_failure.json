@@ -1,0 +1,1 @@
+{"test/Fail.t.sol:FixtureTest":{"duration":"109µs 103ns","test_results":{"test_initialize_once()":{"status":"Failure","reason":"BugForgeFixture(0x01)","counterexample":null,"logs":[],"decoded_logs":[],"kind":{"Unit":{"gas":223}},"traces":[],"labeled_addresses":{},"duration":"36µs 84ns","breakpoints":{},"gas_snapshots":{}}},"warnings":[]}}

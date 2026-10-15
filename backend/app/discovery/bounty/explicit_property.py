@@ -95,9 +95,15 @@ def classify_explicit_result(
     return_code: int | None,
     stdout: str,
     stderr: str,
+    expected_test: str,
 ) -> dict[str, str]:
-    """Map one Forge result to an outcome. A timeout or compile failure is not a pass."""
-    output = f"{stdout}\n{stderr}"
+    """Map one Forge result to an outcome.
+
+    A zero exit code is not a pass. ``property_held`` requires the named test
+    to appear in Foundry's JSON with status ``Success``. A violation requires
+    that same test to have failed with ``BugForgeProperty`` in its decoded
+    reason. Text elsewhere in the logs is ignored.
+    """
     if process_status == "timeout":
         return _status(
             "timeout",
@@ -125,7 +131,90 @@ def classify_explicit_result(
             "the harness did not compile against the pinned source",
             "compile_failed",
         )
-    if "BugForgeFixture" in output:
+    parsed, suites = _forge_suites(stdout)
+    if parsed == "malformed" or (parsed == "empty" and stdout.strip()):
+        return _status(
+            "inconclusive",
+            "ok",
+            "not_run",
+            "not_run",
+            "Forge output was malformed or incomplete",
+            "malformed_output",
+        )
+    matched, total = _tests_named(suites, expected_test)
+    want = expected_test if expected_test.endswith("()") else f"{expected_test}()"
+    if not matched:
+        if total == 0 or "no tests match" in stderr.lower():
+            reason = "Forge exited without running any test"
+            code = "no_tests_matched"
+        else:
+            reason = f"{want} did not run"
+            code = "expected_test_missing"
+        return _status("not_tested", "ok", "not_run", "not_run", reason, code)
+    statuses = {str(item.get("status") or "") for item in matched}
+    if len(statuses) != 1:
+        return _status(
+            "inconclusive",
+            "ok",
+            "not_run",
+            "not_run",
+            f"{want} has conflicting Foundry results",
+            "ambiguous_result",
+            matched_test=want,
+        )
+    status = next(iter(statuses))
+    failure = "\n".join(str(item.get("reason") or "") for item in matched)
+    if status == "Skipped":
+        return _status(
+            "not_tested",
+            "ok",
+            "skipped",
+            "not_run",
+            f"{want} was skipped",
+            "test_skipped",
+            matched_test=want,
+        )
+    if status == "Success":
+        if return_code != 0:
+            return _status(
+                "inconclusive",
+                "ok",
+                "passed",
+                "not_evaluated",
+                f"{want} passed but Forge did not exit successfully",
+                "ambiguous_result",
+                matched_test=want,
+            )
+        return _status(
+            "property_held",
+            "ok",
+            "passed",
+            "held",
+            f"{want} executed and passed",
+            "property_held",
+            matched_test=want,
+        )
+    if status != "Failure":
+        return _status(
+            "inconclusive",
+            "ok",
+            "not_run",
+            "not_run",
+            f"{want} finished with unrecognized status {status}",
+            "ambiguous_result",
+            matched_test=want,
+        )
+    if return_code == 0:
+        return _status(
+            "inconclusive",
+            "ok",
+            "failed",
+            "not_evaluated",
+            f"{want} failed but Forge exited successfully",
+            "ambiguous_result",
+            matched_test=want,
+        )
+    if "BugForgeFixture" in failure:
         return _status(
             "inconclusive",
             "ok",
@@ -133,33 +222,26 @@ def classify_explicit_result(
             "not_evaluated",
             "the local fixture failed before the property could be judged",
             "fixture_failed",
+            matched_test=want,
         )
-    if "BugForgeProperty" in output or (return_code not in {0, None} and compiler_status == "ok"):
-        if "BugForgeProperty" in output:
-            reason = "the executed assertions did not satisfy the property"
-            code = "property_assertion_failed"
-        else:
-            reason = "Forge completed without the property assertion result"
-            code = "forge_failed"
-        outcome = "property_violated" if code == "property_assertion_failed" else "inconclusive"
-        prop = "violated" if outcome == "property_violated" else "not_evaluated"
-        return _status(outcome, "ok", "failed", prop, reason, code)
-    if return_code == 0:
+    if "BugForgeProperty" in failure:
         return _status(
-            "property_held",
+            "property_violated",
             "ok",
-            "passed",
-            "held",
-            "the second initialization reverted and the first configuration remained",
-            "property_held",
+            "failed",
+            "violated",
+            f"{want} failed the property assertion: {failure[:180]}",
+            "property_assertion_failed",
+            matched_test=want,
         )
     return _status(
         "inconclusive",
-        compiler_status or "not_run",
-        "not_run",
-        "not_run",
-        "the property did not reach a verdict",
-        "not_executed",
+        "ok",
+        "failed",
+        "not_evaluated",
+        f"{want} failed without a property assertion",
+        "forge_failed",
+        matched_test=want,
     )
 
 
@@ -170,6 +252,8 @@ def _status(
     prop: str,
     reason: str,
     code: str,
+    *,
+    matched_test: str = "",
 ) -> dict[str, str]:
     sequence = "completed" if prop in {"held", "violated"} else "not_run"
     if outcome == "inconclusive" and test == "failed":
@@ -182,7 +266,57 @@ def _status(
         "property_status": prop,
         "reason": reason,
         "reason_code": code,
+        "matched_test": matched_test,
     }
+
+
+def _forge_suites(stdout: str) -> tuple[str, list[dict[str, Any]]]:
+    """Decode Foundry `--json` objects. Empty output is not a passing suite."""
+    if "{" not in stdout:
+        return ("empty", [])
+    decoder = json.JSONDecoder()
+    suites: list[dict[str, Any]] = []
+    index = stdout.find("{")
+    parsed = False
+    while index >= 0:
+        try:
+            payload, end = decoder.raw_decode(stdout[index:])
+        except json.JSONDecodeError:
+            return ("malformed", []) if not parsed else ("ok", suites)
+        parsed = True
+        if isinstance(payload, dict):
+            suites.append(payload)
+        index = stdout.find("{", index + end)
+    return ("ok", suites) if parsed else ("malformed", [])
+
+
+def _tests_named(
+    suites: Sequence[Mapping[str, Any]], expected: str
+) -> tuple[list[dict[str, Any]], int]:
+    want = expected if expected.endswith("()") else f"{expected}()"
+    matched: list[dict[str, Any]] = []
+    total = 0
+
+    def walk(node: Any) -> None:
+        nonlocal total
+        if isinstance(node, dict):
+            results = node.get("test_results")
+            if isinstance(results, dict):
+                for name, result in results.items():
+                    if not isinstance(result, dict) or "status" not in result:
+                        continue
+                    total += 1
+                    if name == want:
+                        matched.append(result)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for suite in suites:
+        walk(suite)
+    return matched, total
 
 
 def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -200,7 +334,7 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     if source != "researcher_supplied":
         raise PropertyConfigError("property_incomplete", "source must be researcher_supplied")
     kind = str(raw.get("kind", ""))
-    if kind != "initialization_once":
+    if kind not in {"initialization_once", "erc4626_deposit_accounting"}:
         raise PropertyConfigError("property_unsupported", f"unsupported property kind {kind!r}")
     property_id = str(raw.get("property_id", ""))
     if not _ID.fullmatch(property_id):
@@ -208,7 +342,11 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     contract = _identifier(raw.get("contract"), "contract")
     entry = _identifier(raw.get("entry_point"), "entry_point")
     getter = _identifier(raw.get("state_getter"), "state_getter")
-    error = _identifier(raw.get("expected_error"), "expected_error")
+    error = (
+        _identifier(raw.get("expected_error"), "expected_error")
+        if kind == "initialization_once"
+        else ""
+    )
     deployment = str(raw.get("deployment", ""))
     rationale = str(raw.get("rationale", "")).strip()
     if len(rationale) < 20 or len(rationale) > 2000:
@@ -216,49 +354,80 @@ def _normalize_one(repo_root: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     source_file = _relative(raw.get("source_file"))
     locations = _locations(raw.get("locations"))
     imports = _imports(raw.get("imports"))
-    fixtures = _fixtures(raw.get("fixture_dependencies"))
+    extra_fixtures = (
+        {"local_asset", "zero_interest_model"} if kind == "erc4626_deposit_accounting" else set()
+    )
+    fixtures = _fixtures(raw.get("fixture_dependencies"), extra_fixtures)
     texts = _read_cited(
         repo_root, (source_file, *imports.values(), *(item[0] for item in locations))
     )
     for path, symbol in locations:
         if not re.search(rf"\b{re.escape(symbol)}\b", strip_comments(texts[path])):
             raise PropertyConfigError("property_source_mismatch", f"{symbol} is not in {path}")
-    _validate_initialization_once(
-        texts,
-        source_file=source_file,
-        contract=contract,
-        entry=entry,
-        getter=getter,
-        error=error,
-        deployment=deployment,
-        imports=imports,
-    )
-    harness = render_initialization_harness(
-        texts,
-        contract=contract,
-        source_file=source_file,
-        error=error,
-        imports=imports,
-    )
+    if kind == "initialization_once":
+        _validate_initialization_once(
+            texts,
+            source_file=source_file,
+            contract=contract,
+            entry=entry,
+            getter=getter,
+            error=error,
+            deployment=deployment,
+            imports=imports,
+        )
+        harness = render_initialization_harness(
+            texts,
+            contract=contract,
+            source_file=source_file,
+            error=error,
+            imports=imports,
+        )
+        test_entry = "test_initialize_once"
+        test_file = "InitializeOnce.t.sol"
+        expected = (
+            f"the second {entry} reverts with {error} and {getter} still returns "
+            "the first configuration"
+        )
+    else:
+        _validate_deposit_accounting(
+            texts,
+            source_file=source_file,
+            contract=contract,
+            entry=entry,
+            getter=getter,
+            deployment=deployment,
+            imports=imports,
+        )
+        harness = render_deposit_harness(
+            texts,
+            contract=contract,
+            source_file=source_file,
+            imports=imports,
+        )
+        test_entry = "test_deposit_accounting"
+        test_file = "DepositAccounting.t.sol"
+        expected = (
+            "on an empty zero-fee market, previewDeposit equals the shares minted by "
+            "deposit, the receiver balance increases by those shares, and the underlying "
+            "token and collateral total move by the deposited assets"
+        )
     return {
         "property_id": property_id,
         "source": "researcher_supplied",
-        "kind": "initialization_once",
+        "kind": kind,
         "contract": contract,
         "source_file": source_file,
         "entry_point": entry,
         "state_getter": getter,
         "expected_error": error,
-        "expected_outcome": (
-            f"the second {entry} reverts with {error} and {getter} still returns "
-            "the first configuration"
-        ),
+        "expected_outcome": expected,
         "deployment": deployment,
         "rationale": rationale,
         "locations": [{"path": path, "symbol": symbol} for path, symbol in locations],
         "imports": imports,
         "fixture_dependencies": list(fixtures),
-        "test_entry_point": "test_initialize_once",
+        "test_entry_point": test_entry,
+        "test_file": test_file,
         "harness_sha256": sha256_text(harness),
         "validation": "accepted",
         "vulnerability_finding": False,
@@ -399,6 +568,359 @@ contract InitializeOnceTest {{
 """
 
 
+def _validate_deposit_accounting(
+    texts: Mapping[str, str],
+    *,
+    source_file: str,
+    contract: str,
+    entry: str,
+    getter: str,
+    deployment: str,
+    imports: Mapping[str, str],
+) -> None:
+    if entry != "deposit" or getter != "previewDeposit":
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the deposit property must target deposit and previewDeposit",
+        )
+    contract_text = strip_comments(texts[source_file])
+    if not re.search(rf"\b(?:contract|abstract\s+contract)\s+{contract}\b", contract_text):
+        raise PropertyConfigError("property_source_mismatch", f"{contract} is not declared")
+    if not re.search(r"function\s+deposit\s*\(\s*uint256\b[^)]*\baddress\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "deposit(uint256,address) is not declared"
+        )
+    if not re.search(r"function\s+previewDeposit\s*\(\s*uint256\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "previewDeposit(uint256) is not declared"
+        )
+    if not re.search(r"constructor\s*\(\s*ISiloFactory\b", contract_text):
+        raise PropertyConfigError(
+            "property_source_mismatch", "the constructor does not take ISiloFactory"
+        )
+    if not any("_deposit(" in body for body in _function_bodies(contract_text, "deposit")):
+        raise PropertyConfigError("property_source_mismatch", "deposit does not call _deposit")
+    if not any("Actions.deposit" in body for body in _function_bodies(contract_text, "_deposit")):
+        raise PropertyConfigError(
+            "property_source_mismatch", "_deposit does not call Actions.deposit"
+        )
+    clean = {path: strip_comments(text) for path, text in texts.items()}
+    joined = "\n".join(clean.values())
+    action_bodies = [body for text in clean.values() for body in _function_bodies(text, "deposit")]
+    if not any(
+        "SiloERC4626Lib.deposit" in body
+        and "getCollateralShareTokenAndAsset" in body
+        and "accrueInterestForSilo" in body
+        for body in action_bodies
+    ):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "Actions.deposit does not accrue interest, read the share token, and deposit",
+        )
+    if not re.search(r"_DECIMALS_OFFSET\s*=\s*3\b", joined):
+        raise PropertyConfigError(
+            "property_source_mismatch", "the share offset is not the expected value of 3"
+        )
+    if "DEPOSIT_TO_SHARES" not in joined or "Math.Rounding.Floor" not in joined:
+        raise PropertyConfigError("property_source_mismatch", "deposit share rounding is not floor")
+    if not re.search(r"if\s*\(\s*lastTimestamp\s*==\s*0\s*\)", joined):
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "the first interest accrual does not return before applying a rate",
+        )
+    if "function mint(address" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch", "the collateral share token does not mint"
+        )
+    if "_disableInitializers()" not in joined:
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "this source does not disable initializers on the implementation",
+        )
+    if deployment != "eip1167_clone":
+        raise PropertyConfigError(
+            "property_fixture_rejected",
+            "the implementation constructor disables initializers, so the instance must be a clone",
+        )
+    if "function clone(address" not in clean[imports["clones"]]:
+        raise PropertyConfigError("property_source_mismatch", "Clones.clone is not available")
+    collateral = _enum_index(joined, "CollateralType", "Collateral")
+    asset_type = _enum_index(joined, "AssetType", "Collateral")
+    if collateral is None or collateral != asset_type:
+        raise PropertyConfigError(
+            "property_source_mismatch",
+            "CollateralType.Collateral and AssetType.Collateral do not share an index",
+        )
+    fields = _struct_fields(clean[imports["config_interface"]], "ConfigData")
+    names = {name for _type_name, name in fields}
+    required = {"silo", "token", "collateralShareToken", "interestRateModel", "hookReceiver"}
+    if not required <= names:
+        raise PropertyConfigError(
+            "property_source_mismatch", "ConfigData is missing a field the deposit path reads"
+        )
+
+
+def render_deposit_harness(
+    texts: Mapping[str, str],
+    *,
+    contract: str,
+    source_file: str,
+    imports: Mapping[str, str],
+) -> str:
+    """Local empty-market deposit. Mocks do not implement Silo accounting."""
+    factory = _declared_name(strip_comments(texts[imports["factory_interface"]]), "interface")
+    config = _declared_name(strip_comments(texts[imports["config_interface"]]), "interface")
+    silo_iface = _declared_name(strip_comments(texts[imports["error_interface"]]), "interface")
+    fields = _struct_fields(strip_comments(texts[imports["config_interface"]]), "ConfigData")
+    if not factory or not config or not silo_iface or not fields:
+        raise PropertyConfigError(
+            "property_source_mismatch", "interface declarations are incomplete"
+        )
+    index = {name: position for position, (_type_name, name) in enumerate(fields)}
+    joined = "\n".join(strip_comments(text) for text in texts.values())
+    collateral = _enum_index(joined, "CollateralType", "Collateral")
+    if collateral is None:
+        raise PropertyConfigError(
+            "property_source_mismatch", "CollateralType.Collateral is missing"
+        )
+    contract_text = strip_comments(texts[source_file])
+    payable = bool(
+        re.search(r"\breceive\s*\(\s*\)\s+external\s+payable\b", contract_text)
+        or re.search(r"\bfallback\s*\(\s*\)\s+external\s+payable\b", contract_text)
+    )
+    clone_expr = (
+        "payable(Clones.clone(address(implementation)))"
+        if payable
+        else "Clones.clone(address(implementation))"
+    )
+    rel = {
+        key: _test_import(imports[key])
+        for key in ("factory_interface", "config_interface", "error_interface", "clones")
+    }
+    width = len(fields) * 32
+    mock = f"""contract LocalFactory {{}}
+
+error LocalAssetError(string reason);
+error LocalConfig(string reason);
+
+contract LocalAsset {{
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function credit(address to, uint256 amount) external {{
+        balanceOf[to] += amount;
+    }}
+
+    function approve(address spender, uint256 amount) external returns (bool) {{
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }}
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {{
+        uint256 allowed = allowance[from][msg.sender];
+        if (allowed != type(uint256).max) {{
+            if (allowed < amount) revert LocalAssetError("allowance");
+            allowance[from][msg.sender] = allowed - amount;
+        }}
+        if (balanceOf[from] < amount) revert LocalAssetError("balance");
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }}
+}}
+
+contract LocalInterestRateModel {{
+    function getCompoundInterestRate(address, uint256) external pure returns (uint256) {{
+        return 0;
+    }}
+}}
+
+contract LocalSiloConfig {{
+    address public boundSilo;
+    address public immutable asset;
+    address public immutable rateModel;
+    bool private entered;
+
+    constructor(address asset_, address rate_) {{
+        asset = asset_;
+        rateModel = rate_;
+    }}
+
+    function bind(address silo) external {{
+        if (boundSilo != address(0) || silo == address(0)) revert LocalConfig("bind");
+        boundSilo = silo;
+    }}
+
+    function accrueInterestForSilo(address silo_) external {{
+        if (msg.sender != boundSilo || silo_ != boundSilo) revert LocalConfig("accrue");
+        {silo_iface}(silo_).accrueInterestForConfig(rateModel, 0, 0);
+    }}
+
+    function turnOnReentrancyProtection() external {{
+        if (msg.sender != boundSilo) revert LocalConfig("caller");
+        if (entered) revert LocalConfig("entered");
+        entered = true;
+    }}
+
+    function turnOffReentrancyProtection() external {{
+        if (msg.sender != boundSilo) revert LocalConfig("caller");
+        if (!entered) revert LocalConfig("inactive");
+        entered = false;
+    }}
+
+    function getCollateralShareTokenAndAsset(address silo_, uint8 kind)
+        external
+        view
+        returns (address shareToken, address token)
+    {{
+        if (silo_ != boundSilo || kind != {collateral}) revert LocalConfig("collateral");
+        shareToken = boundSilo;
+        token = asset;
+    }}
+
+    fallback() external {{
+        if (msg.sig != bytes4(0xe48a5f7b)) revert LocalConfig("selector");
+        address silo_ = boundSilo;
+        address token_ = asset;
+        address rate_ = rateModel;
+        assembly {{
+            let ptr := mload(0x40)
+            mstore(add(ptr, {index["silo"] * 32}), silo_)
+            mstore(add(ptr, {index["token"] * 32}), token_)
+            mstore(add(ptr, {index["collateralShareToken"] * 32}), silo_)
+            mstore(add(ptr, {index["interestRateModel"] * 32}), rate_)
+            return(ptr, {width})
+        }}
+    }}
+}}
+"""
+    if "SiloInitialized" in mock or "require" in mock:
+        raise PropertyConfigError(
+            "property_malformed", "the deposit mock must not implement Silo's guards"
+        )
+    return f"""// SPDX-License-Identifier: UNLICENSED
+// Researcher-supplied local property. Not a vulnerability assertion.
+pragma solidity 0.8.28;
+
+import {{{contract}}} from "{_test_import(source_file)}";
+import {{{factory}}} from "{rel["factory_interface"]}";
+import {{{config}}} from "{rel["config_interface"]}";
+import {{{silo_iface}}} from "{rel["error_interface"]}";
+import {{Clones}} from "{rel["clones"]}";
+
+error BugForgeFixture(bytes data);
+error BugForgeProperty(string reason);
+
+{mock}
+contract DepositAccountingTest {{
+    uint256 internal constant AMOUNT = 1_000_000;
+    event BugForgeState(string label, uint256 value);
+
+    function test_deposit_accounting() public {{
+        ({contract} silo, LocalAsset asset_) = _setup();
+        uint256 previewed = _preview(silo);
+        uint256 userBefore = asset_.balanceOf(address(this));
+        uint256 siloBefore = asset_.balanceOf(address(silo));
+        uint256 sharesBefore = silo.balanceOf(address(this));
+        uint256 collateralBefore = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        uint256 minted = _deposit(silo);
+        _check(
+            silo,
+            asset_,
+            previewed,
+            minted,
+            userBefore,
+            siloBefore,
+            sharesBefore,
+            collateralBefore
+        );
+    }}
+
+    function _setup() internal returns ({contract} silo, LocalAsset asset_) {{
+        asset_ = new LocalAsset();
+        LocalInterestRateModel rate = new LocalInterestRateModel();
+        LocalSiloConfig config_ = new LocalSiloConfig(address(asset_), address(rate));
+        LocalFactory deployedFactory = new LocalFactory();
+        {contract} implementation = new {contract}({factory}(address(deployedFactory)));
+        silo = {contract}({clone_expr});
+        config_.bind(address(silo));
+        (bool ok, bytes memory data) = address(silo).call(
+            abi.encodeCall({contract}.initialize, ({config}(address(config_))))
+        );
+        if (!ok) revert BugForgeFixture(data);
+        asset_.credit(address(this), AMOUNT);
+        asset_.approve(address(silo), AMOUNT);
+    }}
+
+    function _preview({contract} silo) internal view returns (uint256 previewed) {{
+        (bool ok, bytes memory data) = address(silo).staticcall(
+            abi.encodeWithSelector(bytes4(keccak256("previewDeposit(uint256)")), AMOUNT)
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        previewed = abi.decode(data, (uint256));
+        if (previewed == 0) revert BugForgeFixture(bytes("preview_zero"));
+    }}
+
+    function _deposit({contract} silo) internal returns (uint256 minted) {{
+        (bool ok, bytes memory data) = address(silo).call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("deposit(uint256,address)")), AMOUNT, address(this)
+            )
+        );
+        if (!ok || data.length < 32) revert BugForgeFixture(data);
+        minted = abi.decode(data, (uint256));
+    }}
+
+    function _check(
+        {contract} silo,
+        LocalAsset asset_,
+        uint256 previewed,
+        uint256 minted,
+        uint256 userBefore,
+        uint256 siloBefore,
+        uint256 sharesBefore,
+        uint256 collateralBefore
+    ) internal {{
+        uint256 userAfter = asset_.balanceOf(address(this));
+        uint256 siloAfter = asset_.balanceOf(address(silo));
+        uint256 sharesAfter = silo.balanceOf(address(this));
+        uint256 collateralAfter = silo.getTotalAssetsStorage({silo_iface}.AssetType.Collateral);
+        emit BugForgeState("preview_shares", previewed);
+        emit BugForgeState("minted_shares", minted);
+        emit BugForgeState("user_assets_before", userBefore);
+        emit BugForgeState("user_assets_after", userAfter);
+        emit BugForgeState("silo_assets_before", siloBefore);
+        emit BugForgeState("silo_assets_after", siloAfter);
+        emit BugForgeState("share_balance_before", sharesBefore);
+        emit BugForgeState("share_balance_after", sharesAfter);
+        emit BugForgeState("collateral_before", collateralBefore);
+        emit BugForgeState("collateral_after", collateralAfter);
+        if (minted != previewed) revert BugForgeProperty("preview_mismatch");
+        if (sharesAfter != sharesBefore + minted) revert BugForgeProperty("share_balance");
+        if (userAfter != userBefore - AMOUNT) revert BugForgeProperty("user_asset");
+        if (siloAfter != siloBefore + AMOUNT) revert BugForgeProperty("silo_asset");
+        if (collateralAfter != collateralBefore + AMOUNT) revert BugForgeProperty("collateral_assets");
+    }}
+}}
+"""
+
+
+def _enum_index(text: str, enum: str, member: str) -> int | None:
+    match = re.search(rf"enum\s+{enum}\s*\{{([^}}]*)\}}", text)
+    if match is None:
+        return None
+    members = [item.strip().split()[0] for item in match.group(1).split(",") if item.strip()]
+    return members.index(member) if member in members else None
+
+
+def _function_bodies(text: str, name: str) -> list[str]:
+    return [
+        body
+        for match in re.finditer(rf"function\s+{name}\b", text)
+        if (body := _brace_block(text, match.start()))
+    ]
+
+
 def _execute_one(
     prop: Mapping[str, Any],
     repo_root: Path,
@@ -448,13 +970,21 @@ def _execute_one(
                 *(item["path"] for item in current["locations"]),
             ),
         )
-        harness = render_initialization_harness(
-            texts,
-            contract=str(current["contract"]),
-            source_file=str(current["source_file"]),
-            error=str(current["expected_error"]),
-            imports=dict(current["imports"]),
-        )
+        if current["kind"] == "initialization_once":
+            harness = render_initialization_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                error=str(current["expected_error"]),
+                imports=dict(current["imports"]),
+            )
+        else:
+            harness = render_deposit_harness(
+                texts,
+                contract=str(current["contract"]),
+                source_file=str(current["source_file"]),
+                imports=dict(current["imports"]),
+            )
     except (OSError, UnicodeError, PropertyConfigError) as exc:
         reason = exc.reason if isinstance(exc, PropertyConfigError) else str(exc)[:200]
         code = exc.code if isinstance(exc, PropertyConfigError) else "source_unreadable"
@@ -470,7 +1000,7 @@ def _execute_one(
             "property_status": "not_run",
             "forge_invoked": False,
         }, 0
-    cheats = untrusted_cheatcode_use({**compiled, _TEST_FILE: harness})
+    cheats = untrusted_cheatcode_use({**compiled, str(current["test_file"]): harness})
     if cheats:
         return {
             **base,
@@ -489,7 +1019,7 @@ def _execute_one(
     forge = tool_path("forge") or "forge"
     with tempfile.TemporaryDirectory(prefix="bugforge-explicit-") as tmp:
         root = Path(tmp)
-        scaffold(root, compiled, harness, config, test_filename=_TEST_FILE)
+        scaffold(root, compiled, harness, config, test_filename=str(current["test_file"]))
         build = run_local_forge(forge, ["build", "--offline"], root, timeout)
         if build["process_status"] != "completed":
             judged = classify_explicit_result(
@@ -498,6 +1028,7 @@ def _execute_one(
                 return_code=build["return_code"],
                 stdout=build["stdout"],
                 stderr=build["stderr"],
+                expected_test=str(current["test_entry_point"]),
             )
             return _finish(base, judged, build, harness, forged=True), 1
         if build["return_code"] != 0:
@@ -507,11 +1038,12 @@ def _execute_one(
                 return_code=build["return_code"],
                 stdout=build["stdout"],
                 stderr=build["stderr"],
+                expected_test=str(current["test_entry_point"]),
             )
             return _finish(base, judged, build, harness, forged=True), 1
         test = run_local_forge(
             forge,
-            ["test", "--offline", "--json", "-vv", "--match-path", f"test/{_TEST_FILE}"],
+            ["test", "--offline", "--json", "-vv", "--match-path", f"test/{current['test_file']}"],
             root,
             timeout,
         )
@@ -521,6 +1053,7 @@ def _execute_one(
         return_code=test["return_code"],
         stdout=test["stdout"],
         stderr=test["stderr"],
+        expected_test=str(current["test_entry_point"]),
     )
     record = _finish(base, judged, test, harness, forged=True)
     record["compiler_status"] = "ok"
@@ -555,7 +1088,7 @@ def _finish(
 
 
 def _verdict(outcome: str) -> str:
-    if outcome in {"property_held", "property_violated"}:
+    if outcome in {"property_held", "property_violated", "not_tested"}:
         return outcome
     return "not_evaluated"
 
@@ -736,18 +1269,35 @@ def _collect_states(node: Any, found: list[dict[str, str]]) -> None:
                         {"raw": json.dumps(item)[:300], "label": label, "topics": str(topics)[:120]}
                     )
         for value in node.values():
-            if len(found) >= 4:
+            if len(found) >= 16:
                 return
             _collect_states(value, found)
     elif isinstance(node, list):
         for value in node:
-            if len(found) >= 4:
+            if len(found) >= 16:
                 return
             _collect_states(value, found)
 
 
+_ADDRESS_LABELS = frozenset({"after_first", "after_second"})
+_NUMBER_LABELS = frozenset(
+    {
+        "preview_shares",
+        "minted_shares",
+        "user_assets_before",
+        "user_assets_after",
+        "silo_assets_before",
+        "silo_assets_after",
+        "share_balance_before",
+        "share_balance_after",
+        "collateral_before",
+        "collateral_after",
+    }
+)
+
+
 def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
-    """Decode BugForgeState(string,address) from a raw Forge log."""
+    """Decode BugForgeState(string,word) from a raw Forge log."""
     data = item.get("data")
     if not isinstance(data, str) or not data.startswith("0x"):
         return None
@@ -757,8 +1307,7 @@ def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
     try:
         words = [raw[index : index + 64] for index in range(0, len(raw), 64)]
         offset = int(words[0], 16) // 32
-        value = "0x" + words[1][-40:]
-        if int(value, 16) == 0 or offset >= len(words) - 1:
+        if offset >= len(words) - 1:
             return None
         length = int(words[offset], 16)
         if not 0 < length <= 32:
@@ -766,9 +1315,14 @@ def _decode_state_log(item: Mapping[str, Any]) -> dict[str, str] | None:
         label = bytes.fromhex(words[offset + 1])[:length].decode("ascii")
     except (ValueError, UnicodeError, IndexError):
         return None
-    if label not in {"after_first", "after_second"}:
-        return None
-    return {"label": label, "value": value}
+    if label in _ADDRESS_LABELS:
+        value = "0x" + words[1][-40:]
+        if int(value, 16) == 0:
+            return None
+        return {"label": label, "value": value}
+    if label in _NUMBER_LABELS:
+        return {"label": label, "value": str(int(words[1], 16))}
+    return None
 
 
 def _read_cited(repo_root: Path, paths: Sequence[str]) -> dict[str, str]:
@@ -806,15 +1360,15 @@ def _imports(raw: Any) -> dict[str, str]:
     return found
 
 
-def _fixtures(raw: Any) -> tuple[str, ...]:
+def _fixtures(raw: Any, extra: set[str] | None = None) -> tuple[str, ...]:
     if not isinstance(raw, Sequence) or isinstance(raw, str) or not raw:
         raise PropertyConfigError("property_incomplete", "fixture_dependencies are required")
     found = tuple(str(item).strip() for item in raw if str(item).strip())
-    required = {"local_factory", "local_silo_config", "eip1167_clone"}
+    required = {"local_factory", "local_silo_config", "eip1167_clone"} | set(extra or ())
     if not required <= set(found):
+        missing = ", ".join(sorted(required - set(found)))
         raise PropertyConfigError(
-            "property_incomplete",
-            "fixture_dependencies must include local_factory, local_silo_config, and eip1167_clone",
+            "property_incomplete", f"fixture_dependencies must include {missing}"
         )
     return found
 
