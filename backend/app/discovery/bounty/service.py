@@ -349,7 +349,9 @@ class BountyCampaignService:
     ) -> BountyCampaign:
         files = _sanitize_files(spec.files)
         selection = self._selection(spec, files)
-        chosen = files or selection.selected
+        # Named targets keep their resolved import closure. The operator file list
+        # is only the fallback when nothing in that list could be read.
+        chosen = selection.selected if selection.selected else files
         extra = {"project_id": spec.manifest.program_id, **spec.manifest.request_extra()}
         extra.update(selection.request_extra())
         if spec.address:
@@ -885,7 +887,15 @@ class BountyCampaignService:
             )
             campaign.request = replace(campaign.request, files=fresh.selected)
         else:
-            fresh = select_named(campaign.spec.repo_root, campaign.request.files)
+            named = tuple(campaign.spec.files) or tuple(
+                item.path for item in campaign.selection.ranked if item.role == "target"
+            )
+            fresh = select_named(campaign.spec.repo_root, named or campaign.request.files)
+            campaign.request = replace(
+                campaign.request,
+                files=fresh.selected or named or campaign.request.files,
+                extra={**campaign.request.extra, **fresh.request_extra()},
+            )
         campaign.selection = fresh
         campaign.cache.pop("analysis", None)
         campaign.cache.pop("analysis_token", None)
@@ -1553,6 +1563,19 @@ class BountyCampaignService:
             "verified": False,
         }
 
+    def _static_status(self, campaign: BountyCampaign) -> str:
+        """The static engine's own status. A missing run is not a completed scan."""
+        found = ""
+        for item in campaign.state.evidence:
+            if item.engine != "bugforge-static":
+                continue
+            status = item.attrs.get("analysis_status", "")
+            if status:
+                found = status
+            elif item.attrs.get("status") == "timeout":
+                found = "TIMED_OUT"
+        return found
+
     def _coverage_facts(
         self, campaign: BountyCampaign, analysis: CampaignAnalysis
     ) -> dict[str, Any]:
@@ -1606,6 +1629,7 @@ class BountyCampaignService:
             "candidates": len(analysis.candidates),
             "sequences": len(analysis.sequences),
             "skipped": analysis.sequence_skipped,
+            "static_analysis_status": self._static_status(campaign),
         }
 
     def research_ledger(self, campaign_id: str) -> dict[str, Any]:

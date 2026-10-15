@@ -585,21 +585,40 @@ def _contract_profiles(graph: SyntaxGraph) -> tuple[dict[str, str], dict[str, st
         if {"safetransferfrom", "balanceof"} <= owned and "ownerof" in owned:
             kinds.setdefault(name, "erc721")
             confidence.setdefault(name, "structural")
-    changed = True
-    while changed:
+    # Inheritance is applied once per edge. A child that would inherit two
+    # different kinds is a conflict and is left unclassified. Replacing the
+    # kind on every pass oscillates on multiple inheritance and does not finish.
+    conflict: set[str] = set()
+    for _step in range(len(bases) + 1):
         changed = False
         for name, parents in bases.items():
+            if name in conflict:
+                continue
             for parent in parents:
                 parent_name = re.sub(r"\(.*", "", parent).strip()
                 kind = kinds.get(parent_name) or _TOKEN_NAMES.get(parent_name.lower(), "")
-                if not kind or kinds.get(name) == kind:
+                if not kind:
                     continue
-                kinds[name] = kind
+                current = kinds.get(name)
+                if current == kind:
+                    continue
+                if current:
+                    conflict.add(name)
+                    kinds.pop(name, None)
+                    confidence.pop(name, None)
+                    changed = True
+                    break
                 parent_confidence = confidence.get(parent_name, "strong")
                 if parent_name.lower() in _TOKEN_NAMES:
                     parent_confidence = "strong"
+                kinds[name] = kind
                 confidence[name] = parent_confidence
                 changed = True
+        if not changed:
+            break
+    for name in conflict:
+        kinds.pop(name, None)
+        confidence.pop(name, None)
     return kinds, confidence
 
 

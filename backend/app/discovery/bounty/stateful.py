@@ -684,6 +684,9 @@ def abi_type(model: ResearchModel, type_name: str) -> str | None:
         return "address" + suffix
     if _TOKEN_TYPE.match(name):
         return "address" + suffix
+    members = model.enums.get(name)
+    if members:
+        return "uint8" + suffix
     return None
 
 
@@ -893,6 +896,19 @@ class _Synth:
             raise _UnbuildableError(
                 "fixed-size arrays are not expressible", "param_not_expressible"
             )
+        enum_name = re.sub(r"\[.*\]", "", _strip_type(param.type_name)).split(".")[-1]
+        members = self.model.enums.get(enum_name)
+        if members and abi == "uint8":
+            if override in {"", "zero", "0"}:
+                return "0"
+            if override in members:
+                return str(members.index(override))
+            if override.isdigit() and int(override) < len(members):
+                return override
+            raise _UnbuildableError(
+                f"parameter {param.name or '?'} ({param.type_name}) has no enum member {override!r}",
+                "enum_member_unknown",
+            )
         if abi == "address":
             if override == "reverting_callee":
                 if not self.failing_callee:
@@ -981,10 +997,14 @@ class _Synth:
             raise _UnbuildableError(exc.reason, exc.code) from exc
         stripped = _strip_type(param.type_name)
         if stripped != profile.model_type:
-            raise _UnbuildableError(
-                f"{param.name} is {stripped}, not profile type {profile.model_type}",
-                "profile_type_mismatch",
+            compatible = profile.model_type == "address" and (
+                stripped == "address" or abi_type(self.model, param.type_name) == "address"
             )
+            if not compatible:
+                raise _UnbuildableError(
+                    f"{param.name} is {stripped}, not profile type {profile.model_type}",
+                    "profile_type_mismatch",
+                )
         self.pre_deploy.extend(prepared.deploy_lines)
         self.profile_contracts = prepared.contracts
         self.profile_imports = prepared.import_paths

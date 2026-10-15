@@ -36,10 +36,23 @@ class BugforgeStaticEngine(DiscoveryEngine):
         return "phase27"
 
     def _analyze_target(self, request: AnalysisRequest) -> DynamicResult:
-        from app.security.engine import SecurityAnalysisEngine
+        from app.security.engine import DEFAULT_STATIC_DEADLINE_S, SecurityAnalysisEngine
 
         files = _files_for_request(request)
-        result = SecurityAnalysisEngine().analyze_repository(request.repo_root, files)
+        targets = {
+            line.strip()
+            for line in request.extra.get("analysis_targets", "").splitlines()
+            if line.strip()
+        }
+        deadline = _deadline(
+            request.extra.get("static_analysis_deadline_s", ""), DEFAULT_STATIC_DEADLINE_S
+        )
+        result = SecurityAnalysisEngine().analyze_repository(
+            request.repo_root,
+            files,
+            target_files=targets or None,
+            deadline_s=deadline,
+        )
         findings = tuple(
             DynamicFinding(
                 detector_id=item.rule_id,
@@ -55,20 +68,43 @@ class BugforgeStaticEngine(DiscoveryEngine):
             for item in result.observations
             if not request.function or item.metadata.get("function") in {"", request.function}
         )
+        if result.status == "COMPLETED":
+            outcome = ResultStatus.INGESTED
+        elif result.status == "TIMED_OUT":
+            outcome = ResultStatus.TIMEOUT
+        else:
+            outcome = ResultStatus.FAILED
         return DynamicResult(
             engine=self.engine_id,
             engine_version=self.version(),
             language=request.language,
             target=request.target or str(request.repo_root),
-            status=ResultStatus.INGESTED,
-            executed=True,
+            status=outcome,
+            executed=result.status == "COMPLETED",
             findings=findings,
             source_file=request.source_file,
             function=request.function,
             contract=request.contract,
             provenance="bugforge_static",
-            metadata={"verified": "false", "files": str(result.files_analyzed)},
+            metadata={
+                "verified": "false",
+                "files": str(result.files_analyzed),
+                "analysis_status": result.status,
+                "target_files": str(result.target_files),
+                "dependency_files": str(result.dependency_files),
+                "limitations": "; ".join(result.limitations)[:500],
+                **{f"timing_{name}_ms": str(value) for name, value in result.timings_ms.items()},
+            },
         )
+
+
+def _deadline(raw: str, default: float) -> float:
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def foundry_project(root: Path) -> bool:

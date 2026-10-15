@@ -8,14 +8,16 @@ A profile binds to those file hashes, so a changed dependency cannot reuse it.
 With no profile, the harness still refuses to invent a struct.
 
 The schema parser resolves elementary types, arrays, and structs declared in the
-bound files. It does not resolve enums or user-defined value types, and it says
-so with ``profile_type_unsupported`` instead of accepting a value that merely
-compiles.
+bound files. An enum is accepted only when its declaration is in those files and
+the value is one of its members. A user-defined value type stays unsupported.
+An address constructor argument is accepted only when the profile supplies the
+value and a local provenance; the harness does not invent one.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -52,7 +54,9 @@ ROLE_EXPRESSION = {
     "victim": "address(0xB0B)",
 }
 PRIVILEGED_ROLES = frozenset({"governor", "pause_guardian"})
-_KINDS = frozenset({"uint", "bool", "role", "fixture", "struct", "array"})
+_KINDS = frozenset({"uint", "bool", "role", "fixture", "struct", "array", "address", "enum"})
+_ADDRESS_PROVENANCE = frozenset({"local_fixture", "local_deployment"})
+_ADDRESS_LITERAL = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _FIXTURE_KINDS = frozenset(
     {
         "decimals_token",
@@ -93,6 +97,7 @@ class ProfileValue:
     type_name: str = ""
     fields: tuple[tuple[str, ProfileValue], ...] = ()
     items: tuple[ProfileValue, ...] = ()
+    provenance: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         if self.kind == "struct":
@@ -107,7 +112,12 @@ class ProfileValue:
                 "type_name": self.type_name,
                 "items": [item.to_dict() for item in self.items],
             }
-        return {"kind": self.kind, "value": self.value}
+        body = {"kind": self.kind, "value": self.value}
+        if self.provenance:
+            body["provenance"] = self.provenance
+        if self.kind == "enum" and self.type_name:
+            body["type_name"] = self.type_name
+        return body
 
 
 @dataclass(frozen=True)
@@ -219,6 +229,35 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def argument_digest(parameter: str, solidity_type: str, value: ProfileValue) -> str:
+    """Integrity hash of one explicit address argument. Value and provenance both participate."""
+    payload = json.dumps(
+        {
+            "parameter": parameter,
+            "provenance": value.provenance,
+            "solidity_type": solidity_type,
+            "value": value.value.lower(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _require_argument_hash(
+    raw: Mapping[str, Any], parameter: str, solidity_type: str, value: ProfileValue
+) -> None:
+    supplied = raw.get("argument_sha256", "")
+    if not isinstance(supplied, str) or not _SHA.fullmatch(supplied):
+        raise ProfileError(
+            "profile_malformed", "argument_sha256 is required for an address argument"
+        )
+    if supplied != argument_digest(parameter, solidity_type, value):
+        raise ProfileError(
+            "profile_tampered", "argument_sha256 does not match the address argument"
+        )
+
+
 def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
     """Validate a profile document. Rejects anything that is not a typed value."""
     if not isinstance(raw, Mapping):
@@ -245,6 +284,7 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         "property_template",
         "probe_argument",
         "observed_fixture",
+        "argument_sha256",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -258,21 +298,35 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
     solidity_type = _type_name(_required_text(raw, "solidity_type"), "solidity_type")
     if solidity_type.endswith("[]"):
         raise ProfileError("profile_malformed", "the constructor type is not an array")
-    struct_name = _ident(raw, "struct_name")
-    if solidity_type.split(".")[-1] != model_type.split(".")[-1]:
-        raise ProfileError("profile_type_mismatch", "solidity_type does not name the model type")
-    if struct_name != model_type.split(".")[-1]:
-        raise ProfileError("profile_type_mismatch", "struct_name does not match the model type")
     source_file = _path(raw, "source_file")
-    struct_file = _path(raw, "struct_file")
     source_sha256 = _sha(raw, "source_sha256")
     fixtures = _fixtures(raw.get("fixtures", []))
     fixture_ids = {item.fixture_id for item in fixtures}
     value = _value(raw.get("value"), fixture_ids, depth=0)
-    if value.kind != "struct":
-        raise ProfileError("profile_malformed", "the profile value must be a struct")
-    if value.type_name != solidity_type:
-        raise ProfileError("profile_type_mismatch", "the struct type does not match solidity_type")
+    address_profile = model_type == "address" or value.kind == "address"
+    if address_profile:
+        if model_type != "address" or value.kind != "address":
+            raise ProfileError(
+                "profile_type_mismatch", "an address profile value does not match its model type"
+            )
+        struct_name = "address"
+        struct_file = source_file
+        _require_argument_hash(raw, parameter, solidity_type, value)
+    else:
+        struct_name = _ident(raw, "struct_name")
+        struct_file = _path(raw, "struct_file")
+        if solidity_type.split(".")[-1] != model_type.split(".")[-1]:
+            raise ProfileError(
+                "profile_type_mismatch", "solidity_type does not name the model type"
+            )
+        if struct_name != model_type.split(".")[-1]:
+            raise ProfileError("profile_type_mismatch", "struct_name does not match the model type")
+        if value.kind != "struct":
+            raise ProfileError("profile_malformed", "the profile value must be a struct")
+        if value.type_name != solidity_type:
+            raise ProfileError(
+                "profile_type_mismatch", "the struct type does not match solidity_type"
+            )
     _reject_privileged_attacker(value)
     imports = _paths(raw.get("imports", []), "imports")
     bound = _bound_files(raw.get("bound_files", []))
@@ -497,13 +551,29 @@ def _lookup_declared(
             enums.append(path)
         if value_re.search(text):
             values.append(path)
-    if enums or values:
-        kind = "enum" if enums else "user-defined value type"
+    if values and not enums:
         raise ProfileError(
             "profile_type_unsupported",
-            f"{short} is a {kind}. The schema parser resolves elementary types, arrays, "
-            "and structs in the bound sources, and does not resolve this kind",
+            f"{short} is a user-defined value type. The schema parser resolves elementary "
+            "types, arrays, structs, and enums in the bound sources, and does not resolve "
+            "this kind",
         )
+    if enums:
+        if structs:
+            raise ProfileError(
+                "profile_type_ambiguous",
+                f"{short} is declared as both a struct and an enum in the bound sources",
+            )
+        from app.parsing.solidity_enums import lookup_enum
+
+        found = lookup_enum(texts, short)
+        if found is None or found == ("", ()) or not found[1]:
+            raise ProfileError(
+                "profile_type_ambiguous",
+                f"{short} is an enum the bound sources do not resolve to one declaration",
+            )
+        path, members = found
+        return "enum", path, tuple((name, str(index)) for index, name in enumerate(members))
     if not structs:
         raise ProfileError(
             "profile_type_unresolved",
@@ -520,6 +590,17 @@ def _lookup_declared(
 
 def _types_match(declared: str, supplied: str) -> bool:
     return declared.split(".")[-1] == supplied.split(".")[-1]
+
+
+def _check_enum(value: ProfileValue, declared: str, fields: tuple[tuple[str, str], ...]) -> None:
+    if value.kind != "enum" or not _types_match(declared, value.type_name or declared):
+        raise ProfileError("profile_type_mismatch", f"{declared} requires an enum value")
+    names = [name for name, _index in fields]
+    if value.value in names:
+        return
+    if value.value.isdigit() and int(value.value) < len(names):
+        return
+    raise ProfileError("profile_enum_rejected", f"{value.value!r} is not a member of {declared}")
 
 
 def _check_value(
@@ -560,6 +641,19 @@ def _check_value(
             raise ProfileError("profile_type_mismatch", f"{declared_type} requires a bool")
         return
     if category == "address":
+        if value.kind == "address":
+            if value.provenance not in _ADDRESS_PROVENANCE or not _ADDRESS_LITERAL.fullmatch(
+                value.value
+            ):
+                raise ProfileError(
+                    "profile_address_rejected",
+                    f"{declared_type} requires an explicit local address",
+                )
+            if int(value.value, 16) == 0:
+                raise ProfileError(
+                    "profile_address_rejected", "the zero address is not a local fixture"
+                )
+            return
         if value.kind == "fixture":
             fixture = fixtures.get(value.value)
             if fixture is None or fixture.kind not in _ADDRESS_FIXTURES:
@@ -570,7 +664,8 @@ def _check_value(
             return
         if value.kind != "role":
             raise ProfileError(
-                "profile_type_mismatch", f"{declared_type} requires a role or a fixture address"
+                "profile_type_mismatch",
+                f"{declared_type} requires a role, a fixture, or an explicit local address",
             )
         return
     if category == "array":
@@ -588,7 +683,10 @@ def _check_value(
             _check_value(item, nested, texts, fixtures, depth + 1)
         return
     if category == "struct":
-        _kind, _path, fields = _lookup_declared(texts, nested)
+        kind, _path, fields = _lookup_declared(texts, nested)
+        if kind == "enum":
+            _check_enum(value, nested, fields)
+            return
         if value.kind != "struct" or not _types_match(nested, value.type_name):
             raise ProfileError("profile_type_mismatch", f"{declared_type} requires struct {nested}")
         expected = tuple(name for _type_name, name in fields)
@@ -720,10 +818,19 @@ def _match_paren(text: str, open_at: int) -> int:
 def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> PreparedProfile:
     """Solidity fragments for a profile that still matches ``sources``."""
     texts = _bound_texts(profile, sources)
+    if profile.value.kind == "address":
+        _validate_address(profile, texts)
+        return PreparedProfile(
+            expression=f"address({profile.value.value})",
+            deploy_lines=(),
+            contracts="",
+            import_paths=profile.imports,
+            provenance=profile.public_dict(),
+        )
     _validate_tree(profile, texts)
     variables = _deploy_fixtures(profile.fixtures)
     statements: list[str] = []
-    expression = _render(profile.value, variables, statements)
+    expression = _render(profile.value, variables, statements, texts)
     contracts = _fixture_contracts(profile.fixtures)
     deploy_text = "\n".join(statements)
     if len(expression) > 8_000 or len(contracts) > 8_000 or len(deploy_text) > 8_000:
@@ -1043,6 +1150,13 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
     seeded = _seed_sequence(model, analysis.sequence_identity, profile, chosen)
     if isinstance(seeded, str):
         analysis.sequence_skipped[f"constructor_profile:{profile.profile_id}"] = seeded
+        if profile.model_type == "address":
+            # The address is still a constructor input. It does not invent a property.
+            record = profile.public_dict()
+            record["sequence"] = "not_seeded"
+            record["sequence_reason"] = seeded
+            campaign.cache["constructor_profile"] = record
+            return record
         record = {
             "validation": "rejected",
             "reason_code": "profile_property_unsupported",
@@ -1306,15 +1420,105 @@ def _contract_name(item: ProfileFixture) -> str:
     return f"{prefix}_{item.fixture_id}"
 
 
+def _validate_address(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
+    declared = _declared_constructor_type(
+        texts.get(profile.source_file, ""), profile.contract, profile.parameter
+    )
+    if declared is None:
+        raise ProfileError(
+            "profile_type_unparsed",
+            f"constructor parameter {profile.parameter} was not found on {profile.contract}",
+        )
+    if not _types_match(_bare_type(declared), _bare_type(profile.solidity_type)):
+        raise ProfileError(
+            "profile_type_mismatch",
+            f"{profile.parameter} is {declared}, not {profile.solidity_type}",
+        )
+    if not _address_compatible(declared, texts):
+        raise ProfileError(
+            "profile_type_mismatch",
+            f"{declared} is not an address-compatible constructor argument",
+        )
+
+
+def _bare_type(type_name: str) -> str:
+    text = type_name.replace("payable", " ").replace("memory", " ").replace("calldata", " ")
+    return " ".join(text.split())
+
+
+def _address_compatible(declared: str, texts: Mapping[str, str]) -> bool:
+    short = _bare_type(declared).split(".")[-1]
+    if short == "address":
+        return True
+    for text in texts.values():
+        if re.search(rf"\b(?:contract|interface)\s+{re.escape(short)}\b", text):
+            return True
+    return False
+
+
+def _declared_constructor_type(text: str, contract: str, parameter: str) -> str | None:
+    params = _constructor_params(text, contract)
+    if params is None:
+        return None
+    for type_name, name in _split_params(params):
+        if name == parameter:
+            return type_name
+    return None
+
+
+def _split_params(text: str) -> tuple[tuple[str, str], ...]:
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+            buf.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            buf.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    found: list[tuple[str, str]] = []
+    for part in parts:
+        piece = " ".join(part.split())
+        if not piece:
+            continue
+        match = re.fullmatch(r"(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)$", piece)
+        if match is None:
+            found.append((piece, ""))
+        else:
+            found.append((match.group(1).strip(), match.group(2)))
+    return tuple(found)
+
+
 def _render(
     value: ProfileValue,
     variables: list[tuple[str, str, str]],
     statements: list[str],
+    texts: Mapping[str, str],
 ) -> str:
     if value.kind == "uint":
         return value.value
     if value.kind == "bool":
         return value.value
+    if value.kind == "address":
+        return f"address({value.value})"
+    if value.kind == "enum":
+        from app.parsing.solidity_enums import lookup_enum
+
+        found = lookup_enum(texts, value.type_name)
+        members = found[1] if found else ()
+        if value.value in members:
+            index = members.index(value.value)
+        else:
+            index = int(value.value)
+        return f"{value.type_name}({index})"
     if value.kind == "role":
         return ROLE_EXPRESSION[value.value]
     if value.kind == "fixture":
@@ -1328,11 +1532,11 @@ def _render(
             f"        {value.type_name}[] memory {name} = new {value.type_name}[]({len(value.items)});"
         )
         for index, item in enumerate(value.items):
-            rendered = _render(item, variables, statements)
+            rendered = _render(item, variables, statements, texts)
             statements.append(f"        {name}[{index}] = {rendered};")
         return name
     fields = ", ".join(
-        f"{name}: {_render(child, variables, statements)}" for name, child in value.fields
+        f"{name}: {_render(child, variables, statements, texts)}" for name, child in value.fields
     )
     return f"{value.type_name}({{ {fields} }})"
 
@@ -1363,6 +1567,27 @@ def _value(raw: Any, fixture_ids: set[str], depth: int) -> ProfileValue:
         if text not in fixture_ids:
             raise ProfileError("profile_unresolved_fixture", f"fixture {text!r} is not declared")
         return ProfileValue("fixture", text)
+    if kind == "address":
+        text = str(raw.get("value", ""))
+        provenance = str(raw.get("provenance", ""))
+        if not _ADDRESS_LITERAL.fullmatch(text):
+            raise ProfileError("profile_malformed", "an address value is not a 20-byte hex address")
+        if provenance not in _ADDRESS_PROVENANCE:
+            raise ProfileError(
+                "profile_address_rejected",
+                "an address argument needs provenance local_fixture or local_deployment",
+            )
+        if int(text, 16) == 0:
+            raise ProfileError(
+                "profile_address_rejected", "the zero address is not a local fixture"
+            )
+        return ProfileValue("address", text, provenance=provenance)
+    if kind == "enum":
+        text = str(raw.get("value", ""))
+        type_name = _type_name(str(raw.get("type_name", "")), "enum type")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]{1,8}", text):
+            raise ProfileError("profile_malformed", "an enum value is not a member name or index")
+        return ProfileValue("enum", text, type_name=type_name)
     if kind == "array":
         type_name = _type_name(str(raw.get("type_name", "")), "array type")
         items = raw.get("items", [])

@@ -222,9 +222,17 @@ def items_from_result(
         "runtime_mode",
         "request_identity",
         "deterministic",
+        "analysis_status",
+        "files",
+        "target_files",
+        "dependency_files",
+        "limitations",
     ):
         if result.metadata.get(name):
             base_attrs[name] = _clip(result.metadata[name])
+    for name, value in result.metadata.items():
+        if name.startswith("timing_") and name.endswith("_ms") and value:
+            base_attrs[name] = _clip(str(value))
     kind = result.to_evidence().kind.value
     items: list[EvidenceItem] = [
         _item(

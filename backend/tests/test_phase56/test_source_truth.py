@@ -164,7 +164,9 @@ def test_an_intentional_partial_analysis_is_not_repository_coverage(tmp_path: Pa
     selection = select_named(tmp_path, ("Target.sol",))
     assert selection.mode == "explicit"
     assert selection.dependency_status() == "traced"
-    assert selection.repository_candidates == 2
+    assert selection.repository_candidates == 1
+    assert "Other.sol" not in selection.selected
+    assert selection.role_of("Target.sol") == "target"
     summary = campaign_coverage(
         files_discovered=selection.considered,
         files_selected=len(selection.selected),

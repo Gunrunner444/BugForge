@@ -174,7 +174,7 @@ def test_incomplete_dependency_hashes_and_enums_fail_closed() -> None:
         ],
     )
     enum_raw["value"]["fields"][2]["value"] = {"kind": "uint", "value": "0"}  # type: ignore[index]
-    _rejects(enum_raw, "profile_type_unsupported", {HOST: enum_host, OTHER: OTHER_TEXT})
+    _rejects(enum_raw, "profile_type_mismatch", {HOST: enum_host, OTHER: OTHER_TEXT})
 
 
 def test_source_commit_must_match_the_campaign_revision() -> None:

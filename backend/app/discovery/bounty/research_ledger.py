@@ -779,6 +779,7 @@ def campaign_coverage(
     analysis_only_files: int | None = None,
     scope_excluded: int | None = None,
     constructor_profile: Mapping[str, Any] | None = None,
+    static_analysis_status: str = "",
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
@@ -859,6 +860,7 @@ def campaign_coverage(
         and not unread
         and files_read >= files_selected
         and files_selected > 0
+        and static_analysis_status not in {"TIMED_OUT", "PARTIAL"}
     )
     blocker = _blocker(
         files_selected=files_selected,
@@ -883,6 +885,7 @@ def campaign_coverage(
             for record in records.values()
             if str(record.get("reason_code") or "") == "compiler_unavailable"
         ),
+        static_analysis_status=static_analysis_status,
     )
     return {
         "files_discovered": files_discovered,
@@ -933,6 +936,7 @@ def campaign_coverage(
         "blocker": blocker,
         "constructor_profile": dict(constructor_profile) if constructor_profile else None,
         "local_results_are_not_production_verification": True,
+        "static_analysis_status": static_analysis_status or "not_recorded",
         "verified": False,
     }
 
@@ -1227,11 +1231,16 @@ def _blocker(
     reason_codes: set[str] | None = None,
     policy_skips: Mapping[str, Mapping[str, Any]] | None = None,
     compiler_reasons: Sequence[str] = (),
+    static_analysis_status: str = "",
 ) -> str:
     """The single most useful reason a campaign did not evaluate a property.
 
     A nonzero Forge invocation does not hide a more specific failure.
     """
+    if static_analysis_status == "TIMED_OUT":
+        return "static analysis timed out before it completed; the result is not verified"
+    if static_analysis_status == "PARTIAL":
+        return "static analysis was partial; the result is not verified"
     if analysis_stale:
         return (
             "the analyzed snapshot no longer matches the repository; reanalyze "
