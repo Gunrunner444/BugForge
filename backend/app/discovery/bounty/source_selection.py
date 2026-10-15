@@ -109,6 +109,10 @@ class SourceSelection:
     # True when every traced dependency of the target was kept in ``selected``.
     closure_complete: bool = True
     scope_excluded: tuple[str, ...] = ()
+    # Files reached by the import walk. They are context, not extra bounty targets.
+    resolved_dependencies: tuple[str, ...] = ()
+    # origin, import spec, status, resolved path or reason.
+    import_edges: tuple[tuple[str, str, str, str], ...] = ()
 
     @staticmethod
     def explicit(files: tuple[str, ...]) -> SourceSelection:
@@ -201,6 +205,11 @@ class SourceSelection:
         extra["source_dependency_status"] = self.dependency_status()
         extra["source_files_read"] = str(self.files_read)
         extra["source_files_not_read"] = str(self.files_not_read)
+        extra["source_closure_dependencies"] = str(len(self.resolved_dependencies))
+        extra["source_closure_unresolved"] = str(len(self.unresolved_imports))
+        targets = [item.path for item in self.ranked if item.role == "target"]
+        if targets:
+            extra["analysis_targets"] = "\n".join(targets)
         return extra
 
     def as_dict(self) -> dict[str, Any]:
@@ -236,6 +245,12 @@ class SourceSelection:
             "excluded_count": self.excluded_count,
             "enumeration_capped": self.enumeration_capped,
             "closure_complete": self.closure_complete,
+            "resolved_dependency_count": len(self.resolved_dependencies),
+            "resolved_dependencies": list(self.resolved_dependencies),
+            "import_edges": [
+                {"origin": origin, "import": spec, "status": status, "detail": detail}
+                for origin, spec, status, detail in self.import_edges
+            ],
             "scope_excluded_count": len(self.scope_excluded),
             "scope_excluded": list(self.scope_excluded[:200]),
             "role_counts": _role_counts(self.ranked),
@@ -437,49 +452,78 @@ def select_sources(
     )
 
 
-def select_named(repo_root: Path, files: tuple[str, ...]) -> SourceSelection:
-    """The operator named the files. Imports are traced inside that set only.
+def select_named(
+    repo_root: Path,
+    files: tuple[str, ...],
+    *,
+    file_limit: int = 512,
+    excluded_roots: tuple[str, ...] = (),
+) -> SourceSelection:
+    """The operator named the targets. Their import closure is resolved around them.
 
-    A named file that cannot be read is recorded and is not replaced with empty
-    source. An import that is not part of the named set stays unresolved.
+    Named files stay bounty targets. Files reached only through imports are
+    compile dependencies and are not extra targets. The repository is not
+    enumerated: a Solidity file that the targets do not import is not a candidate.
+    A missing import is an unresolved edge, not a silent omission.
     """
+    from app.discovery.bounty.import_closure import resolve_import_closure
+
     root = repo_root.resolve()
     if not root.is_dir():
         return SourceSelection((), (), 0, len(files), False, (), mode="unassessed")
-    candidates, excluded, capped = _enumerate(root)
-    sources, reads = read_source_files(root, files)
-    contract_to_files = _contract_index(sources)
-    _resolved, unresolved, ambiguous_imports, escaped, dependency_notes = _trace_dependencies(
-        set(sources), sources, root, contract_to_files
+    _sources, reads = read_source_files(root, files)
+    readable = tuple(record.path for record in reads if record.status == "read")
+    closure = resolve_import_closure(
+        root, readable, file_limit=file_limit, excluded_roots=excluded_roots
     )
-    notes = list(dependency_notes)
-    for record in reads:
+    dependency_reads: tuple[FileRead, ...] = ()
+    if closure.dependencies:
+        _dep_sources, dependency_reads = read_source_files(root, closure.dependencies)
+    notes = list(closure.notes)
+    for record in (*reads, *dependency_reads):
         if record.status != "read":
             notes.append(
                 f"{record.path} was not read ({record.reason}); "
                 "its declarations and imports were not traced"
             )
-    if capped:
-        notes.append(f"repository enumeration stopped at {MAX_CANDIDATE_FILES} Solidity files")
+    unresolved = tuple(
+        (edge.origin, edge.spec) for edge in closure.edges if edge.status == "unresolved"
+    )
+    escaped = tuple(
+        (edge.origin, edge.spec)
+        for edge in closure.edges
+        if edge.status == "unresolved" and edge.reason == "outside_repository"
+    )
     ranked = tuple(
         RankedFile(path, Priority.SCOPE, "named by the operator", "target") for path in files
+    ) + tuple(
+        RankedFile(
+            path,
+            Priority.IMPORTED_BY_SCOPE,
+            "import required to compile or analyse the named target",
+            "compile_dependency",
+        )
+        for path in closure.dependencies
     )
+    selected = readable + closure.dependencies
     return SourceSelection(
-        selected=tuple(files),
+        selected=selected,
         ranked=ranked,
-        considered=len(files),
-        limit=len(files),
-        truncated=False,
-        dropped=(),
+        considered=len(selected),
+        limit=file_limit,
+        truncated=not closure.closure_complete and bool(closure.omitted),
+        dropped=tuple(edge.resolved for edge in closure.omitted if edge.resolved),
         mode="explicit",
-        unresolved_imports=tuple(unresolved),
-        ambiguous_imports=tuple(ambiguous_imports),
-        escaped_imports=tuple(escaped),
+        unresolved_imports=unresolved,
+        escaped_imports=escaped,
         dependency_notes=tuple(notes),
-        reads=reads,
-        repository_candidates=len(candidates),
-        excluded_count=excluded,
-        enumeration_capped=capped,
+        reads=tuple(reads) + tuple(dependency_reads),
+        repository_candidates=len(selected),
+        excluded_count=0,
+        enumeration_capped=False,
+        closure_complete=closure.closure_complete,
+        resolved_dependencies=closure.dependencies,
+        import_edges=tuple(edge.as_tuple() for edge in closure.edges),
     )
 
 

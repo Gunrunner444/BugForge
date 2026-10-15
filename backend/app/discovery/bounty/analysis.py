@@ -127,7 +127,12 @@ def analyze_campaign(
 ) -> CampaignAnalysis:
     sources, primary_reads = read_source_files(repo_root, files)
     read_log: list[FileRead] = list(primary_reads)
-    model = build_research_model(sources) if sources else None
+    prefer = tuple(item.path for item in selection.ranked if item.role == "target")
+    model = (
+        build_research_model(sources, max_files=max(1, min(len(sources), 512)), prefer=prefer)
+        if sources
+        else None
+    )
     target = deployment_identity(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
     )
@@ -156,6 +161,8 @@ def analyze_campaign(
     def absorb(
         part: ResearchModel, found: tuple[SemanticCandidate, ...], part_sources: dict[str, str]
     ) -> None:
+        if target_files:
+            found = tuple(item for item in found if item.file in target_files)
         candidates.extend(found)
         for path, text in part_sources.items():
             hashes.setdefault(path, _sha256(text))
@@ -177,8 +184,16 @@ def analyze_campaign(
                 models[item.sequence_id] = part
                 sequence_sources[item.sequence_id] = part_sources
 
+    target_files = (
+        {item.path for item in selection.ranked if item.role == "target"}
+        if selection.mode == "explicit"
+        else set()
+    )
     if model is not None:
-        absorb(model, run_suite(model).candidates, sources)
+        found = run_suite(model).candidates
+        if target_files:
+            found = tuple(item for item in found if item.file in target_files)
+        absorb(model, found, sources)
         ambiguous |= set(model.ambiguous)
 
     # Bounded follow-up over dropped high-priority files.

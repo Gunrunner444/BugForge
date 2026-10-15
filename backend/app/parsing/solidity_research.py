@@ -129,6 +129,8 @@ class ResearchModel:
     # treat that as a match for whatever source text is supplied.
     source_hashes: tuple[tuple[str, str], ...] = ()
     source_set_digest: str = ""
+    # Enum name -> members in source order. Absent when two files disagree.
+    enums: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def bases_of(self, contract: str) -> tuple[str, ...]:
         """Base contracts, nearest first, bounded and cycle-safe."""
@@ -373,24 +375,36 @@ def build_research_model(
     max_files: int = MAX_FILES,
     max_contracts: int = MAX_CONTRACTS,
     max_functions: int = MAX_FUNCTIONS,
+    prefer: tuple[str, ...] = (),
 ) -> ResearchModel:
     model = ResearchModel()
     notes: list[str] = []
     contracts: dict[str, RContract] = {}
     ambiguous: set[str] = set()
     function_count = 0
-    ordered = sorted(sources)
+    preferred = [path for path in prefer if path in sources]
+    ordered = preferred + [path for path in sorted(sources) if path not in set(preferred)]
     if len(ordered) > max_files:
         model.truncated = True
         notes.append(f"only {max_files} of {len(ordered)} files were read")
     hasher = hashlib.sha256()
     considered = ordered[:max_files]
     file_hashes: list[tuple[str, str]] = []
+    from app.parsing.solidity_enums import enums_in_text
+
+    enums: dict[str, tuple[str, ...]] = {}
+    enum_conflict: set[str] = set()
     for path in considered:
         text = sources[path]
         file_hashes.append((path, hashlib.sha256(text.encode("utf-8")).hexdigest()))
         hasher.update(path.encode())
         hasher.update(hashlib.sha256(text.encode()).digest())
+        for enum_name, members in enums_in_text(text).items():
+            previous = enums.get(enum_name)
+            if previous is not None and previous != members:
+                enum_conflict.add(enum_name)
+            elif enum_name not in enums:
+                enums[enum_name] = members
         if len(text) > MAX_FILE_BYTES:
             model.truncated = True
             notes.append(f"{path} exceeds {MAX_FILE_BYTES} bytes and was skipped")
@@ -405,8 +419,12 @@ def build_research_model(
                 continue
             function_count += len(contract.functions)
             contracts[contract.name] = contract
+    for enum_name in sorted(enum_conflict):
+        enums.pop(enum_name, None)
+        notes.append(f"enum {enum_name} is declared differently in more than one file")
     model.contracts = contracts
     model.ambiguous = frozenset(ambiguous)
+    model.enums = enums
     model.notes = tuple(notes)
     model.digest = hasher.hexdigest()[:16]
     model.source_hashes = tuple(file_hashes)

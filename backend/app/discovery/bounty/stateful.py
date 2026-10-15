@@ -684,6 +684,9 @@ def abi_type(model: ResearchModel, type_name: str) -> str | None:
         return "address" + suffix
     if _TOKEN_TYPE.match(name):
         return "address" + suffix
+    members = model.enums.get(name)
+    if members:
+        return "uint8" + suffix
     return None
 
 
@@ -893,6 +896,19 @@ class _Synth:
             raise _UnbuildableError(
                 "fixed-size arrays are not expressible", "param_not_expressible"
             )
+        enum_name = re.sub(r"\[.*\]", "", _strip_type(param.type_name)).split(".")[-1]
+        members = self.model.enums.get(enum_name)
+        if members and abi == "uint8":
+            if override in {"", "zero", "0"}:
+                return "0"
+            if override in members:
+                return str(members.index(override))
+            if override.isdigit() and int(override) < len(members):
+                return override
+            raise _UnbuildableError(
+                f"parameter {param.name or '?'} ({param.type_name}) has no enum member {override!r}",
+                "enum_member_unknown",
+            )
         if abi == "address":
             if override == "reverting_callee":
                 if not self.failing_callee:
@@ -981,10 +997,14 @@ class _Synth:
             raise _UnbuildableError(exc.reason, exc.code) from exc
         stripped = _strip_type(param.type_name)
         if stripped != profile.model_type:
-            raise _UnbuildableError(
-                f"{param.name} is {stripped}, not profile type {profile.model_type}",
-                "profile_type_mismatch",
+            compatible = profile.model_type == "address" and (
+                stripped == "address" or abi_type(self.model, param.type_name) == "address"
             )
+            if not compatible:
+                raise _UnbuildableError(
+                    f"{param.name} is {stripped}, not profile type {profile.model_type}",
+                    "profile_type_mismatch",
+                )
         self.pre_deploy.extend(prepared.deploy_lines)
         self.profile_contracts = prepared.contracts
         self.profile_imports = prepared.import_paths
@@ -1893,7 +1913,12 @@ class ProjectSettings:
     evm_requested: str = ""
 
 
-def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = None) -> str:
+def foundry_config(
+    pipeline: str,
+    solc: str,
+    settings: ProjectSettings | None = None,
+    remappings: tuple[str, ...] = (),
+) -> str:
     """Server-owned Foundry config. Nothing from the analyzed repository reaches it.
 
     ``pipeline`` may force a corroboration variant. It is never interpolated.
@@ -1936,9 +1961,24 @@ def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = 
         + f"via_ir = {via_ir}\n"
         + f"optimizer = {optimizer}\n"
         + runs_line
-        + 'remappings = ["forge-std/=lib/forge-std/src/"]\n'
+        + f"remappings = [{_remapping_list(remappings)}]\n"
         + "\n[lint]\nlint_on_build = false\n"
     )
+
+
+_SAFE_REMAPPING = re.compile(r"^[A-Za-z0-9_@./-]+=[A-Za-z0-9_@./-]+$")
+
+
+def _remapping_list(remappings: tuple[str, ...]) -> str:
+    """Forge-std plus caller remappings that stay inside the generated project."""
+    items = ["forge-std/=lib/forge-std/src/"]
+    for item in remappings:
+        if item in items or not _SAFE_REMAPPING.fullmatch(item) or ".." in item:
+            continue
+        if not item.split("=", 1)[1].startswith("src/"):
+            continue
+        items.append(item)
+    return ", ".join(json.dumps(item) for item in items)
 
 
 def _safe_env(home: str) -> dict[str, str]:
@@ -1953,7 +1993,48 @@ def _safe_env(home: str) -> dict[str, str]:
     }
 
 
-def scaffold(root: Path, sources: Mapping[str, str], harness_source: str, config: str) -> None:
+def run_local_forge(forge: str, args: list[str], root: Path, timeout: int) -> dict[str, Any]:
+    """One offline Forge invocation. The environment carries no RPC URL or key."""
+    try:
+        proc = subprocess.run(
+            [forge, *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=_safe_env(str(root)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "process_status": "timeout",
+            "return_code": None,
+            "stdout": str(exc.stdout or ""),
+            "stderr": str(exc.stderr or ""),
+        }
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "process_status": "spawn_failed",
+            "return_code": None,
+            "stdout": "",
+            "stderr": str(exc)[:500],
+        }
+    return {
+        "process_status": "completed",
+        "return_code": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+    }
+
+
+def scaffold(
+    root: Path,
+    sources: Mapping[str, str],
+    harness_source: str,
+    config: str,
+    *,
+    test_filename: str = "VfcsHarness.t.sol",
+) -> None:
     """Lay out a self-contained Foundry project from the exact source set."""
     (root / "src").mkdir(parents=True, exist_ok=True)
     (root / "test").mkdir(parents=True, exist_ok=True)
@@ -1965,7 +2046,10 @@ def scaffold(root: Path, sources: Mapping[str, str], harness_source: str, config
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-    (root / "test" / "VfcsHarness.t.sol").write_text(harness_source, encoding="utf-8")
+    safe_name = test_filename if re.fullmatch(r"[A-Za-z0-9_.-]+\.sol", test_filename) else ""
+    if not safe_name:
+        safe_name = "VfcsHarness.t.sol"
+    (root / "test" / safe_name).write_text(harness_source, encoding="utf-8")
     (root / "lib" / "forge-std" / "src" / "Test.sol").write_text(_FORGE_STD, encoding="utf-8")
     (root / "foundry.toml").write_text(config, encoding="utf-8")
 
