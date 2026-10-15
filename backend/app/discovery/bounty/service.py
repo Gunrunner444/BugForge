@@ -1306,11 +1306,19 @@ class BountyCampaignService:
             compiler is None and not required and tools.solc != "available"
         ):
             missing = "forge" if tool_path("forge") is None else "solc"
+            reason = f"{missing} is not installed; unavailable"
             return {
                 **unavailable,
-                "reason": f"{missing} is not installed; unavailable",
+                "reason": reason,
                 "blocker": "Foundry or solc is unavailable",
                 "dynamic_foundry_execution_demonstrated": False,
+                "explicit_properties": _unavailable_explicit(campaign, reason),
+                "campaign_summary": {
+                    "verified": False,
+                    "candidates": 0,
+                    "property_evaluation_demonstrated": False,
+                    "blocker": "Foundry or solc is unavailable",
+                },
             }
         analysis = self._analysis(campaign)
         context = self._identity_context(campaign, analysis)
@@ -1903,6 +1911,34 @@ def _run_tools(ambient: Any, compiler: Any, executor: Any, required: str) -> dic
         "optimizer_runs": "" if project is None else flag(project.optimizer_runs),
         "via_ir": "" if project is None else flag(project.via_ir),
     }
+
+
+def _unavailable_explicit(campaign: BountyCampaign, reason: str) -> dict[str, dict[str, Any]]:
+    """Researcher-supplied properties stay visible when Forge cannot start."""
+    found: dict[str, dict[str, Any]] = {}
+    for prop in campaign.spec.explicit_properties:
+        property_id = str(prop.get("property_id", "explicit"))
+        found[property_id] = {
+            "sequence_id": property_id,
+            "origin": "researcher_supplied",
+            "property_source": "researcher_supplied",
+            "property_id": property_id,
+            "outcome": "unavailable",
+            "reason": reason,
+            "reason_code": "tool_missing",
+            "process_status": "not_run",
+            "compiler_status": "not_run",
+            "test_status": "not_run",
+            "sequence_status": "not_run",
+            "property_status": "not_run",
+            "forge_invoked": False,
+            "executed": False,
+            "verified": False,
+            "candidate": False,
+            "strong_candidate": False,
+            "vulnerability_finding": False,
+        }
+    return found
 
 
 def _run_explicit_properties(

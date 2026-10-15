@@ -9,6 +9,7 @@ import pytest
 
 from app.discovery.bounty.explicit_property import (
     PropertyConfigError,
+    _base_record,
     _state_observations,
     classify_explicit_result,
     normalize_explicit_properties,
@@ -350,6 +351,7 @@ def test_an_explicit_property_reaches_foundry_without_a_detector_candidate(tmp_p
     result = svc.stateful_execute(campaign.campaign_id, rounds=1)
     explicit = result["explicit_properties"]["silo.initialize_once"]
     assert explicit["forge_invoked"] is True
+    assert explicit["test_entry_point"] == "test_initialize_once"
     assert explicit["outcome"] == "property_held", explicit.get("stderr_tail", "")[-500:]
     assert explicit["property_status"] == "held"
     assert explicit["compiler_status"] == "ok"
@@ -486,6 +488,19 @@ def _deposit_property(**overrides: object) -> dict[str, object]:
     }
     raw.update(overrides)
     return raw
+
+
+def test_the_execution_record_keeps_the_property_test_entry() -> None:
+    record = _base_record(
+        {
+            "property_id": "silo.deposit_accounting",
+            "kind": "erc4626_deposit_accounting",
+            "test_entry_point": "test_deposit_accounting",
+        }
+    )
+    assert record["test_entry_point"] == "test_deposit_accounting"
+    assert record["vulnerability_finding"] is False
+    assert record["verified"] is False
 
 
 def test_a_deposit_property_is_validated_against_the_source(tmp_path: Path) -> None:

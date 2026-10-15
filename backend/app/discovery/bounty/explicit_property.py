@@ -1107,7 +1107,7 @@ def _base_record(prop: Mapping[str, Any]) -> dict[str, Any]:
         "strong_candidate": False,
         "verified": False,
         "vulnerability_finding": False,
-        "test_entry_point": "test_initialize_once",
+        "test_entry_point": str(prop.get("test_entry_point", "")),
     }
 
 
