@@ -37,6 +37,7 @@ from app.discovery.bounty.properties import (
     OracleSpec,
     PropertyVerdict,
     precondition_indices,
+    prior_payout_indices,
     probe_index,
 )
 from app.discovery.bounty.stateful import (
@@ -110,7 +111,16 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
         )
         violated = f"        return bfVal[{K_BEFORE}][{probe}] != bfVal[{K_AFTER}][{probe}];\n"
     elif kind is OracleKind.BALANCE_NOT_INCREASED:
-        judged = f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1];\n"
+        # The probe is an additional payout only when an earlier call of the same
+        # function by the same actor succeeded. Otherwise the probe is the ordinary
+        # payout, and a revert means the round trip was not exercised.
+        payouts = prior_payout_indices(sequence, oracle, probe)
+        payout_guard = "".join(f"        if (!_bfOk({i})) return false;\n" for i in payouts)
+        probe_guard = "" if payouts else f"        if (!_bfOk({probe})) return false;\n"
+        judged = (
+            f"{payout_guard}{probe_guard}"
+            f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1];\n"
+        )
         violated = f"        return bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0];\n"
     elif kind is OracleKind.CREDIT_LE_RECEIVED:
         judged = (

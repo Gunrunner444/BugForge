@@ -1007,6 +1007,31 @@ def precondition_indices(sequence: Vfcs, oracle: OracleSpec, probe: int) -> tupl
     )
 
 
+def prior_payout_indices(sequence: Vfcs, oracle: OracleSpec, probe: int) -> tuple[int, ...]:
+    """Earlier calls that pay the probe's function for the probe's actor.
+
+    The ordinary payout is one of these calls. The probe is an additional
+    payout only when one of them succeeded. A role named ``withdraw`` is not
+    that evidence: the binding is the probe's ``(role, function)`` plus a
+    prior call of the same function by the same actor.
+    """
+    if probe < 0 or probe >= len(sequence.calls):
+        return ()
+    probe_call = sequence.calls[probe]
+    function = oracle.probe_function
+    if probe_call.primitive or not function or probe_call.function != function:
+        return ()
+    return tuple(
+        index
+        for index, call in enumerate(sequence.calls)
+        if index < probe
+        and not call.primitive
+        and call.function == function
+        and call.actor == probe_call.actor
+        and call.role != probe_call.role
+    )
+
+
 def evaluate(
     sequence: Vfcs, oracle: OracleSpec, observation: OracleObservation
 ) -> PropertyEvaluation:
@@ -1031,6 +1056,10 @@ def evaluate(
             False,
         )
     if any(observation.call_ok[i] != 1 for i in required):
+        if oracle.kind is OracleKind.BALANCE_NOT_INCREASED and _ordinary_payout_failed(
+            sequence, oracle, observation, probe
+        ):
+            return _payout_not_completed(probe)
         return PropertyEvaluation(
             PropertyVerdict.NOT_EVALUATED,
             "a precondition call reverted, so the property could not be judged",
@@ -1116,7 +1145,7 @@ def evaluate(
             PropertyVerdict.PROPERTY_HELD, f"{oracle.getter} did not change", probe, True, True
         )
     if kind is OracleKind.BALANCE_NOT_INCREASED:
-        return _conservation_verdict(oracle, observation, probe, probe_ok)
+        return _conservation_verdict(sequence, oracle, observation, probe, probe_ok)
     if kind is OracleKind.CREDIT_LE_RECEIVED:
         if not observation.readable or observation.credited is None or observation.received is None:
             return PropertyEvaluation(
@@ -1172,17 +1201,54 @@ def evaluate(
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
 
 
-def _conservation_verdict(
-    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
-) -> PropertyEvaluation:
-    """The attacker's own balance over the whole sequence. A refused probe can still hold.
+def _ordinary_payout_failed(
+    sequence: Vfcs, oracle: OracleSpec, observation: OracleObservation, probe: int
+) -> bool:
+    """True when an earlier payout of the probe's function did not succeed.
 
-    Every precondition already succeeded, so the deposits and the first withdrawal
-    happened. The probe is the repeat withdrawal: a revert there is the protection
-    working, not a missing result.
+    A failed deposit is not this case. Only a payout that the sequence placed
+    before the probe, and that itself did not succeed, is the ordinary payout
+    the round trip needed.
+    """
+    payouts = prior_payout_indices(sequence, oracle, probe)
+    if not payouts or any(
+        observation.call_ok[i] != 1
+        for i in precondition_indices(sequence, oracle, probe)
+        if i not in payouts and i < min(payouts)
+    ):
+        return False
+    return any(observation.call_ok[i] != 1 for i in payouts)
+
+
+def _payout_not_completed(probe: int) -> PropertyEvaluation:
+    return PropertyEvaluation(
+        PropertyVerdict.NOT_EVALUATED,
+        "the intended withdrawal did not succeed, so the round trip did not complete. "
+        "This test does not establish normal withdrawal behavior",
+        probe,
+        False,
+    )
+
+
+def _conservation_verdict(
+    sequence: Vfcs,
+    oracle: OracleSpec,
+    observation: OracleObservation,
+    probe: int,
+    probe_ok: int,
+) -> PropertyEvaluation:
+    """The attacker's own balance over the whole sequence.
+
+    A reverted probe is a refused additional payout only when an earlier call of
+    the same function, by the same actor, succeeded. Otherwise the probe is the
+    ordinary payout, and its revert means the round trip was not exercised.
     """
     before, after = observation.actor_before, observation.actor_after
     evidence = observation.evidence
+    payouts = prior_payout_indices(sequence, oracle, probe)
+    ordinary_done = bool(payouts) and all(observation.call_ok[i] == 1 for i in payouts)
+    if not ordinary_done and probe_ok != 1:
+        return _payout_not_completed(probe)
     if not observation.readable or before is None or after is None:
         return PropertyEvaluation(
             PropertyVerdict.NOT_EVALUATED,
@@ -1190,20 +1256,15 @@ def _conservation_verdict(
             probe,
             evidence=evidence,
         )
-    repeat = oracle.probe_role == "withdraw_again"
-    if not repeat and probe_ok != 1:
-        return PropertyEvaluation(
-            PropertyVerdict.NOT_EVALUATED,
-            f"the only withdrawal {oracle.probe_function} reverted, so the round trip did not "
-            "complete and conservation was not exercised",
-            probe,
-            evidence=evidence,
+    if ordinary_done and probe_ok != 1:
+        outcome = (
+            f"; an earlier {oracle.probe_function} by the same actor succeeded, and the "
+            "additional payout reverted"
         )
-    outcome = (
-        f"; the repeat {oracle.probe_function} {'succeeded' if probe_ok == 1 else 'reverted'}"
-        if repeat
-        else ""
-    )
+    elif ordinary_done:
+        outcome = f"; the additional {oracle.probe_function} succeeded"
+    else:
+        outcome = ""
     readings = _evidence_text(evidence)
     if after > before:
         return PropertyEvaluation(
@@ -1341,11 +1402,14 @@ def _authorization_verdict(
             False,
             control,
         )
+    if control == "changed":
+        control_text = "after the authorized positive control changed it"
+    else:
+        control_text = "no positive control was part of this test"
     return PropertyEvaluation(
         PropertyVerdict.PROPERTY_HELD,
         "the probe call reverted with the expected authorization error "
-        f"{oracle.revert_selector} and the observed state stayed unchanged after the "
-        "authorized positive control changed it",
+        f"{oracle.revert_selector} and the observed state stayed unchanged; {control_text}",
         probe,
         True,
         True,

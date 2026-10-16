@@ -1426,6 +1426,17 @@ class _Synth:
         if conserving:
             self.read_actor(1)
             self.read_evidence(1)
+        # A second actor can supply or approve before a non-balance probe. Funding
+        # them only for balance oracles made an unauthorized withdrawal look like
+        # an empty account reverting, which is not an authorization result.
+        if self.token_kind:
+            self.approve(ATTACKER, ATTACKER_ADDR, "the attacker can move the fixture token")
+            if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
+                self.approve(
+                    VICTIM,
+                    VICTIM_ADDR,
+                    "another actor in this sequence moves the fixture token",
+                )
         if self.token_kind and not self.token_bound:
             raise _UnbuildableError(
                 f"{self.contract} reads its token from state the harness cannot bind "

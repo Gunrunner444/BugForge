@@ -13,11 +13,13 @@ from app.discovery.bounty.priority import prioritize
 from app.discovery.bounty.properties import (
     OracleKind,
     OracleObservation,
+    OracleSpec,
     PropertyDeclaration,
     PropertyFamily,
     PropertyVerdict,
     build_property,
     evaluate,
+    probe_index,
 )
 from app.discovery.bounty.research_ledger import build_ledger
 from app.discovery.bounty.stateful import (
@@ -208,6 +210,100 @@ def test_credit_and_receipt_no_longer_decide_the_balance_oracle() -> None:
     credit = replace(credit, probe_function=sequence.calls[0].function, precondition_roles=())
     verdict = evaluate(sequence, credit, _obs(credited=10, received=1))
     assert verdict.verdict is PropertyVerdict.PROPERTY_VIOLATED
+
+
+def test_a_reverted_withdrawal_is_judged_only_after_a_completed_payout() -> None:
+    """Ordinary and additional payouts are different results, in both judges."""
+    model, candidate, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    oracle = spec.oracle
+    roles = [call.role for call in sequence.calls]
+    ordinary = roles.index("withdraw")
+    extra = roles.index("withdraw_again")
+    succeeded = [1, 1, 1, 1]
+
+    additional = succeeded.copy()
+    additional[extra] = 0
+    held = evaluate(sequence, oracle, _obs(call_ok=tuple(additional)))
+    assert held.verdict is PropertyVerdict.PROPERTY_HELD
+    assert "additional payout reverted" in held.reason
+    assert "earlier" in held.reason
+
+    failed_first = succeeded.copy()
+    failed_first[ordinary] = 0
+    missed = evaluate(sequence, oracle, _obs(call_ok=tuple(failed_first), actor_after=500))
+    assert missed.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "intended withdrawal did not succeed" in missed.reason
+    assert "does not establish normal withdrawal" in missed.reason
+
+    overpaid = evaluate(sequence, oracle, _obs(actor_after=150))
+    assert overpaid.verdict is PropertyVerdict.PROPERTY_VIOLATED
+    assert "+50" in overpaid.reason
+
+    unread = evaluate(sequence, oracle, _obs(actor_before=None))
+    assert unread.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "could not be read" in unread.reason
+
+    swapped = replace(
+        sequence,
+        calls=(sequence.calls[1], sequence.calls[0], sequence.calls[2], sequence.calls[3]),
+    )
+    assert probe_index(swapped, oracle) == 3
+    rebound = build_property(swapped, model, candidate)
+    assert rebound.oracle.probe_role == "withdraw_again"
+    assert probe_index(swapped, rebound.oracle) == 3
+    assert evaluate(swapped, rebound.oracle, _obs(actor_after=140)).verdict is (
+        PropertyVerdict.PROPERTY_VIOLATED
+    )
+
+    # The probe's role name is not evidence that an ordinary payout already happened.
+    early = replace(
+        sequence,
+        calls=(sequence.calls[0], sequence.calls[1], sequence.calls[3], sequence.calls[2]),
+    )
+    early_spec = build_property(early, model, candidate)
+    early_probe = probe_index(early, early_spec.oracle)
+    assert early.calls[early_probe].role == "withdraw_again"
+    assert "withdraw" not in early_spec.oracle.precondition_roles
+    early_ok = [1, 1, 1, 1]
+    early_ok[early_probe] = 0
+    early_verdict = evaluate(early, early_spec.oracle, _obs(call_ok=tuple(early_ok)))
+    assert early_verdict.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "intended withdrawal did not succeed" in early_verdict.reason
+
+    judged, violated = _judge(sequence, oracle)
+    assert judged is not None and f"if (!_bfOk({ordinary})) return false;" in judged
+    assert f"if (!_bfOk({extra})) return false;" not in judged
+    assert f"bfSeen[{K_ACTOR}][0]" in judged and f"bfSeen[{K_ACTOR}][1]" in judged
+    assert violated is not None and f"bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0]" in violated
+
+    sole_calls = tuple(call for call in sequence.calls if call.role != "withdraw_again")
+    sole = replace(sequence, calls=sole_calls)
+    sole_oracle = build_property(sole, model, candidate).oracle
+    assert sole_oracle.probe_role == "withdraw"
+    sole_judged, _sole_violated = _judge(sole, sole_oracle) or ("", "")
+    sole_probe = probe_index(sole, sole_oracle)
+    assert f"if (!_bfOk({sole_probe})) return false;" in sole_judged
+    sole_failed = evaluate(sole, sole_oracle, _obs(call_ok=(1, 1, 0), actor_after=100))
+    assert sole_failed.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "intended withdrawal did not succeed" in sole_failed.reason
+    sole_overpaid = evaluate(sole, sole_oracle, _obs(call_ok=(1, 1, 1), actor_after=160))
+    assert sole_overpaid.verdict is PropertyVerdict.PROPERTY_VIOLATED
+
+
+def test_a_second_actor_is_funded_for_a_non_balance_oracle() -> None:
+    model, _, sequence, _, sources = _round_trip("missing_debit", "vulnerable")
+    calls = tuple(call for call in sequence.calls if call.role in {"victim_deposit", "withdraw"})
+    trimmed = replace(sequence, calls=calls)
+    oracle = OracleSpec(
+        kind=OracleKind.CALL_MUST_FAIL,
+        probe_role="withdraw",
+        probe_function=calls[-1].function,
+        precondition_roles=("victim_deposit",),
+    )
+    harness = build_harness(trimmed, model, oracle=oracle, sources=sources)
+    assert harness.buildable, harness.reason
+    assert "bfToken.mint(address(0xB0B)" in harness.body
+    assert "bfToken.approve(address(t), type(uint256).max)" in harness.body
 
 
 def test_engine_harness_judges_the_same_balance() -> None:
