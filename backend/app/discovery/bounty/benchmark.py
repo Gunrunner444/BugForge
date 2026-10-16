@@ -6,6 +6,10 @@ should reach on each (the safe twin runs the *same* sequence, rebuilt from the
 vulnerable candidate, against the fixed code). Everything is local: fixtures are read
 from a directory on disk; nothing is downloaded.
 
+A ``hypothesis`` case names a hypothesis source that is meant to fire on both twins.
+Its emission is not scored as detector precision. Only execution can discriminate it:
+the vulnerable twin must violate the property and the safe twin must hold it.
+
 The report is a regression signal for these fixtures only. It is **not** a real-world
 detection rate and must never be presented as one.
 """
@@ -18,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.properties import build_property
-from app.discovery.bounty.vfcs import generate
+from app.discovery.bounty.vfcs import generate, mutate
 from app.discovery.orchestration.codec import digest
 from app.parsing.solidity_research import build_research_model
 from app.parsing.solidity_research_suite import run_suite
@@ -29,6 +33,13 @@ DISCLAIMER = (
     "against itself; this is not a real-world detection rate"
 )
 MAX_CASES = 64
+FUNNEL_STAGES = (
+    "sequence_generated",
+    "property_executable",
+    "harness_built",
+    "forge_executed",
+    "property_judged",
+)
 
 
 def _fires(text: str, file: str, detector: str, contract: str) -> tuple[bool, Any, Any]:
@@ -48,6 +59,23 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
         raise ValueError("not a BugForge local benchmark")
     cases: list[dict[str, Any]] = []
     totals = {"tp": 0, "fn": 0, "fp": 0, "tn": 0}
+    hypotheses = {
+        "cases": 0,
+        "emitted_vulnerable": 0,
+        "emitted_safe": 0,
+        "execution_discriminated": 0,
+        "execution_not_discriminated": 0,
+        "execution_not_run": 0,
+        "discriminated_after_feedback": 0,
+    }
+    funnel: dict[str, int] = {"attempted": 0, **{stage: 0 for stage in FUNNEL_STAGES}}
+    # One bounded feedback round after a held primary run, as campaigns do.
+    feedback_totals = {
+        "runs": 0,
+        "violations_on_vulnerable": 0,
+        "violations_on_safe": 0,
+        "cases_changed": 0,
+    }
     stateful = {"agree": 0, "disagree": 0, "not_run": 0}
     identity_validation = {"outcome": "not_run", "executed": None, "forge_delta": None}
     for case in list(spec.get("cases", []))[:MAX_CASES]:
@@ -61,14 +89,23 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             texts["vulnerable"], files["vulnerable"].name, detector, contract
         )
         safe_hit, _, safe_model = _fires(texts["safe"], files["safe"].name, detector, contract)
-        totals["tp" if vuln_hit else "fn"] += 1
-        totals["fp" if safe_hit else "tn"] += 1
+        kind = str(case.get("kind", "detector"))
+        if kind == "hypothesis":
+            hypotheses["cases"] += 1
+            hypotheses["emitted_vulnerable"] += int(vuln_hit)
+            hypotheses["emitted_safe"] += int(safe_hit)
+            static = "emitted_both" if vuln_hit and safe_hit else "fail"
+        else:
+            totals["tp" if vuln_hit else "fn"] += 1
+            totals["fp" if safe_hit else "tn"] += 1
+            static = "pass" if vuln_hit and not safe_hit else "fail"
         result: dict[str, Any] = {
             "id": case["id"],
+            "kind": kind,
             "detector": detector,
             "vulnerable_fires": vuln_hit,
             "safe_fires": safe_hit,
-            "static": "pass" if vuln_hit and not safe_hit else "fail",
+            "static": static,
             "rationale": str(case.get("rationale", "")),
             "ground_truth": str(case.get("ground_truth", "unknown")),
         }
@@ -81,11 +118,13 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
         if expected and executor is not None and candidate is not None:
             outcomes: dict[str, str] = {}
             observed: dict[str, Any] = {}
+            feedback: dict[str, str] = {}
             vulnerable_sequence = None
             for role, model, text, path in (
                 ("vulnerable", vuln_model, texts["vulnerable"], files["vulnerable"]),
                 ("safe", safe_model, texts["safe"], files["safe"]),
             ):
+                funnel["attempted"] += 1
                 twin = replace(candidate, file=path.name)
                 role_sources = {path.name: text}
                 built = generate(model, [twin], sources=role_sources)
@@ -97,6 +136,31 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 obs = executor.execute(sequence, model, {path.name: text}, spec=spec_)
                 outcomes[role] = obs.outcome.value
                 observed[role] = obs
+                reached = (
+                    True,
+                    spec_.executable,
+                    obs.harness is not None and obs.harness.buildable,
+                    bool(obs.executed),
+                    obs.outcome.value in {"property_violated", "property_held"},
+                )
+                for stage, ok in zip(FUNNEL_STAGES, reached, strict=True):
+                    funnel[stage] += int(ok)
+                signal = obs.signal() if obs.outcome.value == "property_held" else None
+                if signal is not None:
+                    child_outcomes = [
+                        executor.execute(
+                            child, model, role_sources, spec=build_property(child, model, twin)
+                        ).outcome.value
+                        for child in mutate([sequence], [signal])
+                    ]
+                    feedback_totals["runs"] += len(child_outcomes)
+                    if "property_violated" in child_outcomes:
+                        feedback[role] = "property_violated"
+                        feedback_totals[f"violations_on_{role}"] += 1
+                    elif "property_held" in child_outcomes:
+                        feedback[role] = "property_held"
+                    else:
+                        feedback[role] = child_outcomes[0] if child_outcomes else "no_variant"
                 if role == "vulnerable":
                     vulnerable_sequence = sequence
             result["stateful"] = outcomes
@@ -115,6 +179,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 "mechanism_observed": "mechanism_only",
                 "failure_propagated": "mechanism_not_reproduced",
                 "no_sequence": "not_a_confirmed_vulnerability",
+                "inconclusive": "inconclusive_not_judged",
             }
             result["vulnerability_label"] = labels.get(
                 outcomes.get("vulnerable", ""), "unclassified"
@@ -136,6 +201,28 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 }
                 result["identity_rejection"] = rejected.outcome.value
             agreed = all(outcomes.get(role) == want for role, want in expected.items())
+            discriminated = (
+                outcomes.get("vulnerable") == "property_violated"
+                and outcomes.get("safe") == "property_held"
+            )
+            result["execution_discriminates"] = discriminated
+            final = {
+                role: feedback.get(role) if feedback.get(role) == "property_violated" else value
+                for role, value in outcomes.items()
+            }
+            after = (
+                final.get("vulnerable") == "property_violated"
+                and final.get("safe") == "property_held"
+            )
+            if feedback:
+                result["feedback"] = feedback
+            result["execution_discriminates_after_feedback"] = after
+            if after != discriminated or final != outcomes:
+                feedback_totals["cases_changed"] += 1
+            if kind == "hypothesis":
+                key = "execution_discriminated" if discriminated else "execution_not_discriminated"
+                hypotheses[key] += 1
+                hypotheses["discriminated_after_feedback"] += int(after)
             executed = any(getattr(item, "executed", False) for item in observed.values())
             verified = any(getattr(item, "verified", False) for item in observed.values())
             result["checks"] = {
@@ -168,6 +255,10 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 stateful["disagree"] += 1
         elif expected:
             stateful["not_run"] += 1
+            if kind == "hypothesis":
+                hypotheses["execution_not_run"] += 1
+        if case.get("known_limitation"):
+            result["known_limitation"] = str(case["known_limitation"])
         cases.append(result)
     judged = totals["tp"] + totals["fp"]
     report = {
@@ -179,6 +270,9 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             totals["tp"] / (totals["tp"] + totals["fn"]) if (totals["tp"] + totals["fn"]) else None
         ),
         "stateful": stateful,
+        "hypotheses": hypotheses,
+        "execution_funnel": funnel,
+        "feedback": feedback_totals,
         "identity_validation": identity_validation,
         "disclaimer": DISCLAIMER,
         "emission_is_not_vulnerability_precision": True,
@@ -190,6 +284,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             "cases": [
                 {
                     "id": case["id"],
+                    "kind": case["kind"],
                     "static": case["static"],
                     "vulnerable_fires": case["vulnerable_fires"],
                     "safe_fires": case["safe_fires"],
@@ -197,12 +292,16 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                     "vulnerability_label": case["vulnerability_label"],
                     "ground_truth": case["ground_truth"],
                     "stateful": case.get("stateful"),
+                    "feedback": case.get("feedback"),
                     "identity_rejection": case.get("identity_rejection"),
                 }
                 for case in cases
             ],
             "totals": totals,
             "stateful": stateful,
+            "hypotheses": hypotheses,
+            "execution_funnel": funnel,
+            "feedback": feedback_totals,
             "identity_validation": identity_validation,
             "fixture_precision": report["fixture_precision"],
             "fixture_recall": report["fixture_recall"],

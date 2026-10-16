@@ -1,0 +1,55 @@
+"""Hypothesis cases in the local benchmark: scored apart from detectors, judged by execution."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from app.discovery.bounty.benchmark import run_benchmark
+from app.discovery.bounty.stateful import StatefulExecutor
+from tests.test_phase52.phase52_support import requires_forge
+
+HISTORY = Path(__file__).resolve().parents[1] / "fixtures" / "phase52_history"
+
+
+def test_static_benchmark_scores_hypotheses_apart_from_detectors() -> None:
+    report = run_benchmark(HISTORY)
+    cases = json.loads((HISTORY / "benchmark.json").read_text())["cases"]
+    detectors = [c for c in cases if c.get("kind", "detector") == "detector"]
+    hypotheses = [c for c in cases if c.get("kind") == "hypothesis"]
+    assert report["totals"] == {
+        "tp": len(detectors),
+        "fn": 0,
+        "fp": 0,
+        "tn": len(detectors),
+    }
+    assert report["hypotheses"]["cases"] == len(hypotheses) == 4
+    assert report["hypotheses"]["emitted_vulnerable"] == 4
+    assert report["hypotheses"]["emitted_safe"] == 4
+    statics = {c["id"]: c["static"] for c in report["cases"] if c["kind"] == "hypothesis"}
+    assert set(statics.values()) == {"emitted_both"}
+    assert report["verified"] is False and report["real_world_rate"] is None
+
+
+@requires_forge
+def test_execution_discriminates_round_trip_twins_and_feedback_finds_the_rounding_twin() -> None:
+    report = run_benchmark(HISTORY, executor=StatefulExecutor())
+    by_id = {c["id"]: c for c in report["cases"]}
+    for stem in ("missing_debit", "post_transfer_price"):
+        case = by_id[f"roundtrip_{stem}"]
+        assert case["stateful"] == {"vulnerable": "property_violated", "safe": "property_held"}
+        assert case["execution_discriminates"] is True
+        assert case["vulnerability_label"] == "local_property_violation_unverified"
+    rounding = by_id["roundtrip_index_rounding"]
+    assert rounding["stateful"] == {"vulnerable": "property_held", "safe": "property_held"}
+    assert rounding["execution_discriminates"] is False
+    assert rounding["feedback"] == {"vulnerable": "property_violated", "safe": "property_held"}
+    assert rounding["execution_discriminates_after_feedback"] is True
+    unbound = by_id["roundtrip_unbound_token"]
+    assert unbound["stateful"] == {"vulnerable": "inconclusive", "safe": "inconclusive"}
+    assert unbound["vulnerability_label"] == "inconclusive_not_judged"
+    assert report["hypotheses"]["execution_discriminated"] == 2
+    assert report["hypotheses"]["discriminated_after_feedback"] == 3
+    assert report["feedback"]["violations_on_safe"] == 0
+    assert report["stateful"]["disagree"] == 0
+    assert all(c["checks"]["overstated"] is False for c in report["cases"] if "checks" in c)
