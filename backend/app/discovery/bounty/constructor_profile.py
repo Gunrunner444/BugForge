@@ -60,10 +60,14 @@ _FIXTURE_KINDS = frozenset(
         "asset_list_factory",
         "factory_holder",
         "source_contract",
+        # The harness's own BugForgeFixtureToken. No contract is deployed for it.
+        "harness_token",
     }
 )
 _ADDRESS_FIXTURES = _FIXTURE_KINDS
-_PROPERTY_TEMPLATES = frozenset({"unauthorized-call", "configured-asset"})
+_PROPERTY_TEMPLATES = frozenset({"unauthorized-call", "configured-asset", "custody"})
+HARNESS_TOKEN_DECIMALS = 18  # BugForgeFixtureToken.decimals()
+HARNESS_TOKEN_VARIABLE = "bfToken"
 
 COMET_CONTRACT = "CometWithExtendedAssetList"
 COMET_FILE = "contracts/CometWithExtendedAssetList.sol"
@@ -213,6 +217,9 @@ class PreparedProfile:
     contracts: str
     import_paths: tuple[str, ...]
     provenance: dict[str, Any]
+    # Fixture id of the harness token and the struct fields it is assigned to.
+    harness_token: str = ""
+    harness_token_fields: tuple[str, ...] = ()
 
 
 def sha256_text(text: str) -> str:
@@ -316,6 +323,18 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         raise ProfileError(
             "profile_malformed", "a configured-asset profile needs a fixture and a probe argument"
         )
+    if template == "custody":
+        observed = next((item for item in fixtures if item.fixture_id == observed_fixture), None)
+        if observed is None or observed.kind != "harness_token":
+            raise ProfileError(
+                "profile_malformed", "a custody profile observes the harness token fixture"
+            )
+        if probe_argument:
+            raise ProfileError("profile_malformed", "a custody profile takes no probe argument")
+        if not fixture_fields(value, observed_fixture):
+            raise ProfileError(
+                "profile_custody_unbound", "the harness token is not assigned to any field"
+            )
     return ConstructorProfile(
         profile_id=profile_id,
         contract=contract,
@@ -728,14 +747,31 @@ def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> 
     deploy_text = "\n".join(statements)
     if len(expression) > 8_000 or len(contracts) > 8_000 or len(deploy_text) > 8_000:
         raise ProfileError("profile_bound_exceeded", "the rendered configuration is too large")
-    deploy = tuple(line for _name, _variable, line in variables)
+    deploy = tuple(line for _name, _variable, line in variables if line)
+    token = next((item.fixture_id for item in profile.fixtures if item.kind == "harness_token"), "")
     return PreparedProfile(
         expression=expression,
         deploy_lines=(*deploy, *statements),
         contracts=contracts,
         import_paths=profile.imports,
         provenance=profile.public_dict(),
+        harness_token=token,
+        harness_token_fields=fixture_fields(profile.value, token) if token else (),
     )
+
+
+def fixture_fields(value: ProfileValue, fixture_id: str, prefix: str = "") -> tuple[str, ...]:
+    """Dotted struct paths whose value is ``fixture_id``. Array items are indexed."""
+    found: list[str] = []
+    if value.kind == "fixture" and value.value == fixture_id:
+        return (prefix,)
+    if value.kind == "struct":
+        for name, child in value.fields:
+            found.extend(fixture_fields(child, fixture_id, f"{prefix}.{name}" if prefix else name))
+    elif value.kind == "array":
+        for index, item in enumerate(value.items):
+            found.extend(fixture_fields(item, fixture_id, f"{prefix}[{index}]"))
+    return tuple(found)
 
 
 def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
@@ -757,25 +793,7 @@ def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
         )
     if "function pause(" not in target or "bool supplyPaused" not in target:
         raise ProfileError("profile_source_unsupported", "pause() is not the expected function")
-    if "config.baseMinForRewards == 0" not in target:
-        raise ProfileError("profile_source_unsupported", "the base-minimum check is absent")
-    if "config.storeFrontPriceFactor > FACTOR_SCALE" not in target:
-        raise ProfileError("profile_source_unsupported", "the storefront check is absent")
-    if "PRICE_FEED_DECIMALS = 8" not in core or "MAX_BASE_DECIMALS = 18" not in core:
-        raise ProfileError(
-            "profile_source_unsupported", "decimal limits are not the expected constants"
-        )
-    if "BASE_ACCRUAL_SCALE = 1e6" not in core:
-        raise ProfileError("profile_source_unsupported", "the accrual scale is not 1e6")
-    declared = struct_field_names(configuration, "Configuration")
-    if declared is None:
-        raise ProfileError("profile_source_unsupported", "Configuration is not declared")
-    values = _comet_fields()
-    if tuple(values) != declared:
-        raise ProfileError(
-            "profile_source_unsupported",
-            "Configuration fields are not the set this profile can fill",
-        )
+    declared = _comet_constructor_checks(target, configuration, core)
     dependencies = (
         COMET_FILE,
         COMET_CONFIGURATION,
@@ -785,6 +803,7 @@ def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
         "contracts/interfaces/IAssetListFactoryHolder.sol",
     )
     bound = _hash_bound(sources, dependencies)
+    values = _comet_fields()
     raw = {
         "profile_id": "comet-pause-authorization",
         "contract": COMET_CONTRACT,
@@ -831,6 +850,140 @@ def comet_pause_profile(sources: Mapping[str, str]) -> ConstructorProfile:
         "property_getter": "isSupplyPaused()",
         "source_commit": COMET_PIN,
         "property_template": "unauthorized-call",
+    }
+    return parse_profile(raw)
+
+
+def _comet_constructor_checks(target: str, configuration: str, core: str) -> tuple[str, ...]:
+    """The Configuration field order, after the constructor checks this profile relies on."""
+    if "config.baseMinForRewards == 0" not in target:
+        raise ProfileError("profile_source_unsupported", "the base-minimum check is absent")
+    if "config.storeFrontPriceFactor > FACTOR_SCALE" not in target:
+        raise ProfileError("profile_source_unsupported", "the storefront check is absent")
+    if "PRICE_FEED_DECIMALS = 8" not in core or "MAX_BASE_DECIMALS = 18" not in core:
+        raise ProfileError(
+            "profile_source_unsupported", "decimal limits are not the expected constants"
+        )
+    if "BASE_ACCRUAL_SCALE = 1e6" not in core:
+        raise ProfileError("profile_source_unsupported", "the accrual scale is not 1e6")
+    declared = struct_field_names(configuration, "Configuration")
+    if declared is None:
+        raise ProfileError("profile_source_unsupported", "Configuration is not declared")
+    if tuple(_comet_fields()) != declared:
+        raise ProfileError(
+            "profile_source_unsupported",
+            "Configuration fields are not the set this profile can fill",
+        )
+    return declared
+
+
+CUSTODY_SIGNATURE = "supply(address,uint256)"
+CUSTODY_STATEMENT = (
+    "a supplier that supplies the base token and withdraws its full balance ends with no more "
+    "base token than it started with while another supplier's base token is in custody"
+)
+
+
+def _declaring(sources: Mapping[str, str], pattern: str, label: str) -> str:
+    """The one closure file whose comment-free text declares ``pattern``."""
+    found = sorted(
+        path for path, text in sources.items() if re.search(pattern, _strip_comments(text))
+    )
+    if len(found) != 1:
+        raise ProfileError(
+            "profile_source_unsupported",
+            f"{label} is declared in {len(found)} closure files; the profile needs exactly one",
+        )
+    return found[0]
+
+
+def _enclosing(text: str, struct_name: str) -> str:
+    """The contract, interface or library that declares ``struct_name``."""
+    clean = _strip_comments(text)
+    struct = re.search(rf"\bstruct\s+{re.escape(struct_name)}\s*\{{", clean)
+    if struct is None:
+        raise ProfileError("profile_source_unsupported", f"{struct_name} is not declared")
+    owners = list(
+        re.finditer(r"\b(?:abstract\s+)?(?:contract|interface|library)\s+([A-Za-z_]\w*)", clean)
+    )
+    before = [match.group(1) for match in owners if match.start() < struct.start()]
+    if not before:
+        raise ProfileError(
+            "profile_source_unsupported", f"{struct_name} is not declared inside a contract"
+        )
+    return before[-1]
+
+
+def comet_custody_profile(sources: Mapping[str, str], *, source_commit: str) -> ConstructorProfile:
+    """Bind the Comet base token to the harness token for the custody round trip.
+
+    Declaring files are found in the closure, so a revision that moves the
+    interfaces still binds; the constructor checks are the pause profile's. The
+    harness token has 18 decimals, so baseScale is 1e18 here, not the 1e6 of
+    the deployed USDC market; that difference is recorded as an assumption.
+    """
+    target = sources.get(COMET_FILE, "")
+    if not target:
+        raise ProfileError("profile_source_unsupported", f"{COMET_FILE} is not in the closure")
+    configuration_file = _declaring(sources, r"\bstruct\s+Configuration\s*\{", "Configuration")
+    core_file = _declaring(sources, r"\bcontract\s+CometCore\b", "CometCore")
+    main_file = _declaring(sources, r"\bcontract\s+CometMainInterface\b", "CometMainInterface")
+    factory_file = _declaring(sources, r"\binterface\s+IAssetListFactory\b", "IAssetListFactory")
+    holder_file = _declaring(
+        sources, r"\binterface\s+IAssetListFactoryHolder\b", "IAssetListFactoryHolder"
+    )
+    declared = _comet_constructor_checks(target, sources[configuration_file], sources[core_file])
+    if "if (asset == baseToken)" not in target or "function initializeStorage()" not in target:
+        raise ProfileError(
+            "profile_source_unsupported",
+            "supply does not branch on baseToken or initializeStorage() is absent",
+        )
+    bound = _hash_bound(
+        sources, (COMET_FILE, configuration_file, core_file, main_file, factory_file, holder_file)
+    )
+    values = _comet_fields()
+    struct_type = f"{_enclosing(sources[configuration_file], 'Configuration')}.Configuration"
+    raw = {
+        "profile_id": "comet-base-custody",
+        "contract": COMET_CONTRACT,
+        "source_file": COMET_FILE,
+        "source_sha256": sha256_text(target),
+        "parameter": "config",
+        "model_type": "Configuration",
+        "solidity_type": struct_type,
+        "struct_file": configuration_file,
+        "struct_name": "Configuration",
+        "value": {
+            "kind": "struct",
+            "type_name": struct_type,
+            "fields": [{"name": name, "value": values[name]} for name in declared],
+        },
+        "fixtures": [
+            {"fixture_id": "baseToken", "kind": "harness_token", "decimals": 18},
+            {"fixture_id": "baseFeed", "kind": "decimals_feed", "decimals": 8},
+            {"fixture_id": "factory", "kind": "asset_list_factory"},
+            {"fixture_id": "holder", "kind": "factory_holder", "depends_on": "factory"},
+        ],
+        "imports": [core_file, factory_file, holder_file],
+        "bound_files": [{"path": path, "sha256": digest} for path, digest in bound],
+        "assumptions": [
+            "the base token is the harness fixture token (18 decimals, no fee, returns true), "
+            "so baseScale is 1e18; the deployed cUSDCv3 base token has 6 decimals",
+            "governor and pauseGuardian are local harness addresses, distinct from the attacker",
+            "the base price feed reports 8 decimals, matching PRICE_FEED_DECIMALS",
+            "baseMinForRewards is 1 because the constructor rejects 0; tracking speeds are 0",
+            "interest-rate fields are 0, and no call advances time, so no interest accrues",
+            "assetConfigs is empty; the round trip supplies and withdraws only the base token",
+            "the extension delegate and asset-list factory are local fixtures, not deployed "
+            "Compound contracts",
+            "this configuration is a local construction environment, not live market state",
+        ],
+        "property_function": CUSTODY_SIGNATURE,
+        "property_statement": CUSTODY_STATEMENT,
+        "property_getter": "balanceOf(address)",
+        "source_commit": source_commit,
+        "property_template": "custody",
+        "observed_fixture": "baseToken",
     }
     return parse_profile(raw)
 
@@ -1022,6 +1175,7 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
     raw = campaign.spec.constructor_profile
     if not raw:
         return None
+    binding: dict[str, str] = {}
     try:
         profile = parse_profile(raw)
         recorded = getattr(getattr(campaign, "manifest", None), "source_commit", "") or ""
@@ -1031,7 +1185,9 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
                 "the profile source commit does not match the campaign source revision",
             )
         chosen = seed_sources(campaign.selection, analysis.sources, profile)
-        prepare_profile(profile, chosen)
+        prepared = prepare_profile(profile, chosen)
+        if profile.property_template == "custody":
+            binding = _custody_binding(profile, prepared, analysis.candidates)
     except ProfileError as exc:
         analysis.sequence_skipped[f"constructor_profile:{raw.get('profile_id', 'unknown')}"] = (
             f"{exc.code}: {exc.reason}"
@@ -1039,6 +1195,11 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
         record = {"validation": "rejected", "reason_code": exc.code, "reason": exc.reason}
         campaign.cache["constructor_profile"] = record
         return record
+    if profile.property_template == "custody":
+        # The traced round trip is already planned; the profile only constructs it.
+        accepted = {**profile.public_dict(), "custody_binding": binding}
+        campaign.cache["constructor_profile"] = accepted
+        return accepted
     model = build_research_model(chosen)
     seeded = _seed_sequence(model, analysis.sequence_identity, profile, chosen)
     if isinstance(seeded, str):
@@ -1059,6 +1220,52 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
     record = profile.public_dict()
     campaign.cache["constructor_profile"] = record
     return record
+
+
+def _custody_binding(
+    profile: ConstructorProfile, prepared: PreparedProfile, candidates: Any
+) -> dict[str, str]:
+    """The traced pair the harness token binds, or the reason it binds nothing."""
+    from app.parsing.solidity_conservation import DETECTOR
+
+    traced = [
+        item
+        for item in candidates
+        if item.detector == DETECTOR
+        and item.contract == profile.contract
+        and item.function == profile.property_function
+    ]
+    if len(traced) != 1:
+        raise ProfileError(
+            "profile_custody_unbound",
+            f"{len(traced)} traced custody pairs start at {profile.property_function}; "
+            "the profile binds exactly one",
+        )
+    candidate = traced[0]
+    binding = candidate.fact("token_binding")
+    source = candidate.fact("token_source")
+    fields = {f"{profile.parameter}.{path}" for path in prepared.harness_token_fields}
+    supplied = next((path for path in sorted(fields) if source.endswith(f" {path}")), "")
+    if not binding.startswith("state:") or not supplied:
+        raise ProfileError(
+            "profile_custody_unbound",
+            f"the traced token is {binding or 'unbound'} ({source or 'no source'}); the "
+            f"harness token is assigned to {', '.join(sorted(fields))}",
+        )
+    getter = candidate.fact("credit_getter")
+    if profile.property_getter and profile.property_getter != getter:
+        raise ProfileError(
+            "profile_custody_unbound",
+            f"the profile reads {profile.property_getter}; the trace reads {getter or 'none'}",
+        )
+    return {
+        "candidate": f"{candidate.detector}@{candidate.contract}.{candidate.function}",
+        "payout_function": candidate.fact("payout_function"),
+        "token_binding": binding,
+        "token_source": source,
+        "harness_token_field": supplied,
+        "credit_getter": getter,
+    }
 
 
 def _seed_sequence(
@@ -1239,10 +1446,19 @@ def _deploy_fixtures(
         ordered.extend(ready)
         pending = [item for item in pending if item not in ready]
     rendered: list[tuple[str, str, str]] = []
-    names = {item.fixture_id: f"bf_{item.fixture_id}" for item in ordered}
+    names = {
+        item.fixture_id: HARNESS_TOKEN_VARIABLE
+        if item.kind == "harness_token"
+        else f"bf_{item.fixture_id}"
+        for item in ordered
+    }
     for item in ordered:
-        contract = _contract_name(item)
         variable = names[item.fixture_id]
+        if item.kind == "harness_token":
+            rendered.append((item.fixture_id, variable, ""))
+            by_id[item.fixture_id] = item
+            continue
+        contract = _contract_name(item)
         if item.kind == "factory_holder":
             dependency = names[item.depends_on]
             line = f"        {contract} {variable} = new {contract}(address({dependency}));"
@@ -1258,6 +1474,8 @@ def _deploy_fixtures(
 def _fixture_contracts(fixtures: tuple[ProfileFixture, ...]) -> str:
     blocks: list[str] = []
     for item in fixtures:
+        if item.kind == "harness_token":
+            continue
         contract = _contract_name(item)
         if item.kind in {"decimals_token", "decimals_feed"}:
             decimals = item.decimals if item.decimals is not None else 0
@@ -1413,6 +1631,15 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
                 or not 0 <= decimals <= 18
             ):
                 raise ProfileError("profile_malformed", "fixture decimals must be an integer 0..18")
+        elif kind == "harness_token":
+            if decimals != HARNESS_TOKEN_DECIMALS or isinstance(decimals, bool):
+                raise ProfileError(
+                    "profile_fixture_incompatible",
+                    f"the harness token has {HARNESS_TOKEN_DECIMALS} decimals; the profile "
+                    "must state that value",
+                )
+            if any(done.kind == "harness_token" for done in found):
+                raise ProfileError("profile_malformed", "a profile binds one harness token")
         elif decimals is not None:
             raise ProfileError("profile_malformed", "this fixture does not take decimals")
         depends = str(item.get("depends_on", ""))
