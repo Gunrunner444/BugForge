@@ -50,6 +50,29 @@ def test_execution_discriminates_round_trip_twins_and_feedback_finds_the_roundin
     assert unbound["vulnerability_label"] == "inconclusive_not_judged"
     assert report["hypotheses"]["execution_discriminated"] == 2
     assert report["hypotheses"]["discriminated_after_feedback"] == 3
-    assert report["feedback"]["violations_on_safe"] == 0
+    feedback = report["feedback"]
+    assert feedback["by_role"]["safe"]["variants_violated"] == 0
+    assert feedback["cases_with_violating_variant"] == {"vulnerable": 1, "safe": 0}
+    assert feedback["by_role"]["vulnerable"]["variants_violated"] >= 1
+    before = feedback["cases_distinguished_before_feedback"]
+    assert feedback["cases_distinguished_after_feedback"] == before + 1
+    assert feedback["variants_generated"] == (
+        feedback["variants_executed"] + feedback["variants_not_executed"]
+    )
+    assert feedback["variants_executed"] == (
+        feedback["variants_judged"] + feedback["variants_compiled_inconclusive"]
+    )
+    for role in ("vulnerable", "safe"):
+        per = feedback["by_role"][role]
+        assert per["variants_executed"] == (
+            per["variants_violated"] + per["variants_held"] + per["variants_compiled_inconclusive"]
+        )
+    recorded = [item for case in report["cases"] for item in case.get("feedback_variants", [])]
+    assert len(recorded) == feedback["variants_generated"]
+    assert {item["status"] for item in recorded} <= {
+        "judged",
+        "compiled_inconclusive",
+        "not_executed",
+    }
     assert report["stateful"]["disagree"] == 0
     assert all(c["checks"]["overstated"] is False for c in report["cases"] if "checks" in c)

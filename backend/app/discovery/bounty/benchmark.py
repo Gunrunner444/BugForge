@@ -69,13 +69,10 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
         "discriminated_after_feedback": 0,
     }
     funnel: dict[str, int] = {"attempted": 0, **{stage: 0 for stage in FUNNEL_STAGES}}
-    # One bounded feedback round after a held primary run, as campaigns do.
-    feedback_totals = {
-        "runs": 0,
-        "violations_on_vulnerable": 0,
-        "violations_on_safe": 0,
-        "cases_changed": 0,
-    }
+    # One bounded feedback round after a held primary run, as campaigns do. Variant
+    # counters and case counters are kept apart: a case with three violating variants
+    # is one case with a violating variant, and three violating variants.
+    feedback_totals = _feedback_totals()
     stateful = {"agree": 0, "disagree": 0, "not_run": 0}
     identity_validation = {"outcome": "not_run", "executed": None, "forge_delta": None}
     for case in list(spec.get("cases", []))[:MAX_CASES]:
@@ -119,6 +116,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             outcomes: dict[str, str] = {}
             observed: dict[str, Any] = {}
             feedback: dict[str, str] = {}
+            variants: list[dict[str, Any]] = []
             vulnerable_sequence = None
             for role, model, text, path in (
                 ("vulnerable", vuln_model, texts["vulnerable"], files["vulnerable"]),
@@ -147,20 +145,19 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                     funnel[stage] += int(ok)
                 signal = obs.signal() if obs.outcome.value == "property_held" else None
                 if signal is not None:
-                    child_outcomes = [
-                        executor.execute(
-                            child, model, role_sources, spec=build_property(child, model, twin)
-                        ).outcome.value
+                    records = [
+                        _variant_record(
+                            role,
+                            child,
+                            executor.execute(
+                                child, model, role_sources, spec=build_property(child, model, twin)
+                            ),
+                        )
                         for child in mutate([sequence], [signal])
                     ]
-                    feedback_totals["runs"] += len(child_outcomes)
-                    if "property_violated" in child_outcomes:
-                        feedback[role] = "property_violated"
-                        feedback_totals[f"violations_on_{role}"] += 1
-                    elif "property_held" in child_outcomes:
-                        feedback[role] = "property_held"
-                    else:
-                        feedback[role] = child_outcomes[0] if child_outcomes else "no_variant"
+                    variants.extend(records)
+                    feedback[role] = _feedback_outcome(records)
+                    _count_variants(feedback_totals, role, records)
                 if role == "vulnerable":
                     vulnerable_sequence = sequence
             result["stateful"] = outcomes
@@ -216,7 +213,17 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
             )
             if feedback:
                 result["feedback"] = feedback
+                result["feedback_variants"] = variants
             result["execution_discriminates_after_feedback"] = after
+            feedback_totals["cases_executed"] += 1
+            feedback_totals["cases_distinguished_before_feedback"] += int(discriminated)
+            feedback_totals["cases_distinguished_after_feedback"] += int(after)
+            for role in ("vulnerable", "safe"):
+                if any(
+                    item["role"] == role and item["outcome"] == "property_violated"
+                    for item in variants
+                ):
+                    feedback_totals["cases_with_violating_variant"][role] += 1
             if after != discriminated or final != outcomes:
                 feedback_totals["cases_changed"] += 1
             if kind == "hypothesis":
@@ -293,6 +300,10 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                     "ground_truth": case["ground_truth"],
                     "stateful": case.get("stateful"),
                     "feedback": case.get("feedback"),
+                    "feedback_variants": [
+                        (item["role"], item["origin"], item["outcome"])
+                        for item in case.get("feedback_variants", [])
+                    ],
                     "identity_rejection": case.get("identity_rejection"),
                 }
                 for case in cases
@@ -310,6 +321,89 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
         }
     )
     return report
+
+
+_JUDGED = frozenset({"property_violated", "property_held"})
+
+
+def _feedback_totals() -> dict[str, Any]:
+    roles = {
+        role: {
+            "variants_generated": 0,
+            "variants_executed": 0,
+            "variants_violated": 0,
+            "variants_held": 0,
+            "variants_compiled_inconclusive": 0,
+            "variants_not_executed": 0,
+        }
+        for role in ("vulnerable", "safe")
+    }
+    return {
+        "variants_generated": 0,
+        "variants_executed": 0,
+        "variants_judged": 0,
+        "variants_compiled_inconclusive": 0,
+        "variants_not_executed": 0,
+        "by_role": roles,
+        "cases_executed": 0,
+        "cases_with_violating_variant": {"vulnerable": 0, "safe": 0},
+        "cases_distinguished_before_feedback": 0,
+        "cases_distinguished_after_feedback": 0,
+        "cases_changed": 0,
+        "note": (
+            "variant counts and case counts use different denominators; a variant that did "
+            "not execute or was not judged is not counted as held or as a negative"
+        ),
+    }
+
+
+def _variant_record(role: str, child: Any, obs: Any) -> dict[str, Any]:
+    outcome = obs.outcome.value
+    result = getattr(obs, "result", None)
+    ran = result is not None and getattr(result, "test_status", "not_run") != "not_run"
+    if outcome in _JUDGED:
+        status = "judged"
+    elif ran:
+        status = "compiled_inconclusive"
+    else:
+        status = "not_executed"
+    return {
+        "role": role,
+        "sequence_id": child.sequence_id,
+        "origin": child.origin,
+        "outcome": outcome,
+        "status": status,
+        "reason_code": getattr(obs, "reason_code", "") or outcome,
+    }
+
+
+def _feedback_outcome(records: list[dict[str, Any]]) -> str:
+    outcomes = [item["outcome"] for item in records]
+    if "property_violated" in outcomes:
+        return "property_violated"
+    if "property_held" in outcomes:
+        return "property_held"
+    return outcomes[0] if outcomes else "no_variant"
+
+
+def _count_variants(totals: dict[str, Any], role: str, records: list[dict[str, Any]]) -> None:
+    per = totals["by_role"][role]
+    for item in records:
+        totals["variants_generated"] += 1
+        per["variants_generated"] += 1
+        if item["status"] == "not_executed":
+            totals["variants_not_executed"] += 1
+            per["variants_not_executed"] += 1
+            continue
+        totals["variants_executed"] += 1
+        per["variants_executed"] += 1
+        if item["status"] == "compiled_inconclusive":
+            totals["variants_compiled_inconclusive"] += 1
+            per["variants_compiled_inconclusive"] += 1
+            continue
+        totals["variants_judged"] += 1
+        key = "variants_violated" if item["outcome"] == "property_violated" else "variants_held"
+        per[key] += 1
 
 
 def pipeline_coverage_matrix(directory: Path | None = None) -> dict[str, Any]:
