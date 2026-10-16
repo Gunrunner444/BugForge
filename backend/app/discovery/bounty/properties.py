@@ -546,7 +546,7 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
         fixture = "false_return"
     primary = OracleSpec(
         kind=OracleKind.CREDIT_LE_RECEIVED,
-        probe_role=_first_role(sequence),
+        probe_role=_role_of(sequence, fn.signature),
         probe_function=fn.signature,
         getter=getter,
         getter_actor=ATTACKER,
@@ -617,9 +617,10 @@ def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) ->
     )
 
 
-def _first_role(sequence: Vfcs) -> str:
+def _role_of(sequence: Vfcs, signature: str) -> str:
+    """The role of the first call to ``signature``, wherever reordering moved it."""
     for call in sequence.calls:
-        if not call.primitive:
+        if not call.primitive and call.function == signature:
             return call.role
     return ""
 
