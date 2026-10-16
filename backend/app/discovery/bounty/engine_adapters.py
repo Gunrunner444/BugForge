@@ -41,6 +41,7 @@ from app.discovery.bounty.properties import (
 )
 from app.discovery.bounty.stateful import (
     _FIXTURE_TOKEN,
+    K_ACTOR,
     K_AFTER,
     K_BEFORE,
     K_CALL,
@@ -107,7 +108,10 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"&& bfSeen[{K_AFTER}][{probe}];\n"
         )
         violated = f"        return bfVal[{K_BEFORE}][{probe}] != bfVal[{K_AFTER}][{probe}];\n"
-    elif kind in {OracleKind.CREDIT_LE_RECEIVED, OracleKind.BALANCE_NOT_INCREASED}:
+    elif kind is OracleKind.BALANCE_NOT_INCREASED:
+        judged = f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1];\n"
+        violated = f"        return bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0];\n"
+    elif kind is OracleKind.CREDIT_LE_RECEIVED:
         judged = (
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][0] && bfSeen[{K_RECEIVED}][1]"
             f" && bfSeen[{K_CREDITED}][0] && bfSeen[{K_CREDITED}][1] && _bfOk({probe});\n"

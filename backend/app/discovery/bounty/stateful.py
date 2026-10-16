@@ -98,6 +98,7 @@ K_CONTROL_BEFORE = 12
 K_CONTROL_AFTER = 13
 K_WORD = 14
 K_FIXTURE = 15
+K_ACTOR = 16  # index 0: attacker fixture balance before the first call, 1: after the last
 
 
 class Outcome(StrEnum):
@@ -907,12 +908,16 @@ class _Synth:
                 return ATTACKER_ADDR
             return ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
         if abi.startswith("uint") or abi.startswith("int"):
+            if override == "actor_credit" and abi in {"uint256", "uint"}:
+                return self.actor_credit(call)
             if override == "max_uint":
                 return f"type({abi}).max"
             if override == "zero":
                 return "0"
             if override == "one":
                 return "1"
+            if override in {"two", "three"}:
+                return "2" if override == "two" else "3"
             if self.token_kind and override in _AMOUNT_LIKE and abi in {"uint256", "uint"}:
                 return FIXTURE_AMOUNT
             if override == "amount_one":
@@ -930,6 +935,27 @@ class _Synth:
         if abi.startswith("bytes"):
             return f"{abi}(0)"
         raise _UnbuildableError(f"type {abi} is not expressible", "param_not_expressible")
+
+    def actor_credit(self, call: VfcsCall) -> str:
+        """The actor's current credit read from the oracle getter, or the deposited amount."""
+        getter = self.oracle.getter
+        if not getter.endswith("(address)"):
+            return FIXTURE_AMOUNT
+        actor = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        ok, value = self._name("CredOk"), self._name("Cred")
+        self.steps.append(
+            f"        (bool {ok}, uint256 {value}) = _bfRead(address(t), "
+            f'abi.encodeWithSignature("{getter}", {actor}));'
+        )
+        self.steps.append(
+            f"        if (!{ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        return value
+
+    def read_actor(self, slot: int) -> None:
+        self.steps.append(
+            f"        emit BugForgeObservation({K_ACTOR}, {slot}, bfToken.balanceOf({ATTACKER_ADDR}));"
+        )
 
     def nested(self, target: str) -> str:
         contract, _, signature = target.partition(".")
@@ -1289,6 +1315,11 @@ class _Synth:
         ctor_args = self.constructor_args()
         if oracle.kind in TOKEN_ORACLES:
             self.approve(ATTACKER, ATTACKER_ADDR, "the probe deposits fixture tokens")
+        conserving = oracle.kind is OracleKind.BALANCE_NOT_INCREASED
+        if conserving:
+            if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
+                self.approve(VICTIM, VICTIM_ADDR, "another depositor's funds are in custody")
+            self.read_actor(0)
         for index, call in enumerate(self.sequence.calls):
             if call.primitive:
                 self.primitive(index, call)
@@ -1311,7 +1342,7 @@ class _Synth:
                 }
             ):
                 self.read_getter(K_BEFORE, index)
-            if index == probe and oracle.kind in TOKEN_ORACLES:
+            if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 0)
                 self.read_credit(0)
             sender = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
@@ -1330,9 +1361,11 @@ class _Synth:
                 }
             ):
                 self.read_getter(K_AFTER, index)
-            if index == probe and oracle.kind in TOKEN_ORACLES:
+            if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
+        if conserving:
+            self.read_actor(1)
         if self.token_kind and not self.token_bound:
             raise _UnbuildableError(
                 f"{self.contract} reads its token from state the harness cannot bind "
@@ -1659,6 +1692,7 @@ def observation_from_events(
     readable = True
     received: dict[int, int] = {}
     credited: dict[int, int] = {}
+    actor: dict[int, int] = {}
     deployed = done = False
     revert_selector = ""
     revert_data_ok = True
@@ -1681,6 +1715,8 @@ def observation_from_events(
             received[index] = value
         elif kind == K_CREDITED:
             credited[index] = value
+        elif kind == K_ACTOR:
+            actor[index] = value
         elif kind == K_DONE:
             done = index == count
         elif kind == K_REVERT:
@@ -1713,6 +1749,8 @@ def observation_from_events(
         credited=credited[1] - credited[0] if {0, 1} <= set(credited) else None,
         holdings_after=received.get(1),
         credit_after=credited.get(1),
+        actor_before=actor.get(0),
+        actor_after=actor.get(1),
         revert_selector=revert_selector,
         revert_data_ok=revert_data_ok,
         control_ok=control_ok,
@@ -2681,6 +2719,9 @@ def run_feedback_loop(
     all_mutated: list[Vfcs] = []
     by_id = {s.sequence_id: s for s in sequences}
 
+    # Earlier signals stay offered: mutate skips children already run, so a parent
+    # whose variants did not fit one round's budget gets the next round's.
+    offered: dict[str, FeedbackSignal] = {}
     for _round in range(max(1, rounds)):
         signals: list[FeedbackSignal] = []
         next_frontier: list[Vfcs] = []
@@ -2729,9 +2770,11 @@ def run_feedback_loop(
                 )
                 independent[sequence.sequence_id] = corroboration
                 independent_runs[sequence.sequence_id] = runs
-        if not signals:
+        for signal in signals:
+            offered.setdefault(f"{signal.kind}:{signal.sequence_id}:{signal.call_index}", signal)
+        if not offered:
             break
-        children = mutate(list(by_id.values()), signals, limit=limit)
+        children = mutate(list(by_id.values()), list(offered.values()), limit=limit)
         for child in children:
             if child.sequence_id in by_id:
                 continue

@@ -11,7 +11,7 @@ minimization never produce verification.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 
 from app.discovery.orchestration.codec import digest
@@ -35,6 +35,9 @@ VICTIM = "victim"
 ATTACKER_CONTROLLED = "attacker_controlled"
 UNCONSTRAINED = "unconstrained"
 _BOUNDARY_VALUES = ("zero", "one", "max_uint", "contract_balance", "total_supply")
+# A value property that held at the fixture amount is retried where rounding
+# remainders are largest relative to the amount.
+_SMALL_AMOUNTS = ("one", "two", "three")
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,7 @@ def generate(
 
 Built = tuple[str, list[VfcsCall], str] | str
 Builder = Callable[[ResearchModel, SemanticCandidate], Built]
+_VariantIter = Iterator[tuple[str, list[VfcsCall]]]
 
 
 def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
@@ -345,6 +349,36 @@ def _token_behavior(model: ResearchModel, candidate: SemanticCandidate) -> Built
         calls.append(_call(withdraw, "withdraw", ATTACKER, default="credited_balance"))
     template = "deposit→withdraw" if withdraw is not None else "deposit"
     return template, calls, "credited balance must equal the amount received"
+
+
+def _round_trip(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """Attacker deposits, another depositor deposits, the attacker withdraws twice.
+
+    The second depositor puts funds in custody that an over-paying withdrawal could
+    take. The repeat withdrawal asks for whatever credit the attacker still has.
+    """
+    deposit = _own(model, candidate)
+    if isinstance(deposit, str):
+        return deposit
+    payout = _resolve(model, candidate.contract, candidate.fact("payout_function"))
+    if payout is None:
+        return "the payout function is not in the model"
+
+    def call(function: RFunction, role: str, actor: str, default: str) -> VfcsCall:
+        built = _call(function, role, actor, default=default)
+        return replace(built, contract=candidate.contract)
+
+    calls = [
+        call(deposit, "deposit", ATTACKER, "minimum_amount"),
+        call(deposit, "victim_deposit", VICTIM, "victim_amount"),
+        call(payout, "withdraw", ATTACKER, "actor_credit"),
+        call(payout, "withdraw_again", ATTACKER, "actor_credit"),
+    ]
+    return (
+        "deposit→deposit→withdraw→withdraw",
+        calls,
+        "a caller must not withdraw more value than it deposited",
+    )
 
 
 def _message(model: ResearchModel, candidate: SemanticCandidate) -> Built:
@@ -511,6 +545,7 @@ _BUILDERS: dict[str, Builder] = {
     "aa.unauthenticated_account_execution": _account_validation,
     "arithmetic.batch_accumulation_overflow": _boundary,
     "arithmetic.unsafe_downcast_after_arithmetic": _boundary,
+    "conservation.round_trip_value": _round_trip,
 }
 
 
@@ -528,26 +563,35 @@ def mutate(
     by_id = {item.sequence_id: item for item in parents}
     known = set(by_id)
     out: dict[str, Vfcs] = {}
+    # Variants are taken round-robin across signals so one parent cannot spend the
+    # whole budget; children already known are skipped and do not count.
+    pending: list[tuple[FeedbackSignal, Vfcs, _VariantIter]] = []
     for signal in sorted(
         list(signals)[:MAX_FEEDBACK_SIGNALS], key=lambda s: (s.kind, s.sequence_id, s.call_index)
     ):
         parent = by_id.get(signal.sequence_id)
-        if parent is None:
-            continue
-        for operator, calls in _variants(parent, signal):
-            if not calls or len(calls) > MAX_VFCS_LENGTH:
-                continue
-            child_id = sequence_id_of(calls, parent.template, parent.identity)
-            if child_id in known or child_id in out:
-                continue
+        if parent is not None:
+            pending.append((signal, parent, iter(_variants(parent, signal))))
+    while pending and len(out) < limit:
+        still: list[tuple[FeedbackSignal, Vfcs, _VariantIter]] = []
+        for signal, parent, variants in pending:
             if len(out) >= limit:
-                return tuple(out.values())
-            out[child_id] = replace(
-                parent,
-                sequence_id=child_id,
-                origin=f"mutation:{signal.kind}:{operator}:{parent.sequence_id}",
-                calls=tuple(calls),
-            )
+                break
+            for operator, calls in variants:
+                if not calls or len(calls) > MAX_VFCS_LENGTH:
+                    continue
+                child_id = sequence_id_of(calls, parent.template, parent.identity)
+                if child_id in known or child_id in out:
+                    continue
+                out[child_id] = replace(
+                    parent,
+                    sequence_id=child_id,
+                    origin=f"mutation:{signal.kind}:{operator}:{parent.sequence_id}",
+                    calls=tuple(calls),
+                )
+                still.append((signal, parent, variants))
+                break
+        pending = still
     return tuple(out.values())
 
 
@@ -579,6 +623,23 @@ def _variants(parent: Vfcs, signal: FeedbackSignal) -> Iterable[tuple[str, list[
         swapped = list(calls)
         swapped[index], swapped[index + 1] = swapped[index + 1], swapped[index]
         yield "reorder", swapped
+    if kind == "near_miss":
+        for position, call in enumerate(calls):
+            if call.role != "deposit" or call.primitive:
+                continue
+            for value in _SMALL_AMOUNTS:
+                arguments = tuple(
+                    (n, value if v == "minimum_amount" else v) for n, v in call.arguments
+                )
+                if arguments != call.arguments:
+                    yield (
+                        f"small_amount_{value}",
+                        [
+                            *calls[:position],
+                            replace(call, arguments=arguments),
+                            *calls[position + 1 :],
+                        ],
+                    )
     if kind == "coverage_gain" and len(calls) < MAX_VFCS_LENGTH and not calls[index].primitive:
         yield "repeat_call", [*calls[: index + 1], calls[index], *calls[index + 1 :]]
     if kind in {"caller_context_mismatch", "contradiction"}:

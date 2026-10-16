@@ -1,0 +1,246 @@
+"""Round-trip conservation hypotheses: emission, property, harness, verdict, feedback, ledger."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from app.discovery.bounty.engine_adapters import _judge
+from app.discovery.bounty.findings import build_findings
+from app.discovery.bounty.priority import prioritize
+from app.discovery.bounty.properties import (
+    OracleKind,
+    OracleObservation,
+    PropertyDeclaration,
+    PropertyFamily,
+    PropertyVerdict,
+    build_property,
+    evaluate,
+)
+from app.discovery.bounty.research_ledger import build_ledger
+from app.discovery.bounty.stateful import K_ACTOR, build_harness
+from app.discovery.bounty.vfcs import FeedbackSignal, generate, mutate
+from app.parsing.solidity_conservation import DETECTOR
+from app.parsing.solidity_research import build_research_model
+from app.parsing.solidity_research_suite import run_suite
+from app.security.solidity.rules import HYPOTHESIS_FAMILIES, _research_rules
+from tests.test_phase50.phase50_support import manifest
+
+HISTORY = Path(__file__).resolve().parents[1] / "fixtures" / "phase52_history"
+PAIRS = ("missing_debit", "post_transfer_price", "index_rounding", "unbound_token")
+
+
+def _fixture(stem: str, role: str) -> tuple[str, str]:
+    name = f"roundtrip_{stem}_{role}.sol"
+    return name, (HISTORY / name).read_text(encoding="utf-8")
+
+
+def _round_trip(stem: str, role: str):  # type: ignore[no-untyped-def]
+    name, text = _fixture(stem, role)
+    model = build_research_model({name: text})
+    hits = [c for c in run_suite(model).candidates if c.detector == DETECTOR]
+    assert len(hits) == 1, (stem, role, hits)
+    built = generate(model, hits, sources={name: text})
+    assert len(built.sequences) == 1
+    sequence = built.sequences[0]
+    return model, hits[0], sequence, build_property(sequence, model, hits[0]), {name: text}
+
+
+@pytest.mark.parametrize("stem", PAIRS)
+@pytest.mark.parametrize("role", ("vulnerable", "safe"))
+def test_the_hypothesis_fires_on_both_twins_with_low_confidence(stem: str, role: str) -> None:
+    _, candidate, sequence, spec, _ = _round_trip(stem, role)
+    assert candidate.confidence == "low"
+    assert candidate.fact("hypothesis_basis") == "token_custody"
+    assert "not a suspected defect" in candidate.summary
+    assert [c.role for c in sequence.calls] == [
+        "deposit",
+        "victim_deposit",
+        "withdraw",
+        "withdraw_again",
+    ]
+    assert [c.actor for c in sequence.calls] == ["attacker", "victim", "attacker", "attacker"]
+    assert spec.family is PropertyFamily.SOLVENCY
+    assert spec.declaration is PropertyDeclaration.PROPERTY_UNDER_TEST
+    assert spec.oracle.kind is OracleKind.BALANCE_NOT_INCREASED
+    assert spec.oracle.probe_role == "withdraw_again"
+    assert spec.oracle.precondition_roles == ("deposit", "victim_deposit", "withdraw")
+    assert spec.verified is False and sequence.verified is False
+
+
+def test_no_hypothesis_without_a_caller_round_trip() -> None:
+    text = """pragma solidity ^0.8.20;
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+contract Treasury {
+    IERC20 public immutable token;
+    address public immutable owner;
+    mapping(address => uint256) public paid;
+    constructor(IERC20 t) { token = t; owner = msg.sender; }
+    function fund(uint256 amount) external {
+        token.transferFrom(msg.sender, address(this), amount);
+        paid[msg.sender] += amount;
+    }
+    function sweep(uint256 amount) external {
+        require(msg.sender == owner, "owner");
+        token.transfer(owner, amount);
+    }
+}
+"""
+    model = build_research_model({"Treasury.sol": text})
+    assert not [c for c in run_suite(model).candidates if c.detector == DETECTOR]
+
+
+def test_the_hypothesis_never_becomes_a_static_observation() -> None:
+    assert "conservation" in HYPOTHESIS_FAMILIES
+    assert all(rule.rule_id != "sol.research.conservation" for rule in _research_rules())
+
+
+def test_the_withdrawal_reads_the_public_credit_or_records_the_fallback() -> None:
+    _, _, _, spec, _ = _round_trip("missing_debit", "vulnerable")
+    assert spec.oracle.getter == "balances(address)"
+    assert any("reports for it" in item for item in spec.provenance.assumptions)
+    name, text = _fixture("missing_debit", "vulnerable")
+    hidden = text.replace(
+        "mapping(address => uint256) public balances", "mapping(address => uint256) balances"
+    )
+    model = build_research_model({name: hidden})
+    hit = next(c for c in run_suite(model).candidates if c.detector == DETECTOR)
+    sequence = generate(model, [hit], sources={name: hidden}).sequences[0]
+    fallback = build_property(sequence, model, hit)
+    assert fallback.oracle.getter == ""
+    assert any("not publicly readable" in item for item in fallback.provenance.assumptions)
+
+
+def test_the_harness_reads_the_attacker_before_and_after_and_funds_the_victim() -> None:
+    model, _, sequence, spec, sources = _round_trip("missing_debit", "vulnerable")
+    harness = build_harness(sequence, model, oracle=spec.oracle, sources=sources)
+    assert harness.buildable, harness.reason
+    body = harness.body
+    first = body.index(f"BugForgeObservation({K_ACTOR}, 0,")
+    last = body.index(f"BugForgeObservation({K_ACTOR}, 1,")
+    assert first < body.index("vm.prank(address(0xA11CE));\n        (bool ok_0") < last
+    assert "bfToken.balanceOf(address(0xA11CE))" in body
+    assert "bfToken.mint(address(0xB0B)" in body
+    assert body.count('abi.encodeWithSignature("balances(address)", address(0xA11CE))') == 2
+
+
+def _obs(**kwargs: object) -> OracleObservation:
+    base: dict[str, object] = {"call_ok": (1, 1, 1, 1), "actor_before": 100, "actor_after": 100}
+    base.update(kwargs)
+    return OracleObservation(**base)  # type: ignore[arg-type]
+
+
+def test_the_verdict_compares_the_attackers_own_balance() -> None:
+    _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    oracle = spec.oracle
+    gained = evaluate(sequence, oracle, _obs(actor_after=150))
+    assert gained.verdict is PropertyVerdict.PROPERTY_VIOLATED and "+50" in gained.reason
+    assert evaluate(sequence, oracle, _obs(actor_after=99)).verdict is PropertyVerdict.PROPERTY_HELD
+    refused = evaluate(sequence, oracle, _obs(call_ok=(1, 1, 1, 0)))
+    assert refused.verdict is PropertyVerdict.PROPERTY_HELD and "reverted" in refused.reason
+    unread = evaluate(sequence, oracle, _obs(actor_after=None))
+    assert unread.verdict is PropertyVerdict.NOT_EVALUATED
+    assert evaluate(sequence, oracle, _obs(readable=False)).verdict is PropertyVerdict.NOT_EVALUATED
+    pre_failed = evaluate(sequence, oracle, _obs(call_ok=(1, 0, 1, 1), actor_after=500))
+    assert pre_failed.verdict is PropertyVerdict.NOT_EVALUATED
+
+
+def test_credit_and_receipt_no_longer_decide_the_balance_oracle() -> None:
+    _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    over_credited = _obs(credited=10, received=1)
+    assert evaluate(sequence, spec.oracle, over_credited).verdict is PropertyVerdict.PROPERTY_HELD
+    credit = replace(spec.oracle, kind=OracleKind.CREDIT_LE_RECEIVED, probe_role="deposit")
+    credit = replace(credit, probe_function=sequence.calls[0].function, precondition_roles=())
+    verdict = evaluate(sequence, credit, _obs(credited=10, received=1))
+    assert verdict.verdict is PropertyVerdict.PROPERTY_VIOLATED
+
+
+def test_engine_harness_judges_the_same_balance() -> None:
+    _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    judged, violated = _judge(sequence, spec.oracle) or ("", "")
+    assert f"bfSeen[{K_ACTOR}][0]" in judged and f"bfSeen[{K_ACTOR}][1]" in judged
+    assert violated.strip() == f"return bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0];"
+    assert "K_CREDITED" not in violated
+
+
+def test_a_held_round_trip_is_retried_at_small_deposit_amounts_once() -> None:
+    _, _, sequence, _, _ = _round_trip("index_rounding", "vulnerable")
+    signal = FeedbackSignal("near_miss", sequence.sequence_id, 3, engine="foundry")
+    children = mutate([sequence], [signal])
+    operators = sorted(child.origin.split(":")[2] for child in children)
+    assert operators == ["small_amount_one", "small_amount_three", "small_amount_two"]
+    for child in children:
+        changed = [c for c, p in zip(child.calls, sequence.calls, strict=True) if c != p]
+        assert [c.role for c in changed] == ["deposit"]
+        again = mutate([child], [replace(signal, sequence_id=child.sequence_id)])
+        assert not [c for c in again if c.origin.split(":")[2].startswith("small_amount")]
+
+
+def _ledger(sequences, outcomes):  # type: ignore[no-untyped-def]
+    model, candidate, sequence, spec, _ = _round_trip("missing_debit", "safe")
+    specs = {s.sequence_id: spec for s in sequences}
+    return build_ledger(
+        models=[model],
+        candidates=[candidate],
+        sequences=sequences,
+        specs=specs,
+        skipped={},
+        executions={sid: {"outcome": outcome} for sid, outcome in outcomes.items()},
+        engines=[],
+    )
+
+
+def test_a_held_property_is_kept_and_asks_for_a_variation_until_one_was_tried() -> None:
+    _, _, sequence, _, _ = _round_trip("missing_debit", "safe")
+    ledger = _ledger([sequence], {sequence.sequence_id: "property_held"})
+    kinds = [gap["kind"] for gap in ledger["RESEARCH_GAPS"]]
+    assert kinds == ["held_untested_variation"]
+    gap = ledger["RESEARCH_GAPS"][0]
+    assert "regression" in gap["reason"] and "one ordering" in gap["reason"]
+    assert ledger["RESEARCH_COVERAGE"]["properties_held"] == 1
+    signal = FeedbackSignal("near_miss", sequence.sequence_id, 3, engine="foundry")
+    child = mutate([sequence], [signal])[0]
+    tried = _ledger(
+        [sequence, child],
+        {sequence.sequence_id: "property_held", child.sequence_id: "property_held"},
+    )
+    assert "held_untested_variation" not in [g["kind"] for g in tried["RESEARCH_GAPS"]]
+    assert tried["RESEARCH_COVERAGE"]["properties_held_after_variation"] == 1
+    assert tried["verified"] is False
+
+
+def test_a_hypothesis_is_a_finding_only_after_an_executed_violation() -> None:
+    _, candidate, _, _, _ = _round_trip("missing_debit", "vulnerable")
+    mani = manifest()
+    identity = mani.to_campaign_identity()
+    assert build_findings([candidate], manifest=mani, identity=identity) == ()
+    key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    held = {"x": {"derived_from": key, "outcome": "property_held"}}
+    assert build_findings([candidate], manifest=mani, identity=identity, executions=held) == ()
+    violated = {
+        "x": {
+            "derived_from": key,
+            "outcome": "property_violated",
+            "declaration": "property_under_test",
+            "verdict": "property_violated",
+            "oracle_kind": "balance_not_increased",
+            "identity_status": "bound",
+        }
+    }
+    (finding,) = build_findings([candidate], manifest=mani, identity=identity, executions=violated)
+    assert finding.candidate_strength == "strong_candidate"
+    assert finding.verified is False
+
+
+def test_a_hypothesis_adds_no_triage_weight() -> None:
+    model, candidate, _, _, _ = _round_trip("missing_debit", "vulnerable")
+    with_hypothesis = prioritize(model, candidates=[candidate])
+    without = prioritize(model, candidates=[])
+    assert [(e.identity, e.score) for e in with_hypothesis.ranked] == [
+        (e.identity, e.score) for e in without.ranked
+    ]

@@ -18,6 +18,7 @@ from app.parsing.solidity_account_abstraction import (
 from app.parsing.solidity_accounting import analyze_balance_delta
 from app.parsing.solidity_arithmetic import analyze_arithmetic
 from app.parsing.solidity_caller_context import analyze_caller_context
+from app.parsing.solidity_conservation import analyze_conservation
 from app.parsing.solidity_high_value import analyze_high_value
 from app.parsing.solidity_message_binding import analyze_message_binding
 from app.parsing.solidity_modules import analyze_protocol_modules, modules_present
@@ -35,8 +36,17 @@ FAMILIES: dict[str, Analyzer] = {
     "arithmetic": analyze_arithmetic,
     "high_value": analyze_high_value,
     "protocol_modules": analyze_protocol_modules,
+    "conservation": analyze_conservation,
 }
 MAX_TOTAL_CANDIDATES = 256
+# Families that emit testable hypotheses on safe and unsafe code alike. Their
+# candidates feed execution planning only: they are not defect suspicions, not
+# static observations, and not findings until execution shows a violation.
+HYPOTHESIS_FAMILIES = frozenset({"conservation"})
+
+
+def is_hypothesis(candidate: SemanticCandidate) -> bool:
+    return candidate.family in HYPOTHESIS_FAMILIES
 
 
 @dataclass(frozen=True)

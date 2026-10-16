@@ -80,7 +80,8 @@ class OracleKind(StrEnum):
     SECOND_CALL_MUST_FAIL = "second_call_must_fail"
     # a privileged public getter must not change across the probe
     STATE_UNCHANGED = "state_unchanged"
-    # the attacker's fixture-token balance must not increase over the sequence
+    # the attacker's fixture-token balance after the last call must not exceed its
+    # balance before the first call (read for the attacker, not the target)
     BALANCE_NOT_INCREASED = "balance_not_increased"
     # credited balance (public getter for the actor) must not exceed tokens received
     CREDIT_LE_RECEIVED = "credit_le_received"
@@ -238,6 +239,7 @@ _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("bridge.", PropertyFamily.BRIDGE_MESSAGE_BINDING),
     ("v4_hooks.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
     ("profile.configured_asset", PropertyFamily.ACCOUNTING),
+    ("conservation.", PropertyFamily.SOLVENCY),
 )
 
 
@@ -581,6 +583,62 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
     )
 
 
+def _round_trip(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
+    """The attacker must not end a deposit/withdraw round trip with more tokens.
+
+    The withdrawal amount is the attacker's readable credit when the credit mapping
+    has a public getter, otherwise the deposited amount, and that choice is recorded
+    as an assumption.
+    """
+    payout = _role_function(sequence, "withdraw_again")
+    if not payout:
+        return (OracleSpec(), (), (), "the sequence has no repeat withdrawal", (), "")
+    payout_fn = _resolve(model, fn.contract, payout)
+    variable = ""
+    for name in sorted(model.state_vars(fn.contract)):
+        indexed = rf"\b{re.escape(name)}\s*\[\s*msg\.sender\s*\]"
+        if re.search(indexed + r"\s*(?:\+=|=(?!=))", fn.body) and (
+            payout_fn is not None and re.search(indexed, payout_fn.body)
+        ):
+            variable = name
+            break
+    getter = public_getter(model, fn.contract, variable) if variable else ""
+    if getter != f"{variable}(address)":
+        getter = ""
+    amount = (
+        f"the attacker withdraws the value {getter} reports for it"
+        if getter
+        else "the attacker withdraws the amount it deposited (the credit is not publicly readable)"
+    )
+    oracle = OracleSpec(
+        kind=OracleKind.BALANCE_NOT_INCREASED,
+        probe_role="withdraw_again",
+        probe_function=payout,
+        precondition_roles=("deposit", "victim_deposit", "withdraw"),
+        getter=getter,
+        getter_actor=ATTACKER,
+        token_fixture="standard",
+        snapshot="before_sequence",
+        expression=(
+            f"after depositing into {fn.name}, a second depositor depositing, and the attacker "
+            f"withdrawing twice through {payout.split('(')[0]}, the attacker's fixture-token "
+            "balance must not exceed its balance before the first deposit"
+        ),
+    )
+    return (
+        oracle,
+        (),
+        (variable,) if variable else (),
+        f"{fn.name} credits the caller and {payout.split('(')[0]} pays the same token back",
+        (
+            "the fixture token is the asset the contract custodies",
+            amount,
+            "one ordering: attacker deposit, second depositor, two attacker withdrawals",
+        ),
+        "",
+    )
+
+
 def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
     """Observe whether a reverting callee's failure is swallowed. Not a security invariant."""
     bound = any(call.primitive and call.function == "deploy_reverting()" for call in sequence.calls)
@@ -839,6 +897,7 @@ _ORACLE_BUILDERS: dict[str, Any] = {
         "{name}'s totals are internal; no public observable distinguishes a wrap"
     ),
     "failing-callee→swallowed-call": _swallowed,
+    "deposit→deposit→withdraw→withdraw": _round_trip,
 }
 
 
@@ -857,6 +916,8 @@ class OracleObservation:
     credited: int | None = None  # credit the getter added for the actor across the probe
     holdings_after: int | None = None  # tokens the target holds after the probe
     credit_after: int | None = None  # the actor's credit after the probe
+    actor_before: int | None = None  # attacker fixture balance before the first call
+    actor_after: int | None = None  # attacker fixture balance after the last call
     revert_selector: str = ""  # 0x plus 8 hex digits, or ""
     revert_data_ok: bool = True
     control_ok: int = -1  # -1 not run, 0 reverted, 1 succeeded
@@ -1013,7 +1074,9 @@ def evaluate(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD, f"{oracle.getter} did not change", probe, True, True
         )
-    if kind in {OracleKind.CREDIT_LE_RECEIVED, OracleKind.BALANCE_NOT_INCREASED}:
+    if kind is OracleKind.BALANCE_NOT_INCREASED:
+        return _conservation_verdict(oracle, observation, probe, probe_ok)
+    if kind is OracleKind.CREDIT_LE_RECEIVED:
         if not observation.readable or observation.credited is None or observation.received is None:
             return PropertyEvaluation(
                 PropertyVerdict.NOT_EVALUATED, "credit or receipt could not be read", probe
@@ -1066,6 +1129,49 @@ def evaluate(
             True,
         )
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
+
+
+def _conservation_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    """The attacker's own balance over the whole sequence. A refused probe can still hold.
+
+    Every precondition already succeeded, so the deposits and the first withdrawal
+    happened. The probe is the repeat withdrawal: a revert there is the protection
+    working, not a missing result.
+    """
+    before, after = observation.actor_before, observation.actor_after
+    if not observation.readable or before is None or after is None:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the attacker's balance or credit could not be read, so nothing was judged",
+            probe,
+        )
+    repeat = "succeeded" if probe_ok == 1 else "reverted"
+    if after > before:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            (
+                f"the attacker's fixture balance rose from {before} to {after} "
+                f"(+{after - before}) across its deposit and withdrawals while another "
+                f"depositor's funds were in custody; the repeat {oracle.probe_function} "
+                f"{repeat}"
+            ),
+            probe,
+            True,
+            True,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        (
+            f"the attacker's fixture balance went from {before} to {after} "
+            f"(-{before - after}); the repeat {oracle.probe_function} {repeat}. This holds "
+            "for this one ordering, amount, and standard fixture token only"
+        ),
+        probe,
+        True,
+        True,
+    )
 
 
 def _selector_word(value: str) -> bool:

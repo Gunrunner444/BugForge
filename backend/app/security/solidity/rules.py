@@ -37,7 +37,7 @@ from app.parsing.solidity_modifiers import (
 )
 from app.parsing.solidity_proxy import analyze_proxy
 from app.parsing.solidity_research import SemanticCandidate, build_research_model
-from app.parsing.solidity_research_suite import FAMILIES
+from app.parsing.solidity_research_suite import FAMILIES, HYPOTHESIS_FAMILIES
 from app.parsing.solidity_storage import analyze_storage
 from app.parsing.solidity_version import checked_arithmetic
 from app.security.rules.base import RuleDocumentation, SecurityObservation, SecurityRule
@@ -1499,7 +1499,9 @@ def _class_for_detector(detector: str, fallback: VulnerabilityClass) -> Vulnerab
 
 
 def _research_rules() -> list[SecurityRule]:
-    return [_ResearchRule(family) for family in sorted(FAMILIES)]
+    return [
+        _ResearchRule(family) for family in sorted(FAMILIES) if family not in HYPOTHESIS_FAMILIES
+    ]
 
 
 @lru_cache(maxsize=8)

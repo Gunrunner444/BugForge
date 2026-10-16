@@ -14,7 +14,7 @@ from app.discovery.bounty.vfcs import (
 )
 from app.discovery.sequences import MAX_MUTATIONS, MAX_SEQUENCE_LENGTH
 from app.parsing.solidity_research import build_research_model
-from app.parsing.solidity_research_suite import run_suite
+from app.parsing.solidity_research_suite import is_hypothesis, run_suite
 from tests.test_phase50.phase50_support import read
 
 IDENTITY = SequenceIdentity(
@@ -76,8 +76,10 @@ def test_short_templates_are_produced_from_candidates() -> None:
 
 def test_no_blind_permutations_and_no_sequence_without_a_candidate() -> None:
     _m, suite, result = _build("caller_context_safe.sol", "accounting_safe.sol")
-    assert suite.candidates == ()
-    assert result.sequences == ()
+    assert not [c for c in suite.candidates if not is_hypothesis(c)]
+    hypotheses = {f"{c.detector}@{c.contract}.{c.function}" for c in suite.candidates}
+    assert all(sequence.derived_from in hypotheses for sequence in result.sequences)
+    assert len(result.sequences) <= len(suite.candidates)
     _m, suite, result = _build("accounting_vulnerable.sol")
     assert len(result.sequences) <= len(suite.candidates)
     for sequence in result.sequences:
