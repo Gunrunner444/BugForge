@@ -111,6 +111,9 @@ class RContract:
     modifiers: tuple[RModifier, ...]
     body: str
     pragma: str = ""
+    # Struct declarations in this contract body: (name, fields). File-level structs
+    # outside a contract are not read.
+    structs: tuple[tuple[str, tuple[Param, ...]], ...] = ()
 
     @property
     def is_interface(self) -> bool:
@@ -196,6 +199,17 @@ class ResearchModel:
             if item is not None:
                 found.update(dict(item.state_vars))
         return found
+
+    def struct_fields(self, type_name: str) -> tuple[Param, ...] | None:
+        """Fields of the struct a type names, or None when it is absent or declared twice."""
+        name = re.sub(r"\[.*\]", "", type_name).strip().split(".")[-1]
+        found = [
+            fields
+            for contract in self.contracts.values()
+            for struct, fields in contract.structs
+            if struct == name
+        ]
+        return found[0] if len(found) == 1 else None
 
     def contract_for_type(self, type_name: str) -> str:
         """The contract a declared type names, or empty when it is not in the model."""
@@ -549,6 +563,7 @@ def _build_contract(
         else:
             functions.append(item)
     state = _state_vars(body_skel, body_clean, depth)
+    structs = _structs(body_skel, body_clean, depth)
     return RContract(
         name=name,
         kind=kind,
@@ -561,7 +576,21 @@ def _build_contract(
         modifiers=tuple(modifiers),
         body=body_clean,
         pragma=pragma,
+        structs=structs,
     )
+
+
+def _structs(skel: str, clean: str, depth: list[int]) -> tuple[tuple[str, tuple[Param, ...]], ...]:
+    found: list[tuple[str, tuple[Param, ...]]] = []
+    for match in re.finditer(r"\bstruct\s+([A-Za-z_]\w*)\s*\{", skel):
+        if depth[match.start()] != 0:
+            continue
+        close = match_close(skel, match.end() - 1)
+        if close == -1:
+            continue
+        fields = parse_params(clean[match.end() : close].replace(";", ","))
+        found.append((match.group(1), tuple(item for item in fields if item.name)))
+    return tuple(found)
 
 
 def _depth_map(skel: str) -> list[int]:
