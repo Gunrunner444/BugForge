@@ -959,6 +959,8 @@ EVIDENCE_SLOTS = (
     "attacker_credit_after",
     "victim_credit_before",
     "victim_credit_after",
+    "attacker_withdrawal_amount",
+    "attacker_repeat_withdrawal_amount",
 )
 
 
@@ -1243,6 +1245,12 @@ def _evidence_text(evidence: tuple[tuple[str, int], ...]) -> str:
         first, last = seen.get(f"{stem}_before"), seen.get(f"{stem}_after")
         if first is not None and last is not None:
             parts.append(f"{label} {first} -> {last}")
+    for label, name in (
+        ("attacker withdrawal amount", "attacker_withdrawal_amount"),
+        ("repeat withdrawal amount", "attacker_repeat_withdrawal_amount"),
+    ):
+        if name in seen:
+            parts.append(f"{label} {seen[name]}")
     return ("Readings: " + "; ".join(parts) + ". ") if parts else ""
 
 

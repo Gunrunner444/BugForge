@@ -797,6 +797,7 @@ class _Synth:
         self.funded: set[str] = set()
         self.approved: set[str] = set()
         self.counter = 0
+        self.withdrawal_reads = 0
         self.body = ""
 
     # -- token fixture -------------------------------------------------------------------
@@ -963,6 +964,13 @@ class _Synth:
         self.steps.append(
             f"        if (!{ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
         )
+        if self.oracle.kind is OracleKind.BALANCE_NOT_INCREASED and call.actor == ATTACKER:
+            slot = 8 + self.withdrawal_reads
+            self.withdrawal_reads += 1
+            if slot < len(EVIDENCE_SLOTS):
+                self.steps.append(
+                    f"        emit BugForgeObservation({K_EVIDENCE}, {slot}, {value});"
+                )
         return value
 
     def read_actor(self, slot: int) -> None:
