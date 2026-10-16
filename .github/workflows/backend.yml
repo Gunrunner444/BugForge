@@ -177,6 +177,8 @@ jobs:
             tests/test_phase59/test_profile_types.py \
             tests/test_phase59/test_constructor_sequence.py \
             tests/test_phase59/test_ci_comet_required.py \
+            tests/test_discovery_conservation \
+            tests/test_discovery_authorization \
             -vv --tb=short
 
   compound-integration:
@@ -199,6 +201,18 @@ jobs:
           test -f comet-pin/contracts/CometConfiguration.sol
           test -f comet-pin/contracts/AssetList.sol
           test -f comet-pin/contracts/AssetListFactory.sol
+      - name: Checkout the deployed cUSDCv3 implementation source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: compound-finance/comet
+          ref: 059c11917f75049b41756d5c5fd44eb3dc716385
+          path: comet-deployed
+      - name: Verify the deployed Comet commit
+        run: |
+          set -euo pipefail
+          test "$(git -C comet-deployed rev-parse HEAD)" = "059c11917f75049b41756d5c5fd44eb3dc716385"
+          test -f comet-deployed/contracts/CometWithExtendedAssetList.sol
+          test -f comet-deployed/contracts/IAssetListFactory.sol
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -235,6 +249,7 @@ jobs:
         working-directory: backend
         env:
           BUGFORGE_COMET_ROOT: ${{ github.workspace }}/comet-pin
+          BUGFORGE_COMET_DEPLOYED_ROOT: ${{ github.workspace }}/comet-deployed
           BUGFORGE_REQUIRE_COMET: "1"
           BUGFORGE_REQUIRE_FOUNDRY: "1"
           FOUNDRY_OFFLINE: "true"
@@ -244,4 +259,5 @@ jobs:
             tests/test_phase58/test_comet_pause_campaign.py \
             tests/test_phase59/test_comet_asset_campaign.py \
             tests/test_phase59/test_ci_comet_required.py \
+            tests/test_compound_custody \
             -vv --tb=short

@@ -1,6 +1,6 @@
 {
   "schema": "bugforge.local_benchmark/1",
-  "note": "Compact local reconstructions. Candidate emission is scored separately from vulnerability labels. This is not a real-world detection rate.",
+  "note": "Compact local reconstructions. Detector cases score candidate emission against a safe twin. Hypothesis cases fire on both twins by design and are discriminated only by execution. This is not a real-world detection rate.",
   "cases": [
     {
       "id": "bridge_receiver",
@@ -10,7 +10,10 @@
       "contract": "OpenReceiver",
       "ground_truth": "local_property_violation_unverified",
       "rationale": "An arbitrary caller reaches receiveMessage on the vulnerable fixture; the safe fixture requires the endpoint. Local property only.",
-      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     },
     {
       "id": "v4_hook",
@@ -20,7 +23,10 @@
       "contract": "CounterHook",
       "ground_truth": "local_property_violation_unverified",
       "rationale": "afterSwap has no pool-manager check on the vulnerable fixture and reverts otherwise. Same call-must-fail oracle as the bridge receiver.",
-      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     },
     {
       "id": "read_only_reentrancy",
@@ -57,7 +63,10 @@
       "contract": "Vault",
       "ground_truth": "local_property_violation_unverified",
       "rationale": "The vulnerable vault credits the requested amount; the safe vault credits the measured delta. Local accounting property only.",
-      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     },
     {
       "id": "initializer",
@@ -67,7 +76,10 @@
       "contract": "Acct",
       "ground_truth": "local_property_violation_unverified",
       "rationale": "initialize can run twice on the vulnerable account and the second call reverts once a guard is present. Local initialization property only.",
-      "stateful": {"vulnerable": "property_violated", "safe": "property_held"}
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     },
     {
       "id": "swallowed_call",
@@ -77,7 +89,10 @@
       "contract": "Relay",
       "ground_truth": "mechanism_only",
       "rationale": "Outer success shows a swallowed callee revert. That is a mechanism observation, not a security-property violation. The safe body propagates the failure.",
-      "stateful": {"vulnerable": "mechanism_observed", "safe": "failure_propagated"}
+      "stateful": {
+        "vulnerable": "mechanism_observed",
+        "safe": "failure_propagated"
+      }
     },
     {
       "id": "swallowed_ambiguous",
@@ -87,7 +102,10 @@
       "contract": "Relay",
       "ground_truth": "ambiguous",
       "rationale": "The failure path is ambiguous, so no sequence is synthesized. Emission is not a vulnerability label.",
-      "stateful": {"vulnerable": "no_sequence", "safe": "no_sequence"}
+      "stateful": {
+        "vulnerable": "no_sequence",
+        "safe": "no_sequence"
+      }
     },
     {
       "id": "prefund_transfer",
@@ -97,7 +115,113 @@
       "contract": "Account",
       "ground_truth": "not_a_confirmed_vulnerability",
       "rationale": "A validateUserOp value transfer to msg.sender is an intentional best-effort prefund. The candidate is a possible false positive and is not synthesized.",
-      "stateful": {"vulnerable": "no_sequence", "safe": "no_sequence"}
+      "stateful": {
+        "vulnerable": "no_sequence",
+        "safe": "no_sequence"
+      }
+    },
+    {
+      "id": "roundtrip_missing_debit",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_missing_debit_vulnerable.sol",
+      "safe": "roundtrip_missing_debit_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "LeakyVault",
+      "family": "accounting / state update omission",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after depositing and withdrawing its credit twice, the attacker holds no more of the token than before",
+      "rationale": "The vulnerable withdraw never reduces balances[msg.sender], so the repeat withdrawal pays out the second depositor's funds. The safe withdraw debits first, so the repeat withdrawal pays nothing.",
+      "reference": "constructed fixture for the missing-state-update class",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
+    },
+    {
+      "id": "roundtrip_post_transfer_price",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_post_transfer_price_vulnerable.sol",
+      "safe": "roundtrip_post_transfer_price_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "EagerShareVault",
+      "family": "accounting / share pricing order",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "an earlier depositor cannot redeem part of a later depositor's assets",
+      "rationale": "The vulnerable deposit prices shares against the balance after transferFrom, so the second depositor receives half the shares and the attacker redeems 4/3 of its deposit. The safe deposit prices against the balance before the transfer.",
+      "reference": "constructed fixture for the post-transfer share-pricing class",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
+    },
+    {
+      "id": "roundtrip_index_rounding",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_index_rounding_vulnerable.sol",
+      "safe": "roundtrip_index_rounding_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "IndexVault",
+      "family": "accounting / rounding direction",
+      "ground_truth": "vulnerable_only_at_small_amounts",
+      "property": "a supply and withdrawal at a 1.5 index must not return more than was supplied",
+      "rationale": "The vulnerable twin rounds supply credit up. A 2-unit supply withdraws 3 units, but the fixed 1e18 fixture supply withdraws exactly 1e18, so the fixed sequence holds on both twins. The safe twin rounds down and leaves one unit of dust, the Compound III behavior.",
+      "known_limitation": "fixed fixture amount: rounding-direction defects need amount search, which the template does not do",
+      "reference": "Compound III principal rounding (comet 059c1191 CometCore.principalValueSupply)",
+      "stateful": {
+        "vulnerable": "property_held",
+        "safe": "property_held"
+      }
+    },
+    {
+      "id": "roundtrip_unbound_token",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_unbound_token_vulnerable.sol",
+      "safe": "roundtrip_unbound_token_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "LateTokenVault",
+      "family": "testability / environment",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "same as roundtrip_missing_debit",
+      "rationale": "The vulnerable twin has the missing-debit defect, but its token is set by an owner call after deployment. The harness binds a token only through a constructor or call parameter, so both twins are inconclusive (unbound_token) rather than silently judged.",
+      "known_limitation": "token configured after deployment is not bound by the local harness",
+      "stateful": {
+        "vulnerable": "inconclusive",
+        "safe": "inconclusive"
+      }
+    },
+    {
+      "id": "roundtrip_helper_debit",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_helper_debit_vulnerable.sol",
+      "safe": "roundtrip_helper_debit_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "HelperVault",
+      "family": "accounting / state update omission through helpers",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after depositing and withdrawing its credit twice, the attacker holds no more of the token than before",
+      "rationale": "Transfers go through a TokenMover library and the position is a Ledger.Position struct reached through a storage-reference helper. The vulnerable withdrawal checks position.shares but never calls Ledger.debit, so the repeat withdrawal pays the second depositor's funds. The safe twin debits through the library first.",
+      "reference": "constructed fixture for helper-mediated custody and library accounting",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
+    },
+    {
+      "id": "roundtrip_struct_index",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_struct_index_vulnerable.sol",
+      "safe": "roundtrip_struct_index_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "StructVault",
+      "family": "accounting / unit conversion",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after initializing, supplying and withdrawing its balance, the attacker holds no more of the token than before",
+      "rationale": "Principal is kept in index units in a packed struct written back whole from a memory copy by a helper, and the index is set once by a permissionless initializer. The vulnerable withdrawal burns principal for the requested amount but pays that amount scaled by the index again, so at a 2.0 index it pays twice the deposit from the second supplier's funds. The safe twin pays the requested amount.",
+      "reference": "constructed fixture for split transfer and struct accounting (the Compound III principal/index shape)",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     }
   ]
 }

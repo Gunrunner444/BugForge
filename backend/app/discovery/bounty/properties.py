@@ -31,6 +31,7 @@ from typing import Any
 from app.discovery.bounty.vfcs import ATTACKER, Vfcs
 from app.discovery.orchestration.codec import digest
 from app.parsing.keccak import function_selector
+from app.parsing.solidity_conservation import custody_pair
 from app.parsing.solidity_research import ResearchModel, RFunction, SemanticCandidate
 
 
@@ -80,7 +81,8 @@ class OracleKind(StrEnum):
     SECOND_CALL_MUST_FAIL = "second_call_must_fail"
     # a privileged public getter must not change across the probe
     STATE_UNCHANGED = "state_unchanged"
-    # the attacker's fixture-token balance must not increase over the sequence
+    # the attacker's fixture-token balance after the last call must not exceed its
+    # balance before the first call (read for the attacker, not the target)
     BALANCE_NOT_INCREASED = "balance_not_increased"
     # credited balance (public getter for the actor) must not exceed tokens received
     CREDIT_LE_RECEIVED = "credit_le_received"
@@ -91,6 +93,8 @@ class OracleKind(StrEnum):
     MECHANISM_PROBE = "mechanism_probe"
     # A configured value is still present in the return data of a read.
     CONFIGURED_VALUE = "configured_value"
+    # The probe succeeds and a public getter ends at the expected word.
+    STATE_EQUALS = "state_equals"
 
 
 EXECUTABLE_ORACLES = frozenset(OracleKind) - {OracleKind.NONE}
@@ -119,6 +123,12 @@ class OracleSpec:
     # Word of a static return tuple. -1 means the oracle does not read one.
     word_index: int = -1
     observed_fixture: str = ""
+    # Decimal words for STATE_EQUALS. Empty expected_before means the start is not checked.
+    expected_before: str = ""
+    expected_after: str = ""
+    # "" or "payout_matches_credit": the caller's token gain equals the owner's credit loss
+    # and the contract's token loss. An authorized payout of that amount is not theft.
+    balance_relation: str = ""
 
     @property
     def executable(self) -> bool:
@@ -140,6 +150,9 @@ class OracleSpec:
             "control_sender": self.control_sender,
             "word_index": self.word_index,
             "observed_fixture": self.observed_fixture,
+            "expected_before": self.expected_before,
+            "expected_after": self.expected_after,
+            "balance_relation": self.balance_relation,
             "executable": self.executable,
         }
 
@@ -238,6 +251,7 @@ _FAMILY_BY_PREFIX: tuple[tuple[str, PropertyFamily], ...] = (
     ("bridge.", PropertyFamily.BRIDGE_MESSAGE_BINDING),
     ("v4_hooks.", PropertyFamily.ACCESS_CONTROL_HIERARCHY),
     ("profile.configured_asset", PropertyFamily.ACCOUNTING),
+    ("conservation.", PropertyFamily.SOLVENCY),
 )
 
 
@@ -546,7 +560,7 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
         fixture = "false_return"
     primary = OracleSpec(
         kind=OracleKind.CREDIT_LE_RECEIVED,
-        probe_role=_first_role(sequence),
+        probe_role=_role_of(sequence, fn.signature),
         probe_function=fn.signature,
         getter=getter,
         getter_actor=ATTACKER,
@@ -577,6 +591,79 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
         (variable,),
         f"{fn.name} credits {variable}[msg.sender] from a caller-supplied amount",
         ("the fixture token is the asset the contract accounts for",),
+        "",
+    )
+
+
+def _round_trip(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
+    """The attacker must not end a deposit/withdraw round trip with more tokens.
+
+    The pair is re-derived from the model by the custody trace, so the credit slot,
+    the token binding and the getter are the traced ones, never a name match. The
+    withdrawal amount is the attacker's credit as the traced getter reports it when
+    one exists, otherwise the deposited amount, and that choice is recorded.
+    """
+    probe_role = "withdraw_again" if _role_function(sequence, "withdraw_again") else "withdraw"
+    payout = _role_function(sequence, probe_role)
+    if not payout:
+        return (OracleSpec(), (), (), "the sequence has no withdrawal", (), "")
+    pair = custody_pair(model, fn.contract, fn.signature, payout)
+    if pair is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"no traced custody pair links {fn.signature} and {payout}",
+            (),
+            "custody trace did not reproduce",
+        )
+    getter = pair.getter
+    variable = pair.mapping
+    roles = ("initialize", "deposit", "victim_deposit", "withdraw", "withdraw_again")
+    order = [call.role for call in sequence.calls]
+    probe_at = order.index(probe_role)
+    preconditions = tuple(r for r in roles if r in order[:probe_at])
+    credit = f"{variable}[{pair.keys}]" + (f".{pair.credit_field}" if pair.credit_field else "")
+    amount = (
+        f"the attacker withdraws the value {getter} reports for it ({pair.getter_basis})"
+        if getter
+        else "the attacker withdraws the amount it deposited (no traced getter reads the credit)"
+    )
+    payout_name = payout.split("(")[0]
+    oracle = OracleSpec(
+        kind=OracleKind.BALANCE_NOT_INCREASED,
+        probe_role=probe_role,
+        probe_function=payout,
+        precondition_roles=preconditions,
+        getter=getter,
+        getter_actor=ATTACKER,
+        token_fixture="standard",
+        snapshot="before_sequence",
+        expression=(
+            f"after the sequence {' > '.join(order)}, the attacker's balance of "
+            f"{pair.token_label} (smallest token unit) must not exceed its balance before "
+            f"the first call to {fn.name}"
+        ),
+    )
+    assumptions = [
+        "one ordering: " + " > ".join(order),
+        f"asset: {pair.token_label} bound by {pair.token_binding} ({pair.token_source or 'n/a'})",
+        f"account: the attacker; credit {credit} is in the contract's own units, "
+        "not assumed to be token units",
+        amount,
+        "no call advances block.timestamp or accrues interest, rewards or index growth, "
+        "so a gain is not yield",
+    ]
+    if pair.initializer:
+        assumptions.append(f"{pair.initializer} runs first: {pair.initializer_basis}")
+    if pair.incomplete:
+        assumptions.append("trace incomplete: " + "; ".join(pair.incomplete)[:300])
+    return (
+        oracle,
+        (),
+        (variable,),
+        f"{fn.name} credits {credit} and {payout_name} pays {pair.token_label} back",
+        tuple(assumptions),
         "",
     )
 
@@ -617,9 +704,10 @@ def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) ->
     )
 
 
-def _first_role(sequence: Vfcs) -> str:
+def _role_of(sequence: Vfcs, signature: str) -> str:
+    """The role of the first call to ``signature``, wherever reordering moved it."""
     for call in sequence.calls:
-        if not call.primitive:
+        if not call.primitive and call.function == signature:
             return call.role
     return ""
 
@@ -838,6 +926,8 @@ _ORACLE_BUILDERS: dict[str, Any] = {
         "{name}'s totals are internal; no public observable distinguishes a wrap"
     ),
     "failing-callee→swallowed-call": _swallowed,
+    "deposit→deposit→withdraw→withdraw": _round_trip,
+    "initialize→deposit→deposit→withdraw": _round_trip,
 }
 
 
@@ -856,6 +946,8 @@ class OracleObservation:
     credited: int | None = None  # credit the getter added for the actor across the probe
     holdings_after: int | None = None  # tokens the target holds after the probe
     credit_after: int | None = None  # the actor's credit after the probe
+    actor_before: int | None = None  # attacker fixture balance before the first call
+    actor_after: int | None = None  # attacker fixture balance after the last call
     revert_selector: str = ""  # 0x plus 8 hex digits, or ""
     revert_data_ok: bool = True
     control_ok: int = -1  # -1 not run, 0 reverted, 1 succeeded
@@ -863,6 +955,24 @@ class OracleObservation:
     control_after: str = ""
     observed_word: str = ""
     fixture_word: str = ""
+    # Supplementary readings by name (see EVIDENCE_SLOTS). They describe the run;
+    # the verdict is still decided by the oracle's own measurement.
+    evidence: tuple[tuple[str, int], ...] = ()
+
+
+# K_EVIDENCE slot -> name. Credits are in the contract's own units.
+EVIDENCE_SLOTS = (
+    "holdings_before",
+    "holdings_after",
+    "victim_balance_before",
+    "victim_balance_after",
+    "attacker_credit_before",
+    "attacker_credit_after",
+    "victim_credit_before",
+    "victim_credit_after",
+    "attacker_withdrawal_amount",
+    "attacker_repeat_withdrawal_amount",
+)
 
 
 @dataclass(frozen=True)
@@ -874,9 +984,10 @@ class PropertyEvaluation:
     evaluated: bool = False
     # "" | changed | failed | unchanged | not_run. Not a finding by itself.
     positive_control: str = ""
+    evidence: tuple[tuple[str, int], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "verdict": self.verdict.value,
             "reason": self.reason,
             "probe_index": self.probe_index,
@@ -885,6 +996,9 @@ class PropertyEvaluation:
             "positive_control": self.positive_control,
             "verified": False,
         }
+        if self.evidence:
+            body["evidence"] = {name: str(value) for name, value in self.evidence}
+        return body
 
 
 def probe_index(sequence: Vfcs, oracle: OracleSpec) -> int:
@@ -901,6 +1015,31 @@ def precondition_indices(sequence: Vfcs, oracle: OracleSpec, probe: int) -> tupl
         index
         for index, call in enumerate(sequence.calls)
         if call.role in oracle.precondition_roles and index < probe
+    )
+
+
+def prior_payout_indices(sequence: Vfcs, oracle: OracleSpec, probe: int) -> tuple[int, ...]:
+    """Earlier calls that pay the probe's function for the probe's actor.
+
+    The ordinary payout is one of these calls. The probe is an additional
+    payout only when one of them succeeded. A role named ``withdraw`` is not
+    that evidence: the binding is the probe's ``(role, function)`` plus a
+    prior call of the same function by the same actor.
+    """
+    if probe < 0 or probe >= len(sequence.calls):
+        return ()
+    probe_call = sequence.calls[probe]
+    function = oracle.probe_function
+    if probe_call.primitive or not function or probe_call.function != function:
+        return ()
+    return tuple(
+        index
+        for index, call in enumerate(sequence.calls)
+        if index < probe
+        and not call.primitive
+        and call.function == function
+        and call.actor == probe_call.actor
+        and call.role != probe_call.role
     )
 
 
@@ -928,6 +1067,10 @@ def evaluate(
             False,
         )
     if any(observation.call_ok[i] != 1 for i in required):
+        if oracle.kind is OracleKind.BALANCE_NOT_INCREASED and _ordinary_payout_failed(
+            sequence, oracle, observation, probe
+        ):
+            return _payout_not_completed(probe)
         return PropertyEvaluation(
             PropertyVerdict.NOT_EVALUATED,
             "a precondition call reverted, so the property could not be judged",
@@ -993,6 +1136,8 @@ def evaluate(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD, "the probe call reverted as required", probe, True, True
         )
+    if kind is OracleKind.STATE_EQUALS:
+        return _state_equals_verdict(oracle, observation, probe, probe_ok)
     if kind is OracleKind.CONFIGURED_VALUE:
         return _configured_verdict(oracle, observation, probe, probe_ok)
     if kind is OracleKind.STATE_UNCHANGED:
@@ -1012,7 +1157,9 @@ def evaluate(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD, f"{oracle.getter} did not change", probe, True, True
         )
-    if kind in {OracleKind.CREDIT_LE_RECEIVED, OracleKind.BALANCE_NOT_INCREASED}:
+    if kind is OracleKind.BALANCE_NOT_INCREASED:
+        return _conservation_verdict(sequence, oracle, observation, probe, probe_ok)
+    if kind is OracleKind.CREDIT_LE_RECEIVED:
         if not observation.readable or observation.credited is None or observation.received is None:
             return PropertyEvaluation(
                 PropertyVerdict.NOT_EVALUATED, "credit or receipt could not be read", probe
@@ -1065,6 +1212,133 @@ def evaluate(
             True,
         )
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
+
+
+def _ordinary_payout_failed(
+    sequence: Vfcs, oracle: OracleSpec, observation: OracleObservation, probe: int
+) -> bool:
+    """True when an earlier payout of the probe's function did not succeed.
+
+    A failed deposit is not this case. Only a payout that the sequence placed
+    before the probe, and that itself did not succeed, is the ordinary payout
+    the round trip needed.
+    """
+    payouts = prior_payout_indices(sequence, oracle, probe)
+    if not payouts or any(
+        observation.call_ok[i] != 1
+        for i in precondition_indices(sequence, oracle, probe)
+        if i not in payouts and i < min(payouts)
+    ):
+        return False
+    return any(observation.call_ok[i] != 1 for i in payouts)
+
+
+def _payout_not_completed(probe: int) -> PropertyEvaluation:
+    return PropertyEvaluation(
+        PropertyVerdict.NOT_EVALUATED,
+        "the intended withdrawal did not succeed, so the round trip did not complete. "
+        "This test does not establish normal withdrawal behavior",
+        probe,
+        False,
+    )
+
+
+def _conservation_verdict(
+    sequence: Vfcs,
+    oracle: OracleSpec,
+    observation: OracleObservation,
+    probe: int,
+    probe_ok: int,
+) -> PropertyEvaluation:
+    """The attacker's own balance over the whole sequence.
+
+    A reverted probe is a refused additional payout only when an earlier call of
+    the same function, by the same actor, succeeded. Otherwise the probe is the
+    ordinary payout, and its revert means the round trip was not exercised.
+    """
+    before, after = observation.actor_before, observation.actor_after
+    evidence = observation.evidence
+    payouts = prior_payout_indices(sequence, oracle, probe)
+    ordinary_done = bool(payouts) and all(observation.call_ok[i] == 1 for i in payouts)
+    if not ordinary_done and probe_ok != 1:
+        return _payout_not_completed(probe)
+    if not observation.readable or before is None or after is None:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the attacker's balance or credit could not be read, so nothing was judged",
+            probe,
+            evidence=evidence,
+        )
+    if ordinary_done and probe_ok != 1:
+        outcome = (
+            f"; an earlier {oracle.probe_function} by the same actor succeeded, and the "
+            "additional payout reverted"
+        )
+    elif ordinary_done:
+        outcome = f"; the additional {oracle.probe_function} succeeded"
+    else:
+        outcome = ""
+    readings = _evidence_text(evidence)
+    if after > before:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            (
+                f"the attacker's fixture balance rose from {before} to {after} "
+                f"(+{after - before}) across its deposit and withdrawal while another "
+                f"depositor's funds were in custody{outcome}. {readings}"
+                f"{_payout_source(evidence, after - before)}"
+            ),
+            probe,
+            True,
+            True,
+            evidence=evidence,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        (
+            f"the attacker's fixture balance went from {before} to {after} "
+            f"(-{before - after}){outcome}. {readings}This holds for this one ordering, "
+            "amount, and fixture token only"
+        ),
+        probe,
+        True,
+        True,
+        evidence=evidence,
+    )
+
+
+def _evidence_text(evidence: tuple[tuple[str, int], ...]) -> str:
+    seen = dict(evidence)
+    parts = []
+    for label, stem in (
+        ("contract holdings", "holdings"),
+        ("victim token balance", "victim_balance"),
+        ("attacker credit (contract units)", "attacker_credit"),
+        ("victim credit (contract units)", "victim_credit"),
+    ):
+        first, last = seen.get(f"{stem}_before"), seen.get(f"{stem}_after")
+        if first is not None and last is not None:
+            parts.append(f"{label} {first} -> {last}")
+    for label, name in (
+        ("attacker withdrawal amount", "attacker_withdrawal_amount"),
+        ("repeat withdrawal amount", "attacker_repeat_withdrawal_amount"),
+    ):
+        if name in seen:
+            parts.append(f"{label} {seen[name]}")
+    return ("Readings: " + "; ".join(parts) + ". ") if parts else ""
+
+
+def _payout_source(evidence: tuple[tuple[str, int], ...], gain: int) -> str:
+    """Where the excess came from, only as far as the readings show. Never a loss claim."""
+    seen = dict(evidence)
+    first, last = seen.get("holdings_before"), seen.get("holdings_after")
+    if first is None or last is None:
+        return "The payout source was not read. Victim loss is not established by this test."
+    return (
+        f"The excess {gain} was paid from the contract's holdings, which hold {last} after the "
+        f"sequence against {first} before. Victim loss is not established by this test: the "
+        "victim did not attempt a withdrawal"
+    )
 
 
 def _selector_word(value: str) -> bool:
@@ -1141,15 +1415,156 @@ def _authorization_verdict(
             False,
             control,
         )
+    if control == "changed":
+        control_text = "after the authorized positive control changed it"
+    else:
+        control_text = "no positive control was part of this test"
     return PropertyEvaluation(
         PropertyVerdict.PROPERTY_HELD,
         "the probe call reverted with the expected authorization error "
-        f"{oracle.revert_selector} and the observed state stayed unchanged after the "
-        "authorized positive control changed it",
+        f"{oracle.revert_selector} and the observed state stayed unchanged; {control_text}",
         probe,
         True,
         True,
         control,
+    )
+
+
+def _decimal(text: str) -> int | None:
+    if not re.fullmatch(r"[0-9]{1,78}", text or ""):
+        return None
+    return int(text)
+
+
+def _word(text: str) -> int | None:
+    if not re.fullmatch(r"0x[0-9a-fA-F]{1,64}", text or ""):
+        return None
+    return int(text, 16)
+
+
+def _payout_relation(observation: OracleObservation) -> PropertyEvaluation | None:
+    """None when the caller's gain matches the owner's credit and the contract's tokens.
+
+    A missing reading is not evaluated. A mismatch is a counterexample. A call that
+    moves nothing did not establish the payout.
+    """
+    seen = dict(observation.evidence)
+    needed = (
+        "holdings_before",
+        "holdings_after",
+        "victim_balance_before",
+        "victim_balance_after",
+        "victim_credit_before",
+        "victim_credit_after",
+    )
+    if (
+        observation.actor_before is None
+        or observation.actor_after is None
+        or any(name not in seen for name in needed)
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the payout balances were not read, so the transfer was not judged",
+        )
+    gained = observation.actor_after - observation.actor_before
+    holdings = seen["holdings_before"] - seen["holdings_after"]
+    credit = seen["victim_credit_before"] - seen["victim_credit_after"]
+    wallet = seen["victim_balance_after"] - seen["victim_balance_before"]
+    if gained == 0 and holdings == 0 and credit == 0 and wallet == 0:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the payout did not move value, so the authorized transfer was not established",
+        )
+    if gained != credit or holdings != credit or wallet != 0 or gained <= 0:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"the caller gained {gained}, the owner credit changed by {credit}, "
+            f"holdings changed by {holdings}, and the owner wallet changed by {wallet}",
+            evaluated=True,
+            evidence=observation.evidence,
+        )
+    return None
+
+
+def _state_equals_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    """A successful call established the expected getter value, or it did not."""
+    if probe_ok != 1:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the call that should establish the state reverted, so the property was not established",
+            probe,
+        )
+    if (
+        not oracle.getter
+        or not observation.readable
+        or not observation.before
+        or not observation.after
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the state getter could not be read",
+            probe,
+        )
+    expected_after = _decimal(oracle.expected_after)
+    before = _word(observation.before)
+    after = _word(observation.after)
+    if expected_after is None or before is None or after is None:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the state oracle has no readable expected value",
+            probe,
+        )
+    if oracle.expected_before:
+        expected_before = _decimal(oracle.expected_before)
+        if expected_before is None:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                "the expected starting state is not an integer",
+                probe,
+            )
+        if before != expected_before:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                f"{oracle.getter} started at {before}, not {expected_before}, so the "
+                "transition was not established",
+                probe,
+            )
+    if oracle.balance_relation == "payout_matches_credit":
+        payout = _payout_relation(observation)
+        if payout is not None:
+            return PropertyEvaluation(
+                payout.verdict,
+                payout.reason,
+                probe,
+                payout.precondition_ok,
+                payout.evaluated,
+                evidence=observation.evidence,
+            )
+    elif oracle.balance_relation:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the balance relation is not supported",
+            probe,
+        )
+    evidence = observation.evidence
+    if after != expected_after:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"{oracle.getter} ended at {after}, not {expected_after}",
+            probe,
+            True,
+            True,
+            evidence=evidence,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        f"{oracle.getter} is {expected_after} after the call",
+        probe,
+        True,
+        True,
+        evidence=evidence,
     )
 
 

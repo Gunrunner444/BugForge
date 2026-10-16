@@ -29,6 +29,7 @@ from app.discovery.orchestration.model import (
     ResearchState,
 )
 from app.parsing.solidity_research import SemanticCandidate
+from app.parsing.solidity_research_suite import is_hypothesis
 
 if TYPE_CHECKING:
     from app.discovery.bounty.deployment_identity import DeploymentIdentity
@@ -167,6 +168,10 @@ def build_findings(
     ):
         if len(findings) >= MAX_FINDINGS:
             break
+        if is_hypothesis(candidate) and execution_summary(
+            candidate, execution_list
+        ).strength not in {"strong_candidate", "corroborated_candidate"}:
+            continue
         deployment = deployment_for(candidate.contract) if deployment_for else None
         finding = _one(
             candidate,

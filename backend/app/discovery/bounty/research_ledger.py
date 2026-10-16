@@ -467,6 +467,18 @@ def build_ledger(
     by_family: dict[str, dict[str, int]] = {}
     executed_sequences = 0
     judged_by: dict[str, int] = {}
+    held = held_after_variation = found_by_variation = 0
+    # A mutation origin is "mutation:<signal>:<operator>:<parent sequence id>". Feedback
+    # children run outside the analysis sequences, so their records are folded into
+    # the parent they vary.
+    children: dict[str, list[Mapping[str, Any]]] = {}
+    for item in executions.values():
+        origin = str(item.get("origin", ""))
+        if origin.startswith("mutation:"):
+            children.setdefault(origin.rsplit(":", 1)[-1], []).append(item)
+    varied = set(children) | {
+        s.origin.rsplit(":", 1)[-1] for s in sequences if s.origin.startswith("mutation:")
+    }
     for sequence in sorted(sequences, key=lambda s: s.sequence_id):
         detector, contract, signature = _split(sequence.derived_from)
         if not _in_scope(manifest, contract):
@@ -481,6 +493,14 @@ def build_ledger(
         fam = by_family.setdefault(family, {"sequences": 0, "executable": 0, "violated": 0})
         fam["sequences"] += 1
         record = executions.get(sequence.sequence_id)
+        violating = [
+            item
+            for item in children.get(sequence.sequence_id, [])
+            if item.get("outcome") == "property_violated" and not item.get("stale")
+        ]
+        if violating and (record is None or record.get("outcome") != "property_violated"):
+            record = violating[0]
+            found_by_variation += 1
         subject = f"{contract}.{signature}"
         sid = sequence.sequence_id
 
@@ -608,6 +628,23 @@ def build_ledger(
                     else ""
                 ),
             )
+        elif outcome == "property_held":
+            held += 1
+            if sid in varied:
+                held_after_variation += 1
+            elif not sequence.origin.startswith("mutation:"):
+                assumptions = "; ".join(spec.provenance.assumptions) if spec else ""
+                gap(
+                    "held_untested_variation",
+                    (
+                        "held for one sequence only; keep it as a regression"
+                        + (f" (assumes: {assumptions})" if assumptions else "")
+                    )[:300],
+                    "the same property under other amounts, orderings, actors, or token behavior",
+                    Cost(local_runs=3, capability="stateful_execution"),
+                    "vfcs:mutate (held: vary amounts and ordering)",
+                    spec.statement if spec else "",
+                )
         elif outcome == "sequence_executed_no_oracle":
             gap(
                 "no_oracle",
@@ -700,6 +737,9 @@ def build_ledger(
         "sequences": len(sequences),
         "sequences_without_template": len(skipped),
         "executed_sequences": executed_sequences,
+        "properties_held": held,
+        "properties_held_after_variation": held_after_variation,
+        "violations_found_by_variation": found_by_variation,
         "by_declaration": dict(sorted(by_declaration.items())),
         "by_outcome": dict(sorted(by_outcome.items())),
         "by_family": {k: by_family[k] for k in sorted(by_family)},
