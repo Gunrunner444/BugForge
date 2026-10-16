@@ -23,9 +23,9 @@ def test_static_benchmark_scores_hypotheses_apart_from_detectors() -> None:
         "fp": 0,
         "tn": len(detectors),
     }
-    assert report["hypotheses"]["cases"] == len(hypotheses) == 4
-    assert report["hypotheses"]["emitted_vulnerable"] == 4
-    assert report["hypotheses"]["emitted_safe"] == 4
+    assert report["hypotheses"]["cases"] == len(hypotheses) == 6
+    assert report["hypotheses"]["emitted_vulnerable"] == 6
+    assert report["hypotheses"]["emitted_safe"] == 6
     statics = {c["id"]: c["static"] for c in report["cases"] if c["kind"] == "hypothesis"}
     assert set(statics.values()) == {"emitted_both"}
     assert report["verified"] is False and report["real_world_rate"] is None
@@ -35,7 +35,7 @@ def test_static_benchmark_scores_hypotheses_apart_from_detectors() -> None:
 def test_execution_discriminates_round_trip_twins_and_feedback_finds_the_rounding_twin() -> None:
     report = run_benchmark(HISTORY, executor=StatefulExecutor())
     by_id = {c["id"]: c for c in report["cases"]}
-    for stem in ("missing_debit", "post_transfer_price"):
+    for stem in ("missing_debit", "post_transfer_price", "helper_debit", "struct_index"):
         case = by_id[f"roundtrip_{stem}"]
         assert case["stateful"] == {"vulnerable": "property_violated", "safe": "property_held"}
         assert case["execution_discriminates"] is True
@@ -48,8 +48,8 @@ def test_execution_discriminates_round_trip_twins_and_feedback_finds_the_roundin
     unbound = by_id["roundtrip_unbound_token"]
     assert unbound["stateful"] == {"vulnerable": "inconclusive", "safe": "inconclusive"}
     assert unbound["vulnerability_label"] == "inconclusive_not_judged"
-    assert report["hypotheses"]["execution_discriminated"] == 2
-    assert report["hypotheses"]["discriminated_after_feedback"] == 3
+    assert report["hypotheses"]["execution_discriminated"] == 4
+    assert report["hypotheses"]["discriminated_after_feedback"] == 5
     feedback = report["feedback"]
     assert feedback["by_role"]["safe"]["variants_violated"] == 0
     assert feedback["cases_with_violating_variant"] == {"vulnerable": 1, "safe": 0}

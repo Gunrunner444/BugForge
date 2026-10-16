@@ -188,6 +188,40 @@
         "vulnerable": "inconclusive",
         "safe": "inconclusive"
       }
+    },
+    {
+      "id": "roundtrip_helper_debit",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_helper_debit_vulnerable.sol",
+      "safe": "roundtrip_helper_debit_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "HelperVault",
+      "family": "accounting / state update omission through helpers",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after depositing and withdrawing its credit twice, the attacker holds no more of the token than before",
+      "rationale": "Transfers go through a TokenMover library and the position is a Ledger.Position struct reached through a storage-reference helper. The vulnerable withdrawal checks position.shares but never calls Ledger.debit, so the repeat withdrawal pays the second depositor's funds. The safe twin debits through the library first.",
+      "reference": "constructed fixture for helper-mediated custody and library accounting",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
+    },
+    {
+      "id": "roundtrip_struct_index",
+      "kind": "hypothesis",
+      "vulnerable": "roundtrip_struct_index_vulnerable.sol",
+      "safe": "roundtrip_struct_index_safe.sol",
+      "detector": "conservation.round_trip_value",
+      "contract": "StructVault",
+      "family": "accounting / unit conversion",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after initializing, supplying and withdrawing its balance, the attacker holds no more of the token than before",
+      "rationale": "Principal is kept in index units in a packed struct written back whole from a memory copy by a helper, and the index is set once by a permissionless initializer. The vulnerable withdrawal burns principal for the requested amount but pays that amount scaled by the index again, so at a 2.0 index it pays twice the deposit from the second supplier's funds. The safe twin pays the requested amount.",
+      "reference": "constructed fixture for split transfer and struct accounting (the Compound III principal/index shape)",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     }
   ]
 }

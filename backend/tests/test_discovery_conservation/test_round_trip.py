@@ -34,7 +34,7 @@ from app.security.solidity.rules import HYPOTHESIS_FAMILIES, _research_rules
 from tests.test_phase50.phase50_support import manifest
 
 HISTORY = Path(__file__).resolve().parents[1] / "fixtures" / "phase52_history"
-PAIRS = ("missing_debit", "post_transfer_price", "index_rounding", "unbound_token")
+PAIRS = ("missing_debit", "post_transfer_price", "index_rounding", "unbound_token", "helper_debit")
 
 
 def _fixture(stem: str, role: str) -> tuple[str, str]:
