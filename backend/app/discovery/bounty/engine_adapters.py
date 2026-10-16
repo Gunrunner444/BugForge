@@ -43,6 +43,7 @@ from app.discovery.bounty.stateful import (
     _FIXTURE_TOKEN,
     K_ACTOR,
     K_AFTER,
+    K_EVIDENCE,
     K_BEFORE,
     K_CALL,
     K_CREDITED,
@@ -165,6 +166,11 @@ contract {contract} {{
         return (true, abi.decode(out, (uint256)));
     }}
 
+    function _bfEvidence(uint256 slot, address target, bytes memory data) internal {{
+        (bool ok, uint256 value) = _bfRead(target, data);
+        if (ok) _bfObs({evidence}, slot, value);
+    }}
+
     function _bfOk(uint256 i) internal view returns (bool) {{
         return (bfSeen[{call}][i] && bfVal[{call}][i] == 1)
             || (bfSeen[{prim}][i] && bfVal[{prim}][i] == 1);
@@ -233,6 +239,7 @@ def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
         fixture=_FIXTURE_TOKEN if harness.fixture else "",
         contract=ENGINE_CONTRACT,
         read_failed=K_READ_FAILED,
+        evidence=K_EVIDENCE,
         call=K_CALL,
         prim=K_PRIMITIVE,
         judged=judge[0],

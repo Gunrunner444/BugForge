@@ -374,10 +374,14 @@ def _round_trip(model: ResearchModel, candidate: SemanticCandidate) -> Built:
             "harness provides one fixture token"
         )
 
+    # An argument-bound token is custodied because it is passed. A state-bound one
+    # only matches the passed token when construction bound the same token.
+    passed = "bound_token" if candidate.fact("token_binding") == "argument" else "custodied_token"
+
     def call(
         function: RFunction, role: str, actor: str, default: str, token: str, amount: str
     ) -> VfcsCall:
-        overrides = {name: "bound_token" for name in (token,) if name}
+        overrides = {name: passed for name in (token,) if name}
         if amount:
             overrides[amount] = default
         built = _call(function, role, actor, overrides, default=default)

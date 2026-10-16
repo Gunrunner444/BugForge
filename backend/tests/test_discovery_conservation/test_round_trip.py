@@ -20,7 +20,12 @@ from app.discovery.bounty.properties import (
     evaluate,
 )
 from app.discovery.bounty.research_ledger import build_ledger
-from app.discovery.bounty.stateful import K_ACTOR, build_harness
+from app.discovery.bounty.stateful import (
+    K_ACTOR,
+    K_EVIDENCE,
+    build_harness,
+    observation_from_events,
+)
 from app.discovery.bounty.vfcs import FeedbackSignal, generate, mutate
 from app.parsing.solidity_conservation import DETECTOR
 from app.parsing.solidity_research import build_research_model
@@ -126,7 +131,16 @@ def test_the_harness_reads_the_attacker_before_and_after_and_funds_the_victim() 
     assert first < body.index("vm.prank(address(0xA11CE));\n        (bool ok_0") < last
     assert "bfToken.balanceOf(address(0xA11CE))" in body
     assert "bfToken.mint(address(0xB0B)" in body
-    assert body.count('abi.encodeWithSignature("balances(address)", address(0xA11CE))') == 2
+    sizing = '_bfRead(address(t), abi.encodeWithSignature("balances(address)", address(0xA11CE))'
+    assert body.count(sizing) == 2
+    for slot in range(4):
+        assert f"BugForgeObservation({K_EVIDENCE}, {slot}, bfToken.balanceOf(" in body
+    for slot, actor in ((4, "0xA11CE"), (5, "0xA11CE"), (6, "0xB0B"), (7, "0xB0B")):
+        assert (
+            f'_bfEvidence({slot}, address(t), abi.encodeWithSignature("balances(address)", '
+            f"address({actor})));" in body
+        )
+    assert body.index(f"BugForgeObservation({K_EVIDENCE}, 1,") > body.index("(bool ok_3")
 
 
 def _obs(**kwargs: object) -> OracleObservation:
@@ -148,6 +162,42 @@ def test_the_verdict_compares_the_attackers_own_balance() -> None:
     assert evaluate(sequence, oracle, _obs(readable=False)).verdict is PropertyVerdict.NOT_EVALUATED
     pre_failed = evaluate(sequence, oracle, _obs(call_ok=(1, 0, 1, 1), actor_after=500))
     assert pre_failed.verdict is PropertyVerdict.NOT_EVALUATED
+
+
+def test_supplementary_evidence_is_decoded_and_reported_without_a_loss_claim() -> None:
+    _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    events = (
+        (K_ACTOR, 0, 100),
+        (K_ACTOR, 1, 150),
+        (K_EVIDENCE, 0, 0),
+        (K_EVIDENCE, 1, 50),
+        (K_EVIDENCE, 4, 0),
+        (K_EVIDENCE, 5, 0),
+        (K_EVIDENCE, 99, 7),
+    )
+    observation, _, _ = observation_from_events(events, 4)
+    assert observation.evidence == (
+        ("holdings_before", 0),
+        ("holdings_after", 50),
+        ("attacker_credit_before", 0),
+        ("attacker_credit_after", 0),
+    )
+    judged = evaluate(sequence, spec.oracle, replace(observation, call_ok=(1, 1, 1, 1)))
+    assert judged.verdict is PropertyVerdict.PROPERTY_VIOLATED
+    assert "contract holdings 0 -> 50" in judged.reason
+    assert "Victim loss is not established" in judged.reason
+    assert judged.as_dict()["evidence"]["holdings_after"] == "50"
+    assert "victim_balance_before" not in judged.as_dict()["evidence"]
+
+
+def test_a_reverted_sole_withdrawal_is_not_judged() -> None:
+    _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
+    single = replace(spec.oracle, probe_role="withdraw", precondition_roles=("deposit",))
+    calls = tuple(c for c in sequence.calls if c.role != "withdraw_again")
+    trimmed = replace(sequence, calls=calls)
+    refused = evaluate(trimmed, single, _obs(call_ok=(1, 1, 0)))
+    assert refused.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "did not complete" in refused.reason
 
 
 def test_credit_and_receipt_no_longer_decide_the_balance_oracle() -> None:

@@ -944,6 +944,22 @@ class OracleObservation:
     control_after: str = ""
     observed_word: str = ""
     fixture_word: str = ""
+    # Supplementary readings by name (see EVIDENCE_SLOTS). They describe the run;
+    # the verdict is still decided by the oracle's own measurement.
+    evidence: tuple[tuple[str, int], ...] = ()
+
+
+# K_EVIDENCE slot -> name. Credits are in the contract's own units.
+EVIDENCE_SLOTS = (
+    "holdings_before",
+    "holdings_after",
+    "victim_balance_before",
+    "victim_balance_after",
+    "attacker_credit_before",
+    "attacker_credit_after",
+    "victim_credit_before",
+    "victim_credit_after",
+)
 
 
 @dataclass(frozen=True)
@@ -955,9 +971,10 @@ class PropertyEvaluation:
     evaluated: bool = False
     # "" | changed | failed | unchanged | not_run. Not a finding by itself.
     positive_control: str = ""
+    evidence: tuple[tuple[str, int], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "verdict": self.verdict.value,
             "reason": self.reason,
             "probe_index": self.probe_index,
@@ -966,6 +983,9 @@ class PropertyEvaluation:
             "positive_control": self.positive_control,
             "verified": False,
         }
+        if self.evidence:
+            body["evidence"] = {name: str(value) for name, value in self.evidence}
+        return body
 
 
 def probe_index(sequence: Vfcs, oracle: OracleSpec) -> int:
@@ -1160,36 +1180,82 @@ def _conservation_verdict(
     working, not a missing result.
     """
     before, after = observation.actor_before, observation.actor_after
+    evidence = observation.evidence
     if not observation.readable or before is None or after is None:
         return PropertyEvaluation(
             PropertyVerdict.NOT_EVALUATED,
             "the attacker's balance or credit could not be read, so nothing was judged",
             probe,
+            evidence=evidence,
         )
-    repeat = "succeeded" if probe_ok == 1 else "reverted"
+    repeat = oracle.probe_role == "withdraw_again"
+    if not repeat and probe_ok != 1:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            f"the only withdrawal {oracle.probe_function} reverted, so the round trip did not "
+            "complete and conservation was not exercised",
+            probe,
+            evidence=evidence,
+        )
+    outcome = (
+        f"; the repeat {oracle.probe_function} {'succeeded' if probe_ok == 1 else 'reverted'}"
+        if repeat
+        else ""
+    )
+    readings = _evidence_text(evidence)
     if after > before:
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_VIOLATED,
             (
                 f"the attacker's fixture balance rose from {before} to {after} "
-                f"(+{after - before}) across its deposit and withdrawals while another "
-                f"depositor's funds were in custody; the repeat {oracle.probe_function} "
-                f"{repeat}"
+                f"(+{after - before}) across its deposit and withdrawal while another "
+                f"depositor's funds were in custody{outcome}. {readings}"
+                f"{_payout_source(evidence, after - before)}"
             ),
             probe,
             True,
             True,
+            evidence=evidence,
         )
     return PropertyEvaluation(
         PropertyVerdict.PROPERTY_HELD,
         (
             f"the attacker's fixture balance went from {before} to {after} "
-            f"(-{before - after}); the repeat {oracle.probe_function} {repeat}. This holds "
-            "for this one ordering, amount, and standard fixture token only"
+            f"(-{before - after}){outcome}. {readings}This holds for this one ordering, "
+            "amount, and fixture token only"
         ),
         probe,
         True,
         True,
+        evidence=evidence,
+    )
+
+
+def _evidence_text(evidence: tuple[tuple[str, int], ...]) -> str:
+    seen = dict(evidence)
+    parts = []
+    for label, stem in (
+        ("contract holdings", "holdings"),
+        ("victim token balance", "victim_balance"),
+        ("attacker credit (contract units)", "attacker_credit"),
+        ("victim credit (contract units)", "victim_credit"),
+    ):
+        first, last = seen.get(f"{stem}_before"), seen.get(f"{stem}_after")
+        if first is not None and last is not None:
+            parts.append(f"{label} {first} -> {last}")
+    return ("Readings: " + "; ".join(parts) + ". ") if parts else ""
+
+
+def _payout_source(evidence: tuple[tuple[str, int], ...], gain: int) -> str:
+    """Where the excess came from, only as far as the readings show. Never a loss claim."""
+    seen = dict(evidence)
+    first, last = seen.get("holdings_before"), seen.get("holdings_after")
+    if first is None or last is None:
+        return "The payout source was not read. Victim loss is not established by this test."
+    return (
+        f"The excess {gain} was paid from the contract's holdings, which hold {last} after the "
+        f"sequence against {first} before. Victim loss is not established by this test: the "
+        "victim did not attempt a withdrawal"
     )
 
 

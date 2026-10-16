@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.properties import (
+    EVIDENCE_SLOTS,
     OracleKind,
     OracleObservation,
     OracleSpec,
@@ -99,6 +100,7 @@ K_CONTROL_AFTER = 13
 K_WORD = 14
 K_FIXTURE = 15
 K_ACTOR = 16  # index 0: attacker fixture balance before the first call, 1: after the last
+K_EVIDENCE = 17  # index into properties.EVIDENCE_SLOTS; supplementary, never the verdict
 
 
 class Outcome(StrEnum):
@@ -879,6 +881,17 @@ class _Synth:
             self.steps.append(f"        bytes[] memory {name} = new bytes[](1);")
             self.steps.append(f"        {name}[0] = {encoded};")
             return name
+        if override in {"bound_token", "custodied_token"}:
+            if abi != "address":
+                raise _UnbuildableError(
+                    f"token argument {param.name or '?'} is not an address", "param_not_expressible"
+                )
+            self.want_token(self.oracle.token_fixture or "standard", "the custodied token argument")
+            # Passing the token binds it only when the contract custodies whatever
+            # token it is given. A state-bound token needs a construction binding.
+            if override == "bound_token":
+                self.token_bound = True
+            return "address(bfToken)"
         if _is_token_type(self.model, param.type_name) and not abi.endswith("]"):
             self.want_token(self.oracle.token_fixture or "standard", "a token-typed parameter")
             self.token_bound = True
@@ -957,6 +970,26 @@ class _Synth:
             f"        emit BugForgeObservation({K_ACTOR}, {slot}, bfToken.balanceOf({ATTACKER_ADDR}));"
         )
 
+    def read_evidence(self, phase: int) -> None:
+        """Holdings, the victim's balance and both credits; a failed credit read is omitted."""
+        self.steps.append(
+            f"        emit BugForgeObservation({K_EVIDENCE}, {phase}, "
+            "bfToken.balanceOf(address(t)));"
+        )
+        self.steps.append(
+            f"        emit BugForgeObservation({K_EVIDENCE}, {2 + phase}, "
+            f"bfToken.balanceOf({VICTIM_ADDR}));"
+        )
+        getter = self.oracle.getter
+        if not getter.endswith("(address)"):
+            return
+        # Through a helper: locals here would push the test function past the stack limit.
+        for base, actor in ((4, ATTACKER_ADDR), (6, VICTIM_ADDR)):
+            self.steps.append(
+                f"        _bfEvidence({base + phase}, address(t), "
+                f'abi.encodeWithSignature("{getter}", {actor}));'
+            )
+
     def nested(self, target: str) -> str:
         contract, _, signature = target.partition(".")
         callee = _resolve(self.model, contract, signature)
@@ -1010,6 +1043,23 @@ class _Synth:
             raise _UnbuildableError(
                 f"{param.name} is {stripped}, not profile type {profile.model_type}",
                 "profile_type_mismatch",
+            )
+        if prepared.harness_token:
+            fields = ", ".join(f"{param.name}.{path}" for path in prepared.harness_token_fields)
+            self.want_token(
+                self.oracle.token_fixture or "standard",
+                f"profile {profile.profile_id} assigns the harness token to {fields}",
+            )
+            self.token_bound = True
+            self.primitives.append(
+                Primitive(
+                    name=f"constructor_profile_token:{prepared.harness_token}",
+                    purpose=f"construct {owner} with the harness token as {fields}",
+                    actor="harness",
+                    value="address(bfToken)",
+                    property_relevance="the custodied token is the token the harness measures",
+                    established_by="the profile's harness_token fixture",
+                )
             )
         self.pre_deploy.extend(prepared.deploy_lines)
         self.profile_contracts = prepared.contracts
@@ -1320,6 +1370,7 @@ class _Synth:
             if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
                 self.approve(VICTIM, VICTIM_ADDR, "another depositor's funds are in custody")
             self.read_actor(0)
+            self.read_evidence(0)
         for index, call in enumerate(self.sequence.calls):
             if call.primitive:
                 self.primitive(index, call)
@@ -1366,6 +1417,7 @@ class _Synth:
                 self.read_credit(1)
         if conserving:
             self.read_actor(1)
+            self.read_evidence(1)
         if self.token_kind and not self.token_bound:
             raise _UnbuildableError(
                 f"{self.contract} reads its token from state the harness cannot bind "
@@ -1396,6 +1448,7 @@ class _Synth:
             reverting=_REVERTING_CALLEE if self.failing_callee else "",
             profile_contracts=self.profile_contracts,
             body=body,
+            evidence=K_EVIDENCE,
         )
 
     def imports(self) -> tuple[str, ...]:
@@ -1486,6 +1539,11 @@ contract VfcsHarness is Test {{
         (bool ok, bytes memory out) = target.staticcall(data);
         if (!ok || out.length < 32) return (false, 0);
         return (true, abi.decode(out, (uint256)));
+    }}
+
+    function _bfEvidence(uint256 slot, address target, bytes memory data) internal {{
+        (bool ok, uint256 value) = _bfRead(target, data);
+        if (ok) emit BugForgeObservation({evidence}, slot, value);
     }}
 
     function test_vfcs_execute() public {{
@@ -1693,6 +1751,7 @@ def observation_from_events(
     received: dict[int, int] = {}
     credited: dict[int, int] = {}
     actor: dict[int, int] = {}
+    evidence: dict[int, int] = {}
     deployed = done = False
     revert_selector = ""
     revert_data_ok = True
@@ -1717,6 +1776,8 @@ def observation_from_events(
             credited[index] = value
         elif kind == K_ACTOR:
             actor[index] = value
+        elif kind == K_EVIDENCE and 0 <= index < len(EVIDENCE_SLOTS):
+            evidence[index] = value
         elif kind == K_DONE:
             done = index == count
         elif kind == K_REVERT:
@@ -1758,6 +1819,7 @@ def observation_from_events(
         control_after=control_after,
         observed_word=observed_word,
         fixture_word=fixture_word,
+        evidence=tuple((EVIDENCE_SLOTS[slot], evidence[slot]) for slot in sorted(evidence)),
     )
     return observation, deployed, done
 
