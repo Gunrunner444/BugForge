@@ -113,7 +113,7 @@ def test_the_withdrawal_reads_the_public_credit_or_records_the_fallback() -> Non
     sequence = generate(model, [hit], sources={name: hidden}).sequences[0]
     fallback = build_property(sequence, model, hit)
     assert fallback.oracle.getter == ""
-    assert any("not publicly readable" in item for item in fallback.provenance.assumptions)
+    assert any("no traced getter" in item for item in fallback.provenance.assumptions)
 
 
 def test_the_harness_reads_the_attacker_before_and_after_and_funds_the_victim() -> None:

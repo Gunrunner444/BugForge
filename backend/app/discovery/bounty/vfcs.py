@@ -352,10 +352,14 @@ def _token_behavior(model: ResearchModel, candidate: SemanticCandidate) -> Built
 
 
 def _round_trip(model: ResearchModel, candidate: SemanticCandidate) -> Built:
-    """Attacker deposits, another depositor deposits, the attacker withdraws twice.
+    """Attacker deposits, another depositor deposits, the attacker withdraws its credit.
 
     The second depositor puts funds in custody that an over-paying withdrawal could
-    take. The repeat withdrawal asks for whatever credit the attacker still has.
+    take. Without an initializer the attacker withdraws twice; the repeat asks for
+    whatever credit it still has. A contract that needs a one-time initializer
+    spends the first call on it and withdraws once, so the sequence stays within
+    the length cap. A token argument the path pins to the custodied token is bound
+    to that token; any other parameter keeps the role's default.
     """
     deposit = _own(model, candidate)
     if isinstance(deposit, str):
@@ -363,22 +367,45 @@ def _round_trip(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     payout = _resolve(model, candidate.contract, candidate.fact("payout_function"))
     if payout is None:
         return "the payout function is not in the model"
+    differs = candidate.fact("token_must_differ_from")
+    if differs:
+        return (
+            f"the custody path needs a token argument other than {differs}; the local "
+            "harness provides one fixture token"
+        )
 
-    def call(function: RFunction, role: str, actor: str, default: str) -> VfcsCall:
-        built = _call(function, role, actor, default=default)
+    def call(
+        function: RFunction, role: str, actor: str, default: str, token: str, amount: str
+    ) -> VfcsCall:
+        overrides = {name: "bound_token" for name in (token,) if name}
+        if amount:
+            overrides[amount] = default
+        built = _call(function, role, actor, overrides, default=default)
         return replace(built, contract=candidate.contract)
 
+    put_token = candidate.fact("deposit_token_argument")
+    put_amount = candidate.fact("deposit_amount_argument")
+    take_token = candidate.fact("payout_token_argument")
+    take_amount = candidate.fact("payout_amount_argument")
     calls = [
-        call(deposit, "deposit", ATTACKER, "minimum_amount"),
-        call(deposit, "victim_deposit", VICTIM, "victim_amount"),
-        call(payout, "withdraw", ATTACKER, "actor_credit"),
-        call(payout, "withdraw_again", ATTACKER, "actor_credit"),
+        call(deposit, "deposit", ATTACKER, "minimum_amount", put_token, put_amount),
+        call(deposit, "victim_deposit", VICTIM, "victim_amount", put_token, put_amount),
+        call(payout, "withdraw", ATTACKER, "actor_credit", take_token, take_amount),
     ]
-    return (
-        "deposit→deposit→withdraw→withdraw",
-        calls,
-        "a caller must not withdraw more value than it deposited",
-    )
+    initializer = candidate.fact("initializer")
+    template = "deposit→deposit→withdraw→withdraw"
+    if initializer:
+        setup = _resolve(model, candidate.contract, initializer)
+        if setup is None or setup.params:
+            return f"the initializer {initializer} is not a parameterless function in the model"
+        first = replace(_call(setup, "initialize", ATTACKER), contract=candidate.contract)
+        calls.insert(0, first)
+        template = "initialize→deposit→deposit→withdraw"
+    else:
+        calls.append(
+            call(payout, "withdraw_again", ATTACKER, "actor_credit", take_token, take_amount)
+        )
+    return template, calls, "a caller must not withdraw more value than it deposited"
 
 
 def _message(model: ResearchModel, candidate: SemanticCandidate) -> Built:

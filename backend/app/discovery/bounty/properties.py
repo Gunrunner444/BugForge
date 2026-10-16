@@ -31,6 +31,7 @@ from typing import Any
 from app.discovery.bounty.vfcs import ATTACKER, Vfcs
 from app.discovery.orchestration.codec import digest
 from app.parsing.keccak import function_selector
+from app.parsing.solidity_conservation import custody_pair
 from app.parsing.solidity_research import ResearchModel, RFunction, SemanticCandidate
 
 
@@ -586,55 +587,72 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
 def _round_trip(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
     """The attacker must not end a deposit/withdraw round trip with more tokens.
 
-    The withdrawal amount is the attacker's readable credit when the credit mapping
-    has a public getter, otherwise the deposited amount, and that choice is recorded
-    as an assumption.
+    The pair is re-derived from the model by the custody trace, so the credit slot,
+    the token binding and the getter are the traced ones, never a name match. The
+    withdrawal amount is the attacker's credit as the traced getter reports it when
+    one exists, otherwise the deposited amount, and that choice is recorded.
     """
-    payout = _role_function(sequence, "withdraw_again")
+    probe_role = "withdraw_again" if _role_function(sequence, "withdraw_again") else "withdraw"
+    payout = _role_function(sequence, probe_role)
     if not payout:
-        return (OracleSpec(), (), (), "the sequence has no repeat withdrawal", (), "")
-    payout_fn = _resolve(model, fn.contract, payout)
-    variable = ""
-    for name in sorted(model.state_vars(fn.contract)):
-        indexed = rf"\b{re.escape(name)}\s*\[\s*msg\.sender\s*\]"
-        if re.search(indexed + r"\s*(?:\+=|=(?!=))", fn.body) and (
-            payout_fn is not None and re.search(indexed, payout_fn.body)
-        ):
-            variable = name
-            break
-    getter = public_getter(model, fn.contract, variable) if variable else ""
-    if getter != f"{variable}(address)":
-        getter = ""
+        return (OracleSpec(), (), (), "the sequence has no withdrawal", (), "")
+    pair = custody_pair(model, fn.contract, fn.signature, payout)
+    if pair is None:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"no traced custody pair links {fn.signature} and {payout}",
+            (),
+            "custody trace did not reproduce",
+        )
+    getter = pair.getter
+    variable = pair.mapping
+    roles = ("initialize", "deposit", "victim_deposit", "withdraw", "withdraw_again")
+    order = [call.role for call in sequence.calls]
+    probe_at = order.index(probe_role)
+    preconditions = tuple(r for r in roles if r in order[:probe_at])
+    credit = f"{variable}[{pair.keys}]" + (f".{pair.credit_field}" if pair.credit_field else "")
     amount = (
-        f"the attacker withdraws the value {getter} reports for it"
+        f"the attacker withdraws the value {getter} reports for it ({pair.getter_basis})"
         if getter
-        else "the attacker withdraws the amount it deposited (the credit is not publicly readable)"
+        else "the attacker withdraws the amount it deposited (no traced getter reads the credit)"
     )
+    payout_name = payout.split("(")[0]
     oracle = OracleSpec(
         kind=OracleKind.BALANCE_NOT_INCREASED,
-        probe_role="withdraw_again",
+        probe_role=probe_role,
         probe_function=payout,
-        precondition_roles=("deposit", "victim_deposit", "withdraw"),
+        precondition_roles=preconditions,
         getter=getter,
         getter_actor=ATTACKER,
         token_fixture="standard",
         snapshot="before_sequence",
         expression=(
-            f"after depositing into {fn.name}, a second depositor depositing, and the attacker "
-            f"withdrawing twice through {payout.split('(')[0]}, the attacker's fixture-token "
-            "balance must not exceed its balance before the first deposit"
+            f"after the sequence {' > '.join(order)}, the attacker's balance of "
+            f"{pair.token_label} (smallest token unit) must not exceed its balance before "
+            f"the first call to {fn.name}"
         ),
     )
+    assumptions = [
+        "one ordering: " + " > ".join(order),
+        f"asset: {pair.token_label} bound by {pair.token_binding} ({pair.token_source or 'n/a'})",
+        f"account: the attacker; credit {credit} is in the contract's own units, "
+        "not assumed to be token units",
+        amount,
+        "no call advances block.timestamp or accrues interest, rewards or index growth, "
+        "so a gain is not yield",
+    ]
+    if pair.initializer:
+        assumptions.append(f"{pair.initializer} runs first: {pair.initializer_basis}")
+    if pair.incomplete:
+        assumptions.append("trace incomplete: " + "; ".join(pair.incomplete)[:300])
     return (
         oracle,
         (),
-        (variable,) if variable else (),
-        f"{fn.name} credits the caller and {payout.split('(')[0]} pays the same token back",
-        (
-            "the fixture token is the asset the contract custodies",
-            amount,
-            "one ordering: attacker deposit, second depositor, two attacker withdrawals",
-        ),
+        (variable,),
+        f"{fn.name} credits {credit} and {payout_name} pays {pair.token_label} back",
+        tuple(assumptions),
         "",
     )
 
@@ -898,6 +916,7 @@ _ORACLE_BUILDERS: dict[str, Any] = {
     ),
     "failing-callee→swallowed-call": _swallowed,
     "deposit→deposit→withdraw→withdraw": _round_trip,
+    "initialize→deposit→deposit→withdraw": _round_trip,
 }
 
 
