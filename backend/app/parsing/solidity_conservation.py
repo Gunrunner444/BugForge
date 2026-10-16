@@ -201,6 +201,22 @@ class CustodyPair:
         }
 
 
+def _named_arguments(arguments: list[str]) -> dict[str, str] | None:
+    """``{a: x, b: y}`` as a single call argument, keyed by parameter name."""
+    if len(arguments) != 1:
+        return None
+    text = arguments[0].strip()
+    if not (text.startswith("{") and match_close(text, 0) == len(text) - 1):
+        return None
+    pairs: dict[str, str] = {}
+    for item in split_top(text[1:-1]):
+        key, sep, expr = item.partition(":")
+        if not sep or not re.fullmatch(r"\s*[A-Za-z_]\w*\s*", key) or key.strip() in pairs:
+            return None
+        pairs[key.strip()] = expr.strip()
+    return pairs or None
+
+
 def _compound(op: re.Match[str] | None) -> bool:
     """A read-modify-write: ``+=``, ``-=``, ``++`` and the like, not a plain ``=``."""
     return op is None or op.group(1) != "="
@@ -314,6 +330,27 @@ class _Walker:
                     table.setdefault(function.name, []).append(function)
             self._by_name[owner] = table
         return [item for item in table.get(name, []) if len(item.params) == arity]
+
+    def _resolve(
+        self, owner: str, name: str, arguments: list[str], skip: int = 0
+    ) -> tuple[list[RFunction], list[str]]:
+        """Callees for a call and its arguments in parameter order.
+
+        ``skip`` leading parameters are bound by the caller (a ``using for`` receiver).
+        A ``f({a: x, b: y})`` call matches only a callee whose parameter names are
+        exactly the named keys.
+        """
+        named = _named_arguments(arguments)
+        if named is None:
+            return self._named(owner, name, len(arguments) + skip), list(arguments)
+        callees = [
+            item
+            for item in self._named(owner, name, len(named) + skip)
+            if {p.name for p in item.params[skip:]} == set(named)
+        ]
+        if len(callees) != 1:
+            return callees, list(arguments)
+        return callees, [named[p.name] for p in callees[0].params[skip:]]
 
     def _is_type(self, name: str) -> bool:
         if name in {"address", "payable"} or name in self.model.contracts:
@@ -469,12 +506,12 @@ class _Walker:
             if prefix.endswith(("emit", "revert")):
                 continue
             resolve_in = owner if library else self.contract
-            callees = self._named(resolve_in, name, len(arguments))
+            callees, ordered = self._resolve(resolve_in, name, list(arguments))
             if not callees:
                 continue
             if len(callees) > 1:
                 trace.incomplete.append(
-                    f"{name} has {len(callees)} overloads with {len(arguments)} arguments "
+                    f"{name} has {len(callees)} overloads with {len(ordered)} arguments "
                     f"at {_site(function, offset)}; not followed"
                 )
                 continue
@@ -490,7 +527,7 @@ class _Walker:
                 continue
             callee_env = {
                 p.name: self._argument(a, local, assigned)
-                for p, a in zip(callee.params, arguments, strict=False)
+                for p, a in zip(callee.params, ordered, strict=False)
                 if p.name
             }
             here = (*guards, *self._guards(regions, offset, local, _site(function, offset)))
@@ -710,16 +747,19 @@ class _Walker:
         callees: list[RFunction] = []
         bound: list[Sym] = []
         if receiver in self.libraries:
-            callees = self._named(receiver, call.name, len(arguments))
+            callees, arguments = self._resolve(receiver, call.name, arguments)
             bound = [self.value(item, local) for item in arguments]
         else:
-            attached = [
-                item
-                for library in sorted(self.libraries)
-                for item in self._named(library, call.name, len(arguments) + 1)
-            ]
-            if not attached:
-                return
+            attached: list[RFunction] = []
+            positional = arguments
+            for library in sorted(self.libraries):
+                found, ordered = self._resolve(library, call.name, arguments, skip=1)
+                if found:
+                    attached.extend(found)
+                    positional = ordered
+            if not attached or all(item.mutability == "pure" for item in attached):
+                return  # a pure function can neither touch storage nor move a token
+            arguments = positional
             if re.fullmatch(r"[A-Za-z_]\w*", receiver):
                 target: Sym | None = self.value(receiver, local)
             else:
@@ -920,6 +960,11 @@ def _caller_flow(path: tuple[str, ...]) -> str:
 def custody_pairs(model: ResearchModel, contract: str) -> tuple[list[CustodyPair], list[str]]:
     """Deposit/payout pairs that share a caller-keyed credit slot and a token."""
     notes: list[str] = []
+    if model.truncated:
+        notes.append(
+            "the source model hit a size cap; calls into sources it did not load are not "
+            "followed, so a missing pair is not evidence of absence"
+        )
     walker = _Walker(model, contract)
     entries = [item for item in model.functions_of(contract) if _mutating(item)]
     if len(entries) > MAX_ENTRIES_PER_CONTRACT:

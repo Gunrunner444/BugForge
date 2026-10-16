@@ -266,6 +266,71 @@ contract V {
     assert any("library call credit" in note and "not followed" in note for note in notes)
 
 
+def test_named_argument_calls_bind_by_parameter_name_not_position() -> None:
+    template = """
+library Mover {
+    function pull(IERC20 token, address from, uint256 amount) internal {
+        token.transferFrom(from, address(this), amount);
+    }
+}
+contract V {
+    IERC20 public immutable token;
+    address public treasury;
+    mapping(address => uint256) public credit;
+    constructor(IERC20 t, address r) { token = t; treasury = r; }
+    function deposit(uint256 amount) external {
+        Mover.pull({amount: amount, from: %s, token: token});
+        _credit({x: amount, who: msg.sender});
+    }
+    function withdraw(uint256 amount) external {
+        credit[msg.sender] -= amount;
+        token.transfer(msg.sender, amount);
+    }
+    function _credit(address who, uint256 x) internal { credit[who] += x; }
+}
+"""
+    (pair,), notes = _pairs(template % "msg.sender")
+    assert notes == [] and pair.deposit.signature == "deposit(uint256)"
+    assert pair.pull.path[-1].startswith("Mover.pull(IERC20,address,uint256)@")
+    assert _pairs(template % "treasury")[0] == []
+
+
+def test_a_pure_attached_library_function_needs_no_receiver() -> None:
+    body = """
+library Bits {
+    function has(uint24 flags, uint24 bit) internal pure returns (bool) { return flags & bit != 0; }
+}
+contract V {
+    using Bits for uint24;
+    struct Setup { uint24 hooks; }
+    IERC20 public immutable token;
+    Setup internal setup;
+    mapping(address => uint256) public credit;
+    constructor(IERC20 t) { token = t; }
+    function deposit(uint256 amount) external {
+        if (setup.hooks.has(1)) revert();
+        token.transferFrom(msg.sender, address(this), amount);
+        credit[msg.sender] += amount;
+    }
+    function withdraw(uint256 amount) external {
+        credit[msg.sender] -= amount;
+        token.transfer(msg.sender, amount);
+    }
+}
+"""
+    (pair,), notes = _pairs(body)
+    assert notes == [] and pair.incomplete == ()
+
+
+def test_a_truncated_source_model_is_never_a_clean_empty_result() -> None:
+    sources = {f"F{i}.sol": f"pragma solidity ^0.8.20;\ncontract F{i} {{}}\n" for i in range(3)}
+    model = build_research_model(sources, max_files=2)
+    assert model.truncated
+    pairs, notes = custody_pairs(model, "F0")
+    assert pairs == []
+    assert any("size cap" in note and "not evidence of absence" in note for note in notes)
+
+
 def test_the_struct_twin_plans_the_initializer_and_binds_the_token_through_construction() -> None:
     name, text, model = _fixture("struct_index", "safe")
     hits = [c for c in run_suite(model).candidates if c.detector == DETECTOR]
