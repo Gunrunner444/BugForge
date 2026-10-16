@@ -31,7 +31,7 @@ confidence stays ``low``.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.parsing.solidity_research import (
@@ -66,6 +66,8 @@ class Sym:
     name: str = ""
     keys: tuple[Sym, ...] = ()
     storage: bool = False  # a slot that is a storage reference, not a memory copy
+    # Fields the caller assigned on a memory copy before passing it to a helper.
+    written: tuple[str, ...] = ()
 
     def label(self) -> str:
         if self.kind == "caller":
@@ -487,7 +489,7 @@ class _Walker:
                 )
                 continue
             callee_env = {
-                p.name: self.value(a, local)
+                p.name: self._argument(a, local, assigned)
                 for p, a in zip(callee.params, arguments, strict=False)
                 if p.name
             }
@@ -502,6 +504,14 @@ class _Walker:
                 here,
                 seen,
             )
+
+    def _argument(self, text: str, local: dict[str, Sym], assigned: dict[str, set[str]]) -> Sym:
+        """An argument's value; a memory copy keeps the fields assigned on it here."""
+        sym = self.value(text, local)
+        name = text.strip()
+        if sym.kind == "slot" and not sym.storage and name in assigned:
+            return replace(sym, written=tuple(sorted({*sym.written, *assigned[name]})))
+        return sym
 
     def _declarations(self, skel: str, body: str, local: dict[str, Sym], names: set[str]) -> None:
         pattern = re.compile(
@@ -612,7 +622,10 @@ class _Walker:
             if write and op and op.group(1) == "=" and struct is not None:
                 stop = skel.find(";", index)
                 rhs = body[index + op.end() : stop if stop != -1 else len(body)].strip()
-                written = assigned.get(rhs)
+                copied = local.get(rhs)
+                written = assigned.get(rhs) or (
+                    set(copied.written) if copied is not None and copied.kind == "slot" else set()
+                )
                 if not written:
                     trace.incomplete.append(
                         f"{mapping}[...] is written whole at {_site(function, match.start())} "
@@ -699,15 +712,28 @@ class _Walker:
         if receiver in self.libraries:
             callees = self._named(receiver, call.name, len(arguments))
             bound = [self.value(item, local) for item in arguments]
-        elif re.fullmatch(r"[A-Za-z_]\w*", receiver):
+        else:
             attached = [
                 item
                 for library in sorted(self.libraries)
                 for item in self._named(library, call.name, len(arguments) + 1)
             ]
-            if attached:
-                callees = attached
-                bound = [self.value(receiver, local), *(self.value(a, local) for a in arguments)]
+            if not attached:
+                return
+            if re.fullmatch(r"[A-Za-z_]\w*", receiver):
+                target: Sym | None = self.value(receiver, local)
+            else:
+                target = self._slot(receiver, local, storage=True) or self._storage_helper(
+                    receiver, local
+                )
+            if target is None:
+                trace.incomplete.append(
+                    f"library call {call.name} on {receiver[:60]} at {_site(function, offset)}: "
+                    "the receiver is not a resolvable storage reference; not followed"
+                )
+                return
+            callees = attached
+            bound = [target, *(self.value(a, local) for a in arguments)]
         if not callees:
             return
         if len(callees) > 1:
