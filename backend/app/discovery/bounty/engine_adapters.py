@@ -42,6 +42,7 @@ from app.discovery.bounty.properties import (
 )
 from app.discovery.bounty.stateful import (
     _FIXTURE_TOKEN,
+    _SIGN_HELPER,
     K_ACTOR,
     K_AFTER,
     K_BEFORE,
@@ -131,6 +132,11 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"        return _bfGreaterDelta(bfVal[{K_CREDITED}][0], bfVal[{K_CREDITED}][1], "
             f"bfVal[{K_RECEIVED}][0], bfVal[{K_RECEIVED}][1]);\n"
         )
+    elif kind is OracleKind.STATE_EQUALS:
+        state_judged, state_violated = _state_equals_judge(oracle, probe)
+        if state_judged is None or state_violated is None:
+            return None
+        return pre + reached + state_judged, state_violated
     elif kind is OracleKind.CREDIT_LE_HOLDINGS:
         judged = (
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][1] && bfSeen[{K_CREDITED}][1]"
@@ -154,6 +160,8 @@ interface BugForgeVm {{
     function warp(uint256) external;
     function roll(uint256) external;
     function deal(address, uint256) external;
+    function addr(uint256) external pure returns (address);
+    function sign(uint256, bytes32) external pure returns (uint8, bytes32, bytes32);
 }}
 
 contract {contract} {{
@@ -228,8 +236,61 @@ contract {contract} {{
     function {flag_violated}() public view returns (bool) {{
         return !_bfViolated();
     }}
-}}
+{sign_helper}}}
 """
+
+
+def _state_equals_judge(oracle: OracleSpec, probe: int) -> tuple[str | None, str | None]:
+    """In-EVM twin of ``_state_equals_verdict``. A bad start or a still payout is unjudged."""
+    if not oracle.getter or not re.fullmatch(r"[0-9]{1,78}", oracle.expected_after):
+        return None, None
+    if oracle.expected_before and not re.fullmatch(r"[0-9]{1,78}", oracle.expected_before):
+        return None, None
+    lines = [
+        f"        if (!bfSeen[{K_BEFORE}][{probe}] || !bfSeen[{K_AFTER}][{probe}] || bfReadFailed) "
+        "return false;",
+        f"        if (!_bfOk({probe})) return false;",
+    ]
+    if oracle.expected_before:
+        lines.append(
+            f"        if (bfVal[{K_BEFORE}][{probe}] != {oracle.expected_before}) return false;"
+        )
+    violated = [f"bfVal[{K_AFTER}][{probe}] != {oracle.expected_after}"]
+    if oracle.balance_relation == "payout_matches_credit":
+        lines.extend(
+            [
+                f"        if (!bfSeen[{K_ACTOR}][0] || !bfSeen[{K_ACTOR}][1]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][0] || !bfSeen[{K_EVIDENCE}][1]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][2] || !bfSeen[{K_EVIDENCE}][3]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][6] || !bfSeen[{K_EVIDENCE}][7]) return false;",
+                (
+                    f"        if (bfVal[{K_ACTOR}][1] == bfVal[{K_ACTOR}][0]"
+                    f" && bfVal[{K_EVIDENCE}][0] == bfVal[{K_EVIDENCE}][1]"
+                    f" && bfVal[{K_EVIDENCE}][6] == bfVal[{K_EVIDENCE}][7]"
+                    f" && bfVal[{K_EVIDENCE}][2] == bfVal[{K_EVIDENCE}][3]) return false;"
+                ),
+            ]
+        )
+        violated.extend(
+            [
+                f"bfVal[{K_ACTOR}][1] < bfVal[{K_ACTOR}][0]",
+                f"bfVal[{K_EVIDENCE}][1] > bfVal[{K_EVIDENCE}][0]",
+                f"bfVal[{K_EVIDENCE}][7] > bfVal[{K_EVIDENCE}][6]",
+                f"bfVal[{K_EVIDENCE}][3] != bfVal[{K_EVIDENCE}][2]",
+                (
+                    f"bfVal[{K_ACTOR}][1] - bfVal[{K_ACTOR}][0]"
+                    f" != bfVal[{K_EVIDENCE}][6] - bfVal[{K_EVIDENCE}][7]"
+                ),
+                (
+                    f"bfVal[{K_EVIDENCE}][0] - bfVal[{K_EVIDENCE}][1]"
+                    f" != bfVal[{K_EVIDENCE}][6] - bfVal[{K_EVIDENCE}][7]"
+                ),
+            ]
+        )
+    elif oracle.balance_relation:
+        return None, None
+    lines.append("        return true;")
+    return "\n".join(lines) + "\n", "        return " + " || ".join(violated) + ";\n"
 
 
 def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
@@ -258,6 +319,7 @@ def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
         flag_ran=FLAG_RAN,
         flag_unjudged=FLAG_UNJUDGED,
         flag_violated=FLAG_VIOLATED,
+        sign_helper=_SIGN_HELPER if "_bfSign(" in body else "",
     )
 
 

@@ -29,7 +29,13 @@ from app.discovery.bounty.vfcs import (
     sequence_id_of,
     stamp_source_identity,
 )
-from app.parsing.solidity_research import ResearchModel, SemanticCandidate, build_research_model
+from app.parsing.solidity_research import (
+    ResearchModel,
+    SemanticCandidate,
+    build_research_model,
+    normalize_type,
+    split_top,
+)
 
 _PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
@@ -52,7 +58,7 @@ ROLE_EXPRESSION = {
     "victim": "address(0xB0B)",
 }
 PRIVILEGED_ROLES = frozenset({"governor", "pause_guardian"})
-_KINDS = frozenset({"uint", "bool", "role", "fixture", "struct", "array"})
+_KINDS = frozenset({"uint", "bool", "role", "fixture", "struct", "array", "bytes32"})
 _FIXTURE_KINDS = frozenset(
     {
         "decimals_token",
@@ -121,6 +127,7 @@ class ProfileFixture:
     decimals: int | None = None
     depends_on: str = ""
     contract: str = ""
+    arguments: tuple[ProfileValue, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {"fixture_id": self.fixture_id, "kind": self.kind}
@@ -130,6 +137,8 @@ class ProfileFixture:
             body["depends_on"] = self.depends_on
         if self.contract:
             body["contract"] = self.contract
+        if self.arguments:
+            body["arguments"] = [item.to_dict() for item in self.arguments]
         return body
 
 
@@ -493,6 +502,9 @@ def _classify_type(type_name: str) -> tuple[str, int, str]:
         return "bool", 0, ""
     if text == "address":
         return "address", 0, ""
+    match = re.fullmatch(r"bytes(3[0-2]|[12][0-9]|[1-9])", text)
+    if match:
+        return "bytes", int(match.group(1)), ""
     if text == "bytes" or re.fullmatch(r"bytes[0-9]+", text):
         return "unsupported", 0, text
     if _TYPE_NAME.fullmatch(text):
@@ -578,6 +590,15 @@ def _check_value(
         if value.kind != "bool":
             raise ProfileError("profile_type_mismatch", f"{declared_type} requires a bool")
         return
+    if category == "bytes":
+        if width != 32 or value.kind != "bytes32":
+            raise ProfileError(
+                "profile_type_unsupported",
+                f"{declared_type} is not a bytes32 value the profile can fill",
+            )
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", value.value):
+            raise ProfileError("profile_malformed", "a bytes32 value is not 32 bytes of hex")
+        return
     if category == "address":
         if value.kind == "fixture":
             fixture = fixtures.get(value.value)
@@ -632,7 +653,7 @@ def _classify_element(type_name: str, texts: Mapping[str, str]) -> None:
     if category == "struct":
         _lookup_declared(texts, nested)
         return
-    if category in {"uint", "int", "bool", "address"}:
+    if category in {"uint", "int", "bool", "address"} or (category == "bytes" and _width == 32):
         return
     raise ProfileError(
         "profile_type_unsupported",
@@ -666,6 +687,7 @@ def _validate_tree(profile: ConstructorProfile, texts: Mapping[str, str]) -> Non
 
 
 def _source_contracts(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
+    fixtures = {item.fixture_id: item for item in profile.fixtures}
     for item in profile.fixtures:
         if item.kind != "source_contract":
             continue
@@ -679,20 +701,26 @@ def _source_contracts(profile: ConstructorProfile, texts: Mapping[str, str]) -> 
                 "profile_fixture_unresolved",
                 f"{item.contract} is not a contract in the bound source closure",
             )
-        if re.search(r"\bconstructor\s*\([^)]*\S", declaring):
-            # A constructor in another contract in the same file can match. Require
-            # the named contract's own constructor, when it has one, to be empty.
-            own = _constructor_params(declaring, item.contract)
-            if own is None:
-                raise ProfileError(
-                    "profile_type_unparsed",
-                    f"the constructor of {item.contract} could not be read",
-                )
-            if own.strip():
+        own = _constructor_params(declaring, item.contract)
+        if own is None:
+            raise ProfileError(
+                "profile_type_unparsed",
+                f"the constructor of {item.contract} could not be read",
+            )
+        params = _constructor_types(own)
+        if len(params) != len(item.arguments):
+            if params and not item.arguments:
                 raise ProfileError(
                     "profile_fixture_incompatible",
                     f"{item.contract} has constructor arguments the profile does not fill",
                 )
+            raise ProfileError(
+                "profile_fixture_incompatible",
+                f"{item.contract} has {len(params)} constructor arguments and the profile "
+                f"supplies {len(item.arguments)}",
+            )
+        for declared, argument in zip(params, item.arguments, strict=True):
+            _check_value(argument, declared, texts, fixtures, depth=1)
 
 
 def _constructor_params(text: str, contract: str) -> str | None:
@@ -722,6 +750,24 @@ def _constructor_params(text: str, contract: str) -> str | None:
                 return body[paren + 1 : close]
         index += 1
     return None
+
+
+def _constructor_types(params: str) -> tuple[str, ...]:
+    """Normalized types of one constructor's parameters, in order."""
+    found: list[str] = []
+    for part in split_top(params):
+        if not part.strip():
+            continue
+        words = part.replace("\n", " ").split()
+        cleaned = [
+            word for word in words if word not in {"memory", "calldata", "storage", "payable"}
+        ]
+        if len(cleaned) >= 2 and _IDENT.fullmatch(cleaned[-1]):
+            cleaned = cleaned[:-1]
+        if not cleaned:
+            raise ProfileError("profile_type_unparsed", "a constructor parameter has no type")
+        found.append(normalize_type(" ".join(cleaned)))
+    return tuple(found)
 
 
 def _match_paren(text: str, open_at: int) -> int:
@@ -1462,6 +1508,21 @@ def _deploy_fixtures(
         if item.kind == "factory_holder":
             dependency = names[item.depends_on]
             line = f"        {contract} {variable} = new {contract}(address({dependency}));"
+        elif item.kind == "source_contract" and item.arguments:
+            statements: list[str] = []
+            try:
+                args = ", ".join(_render(arg, rendered, statements) for arg in item.arguments)
+            except StopIteration as exc:
+                raise ProfileError(
+                    "profile_unresolved_fixture",
+                    f"{item.contract} references a fixture that is not deployed before it",
+                ) from exc
+            rendered_args = "\n".join(statements)
+            line = (
+                f"{rendered_args}\n        {contract} {variable} = new {contract}({args});"
+                if rendered_args
+                else f"        {contract} {variable} = new {contract}({args});"
+            )
         elif item.kind == "source_contract":
             line = f"        {contract} {variable} = new {contract}();"
         else:
@@ -1531,6 +1592,8 @@ def _render(
 ) -> str:
     if value.kind == "uint":
         return value.value
+    if value.kind == "bytes32":
+        return f"bytes32({value.value})"
     if value.kind == "bool":
         return value.value
     if value.kind == "role":
@@ -1566,6 +1629,11 @@ def _value(raw: Any, fixture_ids: set[str], depth: int) -> ProfileValue:
         if not _UINT.fullmatch(text):
             raise ProfileError("profile_malformed", "a uint value is not a decimal integer")
         return ProfileValue("uint", text)
+    if kind == "bytes32":
+        text = str(raw.get("value", ""))
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", text):
+            raise ProfileError("profile_malformed", "a bytes32 value is not 32 bytes of hex")
+        return ProfileValue("bytes32", text)
     if kind == "bool":
         text = str(raw.get("value", ""))
         if text not in {"true", "false"}:
@@ -1608,12 +1676,19 @@ def _value(raw: Any, fixture_ids: set[str], depth: int) -> ProfileValue:
 def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
     if not isinstance(raw, list) or len(raw) > MAX_FIXTURES:
         raise ProfileError("profile_malformed", "fixtures must be a bounded list")
+    fixture_ids = {
+        str(item.get("fixture_id", ""))
+        for item in raw
+        if isinstance(item, Mapping) and _IDENT.fullmatch(str(item.get("fixture_id", "")))
+    }
     found: list[ProfileFixture] = []
     seen: set[str] = set()
     for item in raw:
         if not isinstance(item, Mapping):
             raise ProfileError("profile_malformed", "a fixture is not an object")
-        unknown = sorted(set(item) - {"fixture_id", "kind", "decimals", "depends_on", "contract"})
+        unknown = sorted(
+            set(item) - {"fixture_id", "kind", "decimals", "depends_on", "contract", "arguments"}
+        )
         if unknown:
             raise ProfileError("profile_malformed", f"unknown fixture fields: {', '.join(unknown)}")
         fixture_id = str(item.get("fixture_id", ""))
@@ -1647,7 +1722,7 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
         if kind == "factory_holder":
             if not depends:
                 raise ProfileError("profile_unresolved_fixture", "a factory holder needs a factory")
-        elif depends:
+        elif kind != "source_contract" and depends:
             raise ProfileError("profile_malformed", "this fixture does not take a dependency")
         if kind == "source_contract":
             if not _IDENT.fullmatch(contract):
@@ -1656,6 +1731,16 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
                 )
         elif contract:
             raise ProfileError("profile_malformed", "this fixture does not name a source contract")
+        arguments_raw = item.get("arguments", [])
+        if arguments_raw in (None, ""):
+            arguments_raw = []
+        if not isinstance(arguments_raw, list) or len(arguments_raw) > 8:
+            raise ProfileError("profile_malformed", "fixture constructor arguments are not a list")
+        if arguments_raw and kind != "source_contract":
+            raise ProfileError(
+                "profile_malformed", "this fixture does not take constructor arguments"
+            )
+        arguments = tuple(_value(arg, fixture_ids, depth=1) for arg in arguments_raw)
         found.append(
             ProfileFixture(
                 fixture_id,
@@ -1663,6 +1748,7 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
                 decimals if isinstance(decimals, int) else None,
                 depends,
                 contract,
+                arguments,
             )
         )
     ids = {item.fixture_id for item in found}

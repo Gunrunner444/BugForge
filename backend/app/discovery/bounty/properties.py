@@ -93,6 +93,8 @@ class OracleKind(StrEnum):
     MECHANISM_PROBE = "mechanism_probe"
     # A configured value is still present in the return data of a read.
     CONFIGURED_VALUE = "configured_value"
+    # The probe succeeds and a public getter ends at the expected word.
+    STATE_EQUALS = "state_equals"
 
 
 EXECUTABLE_ORACLES = frozenset(OracleKind) - {OracleKind.NONE}
@@ -121,6 +123,12 @@ class OracleSpec:
     # Word of a static return tuple. -1 means the oracle does not read one.
     word_index: int = -1
     observed_fixture: str = ""
+    # Decimal words for STATE_EQUALS. Empty expected_before means the start is not checked.
+    expected_before: str = ""
+    expected_after: str = ""
+    # "" or "payout_matches_credit": the caller's token gain equals the owner's credit loss
+    # and the contract's token loss. An authorized payout of that amount is not theft.
+    balance_relation: str = ""
 
     @property
     def executable(self) -> bool:
@@ -142,6 +150,9 @@ class OracleSpec:
             "control_sender": self.control_sender,
             "word_index": self.word_index,
             "observed_fixture": self.observed_fixture,
+            "expected_before": self.expected_before,
+            "expected_after": self.expected_after,
+            "balance_relation": self.balance_relation,
             "executable": self.executable,
         }
 
@@ -1125,6 +1136,8 @@ def evaluate(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD, "the probe call reverted as required", probe, True, True
         )
+    if kind is OracleKind.STATE_EQUALS:
+        return _state_equals_verdict(oracle, observation, probe, probe_ok)
     if kind is OracleKind.CONFIGURED_VALUE:
         return _configured_verdict(oracle, observation, probe, probe_ok)
     if kind is OracleKind.STATE_UNCHANGED:
@@ -1414,6 +1427,144 @@ def _authorization_verdict(
         True,
         True,
         control,
+    )
+
+
+def _decimal(text: str) -> int | None:
+    if not re.fullmatch(r"[0-9]{1,78}", text or ""):
+        return None
+    return int(text)
+
+
+def _word(text: str) -> int | None:
+    if not re.fullmatch(r"0x[0-9a-fA-F]{1,64}", text or ""):
+        return None
+    return int(text, 16)
+
+
+def _payout_relation(observation: OracleObservation) -> PropertyEvaluation | None:
+    """None when the caller's gain matches the owner's credit and the contract's tokens.
+
+    A missing reading is not evaluated. A mismatch is a counterexample. A call that
+    moves nothing did not establish the payout.
+    """
+    seen = dict(observation.evidence)
+    needed = (
+        "holdings_before",
+        "holdings_after",
+        "victim_balance_before",
+        "victim_balance_after",
+        "victim_credit_before",
+        "victim_credit_after",
+    )
+    if (
+        observation.actor_before is None
+        or observation.actor_after is None
+        or any(name not in seen for name in needed)
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the payout balances were not read, so the transfer was not judged",
+        )
+    gained = observation.actor_after - observation.actor_before
+    holdings = seen["holdings_before"] - seen["holdings_after"]
+    credit = seen["victim_credit_before"] - seen["victim_credit_after"]
+    wallet = seen["victim_balance_after"] - seen["victim_balance_before"]
+    if gained == 0 and holdings == 0 and credit == 0 and wallet == 0:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the payout did not move value, so the authorized transfer was not established",
+        )
+    if gained != credit or holdings != credit or wallet != 0 or gained <= 0:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"the caller gained {gained}, the owner credit changed by {credit}, "
+            f"holdings changed by {holdings}, and the owner wallet changed by {wallet}",
+            evaluated=True,
+            evidence=observation.evidence,
+        )
+    return None
+
+
+def _state_equals_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    """A successful call established the expected getter value, or it did not."""
+    if probe_ok != 1:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the call that should establish the state reverted, so the property was not established",
+            probe,
+        )
+    if (
+        not oracle.getter
+        or not observation.readable
+        or not observation.before
+        or not observation.after
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the state getter could not be read",
+            probe,
+        )
+    expected_after = _decimal(oracle.expected_after)
+    before = _word(observation.before)
+    after = _word(observation.after)
+    if expected_after is None or before is None or after is None:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the state oracle has no readable expected value",
+            probe,
+        )
+    if oracle.expected_before:
+        expected_before = _decimal(oracle.expected_before)
+        if expected_before is None:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                "the expected starting state is not an integer",
+                probe,
+            )
+        if before != expected_before:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                f"{oracle.getter} started at {before}, not {expected_before}, so the "
+                "transition was not established",
+                probe,
+            )
+    if oracle.balance_relation == "payout_matches_credit":
+        payout = _payout_relation(observation)
+        if payout is not None:
+            return PropertyEvaluation(
+                payout.verdict,
+                payout.reason,
+                probe,
+                payout.precondition_ok,
+                payout.evaluated,
+                evidence=observation.evidence,
+            )
+    elif oracle.balance_relation:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the balance relation is not supported",
+            probe,
+        )
+    evidence = observation.evidence
+    if after != expected_after:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"{oracle.getter} ended at {after}, not {expected_after}",
+            probe,
+            True,
+            True,
+            evidence=evidence,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD,
+        f"{oracle.getter} is {expected_after} after the call",
+        probe,
+        True,
+        True,
+        evidence=evidence,
     )
 
 

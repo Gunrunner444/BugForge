@@ -77,6 +77,14 @@ HARNESS_SCHEMA = "bugforge.harness/2"
 ATTACKER_ADDR = "address(0xA11CE)"
 VICTIM_ADDR = "address(0xB0B)"
 FIXTURE_AMOUNT = "1000000000000000000"  # 1e18 fixture units; local only
+# A harness-only signing key. It is not a secret and not an account that exists anywhere else.
+SIGNER = "signer"
+SIGNER_KEY = "uint256(0xBEEF)"
+SIGNER_EXPR = "vm.addr(uint256(0xBEEF))"
+_EIP712_SPEC = re.compile(
+    r"^eip712:(v|r|s):typehash=(0x[0-9a-fA-F]{64}):signer=key:chain=(current|other):"
+    r"fields=([A-Za-z0-9:,_x]+)$"
+)
 # Forge deploys the test contract at this fixed address (default sender, nonce 1).
 # Only events emitted by the harness itself are observations; any other emitter,
 # including the analyzed contract, is ignored.
@@ -715,6 +723,31 @@ def _constructor(model: ResearchModel, contract: str) -> RFunction | None:
     return None
 
 
+def _mapping_keys(type_name: str) -> tuple[str, ...] | None:
+    """Getter arguments of a public variable, or None when the type is not a simple getter."""
+    keys: list[str] = []
+    current = type_name
+    while current.startswith("mapping(") and current.endswith(")"):
+        inner = current[len("mapping(") : -1]
+        depth = 0
+        arrow = -1
+        for index, char in enumerate(inner):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif depth == 0 and inner.startswith("=>", index):
+                arrow = index
+                break
+        if arrow < 0:
+            return None
+        keys.append(inner[:arrow])
+        current = inner[arrow + 2 :]
+    if "[" in current or current.startswith("mapping"):
+        return None
+    return tuple(keys)
+
+
 def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
     for function in model.functions_of(contract):
         if function.signature == signature and function.has_body:
@@ -799,6 +832,10 @@ class _Synth:
         self.counter = 0
         self.withdrawal_reads = 0
         self.body = ""
+        self.needs_sign = False
+        self.signatures: dict[str, tuple[str, str, str]] = {}
+        self.twin_ready = False
+        self.ctor_args: list[str] = []
 
     # -- token fixture -------------------------------------------------------------------
     def want_token(self, kind: str, why: str) -> None:
@@ -908,6 +945,8 @@ class _Synth:
             raise _UnbuildableError(
                 "fixed-size arrays are not expressible", "param_not_expressible"
             )
+        if override.startswith("eip712:"):
+            return self._eip712(override, abi)
         if abi == "address":
             if override == "reverting_callee":
                 if not self.failing_callee:
@@ -916,6 +955,8 @@ class _Synth:
                         "unsupported_primitive",
                     )
                 return "address(bfCallee)"
+            if override == SIGNER:
+                return SIGNER_EXPR
             if override in {VICTIM, "victim", "second_owner"}:
                 return VICTIM_ADDR
             if override in {"attacker_controlled", "attacker_substituted", ATTACKER}:
@@ -932,6 +973,14 @@ class _Synth:
                 return "1"
             if override in {"two", "three"}:
                 return "2" if override == "two" else "3"
+            if override == "timestamp":
+                return "block.timestamp"
+            if override == "timestamp_plus":
+                return "block.timestamp + 1"
+            if override == "timestamp_minus":
+                return "block.timestamp - 1"
+            if re.fullmatch(r"[0-9]{1,78}", override):
+                return override
             if self.token_kind and override in _AMOUNT_LIKE and abi in {"uint256", "uint"}:
                 return FIXTURE_AMOUNT
             if override == "amount_one":
@@ -947,8 +996,95 @@ class _Synth:
             # Empty calldata still hits the reverting callee's fallback.
             return 'bytes("")'
         if abi.startswith("bytes"):
+            if override == "zero":
+                return f"{abi}(0)"
+            if abi == "bytes32" and re.fullmatch(r"hex:0x[0-9a-fA-F]{64}", override):
+                return f"bytes32({override[4:]})"
             return f"{abi}(0)"
         raise _UnbuildableError(f"type {abi} is not expressible", "param_not_expressible")
+
+    def _actor_expr(self, role: str) -> str:
+        if role in {"", ATTACKER, "attacker"}:
+            return ATTACKER_ADDR
+        if role in {VICTIM, "victim"}:
+            return VICTIM_ADDR
+        if role == SIGNER:
+            return SIGNER_EXPR
+        if role == "governor":
+            return "address(0xC0FE)"
+        if role == "pause_guardian":
+            return "address(0x6A2D)"
+        raise _UnbuildableError(f"actor {role!r} is not a harness actor", "unknown_actor")
+
+    def _sender(self, actor: str) -> str:
+        if actor not in {ATTACKER, VICTIM, SIGNER}:
+            raise _UnbuildableError(f"actor {actor!r} is not a harness actor", "unknown_actor")
+        return self._actor_expr(actor)
+
+    def _eip712_field(self, type_name: str, value: str) -> str:
+        if type_name == "address":
+            return self._actor_expr(value)
+        if type_name == "bool" and value in {"true", "false"}:
+            return value
+        if type_name == "uint256":
+            if value == "max":
+                return "type(uint256).max"
+            if value == "timestamp":
+                return "block.timestamp"
+            if value == "timestamp_plus":
+                return "block.timestamp + 1"
+            if value == "timestamp_minus":
+                return "block.timestamp - 1"
+            if re.fullmatch(r"[0-9]{1,78}", value):
+                return f"uint256({value})"
+        if type_name == "bytes32" and re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
+            return f"bytes32({value})"
+        raise _UnbuildableError(
+            "an EIP-712 field is not a static address, bool, uint256, or bytes32",
+            "signature_unparsed",
+        )
+
+    def _eip712(self, override: str, abi: str) -> str:
+        """Sign one digest on the target and return its v, r, or s component."""
+        match = _EIP712_SPEC.fullmatch(override)
+        if match is None or len(override) > 900:
+            raise _UnbuildableError(
+                "the signature specification is not a supported EIP-712 value",
+                "signature_unparsed",
+            )
+        component, typehash, chain, fields_text = match.groups()
+        expected = {"v": "uint8", "r": "bytes32", "s": "bytes32"}[component]
+        if abi != expected:
+            raise _UnbuildableError(
+                f"EIP-712 component {component} does not match {abi}", "signature_unparsed"
+            )
+        parts = [part for part in fields_text.split(",") if part]
+        if not parts or len(parts) > 12:
+            raise _UnbuildableError(
+                "an EIP-712 signature needs 1 to 12 static fields", "signature_unparsed"
+            )
+        body = override.split(":", 2)[2]
+        cached = self.signatures.get(body)
+        if cached is None:
+            encoded = []
+            for part in parts:
+                type_name, separator, value = part.partition(":")
+                if not separator:
+                    raise _UnbuildableError(
+                        "an EIP-712 field is missing its type", "signature_unparsed"
+                    )
+                encoded.append(self._eip712_field(type_name, value))
+            name = self._name("Sig")
+            chain_expr = "block.chainid" if chain == "current" else "block.chainid + 1"
+            self.steps.append(
+                f"        (uint8 {name}V, bytes32 {name}R, bytes32 {name}S) = _bfSign("
+                f"address(t), {typehash}, abi.encode({', '.join(encoded)}), "
+                f"{chain_expr}, {SIGNER_KEY});"
+            )
+            cached = (f"{name}V", f"{name}R", f"{name}S")
+            self.signatures[body] = cached
+            self.needs_sign = True
+        return cached[{"v": 0, "r": 1, "s": 2}[component]]
 
     def actor_credit(self, call: VfcsCall) -> str:
         """The actor's current credit read from the oracle getter, or the deposited amount."""
@@ -1187,7 +1323,27 @@ class _Synth:
 
     # -- primitives ------------------------------------------------------------------------
     def primitive(self, index: int, call: VfcsCall) -> None:
-        actor_addr = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        actor_addr = self._sender(call.actor) if call.actor in {ATTACKER, VICTIM, SIGNER} else ""
+        if call.function == "deploy_twin()":
+            if self.twin_ready:
+                raise _UnbuildableError("the twin instance is already deployed", "twin_unavailable")
+            args = ", ".join(self.ctor_args)
+            self.steps.append(f"        {self.contract} bfTwin = new {self.contract}({args});")
+            self.twin_ready = True
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="deploy_twin",
+                    purpose=f"deploy a second {self.contract} with the same constructor",
+                    actor="harness",
+                    value=self.contract,
+                    property_relevance="a second verifying contract for a domain check",
+                    established_by="the same constructor arguments as the target",
+                )
+            )
+            return
+        if not actor_addr:
+            raise _UnbuildableError(f"actor {call.actor!r} is not a harness actor", "unknown_actor")
         if call.function == "deploy_reverting()":
             self.failing_callee = True
             self.steps.append(
@@ -1259,8 +1415,16 @@ class _Synth:
         getter = oracle.getter
         if not getter:
             return
-        if getter.endswith("(address)"):
-            actor = ATTACKER_ADDR if oracle.getter_actor in {"", ATTACKER} else VICTIM_ADDR
+        if getter.endswith("(address,address)"):
+            roles = [part.strip() for part in oracle.getter_actor.split(",") if part.strip()]
+            if len(roles) != 2:
+                raise _UnbuildableError(
+                    "a two-address getter needs two actors", "getter_unresolved"
+                )
+            args = ", ".join(self._actor_expr(role) for role in roles)
+            data = f'abi.encodeWithSignature("{getter}", {args})'
+        elif getter.endswith("(address)"):
+            actor = self._actor_expr(oracle.getter_actor)
             data = f'abi.encodeWithSignature("{getter}", {actor})'
         else:
             data = f'abi.encodeWithSignature("{getter}")'
@@ -1294,16 +1458,16 @@ class _Synth:
         )
         self.read_getter(K_CONTROL_AFTER, index)
 
-    def _emit_call(self, index: int, sender: str, encoded: str) -> None:
+    def _emit_call(self, index: int, sender: str, encoded: str, dest: str = "address(t)") -> None:
         oracle = self.oracle
         capture = bool(oracle.revert_selector) or oracle.kind is OracleKind.CONFIGURED_VALUE
         self.steps.append(f"        vm.prank({sender});")
         if capture:
             self.steps.append(
-                f"        (bool ok_{index}, bytes memory ret_{index}) = address(t).call({encoded});"
+                f"        (bool ok_{index}, bytes memory ret_{index}) = {dest}.call({encoded});"
             )
         else:
-            self.steps.append(f"        (bool ok_{index}, ) = address(t).call({encoded});")
+            self.steps.append(f"        (bool ok_{index}, ) = {dest}.call({encoded});")
         self.steps.append(
             f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
         )
@@ -1354,6 +1518,133 @@ class _Synth:
             f"uint256(uint160(address({variable}))));"
         )
 
+    def _bodies(self, signature: str) -> tuple[str, ...]:
+        found: list[str] = []
+        for name in sorted(self.model.contracts):
+            item = self.model.contracts[name]
+            for candidate in item.functions:
+                if (
+                    candidate.kind == "function"
+                    and candidate.signature == signature
+                    and candidate.has_body
+                ):
+                    found.append(name)
+        return tuple(found)
+
+    def _target_delegates(self) -> bool:
+        for function in self.model.functions_of(self.contract, inherited=False):
+            if (
+                function.kind == "fallback"
+                and function.has_body
+                and re.search(r"\bdelegatecall\s*\(", function.body)
+            ):
+                return True
+        return False
+
+    def _declaration_is_public(self, text: str, name: str) -> bool:
+        clean = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        clean = re.sub(r"//.*?$", " ", clean, flags=re.M)
+        for statement in clean.split(";"):
+            if re.search(r"\bfunction\b", statement):
+                continue
+            if re.search(rf"\b{re.escape(name)}\b", statement) and re.search(
+                r"\bpublic\b", statement
+            ):
+                return True
+        return False
+
+    def _public_getter(self, call: VfcsCall) -> RFunction | None:
+        """A public state-variable getter. The parser records the variable, not the getter."""
+        name, separator, tail = call.function.partition("(")
+        if not separator or not tail.endswith(")"):
+            return None
+        found: tuple[str, str, str] | None = None
+        for owner in self.model.lineage(self.contract):
+            item = self.model.contracts.get(owner)
+            if item is None:
+                continue
+            for var_name, type_name in item.state_vars:
+                if var_name == name:
+                    found = (owner, item.file, type_name)
+                    break
+            if found is not None:
+                break
+        if found is None:
+            return None
+        owner, path, type_name = found
+        if not self._declaration_is_public((self.sources or {}).get(path, ""), name):
+            return None
+        keys = _mapping_keys(type_name)
+        if keys is None or f"{name}({','.join(keys)})" != call.function:
+            return None
+        return RFunction(
+            file=path,
+            contract=owner,
+            name=name,
+            kind="function",
+            signature=call.function,
+            line=0,
+            visibility="public",
+            mutability="view",
+            modifiers=(),
+            params=tuple(Param(key, f"arg{index}") for index, key in enumerate(keys)),
+            returns=(),
+            body="",
+            has_body=True,
+        )
+
+    def _callable(self, call: VfcsCall) -> RFunction:
+        """The function to encode. A foreign function is sent through the target fallback."""
+        function = _resolve(self.model, call.contract, call.function)
+        if function is not None and call.contract == self.contract:
+            return function
+        if call.contract == self.contract:
+            getter = self._public_getter(call)
+            if getter is not None:
+                return getter
+        if function is None:
+            raise _UnbuildableError(
+                "a call is not a function of the target contract", "call_outside_target"
+            )
+        bodies = self._bodies(function.signature)
+        if len(bodies) != 1:
+            raise _UnbuildableError(
+                f"{call.function} has {len(bodies)} concrete bodies; the harness does not pick one",
+                "delegate_ambiguous",
+            )
+        if not self._target_delegates():
+            raise _UnbuildableError(
+                "a call is not a function of the target contract", "call_outside_target"
+            )
+        self.primitives.append(
+            Primitive(
+                name="delegate_fallback",
+                purpose=(
+                    f"send {call.contract}.{call.function} to {self.contract} "
+                    "through its delegatecall fallback"
+                ),
+                actor=call.actor,
+                value=call.contract,
+                property_relevance="the call uses the target's storage and address",
+                established_by="one concrete body and a fallback that delegatecalls",
+            )
+        )
+        return function
+
+    def _destination(self, call: VfcsCall) -> str:
+        instance = dict(call.arguments).get("__instance", "")
+        if instance in {"", "target"}:
+            return "address(t)"
+        if instance == "twin":
+            if not self.twin_ready:
+                raise _UnbuildableError(
+                    "the twin instance was not deployed before this call", "twin_unavailable"
+                )
+            return "address(bfTwin)"
+        raise _UnbuildableError(
+            "the call instance is not the target or its twin", "twin_unavailable"
+        )
+
     # -- assemble --------------------------------------------------------------------------
     def build(self) -> str:
         for call in self.sequence.calls:
@@ -1368,12 +1659,19 @@ class _Synth:
                 )
         oracle = self.oracle
         probe = probe_index(self.sequence, oracle) if oracle.executable else -1
-        if oracle.kind in TOKEN_ORACLES:
+        tracking = oracle.balance_relation == "payout_matches_credit"
+        if oracle.kind in TOKEN_ORACLES or tracking:
             self.want_token(oracle.token_fixture or "standard", oracle.expression)
         ctor_args = self.constructor_args()
+        self.ctor_args = ctor_args
         if oracle.kind in TOKEN_ORACLES:
             self.approve(ATTACKER, ATTACKER_ADDR, "the probe deposits fixture tokens")
         conserving = oracle.kind is OracleKind.BALANCE_NOT_INCREASED
+        state_reads = {
+            OracleKind.STATE_UNCHANGED,
+            OracleKind.CALL_MUST_FAIL,
+            OracleKind.STATE_EQUALS,
+        }
         if conserving:
             if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
                 self.approve(VICTIM, VICTIM_ADDR, "another depositor's funds are in custody")
@@ -1383,43 +1681,25 @@ class _Synth:
             if call.primitive:
                 self.primitive(index, call)
                 continue
-            function = _resolve(self.model, call.contract, call.function)
-            if function is None or call.contract != self.contract:
-                raise _UnbuildableError(
-                    "a call is not a function of the target contract", "call_outside_target"
-                )
+            function = self._callable(call)
             encoded = self.encode(call, function)
             if index == probe and oracle.control_sender:
                 self._positive_control(index, encoded)
-            if (
-                index == probe
-                and oracle.getter
-                and oracle.kind
-                in {
-                    OracleKind.STATE_UNCHANGED,
-                    OracleKind.CALL_MUST_FAIL,
-                }
-            ):
+            if index == probe and tracking:
+                self.read_actor(0)
+                self.read_evidence(0)
+            if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_BEFORE, index)
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 0)
                 self.read_credit(0)
-            sender = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
-            if call.actor not in {ATTACKER, VICTIM}:
-                raise _UnbuildableError(
-                    f"actor {call.actor!r} is not a harness actor", "unknown_actor"
-                )
-            self._emit_call(index, sender, encoded)
-            if (
-                index == probe
-                and oracle.getter
-                and oracle.kind
-                in {
-                    OracleKind.STATE_UNCHANGED,
-                    OracleKind.CALL_MUST_FAIL,
-                }
-            ):
+            sender = self._sender(call.actor)
+            self._emit_call(index, sender, encoded, self._destination(call))
+            if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_AFTER, index)
+            if index == probe and tracking:
+                self.read_actor(1)
+                self.read_evidence(1)
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
@@ -1436,6 +1716,12 @@ class _Synth:
                     VICTIM,
                     VICTIM_ADDR,
                     "another actor in this sequence moves the fixture token",
+                )
+            if any(call.actor == SIGNER and not call.primitive for call in self.sequence.calls):
+                self.approve(
+                    SIGNER,
+                    SIGNER_EXPR,
+                    "the signing owner moves the fixture token",
                 )
         if self.token_kind and not self.token_bound:
             raise _UnbuildableError(
@@ -1468,6 +1754,7 @@ class _Synth:
             profile_contracts=self.profile_contracts,
             body=body,
             evidence=K_EVIDENCE,
+            sign_helper=_SIGN_HELPER if self.needs_sign else "",
         )
 
     def imports(self) -> tuple[str, ...]:
@@ -1568,7 +1855,41 @@ contract VfcsHarness is Test {{
     function test_vfcs_execute() public {{
 {body}
     }}
-}}
+{sign_helper}}}
+"""
+
+# Domain name and version are read from the target. The struct typehash and fields
+# come from the sequence. Static fields only: abi.encodePacked(typehash, abi.encode(fields))
+# matches abi.encode(typehash, fields...) for address, bool, uint256, and bytes32.
+_SIGN_HELPER = """
+    function _bfDomainString(address target, string memory sig) internal view returns (string memory) {
+        (bool ok, bytes memory out) = target.staticcall(abi.encodeWithSignature(sig));
+        require(ok && out.length >= 64, "bf-domain");
+        return abi.decode(out, (string));
+    }
+
+    function _bfSign(
+        address target,
+        bytes32 typehash,
+        bytes memory fields,
+        uint256 chainId,
+        uint256 key
+    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes(_bfDomainString(target, "name()"))),
+                keccak256(bytes(_bfDomainString(target, "version()"))),
+                chainId,
+                target
+            )
+        );
+        bytes32 structHash = keccak256(abi.encodePacked(typehash, fields));
+        bytes32 digest = keccak256(abi.encodePacked("\\x19\\x01", domainSeparator, structHash));
+        return vm.sign(key, digest);
+    }
 """
 
 _FIXTURE_TOKEN = """
@@ -1640,6 +1961,8 @@ interface Vm {
     function warp(uint256) external;
     function roll(uint256) external;
     function deal(address, uint256) external;
+    function addr(uint256) external pure returns (address);
+    function sign(uint256, bytes32) external pure returns (uint8, bytes32, bytes32);
 }
 
 contract Test {
