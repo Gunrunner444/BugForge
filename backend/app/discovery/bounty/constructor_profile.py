@@ -968,12 +968,12 @@ def comet_custody_profile(sources: Mapping[str, str], *, source_commit: str) -> 
         "bound_files": [{"path": path, "sha256": digest} for path, digest in bound],
         "assumptions": [
             "the base token is the harness fixture token (18 decimals, no fee, returns true), "
-            "so baseScale is 1e18; the deployed cUSDCv3 base token has 6 decimals",
+            "so baseScale is 1e18. The deployed cUSDCv3 base token has 6 decimals",
             "governor and pauseGuardian are local harness addresses, distinct from the attacker",
             "the base price feed reports 8 decimals, matching PRICE_FEED_DECIMALS",
-            "baseMinForRewards is 1 because the constructor rejects 0; tracking speeds are 0",
+            "baseMinForRewards is 1 because the constructor rejects 0. Tracking speeds are 0",
             "interest-rate fields are 0, and no call advances time, so no interest accrues",
-            "assetConfigs is empty; the round trip supplies and withdraws only the base token",
+            "assetConfigs is empty. The round trip supplies and withdraws only the base token",
             "the extension delegate and asset-list factory are local fixtures, not deployed "
             "Compound contracts",
             "this configuration is a local construction environment, not live market state",
