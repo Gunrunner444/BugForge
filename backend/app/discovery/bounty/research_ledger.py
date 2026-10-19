@@ -819,6 +819,7 @@ def campaign_coverage(
     analysis_only_files: int | None = None,
     scope_excluded: int | None = None,
     constructor_profile: Mapping[str, Any] | None = None,
+    candidate_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What a campaign actually completed, and the first blocker if execution did not.
 
@@ -943,6 +944,7 @@ def campaign_coverage(
         "contracts_modeled": contracts_modeled,
         "functions_modeled": functions_modeled,
         "candidates": candidates,
+        "candidate_budget": dict(candidate_budget or {}),
         "sequences": sequences,
         "sequences_skipped": len(skipped),
         "sequences_excluded": len(policy_skips) if executions is not None else None,

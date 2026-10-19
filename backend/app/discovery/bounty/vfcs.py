@@ -328,7 +328,7 @@ def _donation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     if withdraw is None:
         return "no function that pays out was found in the contract"
     calls = [
-        _call(function, "deposit", ATTACKER, default="minimum_amount"),
+        _call(function, "deposit", ATTACKER, default="unit_amount"),
         donate,
         _call(function, "deposit", VICTIM, default="victim_amount"),
         _call(withdraw, "withdraw", ATTACKER, default="all_shares"),

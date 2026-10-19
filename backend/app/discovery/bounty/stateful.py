@@ -76,6 +76,9 @@ MAX_RUNS = 160  # forge invocations per executor (one campaign request)
 HARNESS_SCHEMA = "bugforge.harness/2"
 ATTACKER_ADDR = "address(0xA11CE)"
 VICTIM_ADDR = "address(0xB0B)"
+# A second wallet the harness treats as attacker-controlled. Payouts to it are part
+# of the attacker's economic balance. It is not a protocol address.
+RECIPIENT_ADDR = "address(0xD1A1)"
 FIXTURE_AMOUNT = "1000000000000000000"  # 1e18 fixture units; local only
 # A harness-only signing key. It is not a secret and not an account that exists anywhere else.
 SIGNER = "signer"
@@ -107,7 +110,8 @@ K_CONTROL_BEFORE = 12
 K_CONTROL_AFTER = 13
 K_WORD = 14
 K_FIXTURE = 15
-K_ACTOR = 16  # index 0: attacker fixture balance before the first call, 1: after the last
+# 0/1 attacker wallet before/after; 2/3 designated recipient wallet before/after.
+K_ACTOR = 16
 K_EVIDENCE = 17  # index into properties.EVIDENCE_SLOTS; supplementary, never the verdict
 
 
@@ -981,6 +985,10 @@ class _Synth:
                 return "block.timestamp - 1"
             if re.fullmatch(r"[0-9]{1,78}", override):
                 return override
+            if override == "unit_amount":
+                return "1"
+            if override == "all_shares" and abi in {"uint256", "uint"}:
+                return self.actor_credit(call)
             if self.token_kind and override in _AMOUNT_LIKE and abi in {"uint256", "uint"}:
                 return FIXTURE_AMOUNT
             if override == "amount_one":
@@ -1112,6 +1120,10 @@ class _Synth:
     def read_actor(self, slot: int) -> None:
         self.steps.append(
             f"        emit BugForgeObservation({K_ACTOR}, {slot}, bfToken.balanceOf({ATTACKER_ADDR}));"
+        )
+        self.steps.append(
+            "        emit BugForgeObservation("
+            f"{K_ACTOR}, {slot + 2}, bfToken.balanceOf({RECIPIENT_ADDR}));"
         )
 
     def read_evidence(self, phase: int) -> None:
@@ -2154,6 +2166,8 @@ def observation_from_events(
         credit_after=credited.get(1),
         actor_before=actor.get(0),
         actor_after=actor.get(1),
+        recipient_before=actor.get(2),
+        recipient_after=actor.get(3),
         revert_selector=revert_selector,
         revert_data_ok=revert_data_ok,
         control_ok=control_ok,

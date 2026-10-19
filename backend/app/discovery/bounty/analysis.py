@@ -67,6 +67,8 @@ class CampaignAnalysis:
     sequence_skipped: dict[str, str] = field(default_factory=dict)
     # Every file the analysis tried to read. Skipped files are not in ``sources``.
     file_reads: tuple[FileRead, ...] = ()
+    # Suite budget: how many candidates were found, kept, and why the rest were dropped.
+    candidate_budget: dict[str, Any] = field(default_factory=dict)
 
     def all_models(self) -> tuple[ResearchModel, ...]:
         """The main model first, then each distinct follow-up model (stable order)."""
@@ -142,6 +144,7 @@ def analyze_campaign(
     )
     candidates: list[SemanticCandidate] = []
     sequences: list[Vfcs] = []
+    budgets: list[dict[str, Any]] = []
     models: dict[str, ResearchModel] = {}
     sequence_sources: dict[str, dict[str, str]] = {}
     sequence_skipped: dict[str, str] = {}
@@ -178,7 +181,9 @@ def analyze_campaign(
                 sequence_sources[item.sequence_id] = part_sources
 
     if model is not None:
-        absorb(model, run_suite(model).candidates, sources)
+        primary = run_suite(model)
+        budgets.append(primary.budget())
+        absorb(model, primary.candidates, sources)
         ambiguous |= set(model.ambiguous)
 
     # Bounded follow-up over dropped high-priority files.
@@ -193,7 +198,9 @@ def analyze_campaign(
             continue
         covered |= set(batch_sources)
         part = build_research_model(batch_sources)
-        found = tuple(c for c in run_suite(part).candidates if c.file in batch_sources)
+        suite = run_suite(part)
+        budgets.append(suite.budget())
+        found = tuple(c for c in suite.candidates if c.file in batch_sources)
         absorb(part, found, batch_sources)
         ambiguous |= set(part.ambiguous)
         followup["batches"].append({"files": sorted(batch_sources), "candidates": len(found)})
@@ -226,7 +233,9 @@ def analyze_campaign(
             if not alone:
                 continue
             part = build_research_model(alone)
-            found = tuple(c for c in run_suite(part).candidates if c.contract == name)
+            suite = run_suite(part)
+            budgets.append(suite.budget())
+            found = tuple(c for c in suite.candidates if c.contract == name)
             absorb(part, found, alone)
             followup["ambiguous_passes"].append(
                 {"contract": name, "file": path, "candidates": len(found)}
@@ -259,13 +268,40 @@ def analyze_campaign(
         sequence_identity=seq_identity,
         ambiguous_contracts=frozenset(ambiguous),
         followup=followup,
-        truncated=bool(selection.truncated or (model is not None and model.truncated)),
+        truncated=bool(
+            selection.truncated
+            or (model is not None and model.truncated)
+            or any(bool(item.get("truncated")) for item in budgets)
+        ),
+        candidate_budget=_merge_budgets(budgets, retained=len(unique)),
         _deployments=deployments,
         sequence_sources=sequence_sources,
         sequence_skipped=sequence_skipped,
         source_hashes=hashes,
         file_reads=tuple(read_log),
     )
+
+
+def _merge_budgets(parts: list[dict[str, Any]], *, retained: int) -> dict[str, Any]:
+    dropped: dict[tuple[str, str], int] = {}
+    found = 0
+    notes: list[str] = []
+    for part in parts:
+        found += int(part.get("candidates_found", 0))
+        notes.extend(str(item) for item in part.get("notes", []))
+        for item in part.get("dropped", []):
+            key = (str(item.get("reason", "")), str(item.get("family", "")))
+            dropped[key] = dropped.get(key, 0) + int(item.get("count", 0))
+    return {
+        "candidates_found": found,
+        "candidates_kept": retained,
+        "truncated": any(bool(part.get("truncated")) for part in parts) or found > retained,
+        "dropped": [
+            {"reason": reason, "family": family, "count": count}
+            for (reason, family), count in sorted(dropped.items())
+        ],
+        "notes": notes[:12],
+    }
 
 
 def _sha256(text: str) -> str:

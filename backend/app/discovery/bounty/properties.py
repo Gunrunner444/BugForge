@@ -537,6 +537,65 @@ def _no_property(reason: str) -> Any:
     return build
 
 
+def _share_inflation(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: str) -> OracleBuilt:
+    """A donation must not let one depositor redeem another depositor's assets.
+
+    The first deposit is one unit, the donation and the second deposit are one
+    fixture unit each (1e18), and the redemption is the attacker's share balance.
+    Ending above the starting token balance is an unauthorized gain. Receiving
+    one's own donation back, or an ordinary share-price move that does not pay
+    the attacker more than they put in, is not.
+    """
+    variable, getter = _credit_getter(model, fn.contract, fn)
+    withdraw = _role_function(sequence, "withdraw")
+    if not getter:
+        return (
+            OracleSpec(),
+            (),
+            (),
+            f"{fn.name} exposes no public per-account share or credit balance",
+            (),
+            "no readable share balance to size the redemption",
+        )
+    if not withdraw:
+        return (OracleSpec(), (), (), "the sequence has no redemption", (), "")
+    order = [call.role for call in sequence.calls]
+    probe_at = order.index("withdraw")
+    preconditions = tuple(dict.fromkeys(role for role in order[:probe_at]))
+    oracle = OracleSpec(
+        kind=OracleKind.BALANCE_NOT_INCREASED,
+        probe_role="withdraw",
+        probe_function=withdraw,
+        precondition_roles=preconditions,
+        getter=getter,
+        getter_actor=ATTACKER,
+        token_fixture="standard",
+        snapshot="before_sequence",
+        expression=(
+            "after a 1-unit deposit, a 1000000000000000000-unit donation by the attacker, "
+            "a second depositor's 1000000000000000000-unit deposit, and redemption of the "
+            f"share balance {getter} reports for the attacker, the sum of the attacker's "
+            "fixture-token balance and the designated recipient balance must not exceed "
+            "that sum before the first deposit. The donation and both deposits are part "
+            "of the measured sequence"
+        ),
+    )
+    return (
+        oracle,
+        (),
+        (variable,),
+        f"{fn.name} prices new shares from the contract's token balance and {withdraw} redeems",
+        (
+            "attacker deposit: 1",
+            "donation: 1000000000000000000 fixture units transferred to the contract",
+            "second depositor: 1000000000000000000 fixture units",
+            f"redemption: {getter} of the attacker, read after both deposits and the donation",
+            "a balance that cannot be read is not a held property",
+        ),
+        "",
+    )
+
+
 def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
     """Credited balance must not exceed what the contract actually received.
 
@@ -640,16 +699,16 @@ def _round_trip(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -
         token_fixture="standard",
         snapshot="before_sequence",
         expression=(
-            f"after the sequence {' > '.join(order)}, the attacker's balance of "
-            f"{pair.token_label} (smallest token unit) must not exceed its balance before "
-            f"the first call to {fn.name}"
+            f"after the sequence {' > '.join(order)}, the sum of the attacker's balance of "
+            f"{pair.token_label} and the designated attacker-controlled recipient balance "
+            f"must not exceed that sum before the first call to {fn.name}"
         ),
     )
     assumptions = [
         "one ordering: " + " > ".join(order),
         f"asset: {pair.token_label} bound by {pair.token_binding} ({pair.token_source or 'n/a'})",
-        f"account: the attacker; credit {credit} is in the contract's own units, "
-        "not assumed to be token units",
+        "account: the attacker wallet plus the designated recipient wallet; "
+        f"credit {credit} is in the contract's own units, not assumed to be token units",
         amount,
         "no call advances block.timestamp or accrues interest, rewards or index growth, "
         "so a gain is not yield",
@@ -901,20 +960,19 @@ _ORACLE_BUILDERS: dict[str, Any] = {
         "needs a funded victim position in the callee (funding fixture)",
     ),
     "approve→transferFrom": _unsupported(
-        "{name} forwards caller-chosen calldata; judging it needs a victim allowance "
-        "and an encoded transferFrom",
-        "needs a fixture token, a victim approval, and nested transferFrom calldata",
+        "{name} forwards caller-chosen calldata; an unsupported allowance property is not "
+        "evidence that the call is safe",
+        "needs a fixture token, a victim approval, and nested transferFrom calldata "
+        "before this template can be judged",
     ),
-    "deposit→donate→withdraw": _unsupported(
-        "share-price inflation needs a funded asset, a donation, and a second depositor",
-        "needs a fixture asset wired into the vault's constructor",
-    ),
+    "deposit→donate→withdraw": _share_inflation,
     "donate→credit": _credit_oracle,
     "deposit": _credit_oracle,
     "deposit→withdraw": _credit_oracle,
     "authorize→execute": _unsupported(
-        "{name} consumes a signed authorization; judging it needs a valid signature",
-        "needs a signer fixture that produces a valid authorization for this digest",
+        "{name} consumes a signed authorization; leaving it unexecuted is not a held property",
+        "needs a signer fixture that produces a valid authorization for this digest "
+        "before replay, expiry, or field binding can be judged",
     ),
     "oracle update→valuation→borrow": _unsupported(
         "{name} reads an external price; judging it needs a controlled price source",
@@ -948,6 +1006,9 @@ class OracleObservation:
     credit_after: int | None = None  # the actor's credit after the probe
     actor_before: int | None = None  # attacker fixture balance before the first call
     actor_after: int | None = None  # attacker fixture balance after the last call
+    # A second attacker-controlled wallet. Missing means the economic sum was not read.
+    recipient_before: int | None = None
+    recipient_after: int | None = None
     revert_selector: str = ""  # 0x plus 8 hex digits, or ""
     revert_data_ok: bool = True
     control_ok: int = -1  # -1 not run, 0 reverted, 1 succeeded
@@ -1250,25 +1311,51 @@ def _conservation_verdict(
     probe: int,
     probe_ok: int,
 ) -> PropertyEvaluation:
-    """The attacker's own balance over the whole sequence.
+    """Attacker-controlled fixture balances over the whole sequence.
 
     A reverted probe is a refused additional payout only when an earlier call of
     the same function, by the same actor, succeeded. Otherwise the probe is the
     ordinary payout, and its revert means the round trip was not exercised.
     """
-    before, after = observation.actor_before, observation.actor_after
+    wallet_before, wallet_after = observation.actor_before, observation.actor_after
+    recipient_before, recipient_after = observation.recipient_before, observation.recipient_after
     evidence = observation.evidence
     payouts = prior_payout_indices(sequence, oracle, probe)
     ordinary_done = bool(payouts) and all(observation.call_ok[i] == 1 for i in payouts)
     if not ordinary_done and probe_ok != 1:
         return _payout_not_completed(probe)
-    if not observation.readable or before is None or after is None:
+    missing = []
+    if not observation.readable or wallet_before is None or wallet_after is None:
+        missing.append("the attacker's fixture balance")
+    if recipient_before is None or recipient_after is None:
+        missing.append("the designated recipient balance")
+    if missing or wallet_before is None or wallet_after is None:
         return PropertyEvaluation(
             PropertyVerdict.NOT_EVALUATED,
-            "the attacker's balance or credit could not be read, so nothing was judged",
+            f"{' and '.join(missing) or 'a required balance'} could not be read, "
+            "so nothing was judged",
             probe,
             evidence=evidence,
         )
+    if recipient_before is None or recipient_after is None:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the designated recipient balance could not be read, so nothing was judged",
+            probe,
+            evidence=evidence,
+        )
+    before = wallet_before + recipient_before
+    after = wallet_after + recipient_after
+    evidence = evidence + (
+        ("attacker_balance_before", wallet_before),
+        ("attacker_balance_after", wallet_after),
+        ("recipient_balance_before", recipient_before),
+        ("recipient_balance_after", recipient_after),
+    )
+    wallets = (
+        f"attacker wallet {wallet_before} -> {wallet_after}, designated recipient "
+        f"{recipient_before} -> {recipient_after}"
+    )
     if ordinary_done and probe_ok != 1:
         outcome = (
             f"; an earlier {oracle.probe_function} by the same actor succeeded, and the "
@@ -1283,8 +1370,8 @@ def _conservation_verdict(
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_VIOLATED,
             (
-                f"the attacker's fixture balance rose from {before} to {after} "
-                f"(+{after - before}) across its deposit and withdrawal while another "
+                f"attacker-controlled fixture balances rose from {before} to {after} "
+                f"(+{after - before}; {wallets}) across the sequence while another "
                 f"depositor's funds were in custody{outcome}. {readings}"
                 f"{_payout_source(evidence, after - before)}"
             ),
@@ -1296,9 +1383,9 @@ def _conservation_verdict(
     return PropertyEvaluation(
         PropertyVerdict.PROPERTY_HELD,
         (
-            f"the attacker's fixture balance went from {before} to {after} "
-            f"(-{before - after}){outcome}. {readings}This holds for this one ordering, "
-            "amount, and fixture token only"
+            f"attacker-controlled fixture balances went from {before} to {after} "
+            f"(-{before - after}; {wallets}){outcome}. {readings}This holds for this one "
+            "ordering, amount, and fixture token only"
         ),
         probe,
         True,

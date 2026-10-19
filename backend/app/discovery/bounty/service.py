@@ -1604,6 +1604,7 @@ class BountyCampaignService:
             "contracts_modeled": len(model.contracts) if model is not None else 0,
             "functions_modeled": len(model.all_functions()) if model is not None else 0,
             "candidates": len(analysis.candidates),
+            "candidate_budget": analysis.candidate_budget,
             "sequences": len(analysis.sequences),
             "skipped": analysis.sequence_skipped,
         }

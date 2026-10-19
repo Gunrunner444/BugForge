@@ -120,9 +120,13 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
         probe_guard = "" if payouts else f"        if (!_bfOk({probe})) return false;\n"
         judged = (
             f"{payout_guard}{probe_guard}"
-            f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1];\n"
+            f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1]"
+            f" && bfSeen[{K_ACTOR}][2] && bfSeen[{K_ACTOR}][3];\n"
         )
-        violated = f"        return bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0];\n"
+        violated = (
+            f"        return bfVal[{K_ACTOR}][1] + bfVal[{K_ACTOR}][3] > "
+            f"bfVal[{K_ACTOR}][0] + bfVal[{K_ACTOR}][2];\n"
+        )
     elif kind is OracleKind.CREDIT_LE_RECEIVED:
         judged = (
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][0] && bfSeen[{K_RECEIVED}][1]"

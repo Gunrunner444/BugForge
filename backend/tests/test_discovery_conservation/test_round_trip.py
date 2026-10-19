@@ -132,6 +132,7 @@ def test_the_harness_reads_the_attacker_before_and_after_and_funds_the_victim() 
     last = body.index(f"BugForgeObservation({K_ACTOR}, 1,")
     assert first < body.index("vm.prank(address(0xA11CE));\n        (bool ok_0") < last
     assert "bfToken.balanceOf(address(0xA11CE))" in body
+    assert "bfToken.balanceOf(address(0xD1A1))" in body
     assert "bfToken.mint(address(0xB0B)" in body
     sizing = '_bfRead(address(t), abi.encodeWithSignature("balances(address)", address(0xA11CE))'
     assert body.count(sizing) == 2
@@ -146,7 +147,13 @@ def test_the_harness_reads_the_attacker_before_and_after_and_funds_the_victim() 
 
 
 def _obs(**kwargs: object) -> OracleObservation:
-    base: dict[str, object] = {"call_ok": (1, 1, 1, 1), "actor_before": 100, "actor_after": 100}
+    base: dict[str, object] = {
+        "call_ok": (1, 1, 1, 1),
+        "actor_before": 100,
+        "actor_after": 100,
+        "recipient_before": 0,
+        "recipient_after": 0,
+    }
     base.update(kwargs)
     return OracleObservation(**base)  # type: ignore[arg-type]
 
@@ -161,6 +168,11 @@ def test_the_verdict_compares_the_attackers_own_balance() -> None:
     assert refused.verdict is PropertyVerdict.PROPERTY_HELD and "reverted" in refused.reason
     unread = evaluate(sequence, oracle, _obs(actor_after=None))
     assert unread.verdict is PropertyVerdict.NOT_EVALUATED
+    side = evaluate(sequence, oracle, _obs(recipient_after=40))
+    assert side.verdict is PropertyVerdict.PROPERTY_VIOLATED and "+40" in side.reason
+    no_recipient = evaluate(sequence, oracle, _obs(recipient_before=None, recipient_after=None))
+    assert no_recipient.verdict is PropertyVerdict.NOT_EVALUATED
+    assert "recipient" in no_recipient.reason
     assert evaluate(sequence, oracle, _obs(readable=False)).verdict is PropertyVerdict.NOT_EVALUATED
     pre_failed = evaluate(sequence, oracle, _obs(call_ok=(1, 0, 1, 1), actor_after=500))
     assert pre_failed.verdict is PropertyVerdict.NOT_EVALUATED
@@ -171,6 +183,8 @@ def test_supplementary_evidence_is_decoded_and_reported_without_a_loss_claim() -
     events = (
         (K_ACTOR, 0, 100),
         (K_ACTOR, 1, 150),
+        (K_ACTOR, 2, 0),
+        (K_ACTOR, 3, 0),
         (K_EVIDENCE, 0, 0),
         (K_EVIDENCE, 1, 50),
         (K_EVIDENCE, 4, 0),
@@ -274,7 +288,10 @@ def test_a_reverted_withdrawal_is_judged_only_after_a_completed_payout() -> None
     assert judged is not None and f"if (!_bfOk({ordinary})) return false;" in judged
     assert f"if (!_bfOk({extra})) return false;" not in judged
     assert f"bfSeen[{K_ACTOR}][0]" in judged and f"bfSeen[{K_ACTOR}][1]" in judged
-    assert violated is not None and f"bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0]" in violated
+    summed = (
+        f"bfVal[{K_ACTOR}][1] + bfVal[{K_ACTOR}][3] > bfVal[{K_ACTOR}][0] + bfVal[{K_ACTOR}][2]"
+    )
+    assert violated is not None and summed in violated
 
     sole_calls = tuple(call for call in sequence.calls if call.role != "withdraw_again")
     sole = replace(sequence, calls=sole_calls)
@@ -310,7 +327,10 @@ def test_engine_harness_judges_the_same_balance() -> None:
     _, _, sequence, spec, _ = _round_trip("missing_debit", "vulnerable")
     judged, violated = _judge(sequence, spec.oracle) or ("", "")
     assert f"bfSeen[{K_ACTOR}][0]" in judged and f"bfSeen[{K_ACTOR}][1]" in judged
-    assert violated.strip() == f"return bfVal[{K_ACTOR}][1] > bfVal[{K_ACTOR}][0];"
+    assert violated.strip() == (
+        f"return bfVal[{K_ACTOR}][1] + bfVal[{K_ACTOR}][3] > "
+        f"bfVal[{K_ACTOR}][0] + bfVal[{K_ACTOR}][2];"
+    )
     assert "K_CREDITED" not in violated
 
 

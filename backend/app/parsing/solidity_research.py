@@ -899,11 +899,13 @@ MAX_CANDIDATES_PER_FAMILY = 64
 
 
 def cap(candidates: list[SemanticCandidate]) -> list[SemanticCandidate]:
-    """Deterministic order and an explicit cap. Duplicates by detector and location collapse."""
-    unique: dict[tuple[str, str, str, int], SemanticCandidate] = {}
+    """Collapse duplicate detector locations. The suite applies the family and total budgets.
+
+    A lexical slice here used to drop a late-file candidate before the suite could
+    rank it. Callers still receive each distinct candidate; ``run_suite`` decides
+    which of them fit the budget.
+    """
+    unique: dict[tuple[str, str, str, str, int], SemanticCandidate] = {}
     for item in candidates:
-        unique.setdefault((item.detector, item.contract, item.function, item.line), item)
-    ordered = sorted(
-        unique.values(), key=lambda c: (c.file, c.line, c.contract, c.function, c.detector)
-    )
-    return ordered[:MAX_CANDIDATES_PER_FAMILY]
+        unique.setdefault((item.detector, item.file, item.contract, item.function, item.line), item)
+    return list(unique.values())

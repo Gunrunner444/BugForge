@@ -179,6 +179,7 @@ jobs:
             tests/test_phase59/test_ci_comet_required.py \
             tests/test_discovery_conservation \
             tests/test_discovery_authorization \
+            tests/test_phase60 \
             -vv --tb=short
 
   compound-integration:
