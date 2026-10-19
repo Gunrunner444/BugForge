@@ -71,7 +71,10 @@ _FIXTURE_KINDS = frozenset(
     }
 )
 _ADDRESS_FIXTURES = _FIXTURE_KINDS
-_PROPERTY_TEMPLATES = frozenset({"unauthorized-call", "configured-asset", "custody"})
+_PROPERTY_TEMPLATES = frozenset(
+    {"unauthorized-call", "configured-asset", "custody", "initialization-asset"}
+)
+_ADDRESS_WORD = re.compile(r"0x[0-9a-fA-F]{40}")
 HARNESS_TOKEN_DECIMALS = 18  # BugForgeFixtureToken.decimals()
 HARNESS_TOKEN_VARIABLE = "bfToken"
 
@@ -128,6 +131,9 @@ class ProfileFixture:
     depends_on: str = ""
     contract: str = ""
     arguments: tuple[ProfileValue, ...] = ()
+    # Runtime code is copied to this address after deployment. It must be a literal
+    # already present in the bound source; the profile does not choose an address.
+    place_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {"fixture_id": self.fixture_id, "kind": self.kind}
@@ -139,6 +145,8 @@ class ProfileFixture:
             body["contract"] = self.contract
         if self.arguments:
             body["arguments"] = [item.to_dict() for item in self.arguments]
+        if self.place_at:
+            body["place_at"] = self.place_at
         return body
 
 
@@ -167,6 +175,8 @@ class ConstructorProfile:
     property_template: str = "unauthorized-call"
     probe_argument: str = ""
     observed_fixture: str = ""
+    # ABI signature of a one-address setup call, when the token is not a constructor argument.
+    initialization_function: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +201,7 @@ class ConstructorProfile:
             "property_template": self.property_template,
             "probe_argument": self.probe_argument,
             "observed_fixture": self.observed_fixture,
+            "initialization_function": self.initialization_function,
         }
 
     def public_dict(self) -> dict[str, Any]:
@@ -213,6 +224,7 @@ class ConstructorProfile:
             "source_commit": self.source_commit,
             "property_template": self.property_template,
             "observed_fixture": self.observed_fixture,
+            "initialization_function": self.initialization_function,
             "configuration": self.value.to_dict(),
             "local_environment": True,
             "establishes_deployed_state": False,
@@ -261,6 +273,7 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         "property_template",
         "probe_argument",
         "observed_fixture",
+        "initialization_function",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -285,9 +298,22 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
     fixtures = _fixtures(raw.get("fixtures", []))
     fixture_ids = {item.fixture_id for item in fixtures}
     value = _value(raw.get("value"), fixture_ids, depth=0)
-    if value.kind != "struct":
+    initialization_function = str(raw.get("initialization_function", "") or "")
+    if initialization_function and not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*\(address\)", initialization_function
+    ):
+        raise ProfileError(
+            "profile_malformed", "initialization_function must be a one-address ABI signature"
+        )
+    address_binding = model_type == "address" and solidity_type == "address"
+    if address_binding:
+        if struct_name != "address":
+            raise ProfileError("profile_type_mismatch", "an address binding names address")
+        if value.kind != "fixture":
+            raise ProfileError("profile_malformed", "an address profile assigns one fixture")
+    elif value.kind != "struct":
         raise ProfileError("profile_malformed", "the profile value must be a struct")
-    if value.type_name != solidity_type:
+    elif value.type_name != solidity_type:
         raise ProfileError("profile_type_mismatch", "the struct type does not match solidity_type")
     _reject_privileged_attacker(value)
     imports = _paths(raw.get("imports", []), "imports")
@@ -306,11 +332,22 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
     template = str(raw.get("property_template", "unauthorized-call") or "unauthorized-call")
     if template not in _PROPERTY_TEMPLATES:
         raise ProfileError("profile_malformed", "property_template is not supported")
+    if address_binding and template != "initialization-asset":
+        raise ProfileError(
+            "profile_malformed", "an address binding uses the initialization-asset template"
+        )
+    if template == "initialization-asset" and not address_binding:
+        raise ProfileError("profile_malformed", "initialization-asset binds an address")
+    if initialization_function and template != "initialization-asset":
+        raise ProfileError(
+            "profile_malformed",
+            "initialization_function requires the initialization-asset template",
+        )
     getter_raw = raw.get("property_getter", "")
     if not isinstance(getter_raw, str):
         raise ProfileError("profile_malformed", "property_getter is not text")
     property_getter = getter_raw.strip()
-    if template == "unauthorized-call":
+    if template in {"unauthorized-call", "initialization-asset"}:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)", property_getter):
             raise ProfileError(
                 "profile_malformed", "property_getter is not a no-argument signature"
@@ -366,6 +403,7 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         property_template=template,
         probe_argument=probe_argument,
         observed_fixture=observed_fixture,
+        initialization_function=initialization_function,
     )
 
 
@@ -661,8 +699,93 @@ def _classify_element(type_name: str, texts: Mapping[str, str]) -> None:
     )
 
 
+def address_literal(texts: Mapping[str, str], wanted: str) -> str:
+    """The bound-source spelling of ``wanted``, when exactly one literal matches."""
+    spellings = {
+        item
+        for text in texts.values()
+        for item in _ADDRESS_WORD.findall(text)
+        if item.lower() == wanted.lower()
+    }
+    if len(spellings) != 1:
+        raise ProfileError(
+            "profile_fixture_unresolved",
+            "place_at must match one address literal in the bound source",
+        )
+    return str(next(iter(spellings)))
+
+
+def _named_params(params: str) -> tuple[tuple[str, str], ...]:
+    found: list[tuple[str, str]] = []
+    for part in split_top(params):
+        if not part.strip():
+            continue
+        words = part.replace("\n", " ").split()
+        cleaned = [
+            word for word in words if word not in {"memory", "calldata", "storage", "payable"}
+        ]
+        if len(cleaned) < 2 or not _IDENT.fullmatch(cleaned[-1]):
+            raise ProfileError("profile_type_unparsed", "a parameter name could not be read")
+        found.append((normalize_type(" ".join(cleaned[:-1])), cleaned[-1]))
+    return tuple(found)
+
+
+def _declares_getter(texts: Mapping[str, str], name: str) -> bool:
+    function = re.compile(rf"\bfunction\s+{re.escape(name)}\s*\(")
+    variable = re.compile(rf"\b(?:public|external)\b[^;{{]*\b{re.escape(name)}\b")
+    return any(function.search(text) or variable.search(text) for text in texts.values())
+
+
+def _require_address_binding(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
+    """The profile's address is a real parameter, and its getter is declared."""
+    if profile.initialization_function:
+        name = profile.initialization_function.split("(", 1)[0]
+        pattern = re.compile(
+            rf"\bfunction\s+{re.escape(name)}\s*\(\s*(?:address|[A-Za-z_]\w*)\s+"
+            rf"{re.escape(profile.parameter)}\b"
+        )
+        if not any(pattern.search(text) for text in texts.values()):
+            raise ProfileError(
+                "profile_type_unresolved",
+                f"{profile.initialization_function} is not declared with parameter "
+                f"{profile.parameter}",
+            )
+    else:
+        params = _constructor_params(texts.get(profile.source_file, ""), profile.contract)
+        if params is None:
+            raise ProfileError("profile_type_unparsed", "the constructor could not be read")
+        match = next((typ for typ, name in _named_params(params) if name == profile.parameter), "")
+        if match != "address":
+            raise ProfileError(
+                "profile_type_mismatch",
+                f"constructor parameter {profile.parameter} is not an address",
+            )
+    getter = profile.property_getter[:-2]
+    if not _declares_getter(texts, getter):
+        raise ProfileError(
+            "profile_type_unresolved",
+            f"{profile.property_getter} is not declared in the bound source",
+        )
+    for item in profile.fixtures:
+        if item.place_at:
+            address_literal(texts, item.place_at)
+
+
 def _validate_tree(profile: ConstructorProfile, texts: Mapping[str, str]) -> None:
     fixtures = {item.fixture_id: item for item in profile.fixtures}
+    if profile.property_template == "initialization-asset":
+        _check_value(profile.value, "address", texts, fixtures, depth=1)
+        token = next(
+            (item.fixture_id for item in profile.fixtures if item.kind == "harness_token"), ""
+        )
+        if profile.value.kind != "fixture" or profile.value.value != token or not token:
+            raise ProfileError(
+                "profile_custody_unbound",
+                "the address binding must be the harness token fixture",
+            )
+        _source_contracts(profile, texts)
+        _require_address_binding(profile, texts)
+        return
     _kind, _path, fields = _lookup_declared(texts, profile.struct_name)
     declared_here = parse_struct_fields(texts.get(profile.struct_file, ""), profile.struct_name)
     if declared_here is None or declared_here != fields:
@@ -786,7 +909,7 @@ def prepare_profile(profile: ConstructorProfile, sources: Mapping[str, str]) -> 
     """Solidity fragments for a profile that still matches ``sources``."""
     texts = _bound_texts(profile, sources)
     _validate_tree(profile, texts)
-    variables = _deploy_fixtures(profile.fixtures)
+    variables = _deploy_fixtures(profile.fixtures, texts)
     statements: list[str] = []
     expression = _render(profile.value, variables, statements)
     contracts = _fixture_contracts(profile.fixtures)
@@ -1246,6 +1369,11 @@ def attach_profile_seed(campaign: Any, analysis: Any) -> dict[str, Any] | None:
         accepted = {**profile.public_dict(), "custody_binding": binding}
         campaign.cache["constructor_profile"] = accepted
         return accepted
+    if profile.property_template == "initialization-asset":
+        # Deployment configuration only. It does not add a candidate or a sequence.
+        record = profile.public_dict()
+        campaign.cache["constructor_profile"] = record
+        return record
     model = build_research_model(chosen)
     seeded = _seed_sequence(model, analysis.sequence_identity, profile, chosen)
     if isinstance(seeded, str):
@@ -1476,7 +1604,7 @@ def _comet_fields() -> dict[str, dict[str, Any]]:
 
 
 def _deploy_fixtures(
-    fixtures: tuple[ProfileFixture, ...],
+    fixtures: tuple[ProfileFixture, ...], texts: Mapping[str, str]
 ) -> list[tuple[str, str, str]]:
     by_id = {item.fixture_id: item for item in fixtures}
     ordered: list[ProfileFixture] = []
@@ -1527,6 +1655,9 @@ def _deploy_fixtures(
             line = f"        {contract} {variable} = new {contract}();"
         else:
             line = f"        {contract} {variable} = new {contract}();"
+        if item.place_at:
+            literal = address_literal(texts, item.place_at)
+            line = f"{line}\n        vm.etch({literal}, address({variable}).code);"
         rendered.append((item.fixture_id, variable, line))
         by_id[item.fixture_id] = item
     return rendered
@@ -1687,7 +1818,8 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
         if not isinstance(item, Mapping):
             raise ProfileError("profile_malformed", "a fixture is not an object")
         unknown = sorted(
-            set(item) - {"fixture_id", "kind", "decimals", "depends_on", "contract", "arguments"}
+            set(item)
+            - {"fixture_id", "kind", "decimals", "depends_on", "contract", "arguments", "place_at"}
         )
         if unknown:
             raise ProfileError("profile_malformed", f"unknown fixture fields: {', '.join(unknown)}")
@@ -1741,6 +1873,11 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
                 "profile_malformed", "this fixture does not take constructor arguments"
             )
         arguments = tuple(_value(arg, fixture_ids, depth=1) for arg in arguments_raw)
+        place_at = str(item.get("place_at", "") or "")
+        if place_at and kind != "source_contract":
+            raise ProfileError("profile_malformed", "only a source contract can be placed")
+        if place_at and not _ADDRESS_WORD.fullmatch(place_at):
+            raise ProfileError("profile_malformed", "place_at is not an address literal")
         found.append(
             ProfileFixture(
                 fixture_id,
@@ -1749,6 +1886,7 @@ def _fixtures(raw: Any) -> tuple[ProfileFixture, ...]:
                 depends,
                 contract,
                 arguments,
+                place_at,
             )
         )
     ids = {item.fixture_id for item in found}

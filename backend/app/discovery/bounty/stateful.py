@@ -113,6 +113,8 @@ K_FIXTURE = 15
 # 0/1 attacker wallet before/after; 2/3 designated recipient wallet before/after.
 K_ACTOR = 16
 K_EVIDENCE = 17  # index into properties.EVIDENCE_SLOTS; supplementary, never the verdict
+# 1 when a declared asset getter returned the harness token; 0 when setup did not.
+K_SETUP = 18
 
 
 class Outcome(StrEnum):
@@ -840,6 +842,9 @@ class _Synth:
         self.signatures: dict[str, tuple[str, str, str]] = {}
         self.twin_ready = False
         self.ctor_args: list[str] = []
+        self.prepared: Any = None
+        self.profile_ready = False
+        self.asset_lines: list[str] = []
 
     # -- token fixture -------------------------------------------------------------------
     def want_token(self, kind: str, why: str) -> None:
@@ -1217,6 +1222,8 @@ class _Synth:
                     established_by="the profile's harness_token fixture",
                 )
             )
+        self.prepared = prepared
+        self.profile_ready = True
         self.pre_deploy.extend(prepared.deploy_lines)
         self.profile_contracts = prepared.contracts
         self.profile_imports = prepared.import_paths
@@ -1231,6 +1238,70 @@ class _Synth:
             )
         )
         return prepared.expression
+
+    def _bind_initialized_asset(self) -> None:
+        """Pass the harness token through a declared setup and read it back.
+
+        The profile names the parameter and the getter. A matching name is not
+        enough: the run stays inconclusive unless the getter returns the token.
+        """
+        profile = self.profile
+        if profile is None or profile.property_template != "initialization-asset":
+            return
+        if profile.contract != self.contract:
+            return
+        if not self.profile_ready:
+            from app.discovery.bounty.constructor_profile import ProfileError, prepare_profile
+
+            try:
+                prepared = prepare_profile(profile, self.sources or {})
+            except ProfileError as exc:
+                raise _UnbuildableError(exc.reason, exc.code) from exc
+            self.prepared = prepared
+            self.profile_ready = True
+            self.pre_deploy.extend(prepared.deploy_lines)
+            self.profile_contracts = prepared.contracts
+            self.profile_imports = prepared.import_paths
+        if not self.token_bound:
+            self.want_token(
+                self.oracle.token_fixture or "standard",
+                f"profile {profile.profile_id} assigns the harness token",
+            )
+            self.token_bound = True
+        count = len(self.sequence.calls)
+        getter = profile.property_getter
+        init = profile.initialization_function
+        lines = ["        {"]
+        if init:
+            lines.extend(
+                [
+                    "            (bool bfInitOk, ) = address(t).call("
+                    f'abi.encodeWithSignature("{init}", address(bfToken)));',
+                    "            if (!bfInitOk) {",
+                    f"                emit BugForgeObservation({K_SETUP}, 0, 0);",
+                    f"                emit BugForgeObservation({K_DONE}, {count}, 1);",
+                    "                return;",
+                    "            }",
+                ]
+            )
+        lines.extend(
+            [
+                "            (bool bfAssetOk, bytes memory bfAssetOut) = address(t).staticcall("
+                f'abi.encodeWithSignature("{getter}"));',
+                "            address bfBound = address(0);",
+                "            if (bfAssetOk && bfAssetOut.length >= 32) {",
+                "                bfBound = abi.decode(bfAssetOut, (address));",
+                "            }",
+                "            if (bfBound != address(bfToken)) {",
+                f"                emit BugForgeObservation({K_SETUP}, 0, 0);",
+                f"                emit BugForgeObservation({K_DONE}, {count}, 1);",
+                "                return;",
+                "            }",
+                f"            emit BugForgeObservation({K_SETUP}, 0, 1);",
+                "        }",
+            ]
+        )
+        self.asset_lines = lines
 
     # -- constructor ---------------------------------------------------------------------
     def constructor_args(self) -> list[str]:
@@ -1544,7 +1615,7 @@ class _Synth:
         return tuple(found)
 
     def _target_delegates(self) -> bool:
-        for function in self.model.functions_of(self.contract, inherited=False):
+        for function in self.model.functions_of(self.contract, inherited=True):
             if (
                 function.kind == "fallback"
                 and function.has_body
@@ -1676,6 +1747,7 @@ class _Synth:
             self.want_token(oracle.token_fixture or "standard", oracle.expression)
         ctor_args = self.constructor_args()
         self.ctor_args = ctor_args
+        self._bind_initialized_asset()
         if oracle.kind in TOKEN_ORACLES:
             self.approve(ATTACKER, ATTACKER_ADDR, "the probe deposits fixture tokens")
         conserving = oracle.kind is OracleKind.BALANCE_NOT_INCREASED
@@ -1747,6 +1819,7 @@ class _Synth:
                 *self.pre_deploy,
                 deploy,
                 f"        emit BugForgeObservation({K_DEPLOYED}, 0, 1);",
+                *self.asset_lines,
                 *self.post_deploy,
                 *self.steps,
                 f"        emit BugForgeObservation({K_DONE}, {len(self.sequence.calls)}, 1);",
@@ -1777,6 +1850,39 @@ class _Synth:
             if path not in files:
                 files.append(path)
         return tuple(files)
+
+
+def delegate_execution_host(
+    profile: Any, model: ResearchModel, contract: str, sources: Mapping[str, str] | None
+) -> str:
+    """A profile host that delegatecalls ``contract`` after that code is placed.
+
+    Empty unless the profile names a different contract, places this one at an
+    address literal, and that host's fallback delegatecalls. The sequence still
+    names the logic contract.
+    """
+    if profile is None or getattr(profile, "property_template", "") != "initialization-asset":
+        return ""
+    host = str(getattr(profile, "contract", "") or "")
+    if not host or host == contract:
+        return ""
+    placed = [
+        item
+        for item in getattr(profile, "fixtures", ())
+        if getattr(item, "kind", "") == "source_contract"
+        and getattr(item, "contract", "") == contract
+        and getattr(item, "place_at", "")
+    ]
+    if len(placed) != 1 or not _deployable(model, host, sources):
+        return ""
+    for function in model.functions_of(host, inherited=True):
+        if (
+            function.kind == "fallback"
+            and function.has_body
+            and re.search(r"\bdelegatecall\s*\(", function.body)
+        ):
+            return host
+    return ""
 
 
 def build_harness(
@@ -1821,7 +1927,21 @@ def build_harness(
         )
     if item is None or not _deployable(model, contract, sources):
         return fail("target contract is not a deployable source", "not_deployable")
-    synth = _Synth(model, sequence, contract, oracle, sources, profile)
+    host = delegate_execution_host(profile, model, contract, sources)
+    synth = _Synth(model, sequence, host or contract, oracle, sources, profile)
+    if host:
+        synth.primitives.append(
+            Primitive(
+                name="delegate_host",
+                purpose=f"deploy {host} and execute {contract} through its delegatecall fallback",
+                actor="harness",
+                value=host,
+                property_relevance="the logic contract's storage is the host's storage",
+                established_by=(
+                    "the profile places the logic runtime at an address literal in the host"
+                ),
+            )
+        )
     try:
         source = synth.build()
     except _UnbuildableError as exc:
@@ -1975,6 +2095,7 @@ interface Vm {
     function deal(address, uint256) external;
     function addr(uint256) external pure returns (address);
     function sign(uint256, bytes32) external pure returns (uint8, bytes32, bytes32);
+    function etch(address, bytes calldata) external;
 }
 
 contract Test {
@@ -2349,7 +2470,53 @@ class ProjectSettings:
     evm_requested: str = ""
 
 
-def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = None) -> str:
+_REMAPPING = re.compile(r"^[A-Za-z0-9_@./-]+=src/[A-Za-z0-9_@./+-]+/$")
+_IMPORT_PATH = re.compile(r"""import\s+(?:[^'";]*?\s+from\s+)?["']([^"']+)["']""")
+
+
+def derived_remappings(sources: Mapping[str, str]) -> tuple[str, ...]:
+    """Remap an import prefix only when one source file contains that suffix.
+
+    The prefix and the directory both come from the source set. A prefix that
+    matches nothing, or more than one file, is left unresolved.
+    """
+    imports: set[str] = set()
+    for text in sources.values():
+        imports.update(_IMPORT_PATH.findall(text))
+    paths = [path for path in sources if path.endswith(".sol")]
+    found: list[str] = []
+    for imported in sorted(imports):
+        if imported.startswith(("./", "../", "src/", "forge-std/")):
+            continue
+        candidate = ""
+        for index, char in enumerate(imported):
+            if char != "/" or index == 0 or index == len(imported) - 1:
+                continue
+            prefix = imported[: index + 1]
+            suffix = imported[index + 1 :]
+            matches = [path for path in paths if path.endswith("/" + suffix) or path == suffix]
+            if len(matches) != 1:
+                continue
+            directory = matches[0][: -len(suffix)]
+            if not directory.endswith("/"):
+                continue
+            item = f"{prefix}=src/{directory}"
+            if _REMAPPING.fullmatch(item):
+                candidate = item
+            break
+        if candidate and candidate not in found:
+            found.append(candidate)
+        if len(found) == 4:
+            break
+    return tuple(found)
+
+
+def foundry_config(
+    pipeline: str,
+    solc: str,
+    settings: ProjectSettings | None = None,
+    remappings: tuple[str, ...] = (),
+) -> str:
     """Server-owned Foundry config. Nothing from the analyzed repository reaches it.
 
     ``pipeline`` may force a corroboration variant. It is never interpolated.
@@ -2376,6 +2543,11 @@ def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = 
     ):
         evm_line = f"evm_version = {json.dumps(settings.evm_version)}\n"
     solc_line = f"solc = {json.dumps(solc)}\n" if solc else ""
+    listed = ["forge-std/=lib/forge-std/src/"]
+    for item in remappings:
+        if _REMAPPING.fullmatch(item) and item not in listed and len(listed) < 5:
+            listed.append(item)
+    remap_line = "remappings = [" + ", ".join(json.dumps(item) for item in listed) + "]\n"
     return (
         "[profile.default]\n"
         'src = "src"\n'
@@ -2392,7 +2564,7 @@ def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = 
         + f"via_ir = {via_ir}\n"
         + f"optimizer = {optimizer}\n"
         + runs_line
-        + 'remappings = ["forge-std/=lib/forge-std/src/"]\n'
+        + remap_line
         + "\n[lint]\nlint_on_build = false\n"
     )
 
@@ -2577,7 +2749,7 @@ class StatefulExecutor:
         self.runs += 1
         forge = tool_path("forge") or "forge"
         solc = str(self.compiler.path) if self.compiler is not None else (tool_path("solc") or "")
-        config = foundry_config(harness.pipeline, solc, self.project)
+        config = foundry_config(harness.pipeline, solc, self.project, derived_remappings(sources))
         common: dict[str, Any] = {
             "pipeline": harness.pipeline,
             "forge_version": self.tools.forge_version,
@@ -2787,6 +2959,28 @@ def interpret(
         if not deployed:
             reason = f"the target could not be deployed locally: {reason}"
         return failed(reason, "harness_failed", "failed")
+    if any(kind == K_SETUP and value == 0 for kind, _index, value in events):
+        reason = "initialization did not leave the harness token in the declared asset getter"
+        return base.done(
+            Outcome.INCONCLUSIVE,
+            reason,
+            "asset_binding_unconfirmed",
+            harness=harness,
+            result=ExecutionResult(
+                "completed",
+                "ok",
+                "passed",
+                "incomplete",
+                "not_evaluated",
+                return_code=return_code,
+                failure_reason=reason,
+                events=events,
+                stdout_tail=_tail(stdout, 600),
+                stderr_tail=_tail(stderr, 600),
+                duration_ms=duration_ms,
+                **common,
+            ),
+        )
     if not deployed or not done:
         return failed("the harness did not report a complete run", "incomplete_run", "passed")
     outcome, evaluation, reason = classify(base.sequence, base.oracle, observation)

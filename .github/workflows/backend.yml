@@ -180,6 +180,7 @@ jobs:
             tests/test_discovery_conservation \
             tests/test_discovery_authorization \
             tests/test_phase60 \
+            tests/test_phase61 \
             -vv --tb=short
 
   compound-integration:
