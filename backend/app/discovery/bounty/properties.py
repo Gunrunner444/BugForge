@@ -24,7 +24,7 @@ property is a hypothesis until executed evidence exists; nothing here verifies.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -354,8 +354,17 @@ def build_property(
     function = _resolve(model, contract, signature)
     file = function.file if function else (candidate.file if candidate else "")
     start, end = _span(function) if function else ((candidate.line if candidate else 0),) * 2
-    functions = tuple(dict.fromkeys(call.function for call in sequence.calls if not call.primitive))
+    called = [call.function for call in sequence.calls if not call.primitive]
+    if function is not None and function.signature not in called:
+        called.insert(0, function.signature)
+    functions = tuple(dict.fromkeys(called))
     builder = _ORACLE_BUILDERS.get(sequence.template)
+    oracle: OracleSpec
+    alternates: tuple[OracleSpec, ...]
+    variables: tuple[str, ...]
+    reason: str
+    assumptions: tuple[str, ...]
+    unsupported: str
     if function is None:
         oracle, alternates, variables, reason, assumptions, unsupported = (
             OracleSpec(),
@@ -378,6 +387,13 @@ def build_property(
         oracle, alternates, variables, reason, assumptions, unsupported = builder(
             sequence, model, function, detector
         )
+        oracle = _retarget_probe(sequence, function.signature, oracle)
+        alternates = tuple(
+            _retarget_probe(sequence, function.signature, item) for item in alternates
+        )
+    path_assumptions = tuple(sequence.call_path[:8]) + tuple(sequence.path_notes[:8])
+    if path_assumptions:
+        assumptions = (*assumptions, *path_assumptions)
     if oracle.kind is OracleKind.MECHANISM_PROBE and oracle.executable:
         declaration = PropertyDeclaration.MECHANISM_OBSERVATION
     elif oracle.executable:
@@ -764,11 +780,42 @@ def _swallowed(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) ->
 
 
 def _role_of(sequence: Vfcs, signature: str) -> str:
-    """The role of the first call to ``signature``, wherever reordering moved it."""
+    """The role of the first call to ``signature``, wherever reordering moved it.
+
+    A call whose ``entrypoint_for`` is the candidate stands in for that candidate.
+    The role stays the one the template assigned to the helper.
+    """
     for call in sequence.calls:
-        if not call.primitive and call.function == signature:
+        if call.primitive:
+            continue
+        if call.function == signature or call.entrypoint_for == signature:
             return call.role
     return ""
+
+
+def _retarget_probe(sequence: Vfcs, helper: str, oracle: OracleSpec) -> OracleSpec:
+    """Point the oracle at the executed entry when the helper is not itself called.
+
+    The helper stays the provenance of the property. An ambiguous stand-in is left
+    unchanged so evaluation reports that the probe is not in the sequence.
+    """
+    if not helper or oracle.probe_function != helper:
+        return oracle
+    if any(
+        not call.primitive and call.function == helper and call.role == oracle.probe_role
+        for call in sequence.calls
+    ):
+        return oracle
+    standins = [
+        call
+        for call in sequence.calls
+        if not call.primitive
+        and call.entrypoint_for == helper
+        and (not oracle.probe_role or call.role == oracle.probe_role)
+    ]
+    if len(standins) != 1:
+        return oracle
+    return replace(oracle, probe_function=standins[0].function, probe_role=standins[0].role)
 
 
 def _body_compact(body: str) -> str:

@@ -92,9 +92,13 @@ def run_blind_campaign(
                     "actor": call.actor,
                     "arguments": [list(pair) for pair in call.arguments],
                     "primitive": call.primitive,
+                    "entrypoint_for": call.entrypoint_for,
                 }
                 for call in item.calls
             ],
+            "call_path": list(item.call_path),
+            "path_notes": list(item.path_notes),
+            "execution_contract": item.execution_contract,
             "source_hashes": dict(item.identity.source_hashes),
             "compiler_configuration": item.identity.compiler_configuration,
         }

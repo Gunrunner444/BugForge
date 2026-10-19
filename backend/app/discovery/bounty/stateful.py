@@ -339,7 +339,14 @@ class ExecutionIdentity:
 
 
 def target_contract(sequence: Vfcs) -> str:
-    """The contract a sequence targets: the candidate's contract, never calls[0]."""
+    """The contract a sequence deploys.
+
+    An entrypoint on another contract (the contract that reaches an internal or
+    library candidate) is used when the sequence names one. Otherwise the target
+    stays the candidate's contract, never ``calls[0]``.
+    """
+    if sequence.execution_contract:
+        return sequence.execution_contract
     _detector, _, target = sequence.derived_from.partition("@")
     contract = target.partition(".")[0]
     if contract:

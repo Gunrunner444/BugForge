@@ -14,6 +14,11 @@ import hashlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 
+from app.discovery.bounty.entrypoints import (
+    entrypoints_for,
+    forwarded_entry_params,
+    path_lines,
+)
 from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
@@ -67,6 +72,9 @@ class VfcsCall:
     arguments: tuple[tuple[str, str], ...] = ()
     primitive: bool = False
     established_by: str = ""
+    # Signature of the semantic candidate this call stands in for. Empty when the
+    # call is the candidate itself or an unrelated step.
+    entrypoint_for: str = ""
 
     @property
     def identity(self) -> str:
@@ -84,6 +92,13 @@ class Vfcs:
     identity: SequenceIdentity
     status: str = "candidate"
     verified: bool = False
+    # Exposed call path that reaches the candidate. Empty when the candidate is
+    # itself the call, or when no path was established.
+    call_path: tuple[str, ...] = ()
+    path_notes: tuple[str, ...] = ()
+    # Contract the harness deploys when it is not the candidate's contract.
+    # Empty keeps the candidate contract, so existing sequences are unchanged.
+    execution_contract: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,19 +206,31 @@ def generate(
         if not calls or len(calls) > MAX_VFCS_LENGTH:
             skipped.append((key, "the sequence would exceed the length limit"))
             continue
-        sequence = Vfcs(
-            sequence_id=sequence_id_of(calls, template, identity),
-            template=template,
-            origin=f"template:{template}",
-            calls=tuple(calls),
-            property_under_test=prop,
-            derived_from=key,
-            identity=identity,
-        )
-        if sequence.sequence_id in found:
-            skipped.append((key, "deduplicated: an equivalent sequence was already generated"))
-            continue
-        found[sequence.sequence_id] = sequence
+        for promoted in _promote(model, candidate, calls):
+            if len(found) >= limit:
+                truncated = True
+                skipped.append((key, "the sequence limit was reached"))
+                break
+            promoted_calls, call_path, path_notes, execution_contract = promoted
+            if not promoted_calls or len(promoted_calls) > MAX_VFCS_LENGTH:
+                skipped.append((key, "the sequence would exceed the length limit"))
+                continue
+            sequence = Vfcs(
+                sequence_id=sequence_id_of(promoted_calls, template, identity),
+                template=template,
+                origin=f"template:{template}",
+                calls=tuple(promoted_calls),
+                property_under_test=prop,
+                derived_from=key,
+                identity=identity,
+                call_path=call_path,
+                path_notes=path_notes,
+                execution_contract=execution_contract,
+            )
+            if sequence.sequence_id in found:
+                skipped.append((key, "deduplicated: an equivalent sequence was already generated"))
+                continue
+            found[sequence.sequence_id] = sequence
     return VfcsResult(tuple(found.values()), tuple(skipped), truncated)
 
 
@@ -217,6 +244,96 @@ def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction |
         if function.signature == signature and function.has_body:
             return function
     return None
+
+
+def _promote(
+    model: ResearchModel, candidate: SemanticCandidate, calls: list[VfcsCall]
+) -> tuple[tuple[tuple[VfcsCall, ...], tuple[str, ...], tuple[str, ...], str], ...]:
+    """Rewrite candidate calls onto each exposed entry that source structure reaches.
+
+    The candidate identity stays on the sequence. A helper with no established
+    entry is left as the original call and the gap is recorded on the sequence.
+    An already ABI-callable exposed function is not rewritten.
+    """
+    function = _resolve(model, candidate.contract, candidate.function)
+    aimed = [
+        call
+        for call in calls
+        if not call.primitive
+        and call.contract == candidate.contract
+        and call.function == candidate.function
+    ]
+    if function is None or not aimed:
+        return ((tuple(calls), (), (), ""),)
+    found = entrypoints_for(model, function)
+    if found.directly_executable:
+        return ((tuple(calls), (), found.incomplete, ""),)
+    if not found.paths:
+        notes = found.incomplete or (f"no exposed entrypoint reaches {function.identity}",)
+        gap = ("no exposed entrypoint was established; the helper was not wrapped",)
+        return ((tuple(calls), (), notes + gap, ""),)
+    promoted: list[tuple[tuple[VfcsCall, ...], tuple[str, ...], tuple[str, ...], str]] = []
+    for path in found.paths:
+        entry = _resolve(model, path.entry_contract, path.entry_signature)
+        if entry is None:
+            continue
+        binding = forwarded_entry_params(path, function)
+        rewritten: list[VfcsCall] = []
+        for call in calls:
+            if (
+                call.primitive
+                or call.contract != candidate.contract
+                or call.function != candidate.function
+            ):
+                rewritten.append(call)
+                continue
+            rewritten.append(_entry_call(call, entry, function, binding))
+        contract = "" if path.entry_contract == candidate.contract else path.entry_contract
+        notes = path.notes + found.incomplete
+        unbound = tuple(
+            param.name for param in entry.params if param.name and param.name not in binding
+        )
+        if unbound:
+            shown = ", ".join(unbound[:6])
+            notes = (*notes, f"entry parameters without a forwarded candidate value: {shown}")
+        promoted.append((tuple(rewritten), path_lines(path), notes, contract))
+    if not promoted:
+        return (
+            (
+                tuple(calls),
+                (),
+                found.incomplete + ("an exposed path did not resolve to a function",),
+                "",
+            ),
+        )
+    return tuple(promoted)
+
+
+def _entry_call(
+    call: VfcsCall,
+    entry: RFunction,
+    helper: RFunction,
+    binding: dict[str, str],
+) -> VfcsCall:
+    values = dict(call.arguments)
+    arguments = []
+    for index, param in enumerate(entry.params):
+        key = param.name or f"arg{index}"
+        if param.name and param.name in binding:
+            arguments.append((key, values.get(binding[param.name], UNCONSTRAINED)))
+        else:
+            arguments.append((key, UNCONSTRAINED))
+    why = call.established_by or f"entrypoint:{entry.contract}.{entry.signature}"
+    return VfcsCall(
+        entry.contract,
+        entry.signature,
+        call.role,
+        call.actor,
+        tuple(arguments),
+        False,
+        why[:240],
+        helper.signature,
+    )
 
 
 def _split_callee(text: str) -> tuple[str, str]:
