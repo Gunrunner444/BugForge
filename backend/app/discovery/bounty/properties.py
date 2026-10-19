@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from app.discovery.bounty.shares import share_accounting
 from app.discovery.bounty.vfcs import ATTACKER, Vfcs
 from app.discovery.orchestration.codec import digest
 from app.parsing.keccak import function_selector
@@ -311,7 +312,12 @@ def _written_public_state(
 
 
 def _credit_getter(model: ResearchModel, contract: str, function: RFunction) -> tuple[str, str]:
-    """The per-account credit mapping a deposit-like function increments for msg.sender."""
+    """A reader of the amount this function credits, in the same unit as assets pulled.
+
+    A public per-account mapping is the original reader. A view is accepted only
+    when source structure shows it returns that credited slot. A converted share
+    balance is not a credit reader: share units are not asset units.
+    """
     for variable in sorted(model.state_vars(contract)):
         if not re.search(rf"\b{re.escape(variable)}\s*\[\s*msg\.sender\s*\]\s*\+=", function.body):
             continue
@@ -322,7 +328,39 @@ def _credit_getter(model: ResearchModel, contract: str, function: RFunction) -> 
         getter = public_getter(model, contract, name)
         if getter == f"{name}(address)":
             return name, getter
-    return "", ""
+    info = share_accounting(model, function)
+    reader = info.credit_reader
+    if reader is None:
+        return "", ""
+    if info.share_unit == "converted_shares" and reader.kind == "share":
+        return "", ""
+    return reader.variable, reader.getter
+
+
+def _exit_sizing(sequence: Vfcs) -> str:
+    for call in sequence.calls:
+        if call.role != "withdraw":
+            continue
+        for _name, value in call.arguments:
+            if value == "share_balance":
+                return "the attacker's share balance"
+            if value.startswith("asset_exit:"):
+                return f"{value.split(':', 1)[1]} in asset units"
+            if value in {"all_shares", "actor_credit"}:
+                return f"the share balance reported for the attacker ({value})"
+    return "the sequence's withdrawal amount"
+
+
+def _position_getter(model: ResearchModel, function: RFunction) -> tuple[str, str]:
+    """The user's share balance, including a converted-share reader used only to size an exit."""
+    variable, getter = _credit_getter(model, function.contract, function)
+    if getter.endswith("(address)"):
+        return variable, getter
+    info = share_accounting(model, function)
+    reader = info.share_reader
+    if reader is None:
+        return "", ""
+    return reader.variable, reader.getter
 
 
 def _span(function: RFunction) -> tuple[int, int]:
@@ -562,7 +600,7 @@ def _share_inflation(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
     one's own donation back, or an ordinary share-price move that does not pay
     the attacker more than they put in, is not.
     """
-    variable, getter = _credit_getter(model, fn.contract, fn)
+    variable, getter = _position_getter(model, fn)
     withdraw = _role_function(sequence, "withdraw")
     if not getter:
         return (
@@ -578,6 +616,52 @@ def _share_inflation(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
     order = [call.role for call in sequence.calls]
     probe_at = order.index("withdraw")
     preconditions = tuple(dict.fromkeys(role for role in order[:probe_at]))
+    sizing = _exit_sizing(sequence)
+    classic = any(
+        call.role == "deposit" and any(value == "unit_amount" for _name, value in call.arguments)
+        for call in sequence.calls
+    )
+    expression: str
+    assumptions: tuple[str, ...]
+    statement: str
+    if classic:
+        expression = (
+            "after a 1-unit deposit, a 1000000000000000000-unit donation by the attacker, "
+            "a second depositor's 1000000000000000000-unit deposit, and redemption of the "
+            f"share balance {getter} reports for the attacker, the sum of the attacker's "
+            "fixture-token balance and the designated recipient balance must not exceed "
+            "that sum before the first deposit. The donation and both deposits are part "
+            "of the measured sequence"
+        )
+        assumptions = (
+            "attacker deposit: 1",
+            "donation: 1000000000000000000 fixture units transferred to the contract",
+            "second depositor: 1000000000000000000 fixture units",
+            f"redemption: {getter} of the attacker, read after both deposits and the donation",
+            "a balance that cannot be read is not a held property",
+        )
+        statement = (
+            f"{fn.name} prices new shares from the contract's token balance and {withdraw} redeems"
+        )
+    else:
+        expression = (
+            "after the attacker deposits, donates one fixture unit, and a second depositor "
+            f"deposits, the exit is sized by {sizing}. Share position is read with {getter}. "
+            "The sum of the attacker's fixture-token balance and the designated recipient "
+            "balance must not exceed that sum before the first deposit. Share units are not "
+            "compared with asset units. A zero position, a failed read, or a reverted setup "
+            "is not a held property"
+        )
+        assumptions = (
+            "attacker deposit through an exposed entry that pulls the fixture asset",
+            "donation: 1000000000000000000 fixture units transferred to the contract",
+            "second depositor: the same exposed deposit",
+            f"exit amount: {sizing}",
+            f"share reader: {getter}",
+            "a balance that cannot be read is not a held property",
+            "an empty position is not a held property",
+        )
+        statement = f"{fn.name} changes a share position and {withdraw} pays the underlying asset"
     oracle = OracleSpec(
         kind=OracleKind.BALANCE_NOT_INCREASED,
         probe_role="withdraw",
@@ -587,29 +671,9 @@ def _share_inflation(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
         getter_actor=ATTACKER,
         token_fixture="standard",
         snapshot="before_sequence",
-        expression=(
-            "after a 1-unit deposit, a 1000000000000000000-unit donation by the attacker, "
-            "a second depositor's 1000000000000000000-unit deposit, and redemption of the "
-            f"share balance {getter} reports for the attacker, the sum of the attacker's "
-            "fixture-token balance and the designated recipient balance must not exceed "
-            "that sum before the first deposit. The donation and both deposits are part "
-            "of the measured sequence"
-        ),
+        expression=expression,
     )
-    return (
-        oracle,
-        (),
-        (variable,),
-        f"{fn.name} prices new shares from the contract's token balance and {withdraw} redeems",
-        (
-            "attacker deposit: 1",
-            "donation: 1000000000000000000 fixture units transferred to the contract",
-            "second depositor: 1000000000000000000 fixture units",
-            f"redemption: {getter} of the attacker, read after both deposits and the donation",
-            "a balance that cannot be read is not a held property",
-        ),
-        "",
-    )
+    return oracle, (), (variable,), statement, assumptions, ""
 
 
 def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str) -> OracleBuilt:
@@ -621,6 +685,19 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
     the token fixture primitive that makes it executable).
     """
     variable, getter = _credit_getter(model, fn.contract, fn)
+    info = share_accounting(model, fn)
+    if not getter and info.share_unit == "converted_shares":
+        return (
+            OracleSpec(),
+            (),
+            (info.slot.field,) if info.slot is not None else (),
+            f"{fn.name} mints converted shares; those units are not compared with tokens received",
+            (
+                "share units and underlying-asset units are kept separate",
+                info.share_reader.basis if info.share_reader is not None else "no share reader",
+            ),
+            "converted share balance is not an asset-unit credit",
+        )
     if not getter:
         return (
             OracleSpec(),
@@ -664,8 +741,12 @@ def _credit_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, det: str
         primary,
         (alternate,),
         (variable,),
-        f"{fn.name} credits {variable}[msg.sender] from a caller-supplied amount",
-        ("the fixture token is the asset the contract accounts for",),
+        f"{fn.name} credits {variable} from the pulled asset amount",
+        (
+            "the fixture token is the asset the contract accounts for",
+            "the credited expression is in asset units, not a converted share price",
+            info.credit_reader.basis if info.credit_reader is not None else f"reader {getter}",
+        ),
         "",
     )
 
@@ -1322,6 +1403,20 @@ def evaluate(
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
 
 
+def _unfunded_exit(sequence: Vfcs, observation: OracleObservation) -> bool:
+    """True when a sized exit observed an empty position. That is not a held property."""
+    sized = any(
+        value == "share_balance" or value.startswith("asset_exit:")
+        for call in sequence.calls
+        for _name, value in call.arguments
+    )
+    if not sized:
+        return False
+    evidence = dict(observation.evidence)
+    amount = evidence.get("attacker_withdrawal_amount")
+    return amount is None or amount == 0
+
+
 def _ordinary_payout_failed(
     sequence: Vfcs, oracle: OracleSpec, observation: OracleObservation, probe: int
 ) -> bool:
@@ -1364,6 +1459,14 @@ def _conservation_verdict(
     the same function, by the same actor, succeeded. Otherwise the probe is the
     ordinary payout, and its revert means the round trip was not exercised.
     """
+    if _unfunded_exit(sequence, observation):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the exit amount read from the source-backed position was zero, so the "
+            "payout was not exercised",
+            probe,
+            False,
+        )
     wallet_before, wallet_after = observation.actor_before, observation.actor_after
     recipient_before, recipient_after = observation.recipient_before, observation.recipient_after
     evidence = observation.evidence

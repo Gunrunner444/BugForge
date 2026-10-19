@@ -1490,7 +1490,12 @@ def _seed_sequence(
     )
     sequence = stamp_source_identity(
         Vfcs(
-            sequence_id=sequence_id_of((call,), "unauthorized-call", identity),
+            sequence_id=sequence_id_of(
+                (call,),
+                "unauthorized-call",
+                identity,
+                derived_from=f"profile.authorization@{profile.contract}.{function.signature}",
+            ),
             template="unauthorized-call",
             origin=f"constructor_profile:{profile.profile_id}",
             calls=(call,),
@@ -1539,7 +1544,12 @@ def _seed_configured(
     )
     sequence = stamp_source_identity(
         Vfcs(
-            sequence_id=sequence_id_of((call,), "configured-asset", identity),
+            sequence_id=sequence_id_of(
+                (call,),
+                "configured-asset",
+                identity,
+                derived_from=f"profile.configured_asset@{profile.contract}.{function.signature}",
+            ),
             template="configured-asset",
             origin=f"constructor_profile:{profile.profile_id}",
             calls=(call,),

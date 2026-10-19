@@ -11,6 +11,7 @@ minimization never produce verification.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 
@@ -19,6 +20,7 @@ from app.discovery.bounty.entrypoints import (
     forwarded_entry_params,
     path_lines,
 )
+from app.discovery.bounty.shares import ShareAccounting, position_entry, share_accounting
 from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
@@ -138,9 +140,21 @@ def stamp_source_identity(sequence: Vfcs, sources: Mapping[str, str]) -> Vfcs:
     )
 
 
-def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceIdentity) -> str:
-    # Content hashes and implementation are not part of the id. A deployment still is,
-    # and sequences without one keep the id shape from before that field existed.
+def sequence_id_of(
+    calls: Iterable[VfcsCall],
+    template: str,
+    identity: SequenceIdentity,
+    *,
+    derived_from: str = "",
+) -> str:
+    """Identity of one hypothesis, not of an in-memory object.
+
+    ``derived_from`` is the candidate key. ``entrypoint_for`` is the helper a
+    promoted call stands in for. Two helpers that reach the same exposed call
+    therefore stay distinct. ``call_path`` and ``path_notes`` are omitted, so
+    equivalent executions of one candidate still deduplicate. Content hashes and
+    the implementation address stay out of the id. A deployment still is.
+    """
     bound: dict[str, str] = {
         "campaign_id": identity.campaign_id,
         "source_snapshot": identity.source_snapshot,
@@ -150,13 +164,11 @@ def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceI
     }
     if identity.deployment:
         bound["deployment"] = identity.deployment
-    return "vf_" + digest(
-        (
-            [(c.contract, c.function, c.role, c.actor, c.arguments, c.primitive) for c in calls],
-            template,
-            bound,
-        )
-    )
+    rows = [
+        (c.contract, c.function, c.role, c.actor, c.arguments, c.primitive, c.entrypoint_for)
+        for c in calls
+    ]
+    return "vf_" + digest((rows, template, bound, derived_from))
 
 
 # ---- generation -----------------------------------------------------------------------------
@@ -215,8 +227,21 @@ def generate(
             if not promoted_calls or len(promoted_calls) > MAX_VFCS_LENGTH:
                 skipped.append((key, "the sequence would exceed the length limit"))
                 continue
+            if any(
+                value == "asset_exit:unsupported"
+                for call in promoted_calls
+                for _n, value in call.arguments
+            ):
+                skipped.append(
+                    (
+                        key,
+                        "the exit amount is in asset units and no source-backed "
+                        "conversion or limit was resolved",
+                    )
+                )
+                continue
             sequence = Vfcs(
-                sequence_id=sequence_id_of(promoted_calls, template, identity),
+                sequence_id=sequence_id_of(promoted_calls, template, identity, derived_from=key),
                 template=template,
                 origin=f"template:{template}",
                 calls=tuple(promoted_calls),
@@ -427,6 +452,87 @@ def _actor_parameter(model: ResearchModel, candidate: SemanticCandidate) -> Buil
     return "forwarded-actor", calls, "the callee must bind the acted-for account to the caller"
 
 
+def _payout_lifecycle(model: ResearchModel, function: RFunction, donate: VfcsCall) -> Built | None:
+    """Deposit, then exit, when source links the two. None when this is not a payout.
+
+    A string means the payout cannot be sized, so no withdrawal-without-a-position
+    sequence is emitted in its place.
+    """
+    info = share_accounting(model, function)
+    if not info.decreases_shares and not info.pay_param:
+        return None
+    if info.share_reader is None or info.slot is None:
+        return "no source-backed reader reports the share position this payout uses"
+    setup = position_entry(model, function.contract, info.slot)
+    if setup is None:
+        return "no exposed deposit establishes the share position this payout redeems"
+    deposit = VfcsCall(
+        setup.contract,
+        setup.function,
+        "deposit",
+        ATTACKER,
+        setup.arguments,
+        False,
+        setup.basis[:240],
+    )
+    victim = replace(
+        deposit,
+        role="victim_deposit",
+        actor=VICTIM,
+        arguments=tuple(
+            (name, VICTIM if value == ATTACKER else value) for name, value in setup.arguments
+        ),
+    )
+    exit_call = _call(function, "withdraw", ATTACKER, _exit_overrides(function, info))
+    return (
+        "deposit→donate→withdraw",
+        [deposit, donate, victim, exit_call],
+        "a sized exit must not increase the attacker's assets or the designated recipient; "
+        "share units and asset units are not interchangeable",
+    )
+
+
+def _exit_overrides(function: RFunction, info: ShareAccounting) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for index, param in enumerate(function.params):
+        name = param.name or f"arg{index}"
+        if _is_address(param.type_name):
+            overrides[name] = ATTACKER
+        elif _is_uint(param.type_name):
+            overrides[name] = _amount_role(name, info) or "zero"
+    return overrides
+
+
+def _amount_role(name: str, info: ShareAccounting) -> str:
+    pay, burn = info.pay_param, info.burn_param
+    if name and name == pay and name == burn:
+        if info.pay_bare and info.burn_bare:
+            return "share_balance"
+        if info.burn_bare and not info.pay_bare:
+            return "share_balance"
+        return _asset_override(info)
+    if name and name == burn and name != pay:
+        return "share_balance"
+    if name and name == pay and name != burn:
+        return _asset_override(info)
+    return ""
+
+
+def _asset_override(info: ShareAccounting) -> str:
+    if info.asset_sizer:
+        return f"asset_exit:{info.asset_sizer}"
+    return "asset_exit:unsupported"
+
+
+def _is_address(type_name: str) -> bool:
+    return type_name.replace(" ", "") in {"address", "addresspayable"}
+
+
+def _is_uint(type_name: str) -> bool:
+    text = type_name.replace(" ", "")
+    return text == "uint" or bool(re.fullmatch(r"u?int\d*", text))
+
+
 def _donation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -439,6 +545,9 @@ def _donation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
         "balanceOf(address(this)) is read by the candidate function",
     )
     if candidate.detector == "accounting.balance_as_deposit":
+        linked = _payout_lifecycle(model, function, donate)
+        if linked is not None:
+            return linked
         calls = [donate, _call(function, "credit", ATTACKER, default=ATTACKER_CONTROLLED)]
         return "donate→credit", calls, "a donation must not be credited as a deposit"
     withdraw = _withdraw_like(model, function.contract, function.signature)
@@ -728,7 +837,9 @@ def mutate(
             for operator, calls in variants:
                 if not calls or len(calls) > MAX_VFCS_LENGTH:
                     continue
-                child_id = sequence_id_of(calls, parent.template, parent.identity)
+                child_id = sequence_id_of(
+                    calls, parent.template, parent.identity, derived_from=parent.derived_from
+                )
                 if child_id in known or child_id in out:
                     continue
                 out[child_id] = replace(

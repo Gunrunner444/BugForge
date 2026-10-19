@@ -182,6 +182,7 @@ jobs:
             tests/test_phase60 \
             tests/test_phase61 \
             tests/test_phase62 \
+            tests/test_phase63 \
             -vv --tb=short
 
   compound-integration:

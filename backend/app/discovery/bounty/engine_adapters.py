@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.properties import (
+    EVIDENCE_SLOTS,
     OracleKind,
     OracleSpec,
     PropertyVerdict,
@@ -88,6 +89,14 @@ class EngineStatus(StrEnum):
 # ---- in-EVM judge ---------------------------------------------------------------------------
 
 
+def _sized_exit(sequence: Vfcs) -> bool:
+    return any(
+        value == "share_balance" or value.startswith("asset_exit:")
+        for call in sequence.calls
+        for _name, value in call.arguments
+    )
+
+
 def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
     """Solidity bodies for (_bfJudged, _bfViolated), or None when not expressible."""
     if not oracle.executable:
@@ -118,8 +127,15 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
         payouts = prior_payout_indices(sequence, oracle, probe)
         payout_guard = "".join(f"        if (!_bfOk({i})) return false;\n" for i in payouts)
         probe_guard = "" if payouts else f"        if (!_bfOk({probe})) return false;\n"
+        position_guard = ""
+        if _sized_exit(sequence):
+            slot = EVIDENCE_SLOTS.index("attacker_withdrawal_amount")
+            position_guard = (
+                f"        if (!bfSeen[{K_EVIDENCE}][{slot}] || bfVal[{K_EVIDENCE}][{slot}] == 0) "
+                "return false;\n"
+            )
         judged = (
-            f"{payout_guard}{probe_guard}"
+            f"{payout_guard}{probe_guard}{position_guard}"
             f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1]"
             f" && bfSeen[{K_ACTOR}][2] && bfSeen[{K_ACTOR}][3];\n"
         )

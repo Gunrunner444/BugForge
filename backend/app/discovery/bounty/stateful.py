@@ -981,6 +981,15 @@ class _Synth:
         if abi.startswith("uint") or abi.startswith("int"):
             if override == "actor_credit" and abi in {"uint256", "uint"}:
                 return self.actor_credit(call)
+            if override == "share_balance" and abi in {"uint256", "uint"}:
+                if not self.oracle.getter.endswith("(address)"):
+                    raise _UnbuildableError(
+                        "no source-backed share balance reader is bound to this exit",
+                        "share_reader_unresolved",
+                    )
+                return self.actor_credit(call)
+            if override.startswith("asset_exit:") and abi in {"uint256", "uint"}:
+                return self.asset_exit(call, override.split(":", 1)[1])
             if override == "max_uint":
                 return f"type({abi}).max"
             if override == "zero":
@@ -1128,6 +1137,50 @@ class _Synth:
                     f"        emit BugForgeObservation({K_EVIDENCE}, {slot}, {value});"
                 )
         return value
+
+    def asset_exit(self, call: VfcsCall, spec: str) -> str:
+        """An asset-unit exit amount from a source-backed view. Zero shares stays zero."""
+        getter = self.oracle.getter
+        if not getter.endswith("(address)") or spec in {"", "unsupported"}:
+            raise _UnbuildableError(
+                "the asset exit has no source-backed share reader or conversion",
+                "share_reader_unresolved",
+            )
+        if not (spec.endswith("(address)") or spec.endswith("(uint256)")):
+            raise _UnbuildableError(
+                f"asset conversion {spec} is not a supported view",
+                "share_reader_unresolved",
+            )
+        actor = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        share_ok, shares = self._name("PosOk"), self._name("Pos")
+        self.steps.append(
+            f"        (bool {share_ok}, uint256 {shares}) = _bfRead(address(t), "
+            f'abi.encodeWithSignature("{getter}", {actor}));'
+        )
+        self.steps.append(
+            f"        if (!{share_ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        if spec.endswith("(address)"):
+            read = f'_bfRead(address(t), abi.encodeWithSignature("{spec}", {actor}))'
+        else:
+            read = f'_bfRead(address(t), abi.encodeWithSignature("{spec}", {shares}))'
+        ok, value = self._name("ExitOk"), self._name("Exit")
+        self.steps.append(f"        (bool {ok}, uint256 {value}) = {read};")
+        self.steps.append(
+            f"        if (!{ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        sized = self._name("Sized")
+        self.steps.append(
+            f"        uint256 {sized} = ({share_ok} && {ok} && {shares} != 0) ? {value} : 0;"
+        )
+        if self.oracle.kind is OracleKind.BALANCE_NOT_INCREASED and call.actor == ATTACKER:
+            slot = 8 + self.withdrawal_reads
+            self.withdrawal_reads += 1
+            if slot < len(EVIDENCE_SLOTS):
+                self.steps.append(
+                    f"        emit BugForgeObservation({K_EVIDENCE}, {slot}, {sized});"
+                )
+        return sized
 
     def read_actor(self, slot: int) -> None:
         self.steps.append(
