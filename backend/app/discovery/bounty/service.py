@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -851,7 +851,11 @@ class BountyCampaignService:
             campaign.cache["analysis_stale"] = campaign.cache.get("analysis_token") != token
             return cast("CampaignAnalysis", cached)
 
-        def _build(host_name: str = "", evidence: str = "") -> CampaignAnalysis:
+        def _build(
+            host_name: str = "",
+            evidence: str = "",
+            units: Mapping[str, str] | None = None,
+        ) -> CampaignAnalysis:
             return analyze_campaign(
                 manifest=campaign.manifest,
                 identity=campaign.identity,
@@ -863,6 +867,7 @@ class BountyCampaignService:
                 chain_id=campaign.spec.chain_id,
                 reporting_host=host_name,
                 reporting_host_evidence=evidence,
+                asset_unit_evidence=units,
             )
 
         analysis = _build()
@@ -875,6 +880,7 @@ class BountyCampaignService:
 
         attached = attach_profile_seed(campaign, analysis)
         host = ""
+        profile = None
         raw = campaign.spec.constructor_profile
         if (
             isinstance(attached, dict)
@@ -895,7 +901,13 @@ class BountyCampaignService:
                     analysis.sources,
                 )
         if host:
-            analysis = _build(host, "validated_profile")
+            units = {
+                f"{contract}.{getter}": evidence
+                for contract, getter, evidence in (
+                    profile.asset_units if profile is not None else ()
+                )
+            }
+            analysis = _build(host, "validated_profile", units)
             attach_profile_seed(campaign, analysis)
         campaign.cache["analysis"] = analysis
         campaign.cache["analysis_token"] = token

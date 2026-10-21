@@ -387,7 +387,10 @@ def is_strong(record: Mapping[str, Any]) -> bool:
     when the token fixture is an explicit standard name. An empty fixture is not
     that evidence and must be re-analyzed.
     """
-    from app.discovery.bounty.applicability import LEGACY_STRONG_FIXTURES
+    from app.discovery.bounty.applicability import (
+        LEGACY_STRONG_FIXTURES,
+        applicability_is_strong,
+    )
 
     if not (
         record.get("outcome") == "property_violated"
@@ -400,7 +403,7 @@ def is_strong(record: Mapping[str, Any]) -> bool:
         return False
     applicability = _applicability(record)
     if applicability:
-        return applicability.get("disposition") == "target_applicable"
+        return applicability_is_strong(record)
     # Legacy rows predate applicability. Only an explicit standard fixture stays
     # eligible. A missing or empty fixture is not proof of standard behavior.
     return str(record.get("token_fixture") or "") in LEGACY_STRONG_FIXTURES

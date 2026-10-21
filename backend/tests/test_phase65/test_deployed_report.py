@@ -62,6 +62,8 @@ def _desk(body: str) -> str:
 def _rows(source: str) -> list[dict[str, object]]:
     files = {"Desk.sol": source}
     model = build_research_model(files)
+    # accrue() assigns the amount without a transfer. The profile claim is the unit evidence.
+    model.asset_unit_evidence["Desk.deployed()"] = "validated_profile"
     found = [
         item
         for item in run_suite(model).candidates

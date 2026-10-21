@@ -1546,6 +1546,17 @@ class _Synth:
             self.fund(call.actor, actor_addr)
             verb = "transfer" if call.function.startswith("transfer") else "approve"
             amount = FIXTURE_AMOUNT if verb == "transfer" else "type(uint256).max"
+            if verb == "transfer":
+                chosen = next(
+                    (
+                        value
+                        for name, value in call.arguments
+                        if name == "amount" and re.fullmatch(r"[1-9][0-9]{0,27}", value)
+                    ),
+                    "",
+                )
+                if chosen:
+                    amount = chosen
             ok = self._name("Prim")
             self.steps.append(f"        vm.prank({actor_addr});")
             self.steps.append(
@@ -1652,6 +1663,120 @@ class _Synth:
             f"        if (bfExtOk_{slot} && bfExtRet_{slot}.length >= 32) {{ "
             f"emit BugForgeObservation({K_RECEIVED}, {slot}, "
             f"abi.decode(bfExtRet_{slot}, (uint256))); }} else {{ {failed} }}"
+        )
+
+    def read_fee_ledger(self, phase: str) -> None:
+        """Read the fee-share ledger. A failed staticcall is not stored as zero.
+
+        The reads share two locals. A fresh bool and bytes for every getter
+        overflows the legacy Solidity stack in this function.
+        """
+        oracle = self.oracle
+        if phase == "before":
+            self.steps.append("        bool bfFeeOk;")
+            self.steps.append("        bytes memory bfFeeRet;")
+            self.steps.append("        address bfPerfWho;")
+            self.steps.append("        address bfProtoWho;")
+            self.steps.append("        uint256 bfProtoBps;")
+            self._read_fee_uint("fee_assets_before", oracle.getter)
+            self._read_fee_uint("fee_supply_before", oracle.fee_supply_getter)
+            self._read_fee_uint("fee_performance_bps", oracle.fee_rate_getter)
+            self._read_fee_protocol()
+            self._read_fee_recipient("bfPerfWho", oracle.fee_recipient_getter)
+            self._read_fee_balance("fee_performance_before", "bfPerfWho")
+            self._read_fee_balance("fee_protocol_before", "bfProtoWho")
+            self._read_fee_balance("fee_self_before", "address(t)")
+            return
+        self._read_fee_uint("fee_assets_after", oracle.getter)
+        self._read_fee_balance("fee_performance_after", "bfPerfWho")
+        self._read_fee_balance("fee_protocol_after", "bfProtoWho")
+        self._read_fee_balance("fee_self_after", "address(t)")
+
+    def _fee_signature(self, signature: str, kind: str) -> str:
+        pattern = r"[A-Za-z_]\w*\(\)" if kind == "uint" else r"[A-Za-z_]\w*\(address\)"
+        if not re.fullmatch(pattern, signature):
+            raise _UnbuildableError(
+                f"the fee getter {signature or 'empty'} is not a {kind} signature",
+                "fee_getter_unresolved",
+            )
+        return signature
+
+    def _read_fee_uint(self, slot_name: str, signature: str) -> None:
+        signature = self._fee_signature(signature, "uint")
+        slot = EVIDENCE_SLOTS.index(slot_name)
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}"));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"emit BugForgeObservation({K_EVIDENCE}, {slot}, "
+            "abi.decode(bfFeeRet, (uint256))); } "
+            f"else {{ emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE}); }}"
+        )
+
+    def _read_fee_protocol(self) -> None:
+        oracle = self.oracle
+        config = self._fee_signature(oracle.protocol_config_getter, "uint")
+        slot = EVIDENCE_SLOTS.index("fee_protocol_bps")
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE});"
+        decode = (
+            "            if (bfFeeOk && bfFeeRet.length >= 64) {\n"
+            "                (bfProtoBps, bfProtoWho) = "
+            "abi.decode(bfFeeRet, (uint256, address));\n"
+            f"                emit BugForgeObservation({K_EVIDENCE}, {slot}, bfProtoBps);\n"
+            f"            }} else {{ {failed} }}"
+        )
+        if oracle.protocol_factory_getter:
+            factory = self._fee_signature(oracle.protocol_factory_getter, "uint")
+            self.steps.append(
+                "        (bfFeeOk, bfFeeRet) = "
+                f'address(t).staticcall(abi.encodeWithSignature("{factory}"));'
+            )
+            self.steps.append(
+                "        if (!bfFeeOk || bfFeeRet.length < 32) { " + failed + " } else {"
+            )
+            # bfPerfWho is still unset here. Reuse it so the factory address
+            # does not add another stack slot in the legacy codegen.
+            self.steps.append("            bfPerfWho = abi.decode(bfFeeRet, (address));")
+            self.steps.append(
+                "            (bfFeeOk, bfFeeRet) = bfPerfWho.staticcall("
+                f'abi.encodeWithSignature("{config}"));'
+            )
+            self.steps.append(decode)
+            self.steps.append("        }")
+            return
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{config}"));'
+        )
+        self.steps.append(decode)
+
+    def _read_fee_recipient(self, variable: str, signature: str) -> None:
+        signature = self._fee_signature(signature, "uint")
+        slot = EVIDENCE_SLOTS.index("fee_performance_before")
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE});"
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}"));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"{variable} = abi.decode(bfFeeRet, (address)); }} else {{ {failed} }}"
+        )
+
+    def _read_fee_balance(self, slot_name: str, who: str) -> None:
+        signature = self._fee_signature(self.oracle.share_getter, "address")
+        slot = EVIDENCE_SLOTS.index(slot_name)
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}", {who}));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"emit BugForgeObservation({K_EVIDENCE}, {slot}, "
+            "abi.decode(bfFeeRet, (uint256))); } "
+            f"else {{ emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE}); }}"
         )
 
     def _positive_control(self, index: int, encoded: str) -> None:
@@ -1904,7 +2029,7 @@ class _Synth:
         oracle = self.oracle
         probe = probe_index(self.sequence, oracle) if oracle.executable else -1
         tracking = oracle.balance_relation == "payout_matches_credit"
-        if oracle.kind in TOKEN_ORACLES or tracking:
+        if oracle.kind in TOKEN_ORACLES or oracle.kind is OracleKind.FEE_SHARES_MATCH or tracking:
             self.want_token(oracle.token_fixture or "standard", oracle.expression)
         ctor_args = self.constructor_args()
         self.ctor_args = ctor_args
@@ -1935,6 +2060,8 @@ class _Synth:
                 self.read_evidence(0)
             if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_BEFORE, index)
+            if index == probe and oracle.kind is OracleKind.FEE_SHARES_MATCH:
+                self.read_fee_ledger("before")
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 0)
                 self.read_credit(0)
@@ -1951,6 +2078,8 @@ class _Synth:
             if index == probe and tracking:
                 self.read_actor(1)
                 self.read_evidence(1)
+            if index == probe and oracle.kind is OracleKind.FEE_SHARES_MATCH:
+                self.read_fee_ledger("after")
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
@@ -2522,7 +2651,25 @@ class StatefulObservation:
         if not base:
             return False
         if self.applicability_disposition:
-            return self.applicability_disposition == "target_applicable"
+            if self.applicability_disposition != "target_applicable":
+                return False
+            if self.oracle_kind in {
+                "credit_le_received",
+                "credit_le_holdings",
+                "credit_matches_reported",
+                "balance_not_increased",
+                "fee_shares_match",
+            }:
+                return self.token_fixture in LEGACY_STRONG_FIXTURES or self.token_fixture in {
+                    "fee_on_transfer",
+                    "false_return",
+                    "rebasing",
+                }
+            return self.token_fixture in {"", *LEGACY_STRONG_FIXTURES} or self.token_fixture in {
+                "fee_on_transfer",
+                "false_return",
+                "rebasing",
+            }
         return self.token_fixture in LEGACY_STRONG_FIXTURES
 
     def signal(self) -> FeedbackSignal | None:

@@ -25,6 +25,7 @@ from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
 from app.parsing.solidity_accounting import reported_site
+from app.parsing.solidity_fee_shares import fee_share_site
 from app.parsing.solidity_research import (
     ResearchModel,
     RFunction,
@@ -924,6 +925,77 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     return plans
 
 
+def _fee_donation(amount: str, why: str) -> VfcsCall:
+    return VfcsCall(
+        "token",
+        "transfer(address,uint256)",
+        "donation",
+        ATTACKER,
+        (("amount", amount),),
+        True,
+        why,
+    )
+
+
+def _fee_shares(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """No-change, profit, rounding, and dust reports. Amounts stay in the sequence."""
+    function = _own(model, candidate)
+    if isinstance(function, str):
+        return function
+    site = fee_share_site(model, function)
+    if site is None:
+        return "the function does not establish a fee-share formula"
+    actor = "deployer" if site.role_getter else ATTACKER
+    why = (
+        f"role_getter:{site.role_getter}"
+        if site.role_getter
+        else "no source role getter; the report caller is the ordinary attacker"
+    )
+    report = replace(_call(function, "report", actor), established_by=why[:240])
+    if not site.complete:
+        return [
+            (
+                "fee-no-change",
+                [report],
+                site.gap or "the fee-share configuration is not readable, so it is not judged",
+            )
+        ]
+    return [
+        (
+            "fee-no-change",
+            [report],
+            "a report with no asset increase mints no performance or protocol fee shares",
+        ),
+        (
+            "fee-profit",
+            [
+                _fee_donation(
+                    "1000000000000000000",
+                    "donate 1000000000000000000 asset units before the fee report",
+                ),
+                report,
+            ],
+            "profit of 1000000000000000000 is charged with the configured fee split",
+        ),
+        (
+            "fee-rounding",
+            [
+                _fee_donation("15", "donate 15 asset units so the fee division has a remainder"),
+                report,
+            ],
+            "a 15-unit profit exercises floor division of the fee-share formula",
+        ),
+        (
+            "fee-dust",
+            [
+                _fee_donation("9", "donate 9 asset units so a 10 percent fee rounds to zero"),
+                report,
+            ],
+            "a 9-unit profit rounds the fee-share amount down to zero",
+        ),
+    ]
+
+
 def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -945,6 +1017,7 @@ _BUILDERS: dict[str, Builder] = {
     "accounting.fee_on_transfer_mismatch": _token_behavior,
     "accounting.unchecked_token_return": _token_behavior,
     "accounting.reported_balance": _reported,
+    "accounting.fee_shares": _fee_shares,
     "message.field_not_bound": _message,
     "message.missing_domain_separation": _message,
     "message.missing_expiry": _message,

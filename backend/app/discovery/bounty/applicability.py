@@ -167,14 +167,32 @@ def assess(
     if facts.get("report_scope") == "host":
         host = facts.get("reporting_host", "") or "unknown"
         host_evidence = facts.get("reporting_host_evidence", "")
-        if host_evidence == "validated_profile" and host != "unknown":
+        # A validated local host proves this replay's callback. It does not prove
+        # that callback for every bounty deployment. Fee shares that use only
+        # observed totals are not that assumption.
+        if (
+            facts.get("host_dependence") == "observed_inputs"
+            and host_evidence == "validated_profile"
+            and host != "unknown"
+        ):
             assumptions.append(
                 Assumption(
                     "reporting_host",
                     host,
                     "confirmed",
-                    f"validated profile names {host} as the reporting host in this source "
-                    "set; this is not evidence about every deployment",
+                    "fee inputs are observed totals, supply, and fee configuration; "
+                    "this property does not assume the host callback matches a deployment",
+                    False,
+                )
+            )
+        elif host_evidence == "validated_profile" and host != "unknown":
+            assumptions.append(
+                Assumption(
+                    "reporting_host",
+                    host,
+                    "unknown",
+                    f"validated profile names {host} for this local replay; "
+                    "that does not establish the host callback matches the bounty deployment",
                     True,
                 )
             )
@@ -276,6 +294,109 @@ def apply_execution_applicability(
     if role_proven:
         return confirm_validated_role(updated, execution_id=execution_id, property_id=property_id)
     return updated
+
+
+_TOKEN_ORACLES = frozenset(
+    {
+        "credit_le_received",
+        "credit_le_holdings",
+        "credit_matches_reported",
+        "balance_not_increased",
+        "fee_shares_match",
+    }
+)
+_ASSUMPTION_KEYS = frozenset({"name", "value", "status", "evidence", "material"})
+
+
+def _assumption_from(raw: object) -> Assumption | None:
+    if not isinstance(raw, Mapping):
+        return None
+    name = raw.get("name")
+    status = raw.get("status")
+    if not isinstance(name, str) or status not in {"confirmed", "contradicted", "unknown"}:
+        return None
+    evidence = raw.get("evidence", "")
+    value = raw.get("value", "")
+    material = raw.get("material", True)
+    if (
+        not isinstance(evidence, str)
+        or not isinstance(value, str)
+        or not isinstance(material, bool)
+    ):
+        return None
+    return Assumption(name, value, status, evidence, material)
+
+
+def applicability_is_strong(record: Mapping[str, Any]) -> bool:
+    """True only when the stored applicability still recomputes to target_applicable.
+
+    A stored disposition does not override contradictory assumptions, a missing
+    token fixture on an accounting oracle, a role proof for a different execution,
+    or a host-dependent callback.
+    """
+    raw = record.get("applicability")
+    if not isinstance(raw, Mapping):
+        return False
+    items = raw.get("assumptions")
+    if not isinstance(items, list):
+        return False
+    assumptions: list[Assumption] = []
+    for item in items:
+        parsed = _assumption_from(item)
+        if parsed is None:
+            return False
+        if isinstance(item, Mapping) and set(item) - _ASSUMPTION_KEYS:
+            return False
+        assumptions.append(parsed)
+    frozen = tuple(assumptions)
+    recomputed = _disposition(frozen, executable=True)
+    if raw.get("disposition") != recomputed or recomputed != "target_applicable":
+        return False
+    for item in frozen:
+        if item.name == "reporting_host" and item.material:
+            return False
+        if item.material and item.status == "confirmed" and "harness setting" in item.evidence:
+            return False
+        if item.name == "token_behavior" and item.material and item.status == "confirmed":
+            if not (
+                item.evidence.startswith("source ")
+                or item.evidence.startswith("validated_profile ")
+            ):
+                return False
+        if item.name == "privileged_actor" and item.status == "confirmed":
+            execution = str(record.get("sequence_id") or "")
+            property_id = str(record.get("property_id") or "")
+            if (
+                not execution
+                or not property_id
+                or execution == "unbound"
+                or property_id == "unbound"
+            ):
+                return False
+            if (
+                f"execution {execution}" not in item.evidence
+                or f"property {property_id}" not in item.evidence
+            ):
+                return False
+    fixture = str(record.get("token_fixture") or "")
+    if str(record.get("oracle_kind") or "") in _TOKEN_ORACLES:
+        if fixture in LEGACY_STRONG_FIXTURES:
+            return True
+        if fixture in MATERIAL_FIXTURES:
+            match = next((item for item in frozen if item.name == "token_behavior"), None)
+            return bool(
+                match
+                and match.status == "confirmed"
+                and match.value == fixture
+                and (
+                    match.evidence.startswith("source ")
+                    or match.evidence.startswith("validated_profile ")
+                )
+            )
+        return False
+    if fixture and fixture not in LEGACY_STRONG_FIXTURES | MATERIAL_FIXTURES:
+        return False
+    return True
 
 
 def mark_not_applicable(applicability: Applicability, evidence: str) -> Applicability:

@@ -6,6 +6,7 @@ import textwrap
 
 from app.discovery.bounty.analysis import CampaignAnalysis
 from app.discovery.bounty.applicability import (
+    applicability_is_strong,
     apply_execution_applicability,
     assess,
     deny_unconfirmed_role,
@@ -176,10 +177,25 @@ def test_unknown_fixture_names_fail_closed_on_the_finding_path() -> None:
             "reporting_host_evidence": "validated_profile",
         },
     )
-    assert host.disposition == "target_applicable"
+    assert host.disposition == "unconfirmed"
     named = next(item for item in host.assumptions if item.name == "reporting_host")
-    assert named.status == "confirmed"
-    assert "every deployment" in named.evidence
+    assert named.status == "unknown"
+    assert named.material is True
+    assert "does not establish" in named.evidence
+    assert is_strong(_record(applicability=host.as_dict())) is False
+    observed = assess(
+        token_fixture="standard",
+        facts={
+            "report_scope": "host",
+            "reporting_host": "IdleHost",
+            "reporting_host_evidence": "validated_profile",
+            "host_dependence": "observed_inputs",
+        },
+    )
+    assert observed.disposition == "target_applicable"
+    observed_host = next(item for item in observed.assumptions if item.name == "reporting_host")
+    assert observed_host.status == "confirmed"
+    assert observed_host.material is False
     unnamed = assess(token_fixture="standard", facts={"report_scope": "host"})
     assert unnamed.disposition == "unconfirmed"
     built = assess(token_fixture="standard", facts={"role_getter": "keeper()"})
@@ -189,9 +205,30 @@ def test_unknown_fixture_names_fail_closed_on_the_finding_path() -> None:
         reason_code="property_violated",
         role_proven=True,
         role_denied=False,
+        execution_id="vf_one",
+        property_id="pr_one",
     )
     assert proven.disposition == "target_applicable"
-    assert is_strong(_record(applicability=proven.as_dict())) is True
+    assert (
+        is_strong(
+            _record(
+                applicability=proven.as_dict(),
+                sequence_id="vf_one",
+                property_id="pr_one",
+            )
+        )
+        is True
+    )
+    assert (
+        is_strong(
+            _record(
+                applicability=proven.as_dict(),
+                sequence_id="vf_other",
+                property_id="pr_one",
+            )
+        )
+        is False
+    )
     blocked = apply_execution_applicability(
         built,
         identity_status="identity_mismatch",
@@ -354,9 +391,20 @@ def test_report_candidate_is_balance_backed_only_when_the_call_resolves() -> Non
         reason_code="property_violated",
         role_proven=True,
         role_denied=False,
+        execution_id="vf_report",
+        property_id="pr_report",
     )
     assert proven.disposition == "target_applicable"
-    assert is_strong(_record(applicability=proven.as_dict())) is True
+    assert (
+        is_strong(
+            _record(
+                applicability=proven.as_dict(),
+                sequence_id="vf_report",
+                property_id="pr_report",
+            )
+        )
+        is True
+    )
     opaque = _desk(
         "data.accounted = live;",
         extra="function _live() internal pure returns (uint256) { return 1; }",
@@ -388,3 +436,171 @@ def test_loss_ignoring_is_a_different_transition_from_a_safe_report() -> None:
     assert safe[0].fact("loss_ignored") == "false"
     assert loss[0].fact("loss_ignored") == "true"
     assert loss[0].fact("outflow") == "skim(uint256)"
+
+
+def _assumption(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "name": "token_behavior",
+        "value": "fee_on_transfer",
+        "status": "confirmed",
+        "evidence": "source evidence records token_behavior=fee_on_transfer",
+        "material": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_a_stored_target_applicable_disposition_cannot_override_the_evidence() -> None:
+    """Strength is recomputed. A stored disposition does not win a contradiction."""
+    assert is_strong(_record()) is True
+    assert is_strong(_record(token_fixture="")) is False
+    assert is_strong(_record(token_fixture="misspelled_fee")) is False
+    assert is_strong(_record(oracle_kind="call_must_fail", token_fixture="")) is True
+    assert is_strong(_record(applicability={"disposition": "target_applicable"})) is False
+    contradicted = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            _assumption(
+                status="contradicted",
+                evidence=(
+                    "source evidence records token_behavior=standard, which contradicts "
+                    "fixture fee_on_transfer"
+                ),
+            )
+        ],
+    }
+    assert is_strong(_record(applicability=contradicted, token_fixture="fee_on_transfer")) is False
+    harness = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            _assumption(evidence="harness setting records token_behavior=fee_on_transfer")
+        ],
+    }
+    assert is_strong(_record(applicability=harness, token_fixture="fee_on_transfer")) is False
+    unlabeled = {
+        "disposition": "target_applicable",
+        "assumptions": [_assumption(evidence="someone said the token takes a fee")],
+    }
+    assert is_strong(_record(applicability=unlabeled, token_fixture="fee_on_transfer")) is False
+    sourced = {"disposition": "target_applicable", "assumptions": [_assumption()]}
+    assert is_strong(_record(applicability=sourced, token_fixture="fee_on_transfer")) is True
+    profiled = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            _assumption(
+                evidence="validated_profile evidence records token_behavior=fee_on_transfer"
+            )
+        ],
+    }
+    assert is_strong(_record(applicability=profiled, token_fixture="fee_on_transfer")) is True
+    mismatched_fixture = {
+        "disposition": "target_applicable",
+        "assumptions": [_assumption(value="rebasing")],
+    }
+    assert (
+        is_strong(_record(applicability=mismatched_fixture, token_fixture="fee_on_transfer"))
+        is False
+    )
+    extra = {
+        "disposition": "target_applicable",
+        "assumptions": [{**_assumption(), "note": "stale"}],
+    }
+    assert is_strong(_record(applicability=extra, token_fixture="fee_on_transfer")) is False
+    broken = {
+        "disposition": "target_applicable",
+        "assumptions": [_assumption(status="maybe")],
+    }
+    assert is_strong(_record(applicability=broken)) is False
+    host = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            {
+                "name": "reporting_host",
+                "value": "IdleHost",
+                "status": "confirmed",
+                "evidence": "validated profile names IdleHost for this local replay",
+                "material": True,
+            }
+        ],
+    }
+    assert is_strong(_record(applicability=host)) is False
+    non_material = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            {
+                "name": "reporting_host",
+                "value": "IdleHost",
+                "status": "confirmed",
+                "evidence": "fee inputs are observed totals",
+                "material": False,
+            }
+        ],
+    }
+    assert is_strong(_record(applicability=non_material)) is True
+    role = {
+        "disposition": "target_applicable",
+        "assumptions": [
+            {
+                "name": "privileged_actor",
+                "value": "keeper()",
+                "status": "confirmed",
+                "evidence": (
+                    "the harness read the role getter and it returned the deploying contract "
+                    "for execution vf_one and property pr_one"
+                ),
+                "material": True,
+            }
+        ],
+    }
+    assert is_strong(_record(applicability=role)) is False
+    assert (
+        is_strong(_record(applicability=role, sequence_id="vf_one", property_id="pr_one")) is True
+    )
+    assert (
+        is_strong(_record(applicability=role, sequence_id="vf_two", property_id="pr_one")) is False
+    )
+    assert is_strong(_record(oracle_kind="call_must_fail", token_fixture="custom_name")) is False
+    assert applicability_is_strong({"applicability": "target_applicable"}) is False
+    assert (
+        applicability_is_strong(
+            {"applicability": {"disposition": "target_applicable", "assumptions": "no"}}
+        )
+        is False
+    )
+    for broken_assumption in (
+        {"name": 1, "status": "confirmed"},
+        {
+            "name": "token_behavior",
+            "status": "confirmed",
+            "evidence": 1,
+            "value": "x",
+            "material": True,
+        },
+        {
+            "name": "token_behavior",
+            "status": "confirmed",
+            "evidence": "source x",
+            "value": 1,
+            "material": True,
+        },
+        {
+            "name": "token_behavior",
+            "status": "confirmed",
+            "evidence": "source x",
+            "value": "x",
+            "material": "yes",
+        },
+    ):
+        assert (
+            applicability_is_strong(
+                {
+                    "applicability": {
+                        "disposition": "target_applicable",
+                        "assumptions": [broken_assumption],
+                    },
+                    "oracle_kind": "call_must_fail",
+                    "token_fixture": "standard",
+                }
+            )
+            is False
+        )

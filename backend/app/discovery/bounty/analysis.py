@@ -133,6 +133,18 @@ def _name_reporting_host(model: ResearchModel | None, host: str, evidence: str) 
     model.reporting_host_evidence = evidence
 
 
+def _name_asset_units(model: ResearchModel | None, evidence: Mapping[str, str] | None) -> None:
+    """Copy structured profile unit claims. Anything else is ignored."""
+    if model is None or not evidence:
+        return
+    for key, tag in evidence.items():
+        if tag != "validated_profile" or "." not in key:
+            continue
+        contract, getter = key.split(".", 1)
+        if getter.endswith("()") and contract in model.contracts:
+            model.asset_unit_evidence[key] = "validated_profile"
+
+
 def analyze_campaign(
     *,
     manifest: BountyManifest,
@@ -145,11 +157,13 @@ def analyze_campaign(
     chain_id: str = "",
     reporting_host: str = "",
     reporting_host_evidence: str = "",
+    asset_unit_evidence: Mapping[str, str] | None = None,
 ) -> CampaignAnalysis:
     sources, primary_reads = read_source_files(repo_root, files)
     read_log: list[FileRead] = list(primary_reads)
     model = build_research_model(sources) if sources else None
     _name_reporting_host(model, reporting_host, reporting_host_evidence)
+    _name_asset_units(model, asset_unit_evidence)
     target = deployment_identity(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
     )
@@ -219,6 +233,7 @@ def analyze_campaign(
         covered |= set(batch_sources)
         part = build_research_model(batch_sources)
         _name_reporting_host(part, reporting_host, reporting_host_evidence)
+        _name_asset_units(part, asset_unit_evidence)
         suite = run_suite(part)
         budgets.append(suite.budget())
         found = tuple(c for c in suite.candidates if c.file in batch_sources)
@@ -255,6 +270,7 @@ def analyze_campaign(
                 continue
             part = build_research_model(alone)
             _name_reporting_host(part, reporting_host, reporting_host_evidence)
+            _name_asset_units(part, asset_unit_evidence)
             suite = run_suite(part)
             budgets.append(suite.budget())
             found = tuple(c for c in suite.candidates if c.contract == name)

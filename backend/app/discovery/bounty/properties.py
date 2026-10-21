@@ -95,6 +95,8 @@ class OracleKind(StrEnum):
     # The stored total equals the source-backed reportable amount.
     # Still not a fee, locked-share, or unlock-formula proof.
     CREDIT_MATCHES_REPORTED = "credit_matches_reported"
+    # Observed fee-recipient share deltas equal the source fee-share formula.
+    FEE_SHARES_MATCH = "fee_shares_match"
     # Behavioral probe: did a reverting callee's failure reach the outer call?
     # Outer success is evidence of a mechanism, not a security-property violation.
     MECHANISM_PROBE = "mechanism_probe"
@@ -140,6 +142,14 @@ class OracleSpec:
     external_getter: str = ""
     # Public address getter for that uint, when it is not on the executed contract.
     external_address_getter: str = ""
+    # Fee-share reads. Empty unless kind is FEE_SHARES_MATCH.
+    fee_supply_getter: str = ""
+    fee_rate_getter: str = ""
+    fee_recipient_getter: str = ""
+    protocol_factory_getter: str = ""
+    protocol_config_getter: str = ""
+    share_getter: str = ""
+    max_bps: int = 0
 
     @property
     def executable(self) -> bool:
@@ -166,6 +176,13 @@ class OracleSpec:
             "balance_relation": self.balance_relation,
             "external_getter": self.external_getter,
             "external_address_getter": self.external_address_getter,
+            "fee_supply_getter": self.fee_supply_getter,
+            "fee_rate_getter": self.fee_rate_getter,
+            "fee_recipient_getter": self.fee_recipient_getter,
+            "protocol_factory_getter": self.protocol_factory_getter,
+            "protocol_config_getter": self.protocol_config_getter,
+            "share_getter": self.share_getter,
+            "max_bps": self.max_bps,
             "executable": self.executable,
         }
 
@@ -1224,7 +1241,8 @@ def _reported_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
         assumptions = (
             *assumptions,
             "this equality reconciles the stored total with the reported amount and does "
-            "not prove fees, locked shares, or the unlock formula",
+            "not prove fees, locked shares, the unlock formula, or that the reported "
+            "quantity is the correct economic value",
         )
     else:
         assumptions = (
@@ -1266,6 +1284,66 @@ for _report_template in (
     "gain→report",
 ):
     _ORACLE_BUILDERS[_report_template] = _reported_oracle
+
+
+def _fee_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: str) -> OracleBuilt:
+    """Judge fee-share deltas from observed inputs. A successful report is not a hold."""
+    from app.parsing.solidity_fee_shares import fee_share_site
+
+    site = fee_share_site(model, fn)
+    if site is None or not site.complete:
+        reason = (
+            site.gap
+            if site is not None and site.gap
+            else ("the source does not establish a fee-share formula that this harness can judge")
+        )
+        return OracleSpec(), (), (), reason, (), reason
+    probe = "report"
+    pre = tuple(role for role in ("donation",) if any(call.role == role for call in sequence.calls))
+    assumptions: tuple[str, ...] = (
+        "performance-fee shares are profitShares * feeBps / maxBps, rounded down",
+        "protocol-fee shares are that amount * protocolBps / maxBps, rounded down",
+        "the performance recipient receives the remainder; locked shares are not fees",
+        "a configured recipient receiving its shares is not theft",
+        "the rates and recipients are the runtime reads, not a profile label",
+        "this does not prove the reported total is the correct economic value",
+    )
+    if site.report_scope == "host":
+        assumptions = (
+            *assumptions,
+            "the fee inputs are observed totals, supply, and fee configuration; "
+            "the host callback is not assumed to match a production deployment",
+        )
+    return (
+        OracleSpec(
+            kind=OracleKind.FEE_SHARES_MATCH,
+            probe_role=probe,
+            probe_function=fn.signature,
+            precondition_roles=pre,
+            getter=site.asset_getter,
+            token_fixture="standard",
+            expression=(
+                f"fee-share deltas equal profit shares times {site.rate_getter} "
+                f"over {site.max_bps}, with {site.protocol_config_getter} taking its fraction"
+            ),
+            fee_supply_getter=site.supply_getter,
+            fee_rate_getter=site.rate_getter,
+            fee_recipient_getter=site.recipient_getter,
+            protocol_factory_getter=site.protocol_factory_getter,
+            protocol_config_getter=site.protocol_config_getter,
+            share_getter=site.share_getter,
+            max_bps=site.max_bps,
+        ),
+        (),
+        (site.asset_getter, site.rate_getter, site.recipient_getter, site.protocol_config_getter),
+        f"{fn.name} mints fee shares from the share value of profit",
+        assumptions,
+        "",
+    )
+
+
+for _fee_template in ("fee-no-change", "fee-profit", "fee-rounding", "fee-dust"):
+    _ORACLE_BUILDERS[_fee_template] = _fee_oracle
 
 
 # ---- evaluation -------------------------------------------------------------------------------
@@ -1314,6 +1392,18 @@ EVIDENCE_SLOTS = (
     "victim_credit_after",
     "attacker_withdrawal_amount",
     "attacker_repeat_withdrawal_amount",
+    # Fee-share ledger. Missing slots are not zero.
+    "fee_assets_before",
+    "fee_assets_after",
+    "fee_supply_before",
+    "fee_performance_bps",
+    "fee_protocol_bps",
+    "fee_performance_before",
+    "fee_performance_after",
+    "fee_protocol_before",
+    "fee_protocol_after",
+    "fee_self_before",
+    "fee_self_after",
 )
 
 
@@ -1563,6 +1653,8 @@ def evaluate(
             True,
             True,
         )
+    if kind is OracleKind.FEE_SHARES_MATCH:
+        return _fee_share_verdict(oracle, observation, probe, probe_ok)
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
 
 
@@ -1597,6 +1689,120 @@ def _reported_ceiling(
             f"{observation.external_after}"
         )
     return ceiling, ceiling_text
+
+
+_FEE_OBSERVATIONS = (
+    "fee_assets_before",
+    "fee_assets_after",
+    "fee_supply_before",
+    "fee_performance_bps",
+    "fee_protocol_bps",
+    "fee_performance_before",
+    "fee_performance_after",
+    "fee_protocol_before",
+    "fee_protocol_after",
+    "fee_self_before",
+    "fee_self_after",
+)
+
+
+def _fee_share_verdict(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> PropertyEvaluation:
+    """Compare recipient share deltas with the source formula. Missing reads are not zero."""
+    if probe_ok != 1:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the report reverted; a revert is not a fee-share verdict",
+            probe,
+        )
+    if not observation.readable:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "a fee reading failed; a missing value is not zero",
+            probe,
+        )
+    if oracle.max_bps <= 0:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "the fee denominator was not established",
+            probe,
+        )
+    evidence = dict(observation.evidence)
+    missing = [name for name in _FEE_OBSERVATIONS if name not in evidence]
+    if missing:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED,
+            "fee observation missing " + ", ".join(missing) + "; a missing value is not zero",
+            probe,
+        )
+    assets0 = evidence["fee_assets_before"]
+    assets1 = evidence["fee_assets_after"]
+    supply = evidence["fee_supply_before"]
+    perf_bps = evidence["fee_performance_bps"]
+    proto_bps = evidence["fee_protocol_bps"]
+    performance, protocol, profit = _expected_fee_shares(
+        assets0, assets1, supply, perf_bps, proto_bps, oracle.max_bps
+    )
+    perf0 = evidence["fee_performance_before"]
+    perf1 = evidence["fee_performance_after"]
+    proto0 = evidence["fee_protocol_before"]
+    proto1 = evidence["fee_protocol_after"]
+    self0 = evidence["fee_self_before"]
+    self1 = evidence["fee_self_after"]
+    if perf1 < perf0 or proto1 < proto0:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            f"a fee recipient balance decreased ({perf0}->{perf1}, {proto0}->{proto1})",
+            probe,
+            True,
+            True,
+        )
+    perf_delta = perf1 - perf0
+    proto_delta = proto1 - proto0
+    locked = self1 - self0 if self1 >= self0 else 0
+    detail = (
+        f"performance delta {perf_delta} == {performance}; "
+        f"protocol delta {proto_delta} == {protocol}; profit {profit}; "
+        f"locked-share delta {locked} is not a fee"
+    )
+    recorded = tuple(sorted(evidence.items()))
+    if perf_delta != performance or proto_delta != protocol:
+        return PropertyEvaluation(
+            PropertyVerdict.PROPERTY_VIOLATED,
+            detail.replace(" == ", " != ", 2),
+            probe,
+            True,
+            True,
+            evidence=recorded,
+        )
+    return PropertyEvaluation(
+        PropertyVerdict.PROPERTY_HELD, detail, probe, True, True, evidence=recorded
+    )
+
+
+def _expected_fee_shares(
+    assets_before: int,
+    assets_after: int,
+    supply_before: int,
+    performance_bps: int,
+    protocol_bps: int,
+    max_bps: int,
+) -> tuple[int, int, int]:
+    """(performance shares, protocol shares, profit) using the source's floor division."""
+    if max_bps <= 0 or assets_after < assets_before or performance_bps <= 0:
+        profit = assets_after - assets_before if assets_after >= assets_before else 0
+        return 0, 0, profit
+    profit = assets_after - assets_before
+    if supply_before == 0:
+        shares = profit
+    elif assets_before == 0:
+        shares = 0
+    else:
+        shares = (profit * supply_before) // assets_before
+    total = (shares * performance_bps) // max_bps
+    protocol = (total * protocol_bps) // max_bps if protocol_bps > 0 else 0
+    return total - protocol, protocol, profit
 
 
 def _unfunded_exit(sequence: Vfcs, observation: OracleObservation) -> bool:

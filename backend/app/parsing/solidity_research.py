@@ -140,6 +140,10 @@ class ResearchModel:
     # validated profile; ``reporting_host_evidence`` records why it was set.
     reporting_host: str = ""
     reporting_host_evidence: str = ""
+    # ``Contract.getter()`` -> ``validated_profile`` | ``source``. A public uint is
+    # not an asset amount unless one of these tags is present. Profiles may only
+    # set ``validated_profile``; ``source`` is recorded by the unit tracer.
+    asset_unit_evidence: dict[str, str] = field(default_factory=dict)
 
     def bases_of(self, contract: str) -> tuple[str, ...]:
         """Base contracts, nearest first, bounded and cycle-safe."""

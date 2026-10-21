@@ -177,6 +177,9 @@ class ConstructorProfile:
     observed_fixture: str = ""
     # ABI signature of a one-address setup call, when the token is not a constructor argument.
     initialization_function: str = ""
+    # (contract, getter(), "validated_profile") claims. A public uint is not an asset
+    # amount without one of these, or without source-traced transfer/balance writes.
+    asset_units: tuple[tuple[str, str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -202,6 +205,10 @@ class ConstructorProfile:
             "probe_argument": self.probe_argument,
             "observed_fixture": self.observed_fixture,
             "initialization_function": self.initialization_function,
+            "asset_units": [
+                {"contract": contract, "getter": getter, "evidence": evidence}
+                for contract, getter, evidence in self.asset_units
+            ],
         }
 
     def public_dict(self) -> dict[str, Any]:
@@ -225,6 +232,10 @@ class ConstructorProfile:
             "property_template": self.property_template,
             "observed_fixture": self.observed_fixture,
             "initialization_function": self.initialization_function,
+            "asset_units": [
+                {"contract": contract, "getter": getter, "evidence": evidence}
+                for contract, getter, evidence in self.asset_units
+            ],
             "configuration": self.value.to_dict(),
             "local_environment": True,
             "establishes_deployed_state": False,
@@ -245,6 +256,37 @@ class PreparedProfile:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _asset_units(raw: Any) -> tuple[tuple[str, str, str], ...]:
+    """Structured unit claims. Only ``validated_profile`` is accepted from a profile."""
+    if raw in (None, ""):
+        return ()
+    if not isinstance(raw, list) or len(raw) > 8:
+        raise ProfileError("profile_malformed", "asset_units must be a bounded list")
+    found: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ProfileError("profile_malformed", "an asset unit claim is not an object")
+        contract = str(item.get("contract", ""))
+        getter = str(item.get("getter", ""))
+        evidence = str(item.get("evidence", ""))
+        if not _IDENT.fullmatch(contract) or not re.fullmatch(r"[A-Za-z_]\w*\(\)", getter):
+            raise ProfileError(
+                "profile_malformed", "an asset unit claim needs a contract and getter"
+            )
+        if evidence != "validated_profile":
+            raise ProfileError(
+                "profile_malformed",
+                "an asset unit claim must be validated_profile evidence, not a guessed unit",
+            )
+        key = f"{contract}.{getter}"
+        if key in seen:
+            raise ProfileError("profile_malformed", f"duplicate asset unit claim {key}")
+        seen.add(key)
+        found.append((contract, getter, evidence))
+    return tuple(found)
 
 
 def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
@@ -274,6 +316,7 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         "probe_argument",
         "observed_fixture",
         "initialization_function",
+        "asset_units",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -404,6 +447,7 @@ def parse_profile(raw: Mapping[str, Any] | None) -> ConstructorProfile:
         probe_argument=probe_argument,
         observed_fixture=observed_fixture,
         initialization_function=initialization_function,
+        asset_units=_asset_units(raw.get("asset_units", [])),
     )
 
 

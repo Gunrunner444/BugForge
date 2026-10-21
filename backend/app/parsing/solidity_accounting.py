@@ -41,6 +41,7 @@ def analyze_balance_delta(model: ResearchModel) -> list[SemanticCandidate]:
         found.extend(_balance_as_deposit(model, function))
         found.extend(_unchecked_return(function))
         found.extend(_reported_balance(model, function))
+        found.extend(_fee_share_candidates(model, function))
     found.extend(_cached_balance(model))
     return cap(found)
 
@@ -416,6 +417,8 @@ class ReportedSite:
     # ``equal`` when the stored field is assigned the reported local itself.
     # ``upper_bound`` when the assignment is a reduced or scaled expression.
     store_relation: str = "upper_bound"
+    # ``source`` or ``validated_profile`` when an added component has unit evidence.
+    asset_units: str = ""
 
     @property
     def judgeable(self) -> bool:
@@ -443,6 +446,9 @@ def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | N
     external_contract = classified.external_contract if classified is not None else ""
     address_getter = classified.address_getter if classified is not None else ""
     host = model.reporting_host if scope == "host" else ""
+    units = ""
+    if form == "idle_plus_getter" and external_getter:
+        units = _unit_evidence(model, external_contract or function.contract, external_getter)
     gain = ""
     if form == "idle_plus_getter" and not address_getter and external_getter:
         owner = host or function.contract
@@ -466,12 +472,17 @@ def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | N
         store_at=assign_at,
         reported_form=form if getter else "other",
         report_scope=scope if getter else "unresolved",
-        external_getter=external_getter if form == "idle_plus_getter" and getter else "",
-        external_contract=external_contract if form == "idle_plus_getter" and getter else "",
+        external_getter=(
+            external_getter if form in {"idle_plus_getter", "unproven_units"} and getter else ""
+        ),
+        external_contract=(
+            external_contract if form in {"idle_plus_getter", "unproven_units"} and getter else ""
+        ),
         address_getter=address_getter if form == "idle_plus_getter" and getter else "",
         host=host,
         gain=gain if form == "idle_plus_getter" and getter else "",
         store_relation=relation,
+        asset_units=units,
     )
 
 
@@ -489,10 +500,15 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
         return []
     line = _body_line(function, site.store_at)
     gaps: list[str] = []
-    if not site.judgeable:
+    if site.reported_form == "unproven_units":
+        gaps.append(
+            f"{site.external_getter or 'the added value'} is a public uint without "
+            "asset-unit evidence; a type and a name do not make it underlying assets"
+        )
+    elif not site.judgeable:
         gaps.append(
             "the reported call does not resolve to idle token holdings or idle holdings "
-            "plus one public uint getter"
+            "plus one public uint whose asset units are established"
         )
     if site.report_scope == "host" and model.reporting_host_evidence != "validated_profile":
         gaps.append("a validated host profile for the reporting callback")
@@ -516,7 +532,9 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
                 f"{function.contract}.{function.name} stores `{site.field}` from `{site.local}`, "
                 f"which is assigned from `{site.call}`. "
                 f"Form: {site.reported_form}. Scope: {site.report_scope}. "
-                f"Role getter: {site.role_getter or 'none'}."
+                f"Role getter: {site.role_getter or 'none'}. "
+                "Equality with the reported quantity does not prove that quantity is the "
+                "correct economic value."
             ),
             file=function.file,
             line=max(line, function.line),
@@ -548,6 +566,11 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
                 ("reporting_host_evidence", model.reporting_host_evidence if site.host else ""),
                 ("gain", site.gain),
                 ("store_relation", site.store_relation),
+                ("asset_units", site.asset_units),
+                (
+                    "host_dependence",
+                    "callback" if site.report_scope == "host" else "",
+                ),
             ),
             observed=("a called value is written into stored accounting",),
             missing=tuple(gaps),
@@ -555,6 +578,12 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
             impact_tags=("custody", "vault_accounting"),
         )
     ]
+
+
+def _fee_share_candidates(model: ResearchModel, function: RFunction) -> list[SemanticCandidate]:
+    from app.parsing.solidity_fee_shares import fee_share_candidates
+
+    return fee_share_candidates(model, function)
 
 
 def _store_relation(rhs: str, local: str) -> str:
@@ -690,6 +719,96 @@ def _top_sum(expr: str) -> tuple[str, str] | None:
     return left, right
 
 
+def _unit_evidence(model: ResearchModel, contract: str, getter: str) -> str:
+    """Why ``getter`` is denominated in the asset, or "" when that is not established.
+
+    A public ``uint`` is not enough. ``validated_profile`` is an explicit profile
+    claim. ``source`` means every write of the variable is a token balance or the
+    amount of a token transfer in the same function.
+    """
+    key = f"{contract}.{getter}"
+    if model.asset_unit_evidence.get(key) == "validated_profile":
+        return "validated_profile"
+    if not getter.endswith("()"):
+        return ""
+    variable = getter[:-2]
+    if not re.fullmatch(r"[A-Za-z_]\w*", variable):
+        return ""
+    writes: list[tuple[RFunction, str]] = []
+    for function in model.functions_of(contract):
+        if not function.has_body:
+            continue
+        for match in re.finditer(
+            rf"\b{re.escape(variable)}\s*(?:\+=|(?<![=!<>])=(?!=))\s*([^;]+);",
+            function.body,
+        ):
+            writes.append((function, match.group(1).strip()))
+    if not writes:
+        return ""
+    for function, rhs in writes:
+        if not _rhs_is_asset_amount(function.body, rhs):
+            return ""
+    return "source"
+
+
+def _rhs_is_asset_amount(body: str, rhs: str) -> bool:
+    """True when every top-level term is a token balance or a transfer amount."""
+    parts = _sum_terms(rhs)
+    if not parts:
+        return False
+    for part in parts:
+        compact = re.sub(r"\s+", "", part)
+        if "balanceOf(" in compact:
+            continue
+        if re.fullmatch(r"[A-Za-z_]\w*", compact) and _transfer_amount(body, compact):
+            continue
+        return False
+    return True
+
+
+def _sum_terms(expr: str) -> list[str]:
+    depth = 0
+    start = 0
+    terms: list[str] = []
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char in "+-" and depth == 0:
+            terms.append(expr[start:index].strip())
+            start = index + 1
+    terms.append(expr[start:].strip())
+    return [term for term in terms if term]
+
+
+def _transfer_amount(body: str, name: str) -> bool:
+    for match in re.finditer(
+        r"(?:safeTransferFrom|transferFrom|safeTransfer|transfer)\s*\(([^;]*)\)",
+        body,
+    ):
+        args = [re.sub(r"\s+", "", item) for item in _split_args(match.group(1))]
+        if args and args[-1] == name:
+            return True
+    return False
+
+
+def _split_args(text: str) -> list[str]:
+    depth = 0
+    start = 0
+    found: list[str] = []
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            found.append(text[start:index].strip())
+            start = index + 1
+    found.append(text[start:].strip())
+    return [item for item in found if item]
+
+
 def _addend(model: ResearchModel, contract: str, expr: str) -> tuple[str, str, str] | None:
     """(public uint getter, declaring contract, address getter) for one readable addend."""
     from app.discovery.bounty.properties import public_getter
@@ -743,6 +862,10 @@ def _classify_reported(
         if addend is None:
             return _ReportedValue("other", scope)
         getter, owner, address_getter = addend
+        if not _unit_evidence(model, owner, getter):
+            # Public and unsigned is not an asset amount. Keep the getter so the
+            # candidate can say which value was refused.
+            return _ReportedValue("unproven_units", scope, getter, owner, address_getter)
         return _ReportedValue("idle_plus_getter", scope, getter, owner, address_getter)
     hook = _CAST_HOOK.search(expr)
     if hook and _primary_call(expr) == hook.group(1) and hook.group(1) != "balanceOf":

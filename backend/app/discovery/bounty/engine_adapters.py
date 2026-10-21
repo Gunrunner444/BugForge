@@ -168,10 +168,65 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"{extra} && _bfOk({probe});\n"
         )
         compare = "!=" if kind is OracleKind.CREDIT_MATCHES_REPORTED else ">"
-        violated = f"        return bfVal[{K_CREDITED}][1] {compare} {ceiling};\n"
+        # The violated expression repeats the judged guards. A missing read or a
+        # reverted probe is not a violation even if this expression is considered alone.
+        violated = (
+            "        if (bfReadFailed || !_bfOk("
+            f"{probe}) || !bfSeen[{K_RECEIVED}][1] || !bfSeen[{K_CREDITED}][1]"
+            f"{extra.replace(' && ', ' || !')}) return false;\n"
+            f"        return bfVal[{K_CREDITED}][1] {compare} {ceiling};\n"
+        )
+    elif kind is OracleKind.FEE_SHARES_MATCH:
+        fee = _fee_judge(oracle, probe)
+        if fee is None:
+            return None
+        fee_judged, fee_violated = fee
+        return pre + reached + fee_judged, fee_violated
     else:
         return None
     return pre + reached + judged, violated
+
+
+def _fee_slot(name: str) -> int:
+    return EVIDENCE_SLOTS.index(name)
+
+
+def _fee_judge(oracle: OracleSpec, probe: int) -> tuple[str, str] | None:
+    """In-EVM fee-share judge. It does not read a precomputed expected value."""
+    if oracle.max_bps <= 0 or not oracle.share_getter:
+        return None
+    slots = [
+        _fee_slot(name)
+        for name in (
+            "fee_assets_before",
+            "fee_assets_after",
+            "fee_supply_before",
+            "fee_performance_bps",
+            "fee_protocol_bps",
+            "fee_performance_before",
+            "fee_performance_after",
+            "fee_protocol_before",
+            "fee_protocol_after",
+            "fee_self_before",
+            "fee_self_after",
+        )
+    ]
+    seen = " && ".join(f"bfSeen[{K_EVIDENCE}][{slot}]" for slot in slots)
+    judged = f"        return !bfReadFailed && _bfOk({probe}) && {seen};\n"
+    assets0, assets1, supply, perf_bps, proto_bps, perf0, perf1, proto0, proto1 = slots[:9]
+    violated = (
+        f"        if (bfReadFailed || !_bfOk({probe}) || !({seen})) return false;\n"
+        f"        if (bfVal[{K_EVIDENCE}][{perf1}] < bfVal[{K_EVIDENCE}][{perf0}] "
+        f"|| bfVal[{K_EVIDENCE}][{proto1}] < bfVal[{K_EVIDENCE}][{proto0}]) return true;\n"
+        f"        (uint256 bfPerfExpected, uint256 bfProtoExpected) = _bfFeeShares("
+        f"bfVal[{K_EVIDENCE}][{assets0}], bfVal[{K_EVIDENCE}][{assets1}], "
+        f"bfVal[{K_EVIDENCE}][{supply}], bfVal[{K_EVIDENCE}][{perf_bps}], "
+        f"bfVal[{K_EVIDENCE}][{proto_bps}], {oracle.max_bps});\n"
+        f"        return bfVal[{K_EVIDENCE}][{perf1}] - bfVal[{K_EVIDENCE}][{perf0}] "
+        f"!= bfPerfExpected || bfVal[{K_EVIDENCE}][{proto1}] - bfVal[{K_EVIDENCE}][{proto0}] "
+        f"!= bfProtoExpected;\n"
+    )
+    return judged, violated
 
 
 _ENGINE_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
@@ -236,6 +291,23 @@ contract {contract} {{
         if (cNeg && !rNeg) return false;
         if (!cNeg) return cAbs > rAbs;
         return cAbs < rAbs;
+    }}
+
+    // Floor-division fee shares. Independent of the Python judge.
+    function _bfFeeShares(
+        uint256 assets0,
+        uint256 assets1,
+        uint256 supply,
+        uint256 perfBps,
+        uint256 protoBps,
+        uint256 maxBps
+    ) internal pure returns (uint256 performance, uint256 protocol) {{
+        if (maxBps == 0 || assets1 < assets0 || perfBps == 0) return (0, 0);
+        uint256 profit = assets1 - assets0;
+        uint256 shares = supply == 0 ? profit : (assets0 == 0 ? 0 : (profit * supply) / assets0);
+        uint256 total = (shares * perfBps) / maxBps;
+        protocol = protoBps == 0 ? 0 : (total * protoBps) / maxBps;
+        performance = total - protocol;
     }}
 
     function _bfJudged() internal view returns (bool) {{

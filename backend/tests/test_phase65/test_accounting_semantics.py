@@ -131,6 +131,7 @@ def test_idle_and_deployed_hosts_are_not_the_same_report() -> None:
     assert idle[0].fact("balance_backed") == "true"
     assert idle[0].fact("report_scope") == "host"
     model.reporting_host = "DeployedHost"
+    model.asset_unit_evidence["DeployedHost.deployed()"] = "validated_profile"
     deployed = [
         item
         for item in run_suite(model).candidates

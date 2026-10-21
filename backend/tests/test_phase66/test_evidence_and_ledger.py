@@ -88,7 +88,26 @@ def test_a_role_proof_is_bound_to_one_execution() -> None:
     role = next(item for item in proven.assumptions if item.name == "privileged_actor")
     assert "vf_one" in role.evidence
     assert "pr_one" in role.evidence
-    assert is_strong(_record(applicability=proven.as_dict())) is True
+    assert (
+        is_strong(
+            _record(
+                applicability=proven.as_dict(),
+                sequence_id="vf_one",
+                property_id="pr_one",
+            )
+        )
+        is True
+    )
+    assert (
+        is_strong(
+            _record(
+                applicability=proven.as_dict(),
+                sequence_id="vf_two",
+                property_id="pr_two",
+            )
+        )
+        is False
+    )
     assert is_strong(_record(applicability=denied.as_dict())) is False
     stale = apply_execution_applicability(
         proven,

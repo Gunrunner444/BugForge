@@ -141,7 +141,8 @@ def assemble(tmp_path: Path) -> dict[str, str]:
     return files
 
 
-def _profile(files: dict[str, str]) -> dict[str, object]:
+def _profile(files: dict[str, str], *, protocol_bps: str = "0") -> dict[str, object]:
+    """IdleHost profile. ``protocol_bps`` is the MockFactory constructor argument."""
     bound = tuple(HASHES)
     return {
         "profile_id": "yearn-idle-host",
@@ -161,7 +162,7 @@ def _profile(files: dict[str, str]) -> dict[str, object]:
                 "kind": "source_contract",
                 "contract": "MockFactory",
                 "arguments": [
-                    {"kind": "uint", "value": "0"},
+                    {"kind": "uint", "value": protocol_bps},
                     {"kind": "role", "value": "governor"},
                 ],
             },
@@ -179,7 +180,8 @@ def _profile(files: dict[str, str]) -> dict[str, object]:
         "assumptions": [
             "IdleHost is a local host whose callbacks leave funds idle",
             "TokenizedStrategy runtime is placed at the address literal in BaseStrategy",
-            "MockFactory returns a zero protocol fee and is not the vault factory",
+            "MockFactory is a local factory and is not the vault factory. "
+            f"Its protocol fee argument is {protocol_bps}",
             "asset() must return the harness token before token accounting runs",
             "this run is a local source replay, not deployed-runtime equivalence",
         ],
@@ -195,44 +197,104 @@ def _expect_scenarios(
     sequences: list[object],
     observations: list[dict[str, object]],
     expected: dict[str, dict[str, str]],
+    *,
+    excluded: dict[str, str] | None = None,
 ) -> None:
-    """Every named template must be generated, executed, and judged. One hit is not enough."""
-    by_template: dict[str, list[str]] = {}
-    for item in sequences:
-        by_template.setdefault(str(item.template), []).append(str(item.sequence_id))  # type: ignore[attr-defined]
+    """Require one observation per sequence id. A count match is not that correspondence.
+
+    Every generated template is either an expected scenario or an intentional exclusion
+    with a reason. A duplicate of one id cannot stand in for a missing id. An expected
+    scenario that did not compile, did not execute, or stayed inconclusive fails here.
+    """
+    excluded = dict(excluded or {})
     problems: list[str] = []
-    seen: set[str] = set()
-    for template, spec in expected.items():
-        ids = by_template.get(template) or []
-        if not ids:
+    overlap = sorted(set(expected) & set(excluded))
+    if overlap:
+        problems.append(f"templates listed as both expected and excluded: {overlap}")
+    by_template: dict[str, list[str]] = {}
+    id_to_template: dict[str, str] = {}
+    for item in sequences:
+        template = str(item.template)  # type: ignore[attr-defined]
+        sequence_id = str(item.sequence_id)  # type: ignore[attr-defined]
+        by_template.setdefault(template, []).append(sequence_id)
+        previous = id_to_template.get(sequence_id)
+        if previous is not None:
+            problems.append(f"{sequence_id}: duplicate sequence id for {previous} and {template}")
+        id_to_template[sequence_id] = template
+    for template, ids in by_template.items():
+        if template not in expected and template not in excluded:
+            problems.append(
+                f"{template}: generated ({', '.join(ids)}) but neither an expected "
+                "scenario nor an intentional exclusion"
+            )
+    for template in expected:
+        if template not in by_template:
             problems.append(f"{template}: sequence was not generated")
-            continue
-        rows = [row for row in observations if row["sequence_id"] in set(ids)]
-        if len(rows) != len(ids):
-            problems.append(f"{template}: {len(ids)} sequences but {len(rows)} observations")
-        if not rows:
-            problems.append(f"{template}: not executed")
-            continue
-        for row in rows:
-            seen.add(str(row["sequence_id"]))
-            label = f"{template} {row['sequence_id']}"
+    for template, reason in excluded.items():
+        if template not in by_template:
+            problems.append(f"{template}: exclusion names a sequence that was not generated")
+        if not reason.strip():
+            problems.append(f"{template}: an intentional exclusion needs a reason")
+    observed: dict[str, list[dict[str, object]]] = {}
+    for row in observations:
+        observed.setdefault(str(row.get("sequence_id", "")), []).append(row)
+    expected_ids = set(id_to_template)
+    observed_ids = set(observed)
+    if expected_ids != observed_ids:
+        missing = sorted(expected_ids - observed_ids)
+        extra = sorted(observed_ids - expected_ids)
+        if missing:
+            problems.append(f"missing observations for {missing}")
+        if extra:
+            problems.append(f"unexpected observations for {extra}")
+    for sequence_id, rows in sorted(observed.items()):
+        if len(rows) != 1:
+            problems.append(
+                f"{sequence_id}: {len(rows)} observations; each sequence needs exactly one"
+            )
+    unjudged = {
+        "inconclusive",
+        "sequence_executed_no_oracle",
+        "compile_failed",
+        "execution_failed",
+        "unavailable",
+    }
+    for template, spec in expected.items():
+        for sequence_id in by_template.get(template, []):
+            rows = observed.get(sequence_id) or []
+            if len(rows) != 1:
+                continue
+            row = rows[0]
+            label = f"{template} {sequence_id}"
             if row.get("verified"):
                 problems.append(f"{label}: verified was set")
-            outcome = str(row["outcome"])
-            kind = str(row["oracle_kind"])
-            if outcome != spec["outcome"] or kind != spec["oracle_kind"]:
+            outcome = str(row.get("outcome"))
+            kind = str(row.get("oracle_kind"))
+            if outcome != spec.get("outcome") or kind != spec.get("oracle_kind"):
                 problems.append(f"{label}: {outcome} {kind} {row.get('reason')}")
-            if outcome in {
-                "inconclusive",
-                "sequence_executed_no_oracle",
-                "compile_failed",
-                "execution_failed",
-                "unavailable",
-            }:
-                problems.append(f"{label}: {outcome} does not judge this scenario")
-            needle = spec.get("reason_has", "")
-            if needle and needle not in str(row.get("reason")):
-                problems.append(f"{label}: reason lacks {needle!r}: {row.get('reason')}")
+            if outcome in unjudged:
+                problems.append(
+                    f"{label}: {outcome} does not judge this scenario: {row.get('reason')}"
+                )
+            for key, needle in spec.items():
+                if key in {"outcome", "oracle_kind"} or not needle:
+                    continue
+                if needle not in str(row.get("reason")):
+                    problems.append(f"{label}: reason lacks {needle!r}: {row.get('reason')}")
+    for template, reason in excluded.items():
+        for sequence_id in by_template.get(template, []):
+            rows = observed.get(sequence_id) or []
+            if len(rows) != 1:
+                continue
+            row = rows[0]
+            label = f"{template} {sequence_id}"
+            outcome = str(row.get("outcome"))
+            if outcome in {"property_held", "property_violated"}:
+                problems.append(f"{label}: exclusion cannot hide a judged {outcome}")
+            if reason not in str(row.get("reason")):
+                problems.append(f"{label}: exclusion {reason!r} not in {row.get('reason')}")
+            if row.get("verified"):
+                problems.append(f"{label}: verified was set")
     if problems:
         raise AssertionError("\n".join(problems))
 
@@ -374,6 +436,7 @@ def test_yearn_replay_executes_the_report_through_the_campaign_service(
         item
         for item in analysis.sequences
         if item.derived_from.startswith("accounting.reported_balance@")
+        or item.derived_from.startswith("accounting.fee_shares@")
     ]
     report_ids = {item.sequence_id for item in report_sequences}
     assert report_ids
@@ -416,6 +479,33 @@ def test_yearn_replay_executes_the_report_through_the_campaign_service(
                 "oracle_kind": "credit_matches_reported",
                 "reason_has": "==",
             },
+            "fee-no-change": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "profit 0",
+                "reason_locked": "is not a fee",
+            },
+            "fee-profit": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 100000000000000000 == 100000000000000000",
+                "reason_protocol": "protocol delta 0 == 0",
+                "reason_profit": "profit 1000000000000000000",
+                "reason_locked": "is not a fee",
+            },
+            "fee-rounding": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 1 == 1",
+                "reason_protocol": "protocol delta 0 == 0",
+                "reason_profit": "profit 15",
+            },
+            "fee-dust": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 0 == 0",
+                "reason_profit": "profit 9",
+            },
         },
     )
     assert report_candidates[0].fact("store_relation") == "equal"
@@ -424,6 +514,23 @@ def test_yearn_replay_executes_the_report_through_the_campaign_service(
     assert any("performance-fee share mint" in item for item in missing)
     assert any("protocol-fee share split" in item for item in missing)
     assert any("locked-share" in item for item in missing)
+    fees = [
+        item
+        for item in analysis.candidates
+        if item.detector == "accounting.fee_shares" and item.function == "report()"
+    ]
+    assert len(fees) == 1
+    assert fees[0].fact("fee_complete") == "true"
+    assert fees[0].fact("host_dependence") == "observed_inputs"
+    assert any("unlock formula" in item for item in fees[0].missing)
+    assert any("locked-share" in item for item in fees[0].missing)
+    for row in report_obs:
+        reason = str(row.get("reason", "")).lower()
+        assert "theft" not in reason
+        if row["oracle_kind"] == "fee_shares_match":
+            assert row["applicability_disposition"] == "target_applicable"
+        if row["oracle_kind"] == "credit_matches_reported":
+            assert row["applicability_disposition"] == "unconfirmed"
     assert not inconclusive, [(item["outcome"], item.get("reason")) for item in inconclusive]
     assert not unsupported
     assert not role_blocked
@@ -474,8 +581,12 @@ def test_deployed_host_reports_above_idle_holdings_without_a_violation(
     bound = list(profile["bound_files"])
     bound.append({"path": "src/DeployedHost.sol", "sha256": sha256_text(deployed_text)})
     profile["bound_files"] = bound
+    profile["asset_units"] = [
+        {"contract": "DeployedHost", "getter": "deployed()", "evidence": "validated_profile"},
+    ]
     profile["assumptions"] = [
         "DeployedHost is a local host whose report adds a public deployed balance",
+        "deployed() is asset-denominated only because this profile says validated_profile",
         "TokenizedStrategy runtime is placed at the address literal in BaseStrategy",
         "MockFactory returns a zero protocol fee and is not the vault factory",
         "this run is a local source replay, not deployed-runtime equivalence",
@@ -537,6 +648,7 @@ def test_deployed_host_reports_above_idle_holdings_without_a_violation(
     assert report[0].fact("reported_form") == "idle_plus_getter"
     assert report[0].fact("balance_backed") == "false"
     assert report[0].fact("external_getter") == "deployed()"
+    assert report[0].fact("asset_units") == "validated_profile"
     assert report[0].fact("report_scope") == "host"
     assert report[0].fact("reporting_host") == "DeployedHost"
     observations = result["observations"]
@@ -545,6 +657,7 @@ def test_deployed_host_reports_above_idle_holdings_without_a_violation(
         item
         for item in analysis.sequences
         if item.derived_from.startswith("accounting.reported_balance@")
+        or item.derived_from.startswith("accounting.fee_shares@")
     ]
     report_ids = {item.sequence_id for item in report_sequences}
     report_obs = [item for item in observations if item["sequence_id"] in report_ids]
@@ -576,7 +689,213 @@ def test_deployed_host_reports_above_idle_holdings_without_a_violation(
                 "oracle_kind": "credit_matches_reported",
                 "reason_has": "==",
             },
+            "fee-no-change": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "profit 0",
+                "reason_locked": "is not a fee",
+            },
+            "fee-profit": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 100000000000000000 == 100000000000000000",
+                "reason_protocol": "protocol delta 0 == 0",
+            },
+            "fee-rounding": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 1 == 1",
+                "reason_profit": "profit 15",
+            },
+            "fee-dust": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "profit 9",
+                "reason_zero": "performance delta 0 == 0",
+            },
         },
     )
     assert report[0].fact("store_relation") == "equal"
+    assert result["forge_runs"] <= 30
     assert not any(item.get("verified") for item in observations)
+
+
+def _boot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: dict[str, str],
+    profile: dict[str, object],
+    program_id: str,
+) -> tuple[BountyCampaignService, object, dict[str, object]]:
+    root = tmp_path / program_id
+    root.mkdir()
+    for path, text in files.items():
+        destination = root / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text)
+    import app.discovery.bounty.service as service_module
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(
+        get_settings(),
+        "bounty_campaign_database_url",
+        f"sqlite:///{tmp_path / program_id}.sqlite",
+        raising=False,
+    )
+    monkeypatch.setattr(service_module, "_SERVICE", None, raising=False)
+    manifest = BountyManifest.from_dict(
+        {
+            "platform": "local",
+            "program_id": program_id,
+            "program_name": program_id,
+            "rules_version": "local",
+            "in_scope": [{"kind": "contract", "identifier": "TokenizedStrategy"}],
+            "out_of_scope": [],
+            "known_issues": [],
+            "poc_requirement": "required",
+            "testing_mode": "local_only",
+            "repository": "https://github.com/yearn/tokenized-strategy",
+            "source_commit": PIN,
+            "deployments": [],
+            "chain_ids": ["1"],
+            "compiler": {
+                "version": "0.8.18",
+                "optimizer": "enabled",
+                "optimizer_runs": "200",
+                "via_ir": "false",
+                "evm_version": "paris",
+            },
+            "impact_categories": [
+                {
+                    "name": "Direct theft of user funds",
+                    "severity": "critical",
+                    "weight": 90,
+                    "tags": ["custody", "vault_accounting"],
+                }
+            ],
+        }
+    )
+    service = BountyCampaignService()
+    campaign = service.create(
+        CampaignSpec(
+            manifest=manifest,
+            repo_root=root,
+            contract="TokenizedStrategy",
+            source_file="src/TokenizedStrategy.sol",
+            files=tuple(sorted(files)),
+            constructor_profile=profile,
+            address=LITERAL,
+            chain_id="1",
+        )
+    )
+    result = service.stateful_execute(campaign.campaign_id, rounds=1, max_runs=30)
+    return service, campaign, result
+
+
+def test_nonzero_protocol_fee_splits_performance_shares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Protocol fee 2000 bps to the governor treasury. Supply starts at zero.
+
+    The strategy is freshly initialized: stored total assets 0, total supply 0,
+    performance fee 1000 from the pinned initializer, recipient the deploying
+    harness. Profit is a token transfer into the strategy, then report(), whose
+    host callback returns the idle balance. Shares equal profit because supply
+    is 0. Protocol shares are floor(feeShares * 2000 / 10000). The profile label
+    is not an input to the judge.
+    """
+    if os.environ.get("BUGFORGE_YEARN_EXECUTE") != "1":
+        if os.environ.get("BUGFORGE_REQUIRE_YEARN") == "1":
+            pytest.fail("the Yearn job must execute the nonzero protocol-fee replay")
+        pytest.skip("BUGFORGE_YEARN_EXECUTE is not set")
+    from tests.test_phase52.phase52_support import _has
+
+    if not (_has("forge") and _has("solc")):
+        pytest.fail("forge and solc are required to execute the Yearn replay")
+    files = assemble(tmp_path)
+    profile = _profile(files, protocol_bps="2000")
+    profile["profile_id"] = "yearn-protocol-fee-host"
+    service, campaign, result = _boot(tmp_path, monkeypatch, files, profile, "yearn-protocol-fee")
+    assert result["available"] is True, result.get("blocker") or result.get("reason")
+    assert result["forge_runs"] <= 30
+    analysis = service._analysis(campaign)
+    fees = [
+        item
+        for item in analysis.candidates
+        if item.detector == "accounting.fee_shares" and item.function == "report()"
+    ]
+    assert len(fees) == 1
+    assert fees[0].fact("fee_complete") == "true"
+    assert "2000" not in " ".join(value for _key, value in fees[0].facts)
+    observations = result["observations"]
+    assert isinstance(observations, list)
+    report_sequences = [
+        item
+        for item in analysis.sequences
+        if item.derived_from.startswith("accounting.reported_balance@")
+        or item.derived_from.startswith("accounting.fee_shares@")
+    ]
+    report_ids = {item.sequence_id for item in report_sequences}
+    report_obs = [item for item in observations if item["sequence_id"] in report_ids]
+    _expect_scenarios(
+        report_sequences,
+        report_obs,
+        {
+            "donate→report": {
+                "outcome": "property_held",
+                "oracle_kind": "credit_matches_reported",
+                "reason_has": "==",
+            },
+            "report": {
+                "outcome": "property_held",
+                "oracle_kind": "credit_matches_reported",
+                "reason_has": "==",
+            },
+            "unauthorized-report": {
+                "outcome": "property_held",
+                "oracle_kind": "call_must_fail",
+            },
+            "donate→report→warp→report": {
+                "outcome": "property_held",
+                "oracle_kind": "credit_matches_reported",
+                "reason_has": "==",
+            },
+            "fee-no-change": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "profit 0",
+                "reason_locked": "is not a fee",
+            },
+            "fee-profit": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 80000000000000000 == 80000000000000000",
+                "reason_protocol": "protocol delta 20000000000000000 == 20000000000000000",
+                "reason_profit": "profit 1000000000000000000",
+            },
+            "fee-rounding": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 1 == 1",
+                "reason_protocol": "protocol delta 0 == 0",
+                "reason_profit": "profit 15",
+            },
+            "fee-dust": {
+                "outcome": "property_held",
+                "oracle_kind": "fee_shares_match",
+                "reason_has": "performance delta 0 == 0",
+                "reason_profit": "profit 9",
+            },
+        },
+    )
+    profit_ids = {item.sequence_id for item in report_sequences if item.template == "fee-profit"}
+    assert len(profit_ids) == 1
+    profit = next(row for row in report_obs if row["sequence_id"] in profit_ids)
+    evaluation = profit.get("evaluation")
+    assert isinstance(evaluation, dict)
+    evidence = evaluation.get("evidence")
+    assert isinstance(evidence, dict)
+    assert evidence["fee_performance_bps"] == "1000"
+    assert evidence["fee_protocol_bps"] == "2000"
+    assert "theft" not in str(profit.get("reason")).lower()
+    assert profit.get("verified") is False
