@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -850,19 +850,65 @@ class BountyCampaignService:
             # not be restamped; execution fails closed until reanalyze().
             campaign.cache["analysis_stale"] = campaign.cache.get("analysis_token") != token
             return cast("CampaignAnalysis", cached)
-        analysis = analyze_campaign(
-            manifest=campaign.manifest,
-            identity=campaign.identity,
-            repo_root=campaign.spec.repo_root,
-            files=campaign.request.files,
-            selection=campaign.selection,
-            contract=campaign.spec.contract,
-            address=campaign.spec.address,
-            chain_id=campaign.spec.chain_id,
-        )
-        from app.discovery.bounty.constructor_profile import attach_profile_seed
 
-        attach_profile_seed(campaign, analysis)
+        def _build(
+            host_name: str = "",
+            evidence: str = "",
+            units: Mapping[str, str] | None = None,
+        ) -> CampaignAnalysis:
+            return analyze_campaign(
+                manifest=campaign.manifest,
+                identity=campaign.identity,
+                repo_root=campaign.spec.repo_root,
+                files=campaign.request.files,
+                selection=campaign.selection,
+                contract=campaign.spec.contract,
+                address=campaign.spec.address,
+                chain_id=campaign.spec.chain_id,
+                reporting_host=host_name,
+                reporting_host_evidence=evidence,
+                asset_unit_evidence=units,
+            )
+
+        analysis = _build()
+        from app.discovery.bounty.constructor_profile import (
+            ProfileError,
+            attach_profile_seed,
+            parse_profile,
+        )
+        from app.discovery.bounty.stateful import delegate_execution_host
+
+        attached = attach_profile_seed(campaign, analysis)
+        host = ""
+        profile = None
+        raw = campaign.spec.constructor_profile
+        if (
+            isinstance(attached, dict)
+            and attached.get("validation") == "accepted"
+            and isinstance(raw, dict)
+            and raw
+            and analysis.model is not None
+        ):
+            try:
+                profile = parse_profile(raw)
+            except ProfileError:
+                profile = None
+            if profile is not None:
+                host = delegate_execution_host(
+                    profile,
+                    analysis.model,
+                    campaign.spec.contract,
+                    analysis.sources,
+                )
+        if host:
+            units = {
+                f"{contract}.{getter}": evidence
+                for contract, getter, evidence in (
+                    profile.asset_units if profile is not None else ()
+                )
+            }
+            analysis = _build(host, "validated_profile", units)
+            attach_profile_seed(campaign, analysis)
         campaign.cache["analysis"] = analysis
         campaign.cache["analysis_token"] = token
         campaign.cache["analysis_stale"] = False
@@ -1221,7 +1267,9 @@ class BountyCampaignService:
         # a file that vanished keeps its analyzed text out of the set: identity fails closed
         return current
 
-    def stateful_execute(self, campaign_id: str, *, rounds: int = 3) -> dict[str, Any]:
+    def stateful_execute(
+        self, campaign_id: str, *, rounds: int = 3, max_runs: int | None = None
+    ) -> dict[str, Any]:
         """Phase 52 (hardened): the executable closed loop over the campaign's VFCS plans.
 
         Every sequence runs against the exact source set it was built from (re-read
@@ -1325,12 +1373,21 @@ class BountyCampaignService:
         engines = [PropertyEngine(name) for name in usable_property_engines(registry)]
         project = _project_settings(campaign.manifest.compiler) if compiler is not None else None
         profile_record, profile = _accepted_profile(campaign)
-        executor = StatefulExecutor(
-            compiler=compiler,
-            project=project,
-            compiler_required=required,
-            profile=profile,
-        )
+        if max_runs is None:
+            executor = StatefulExecutor(
+                compiler=compiler,
+                project=project,
+                compiler_required=required,
+                profile=profile,
+            )
+        else:
+            executor = StatefulExecutor(
+                compiler=compiler,
+                project=project,
+                compiler_required=required,
+                profile=profile,
+                max_runs=max_runs,
+            )
         result = run_feedback_loop(
             executor,
             tuple(runnable),
@@ -1502,6 +1559,25 @@ class BountyCampaignService:
                 ),
                 "verified": False,
             }
+            record = executions[obs.sequence_id]
+            from app.discovery.bounty.applicability import apply_execution_applicability
+            from app.discovery.bounty.findings import is_strong
+            from app.discovery.bounty.stateful import K_ROLE
+
+            events = obs.result.events if obs.result is not None else ()
+            role_values = [value for kind, _index, value in events if kind == K_ROLE]
+            applicability = apply_execution_applicability(
+                spec.applicability,
+                identity_status=str(record["identity_status"]),
+                reason_code=str(record["reason_code"]),
+                role_proven=bool(role_values) and all(value == 1 for value in role_values),
+                role_denied=any(value == 0 for value in role_values),
+                execution_id=obs.sequence_id,
+                property_id=str(record.get("property_id") or ""),
+            )
+            record["applicability"] = applicability.as_dict()
+            record["token_fixture"] = spec.oracle.token_fixture
+            record["strong_candidate"] = is_strong(record)
         return bundles, blobs, executions
 
     def stateful_status(self, campaign_id: str) -> dict[str, Any]:
@@ -1604,6 +1680,7 @@ class BountyCampaignService:
             "contracts_modeled": len(model.contracts) if model is not None else 0,
             "functions_modeled": len(model.all_functions()) if model is not None else 0,
             "candidates": len(analysis.candidates),
+            "candidate_budget": analysis.candidate_budget,
             "sequences": len(analysis.sequences),
             "skipped": analysis.sequence_skipped,
         }
@@ -1809,6 +1886,13 @@ class BountyCampaignService:
                 record["stale"] = False
             else:
                 record["stale"] = record.get("source_set_digest") not in valid_digests
+                if record["stale"]:
+                    current_applicability = record.get("applicability")
+                    if isinstance(current_applicability, dict):
+                        updated = dict(current_applicability)
+                        updated["disposition"] = "not_applicable"
+                        record["applicability"] = updated
+                    record["strong_candidate"] = False
             found[sid] = record
         return found
 

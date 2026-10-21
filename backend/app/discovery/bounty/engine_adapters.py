@@ -33,18 +33,23 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.properties import (
+    EVIDENCE_SLOTS,
     OracleKind,
     OracleSpec,
     PropertyVerdict,
     precondition_indices,
+    prior_payout_indices,
     probe_index,
 )
 from app.discovery.bounty.stateful import (
     _FIXTURE_TOKEN,
+    _SIGN_HELPER,
+    K_ACTOR,
     K_AFTER,
     K_BEFORE,
     K_CALL,
     K_CREDITED,
+    K_EVIDENCE,
     K_PRIMITIVE,
     K_READ_FAILED,
     K_RECEIVED,
@@ -84,6 +89,14 @@ class EngineStatus(StrEnum):
 # ---- in-EVM judge ---------------------------------------------------------------------------
 
 
+def _sized_exit(sequence: Vfcs) -> bool:
+    return any(
+        value == "share_balance" or value.startswith("asset_exit:")
+        for call in sequence.calls
+        for _name, value in call.arguments
+    )
+
+
 def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
     """Solidity bodies for (_bfJudged, _bfViolated), or None when not expressible."""
     if not oracle.executable:
@@ -107,7 +120,30 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"&& bfSeen[{K_AFTER}][{probe}];\n"
         )
         violated = f"        return bfVal[{K_BEFORE}][{probe}] != bfVal[{K_AFTER}][{probe}];\n"
-    elif kind in {OracleKind.CREDIT_LE_RECEIVED, OracleKind.BALANCE_NOT_INCREASED}:
+    elif kind is OracleKind.BALANCE_NOT_INCREASED:
+        # The probe is an additional payout only when an earlier call of the same
+        # function by the same actor succeeded. Otherwise the probe is the ordinary
+        # payout, and a revert means the round trip was not exercised.
+        payouts = prior_payout_indices(sequence, oracle, probe)
+        payout_guard = "".join(f"        if (!_bfOk({i})) return false;\n" for i in payouts)
+        probe_guard = "" if payouts else f"        if (!_bfOk({probe})) return false;\n"
+        position_guard = ""
+        if _sized_exit(sequence):
+            slot = EVIDENCE_SLOTS.index("attacker_withdrawal_amount")
+            position_guard = (
+                f"        if (!bfSeen[{K_EVIDENCE}][{slot}] || bfVal[{K_EVIDENCE}][{slot}] == 0) "
+                "return false;\n"
+            )
+        judged = (
+            f"{payout_guard}{probe_guard}{position_guard}"
+            f"        return !bfReadFailed && bfSeen[{K_ACTOR}][0] && bfSeen[{K_ACTOR}][1]"
+            f" && bfSeen[{K_ACTOR}][2] && bfSeen[{K_ACTOR}][3];\n"
+        )
+        violated = (
+            f"        return bfVal[{K_ACTOR}][1] + bfVal[{K_ACTOR}][3] > "
+            f"bfVal[{K_ACTOR}][0] + bfVal[{K_ACTOR}][2];\n"
+        )
+    elif kind is OracleKind.CREDIT_LE_RECEIVED:
         judged = (
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][0] && bfSeen[{K_RECEIVED}][1]"
             f" && bfSeen[{K_CREDITED}][0] && bfSeen[{K_CREDITED}][1] && _bfOk({probe});\n"
@@ -116,15 +152,81 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"        return _bfGreaterDelta(bfVal[{K_CREDITED}][0], bfVal[{K_CREDITED}][1], "
             f"bfVal[{K_RECEIVED}][0], bfVal[{K_RECEIVED}][1]);\n"
         )
-    elif kind is OracleKind.CREDIT_LE_HOLDINGS:
+    elif kind is OracleKind.STATE_EQUALS:
+        state_judged, state_violated = _state_equals_judge(oracle, probe)
+        if state_judged is None or state_violated is None:
+            return None
+        return pre + reached + state_judged, state_violated
+    elif kind in {OracleKind.CREDIT_LE_HOLDINGS, OracleKind.CREDIT_MATCHES_REPORTED}:
+        extra = ""
+        ceiling = f"bfVal[{K_RECEIVED}][1]"
+        if oracle.external_getter:
+            extra = f" && bfSeen[{K_RECEIVED}][2]"
+            ceiling = f"bfVal[{K_RECEIVED}][1] + bfVal[{K_RECEIVED}][2]"
         judged = (
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][1] && bfSeen[{K_CREDITED}][1]"
-            f" && _bfOk({probe});\n"
+            f"{extra} && _bfOk({probe});\n"
         )
-        violated = f"        return bfVal[{K_CREDITED}][1] > bfVal[{K_RECEIVED}][1];\n"
+        compare = "!=" if kind is OracleKind.CREDIT_MATCHES_REPORTED else ">"
+        # The violated expression repeats the judged guards. A missing read or a
+        # reverted probe is not a violation even if this expression is considered alone.
+        violated = (
+            "        if (bfReadFailed || !_bfOk("
+            f"{probe}) || !bfSeen[{K_RECEIVED}][1] || !bfSeen[{K_CREDITED}][1]"
+            f"{extra.replace(' && ', ' || !')}) return false;\n"
+            f"        return bfVal[{K_CREDITED}][1] {compare} {ceiling};\n"
+        )
+    elif kind is OracleKind.FEE_SHARES_MATCH:
+        fee = _fee_judge(oracle, probe)
+        if fee is None:
+            return None
+        fee_judged, fee_violated = fee
+        return pre + reached + fee_judged, fee_violated
     else:
         return None
     return pre + reached + judged, violated
+
+
+def _fee_slot(name: str) -> int:
+    return EVIDENCE_SLOTS.index(name)
+
+
+def _fee_judge(oracle: OracleSpec, probe: int) -> tuple[str, str] | None:
+    """In-EVM fee-share judge. It does not read a precomputed expected value."""
+    if oracle.max_bps <= 0 or not oracle.share_getter:
+        return None
+    slots = [
+        _fee_slot(name)
+        for name in (
+            "fee_assets_before",
+            "fee_assets_after",
+            "fee_supply_before",
+            "fee_performance_bps",
+            "fee_protocol_bps",
+            "fee_performance_before",
+            "fee_performance_after",
+            "fee_protocol_before",
+            "fee_protocol_after",
+            "fee_self_before",
+            "fee_self_after",
+        )
+    ]
+    seen = " && ".join(f"bfSeen[{K_EVIDENCE}][{slot}]" for slot in slots)
+    judged = f"        return !bfReadFailed && _bfOk({probe}) && {seen};\n"
+    assets0, assets1, supply, perf_bps, proto_bps, perf0, perf1, proto0, proto1 = slots[:9]
+    violated = (
+        f"        if (bfReadFailed || !_bfOk({probe}) || !({seen})) return false;\n"
+        f"        if (bfVal[{K_EVIDENCE}][{perf1}] < bfVal[{K_EVIDENCE}][{perf0}] "
+        f"|| bfVal[{K_EVIDENCE}][{proto1}] < bfVal[{K_EVIDENCE}][{proto0}]) return true;\n"
+        f"        (uint256 bfPerfExpected, uint256 bfProtoExpected) = _bfFeeShares("
+        f"bfVal[{K_EVIDENCE}][{assets0}], bfVal[{K_EVIDENCE}][{assets1}], "
+        f"bfVal[{K_EVIDENCE}][{supply}], bfVal[{K_EVIDENCE}][{perf_bps}], "
+        f"bfVal[{K_EVIDENCE}][{proto_bps}], {oracle.max_bps});\n"
+        f"        return bfVal[{K_EVIDENCE}][{perf1}] - bfVal[{K_EVIDENCE}][{perf0}] "
+        f"!= bfPerfExpected || bfVal[{K_EVIDENCE}][{proto1}] - bfVal[{K_EVIDENCE}][{proto0}] "
+        f"!= bfProtoExpected;\n"
+    )
+    return judged, violated
 
 
 _ENGINE_TEMPLATE = """// SPDX-License-Identifier: UNLICENSED
@@ -139,6 +241,8 @@ interface BugForgeVm {{
     function warp(uint256) external;
     function roll(uint256) external;
     function deal(address, uint256) external;
+    function addr(uint256) external pure returns (address);
+    function sign(uint256, bytes32) external pure returns (uint8, bytes32, bytes32);
 }}
 
 contract {contract} {{
@@ -159,6 +263,11 @@ contract {contract} {{
         (bool ok, bytes memory out) = target.staticcall(data);
         if (!ok || out.length < 32) return (false, 0);
         return (true, abi.decode(out, (uint256)));
+    }}
+
+    function _bfEvidence(uint256 slot, address target, bytes memory data) internal {{
+        (bool ok, uint256 value) = _bfRead(target, data);
+        if (ok) _bfObs({evidence}, slot, value);
     }}
 
     function _bfOk(uint256 i) internal view returns (bool) {{
@@ -182,6 +291,23 @@ contract {contract} {{
         if (cNeg && !rNeg) return false;
         if (!cNeg) return cAbs > rAbs;
         return cAbs < rAbs;
+    }}
+
+    // Floor-division fee shares. Independent of the Python judge.
+    function _bfFeeShares(
+        uint256 assets0,
+        uint256 assets1,
+        uint256 supply,
+        uint256 perfBps,
+        uint256 protoBps,
+        uint256 maxBps
+    ) internal pure returns (uint256 performance, uint256 protocol) {{
+        if (maxBps == 0 || assets1 < assets0 || perfBps == 0) return (0, 0);
+        uint256 profit = assets1 - assets0;
+        uint256 shares = supply == 0 ? profit : (assets0 == 0 ? 0 : (profit * supply) / assets0);
+        uint256 total = (shares * perfBps) / maxBps;
+        protocol = protoBps == 0 ? 0 : (total * protoBps) / maxBps;
+        performance = total - protocol;
     }}
 
     function _bfJudged() internal view returns (bool) {{
@@ -208,8 +334,61 @@ contract {contract} {{
     function {flag_violated}() public view returns (bool) {{
         return !_bfViolated();
     }}
-}}
+{sign_helper}}}
 """
+
+
+def _state_equals_judge(oracle: OracleSpec, probe: int) -> tuple[str | None, str | None]:
+    """In-EVM twin of ``_state_equals_verdict``. A bad start or a still payout is unjudged."""
+    if not oracle.getter or not re.fullmatch(r"[0-9]{1,78}", oracle.expected_after):
+        return None, None
+    if oracle.expected_before and not re.fullmatch(r"[0-9]{1,78}", oracle.expected_before):
+        return None, None
+    lines = [
+        f"        if (!bfSeen[{K_BEFORE}][{probe}] || !bfSeen[{K_AFTER}][{probe}] || bfReadFailed) "
+        "return false;",
+        f"        if (!_bfOk({probe})) return false;",
+    ]
+    if oracle.expected_before:
+        lines.append(
+            f"        if (bfVal[{K_BEFORE}][{probe}] != {oracle.expected_before}) return false;"
+        )
+    violated = [f"bfVal[{K_AFTER}][{probe}] != {oracle.expected_after}"]
+    if oracle.balance_relation == "payout_matches_credit":
+        lines.extend(
+            [
+                f"        if (!bfSeen[{K_ACTOR}][0] || !bfSeen[{K_ACTOR}][1]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][0] || !bfSeen[{K_EVIDENCE}][1]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][2] || !bfSeen[{K_EVIDENCE}][3]) return false;",
+                f"        if (!bfSeen[{K_EVIDENCE}][6] || !bfSeen[{K_EVIDENCE}][7]) return false;",
+                (
+                    f"        if (bfVal[{K_ACTOR}][1] == bfVal[{K_ACTOR}][0]"
+                    f" && bfVal[{K_EVIDENCE}][0] == bfVal[{K_EVIDENCE}][1]"
+                    f" && bfVal[{K_EVIDENCE}][6] == bfVal[{K_EVIDENCE}][7]"
+                    f" && bfVal[{K_EVIDENCE}][2] == bfVal[{K_EVIDENCE}][3]) return false;"
+                ),
+            ]
+        )
+        violated.extend(
+            [
+                f"bfVal[{K_ACTOR}][1] < bfVal[{K_ACTOR}][0]",
+                f"bfVal[{K_EVIDENCE}][1] > bfVal[{K_EVIDENCE}][0]",
+                f"bfVal[{K_EVIDENCE}][7] > bfVal[{K_EVIDENCE}][6]",
+                f"bfVal[{K_EVIDENCE}][3] != bfVal[{K_EVIDENCE}][2]",
+                (
+                    f"bfVal[{K_ACTOR}][1] - bfVal[{K_ACTOR}][0]"
+                    f" != bfVal[{K_EVIDENCE}][6] - bfVal[{K_EVIDENCE}][7]"
+                ),
+                (
+                    f"bfVal[{K_EVIDENCE}][0] - bfVal[{K_EVIDENCE}][1]"
+                    f" != bfVal[{K_EVIDENCE}][6] - bfVal[{K_EVIDENCE}][7]"
+                ),
+            ]
+        )
+    elif oracle.balance_relation:
+        return None, None
+    lines.append("        return true;")
+    return "\n".join(lines) + "\n", "        return " + " || ".join(violated) + ";\n"
 
 
 def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
@@ -229,6 +408,7 @@ def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
         fixture=_FIXTURE_TOKEN if harness.fixture else "",
         contract=ENGINE_CONTRACT,
         read_failed=K_READ_FAILED,
+        evidence=K_EVIDENCE,
         call=K_CALL,
         prim=K_PRIMITIVE,
         judged=judge[0],
@@ -237,6 +417,7 @@ def engine_harness_source(harness: HarnessArtifact, sequence: Vfcs) -> str:
         flag_ran=FLAG_RAN,
         flag_unjudged=FLAG_UNJUDGED,
         flag_violated=FLAG_VIOLATED,
+        sign_helper=_SIGN_HELPER if "_bfSign(" in body else "",
     )
 
 

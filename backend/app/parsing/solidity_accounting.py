@@ -10,6 +10,7 @@ behavior is reported as ``unknown`` unless the source establishes it.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from app.parsing.solidity_research import (
     MemberCall,
@@ -39,6 +40,8 @@ def analyze_balance_delta(model: ResearchModel) -> list[SemanticCandidate]:
         found.extend(_pull_all(model, function))
         found.extend(_balance_as_deposit(model, function))
         found.extend(_unchecked_return(function))
+        found.extend(_reported_balance(model, function))
+        found.extend(_fee_share_candidates(model, function))
     found.extend(_cached_balance(model))
     return cap(found)
 
@@ -352,4 +355,759 @@ def _cached_balance(model: ResearchModel) -> list[SemanticCandidate]:
     return found
 
 
-__all__ = ["MemberCall", "analyze_balance_delta"]
+# ---- reported balance reconciliation -------------------------------------------------------
+
+_CALL_KEYWORDS = frozenset(
+    {
+        "if",
+        "for",
+        "while",
+        "require",
+        "assert",
+        "revert",
+        "return",
+        "emit",
+        "abi",
+        "uint",
+        "uint256",
+        "address",
+        "new",
+    }
+)
+_LOCAL_FROM_CALL = re.compile(
+    r"(?:u?int\d*\s+)?(?P<name>[A-Za-z_]\w*)\s*(?<![=!<>])=(?!=)\s*(?P<rhs>[^;]*\([^;]*)\s*;"
+)
+_STORE = re.compile(
+    r"(?P<lhs>[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*(?<![=!<>])=(?!=)\s*(?P<rhs>[^;]*);"
+)
+_BALANCE_OF_THIS = re.compile(r"balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)")
+_DAYS = re.compile(r"\b(\d+)\s+days\b")
+_SENDER_EQ = re.compile(
+    r"(?:msg\.sender|_sender)\s*==\s*([^&|;]+)|([^&|;]+)\s*==\s*(?:msg\.sender|_sender)"
+)
+
+
+@dataclass(frozen=True)
+class ReportedSite:
+    """One exposed function that stores a value obtained from a call.
+
+    ``balance_backed`` is the idle-token form only. A host callback is not idle
+    just because some other contract in the model has the same function name.
+    ``reported_form`` is ``idle_balance``, ``idle_plus_getter``, or ``other``.
+    ``report_scope`` is ``self``, ``lineage``, ``host``, or ``unresolved``.
+    """
+
+    local: str
+    field: str
+    getter: str
+    call: str
+    balance_backed: bool
+    role_getter: str
+    unlock_seconds: str
+    loss_ignored: bool
+    outflow: str
+    store_at: int = 0
+    reported_form: str = "other"
+    report_scope: str = "unresolved"
+    external_getter: str = ""
+    external_contract: str = ""
+    address_getter: str = ""
+    host: str = ""
+    gain: str = ""
+    # ``equal`` when the stored field is assigned the reported local itself.
+    # ``upper_bound`` when the assignment is a reduced or scaled expression.
+    store_relation: str = "upper_bound"
+    # ``source`` or ``validated_profile`` when an added component has unit evidence.
+    asset_units: str = ""
+
+    @property
+    def judgeable(self) -> bool:
+        return bool(self.getter) and self.reported_form in {"idle_balance", "idle_plus_getter"}
+
+
+def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | None:
+    """The reconciliation this function performs, or None when the shape is absent.
+
+    An external call through ``address(this)`` is resolved only on
+    ``model.reporting_host``. A same-named function elsewhere in the model is
+    not that host.
+    """
+    if not function.exposed or not function.has_body or function.kind != "function":
+        return None
+    found = _stored_report(model, function)
+    if found is None:
+        return None
+    local, field, call, assign_at, relation = found
+    getter = _stored_getter(model, function.contract, field)
+    classified = _classify_reported(model, function.contract, call, 0, "self")
+    form = classified.form if classified is not None else "other"
+    scope = classified.scope if classified is not None else "unresolved"
+    external_getter = classified.external_getter if classified is not None else ""
+    external_contract = classified.external_contract if classified is not None else ""
+    address_getter = classified.address_getter if classified is not None else ""
+    host = model.reporting_host if scope == "host" else ""
+    units = ""
+    if form == "idle_plus_getter" and external_getter:
+        units = _unit_evidence(model, external_contract or function.contract, external_getter)
+    gain = ""
+    if form == "idle_plus_getter" and not address_getter and external_getter:
+        owner = host or function.contract
+        if external_contract in {owner, function.contract}:
+            gain = _gain_signature(model, owner, external_getter, function.name)
+    role = _role_getter(model, function)
+    unlock = _unlock_seconds(model, function.contract)
+    ignored = _loss_ignored(function.body, local, field)
+    outflow = _outflow_signature(model, function, field)
+    backed = form == "idle_balance" and bool(getter)
+    return ReportedSite(
+        local=local,
+        field=field,
+        getter=getter,
+        call=call[:120],
+        balance_backed=backed,
+        role_getter=role,
+        unlock_seconds=unlock,
+        loss_ignored=ignored,
+        outflow=outflow,
+        store_at=assign_at,
+        reported_form=form if getter else "other",
+        report_scope=scope if getter else "unresolved",
+        external_getter=(
+            external_getter if form in {"idle_plus_getter", "unproven_units"} and getter else ""
+        ),
+        external_contract=(
+            external_contract if form in {"idle_plus_getter", "unproven_units"} and getter else ""
+        ),
+        address_getter=address_getter if form == "idle_plus_getter" and getter else "",
+        host=host,
+        gain=gain if form == "idle_plus_getter" and getter else "",
+        store_relation=relation,
+        asset_units=units,
+    )
+
+
+def _body_line(function: RFunction, index: int) -> int:
+    """File line of a body offset. The offset is a character index, not a line count."""
+    if index < 0:
+        return function.line
+    origin = function.body_line or function.line
+    return origin + function.body[:index].count("\n")
+
+
+def _reported_balance(model: ResearchModel, function: RFunction) -> list[SemanticCandidate]:
+    site = reported_site(model, function)
+    if site is None:
+        return []
+    line = _body_line(function, site.store_at)
+    gaps: list[str] = []
+    if site.reported_form == "unproven_units":
+        gaps.append(
+            f"{site.external_getter or 'the added value'} is a public uint without "
+            "asset-unit evidence; a type and a name do not make it underlying assets"
+        )
+    elif not site.judgeable:
+        gaps.append(
+            "the reported call does not resolve to idle token holdings or idle holdings "
+            "plus one public uint whose asset units are established"
+        )
+    if site.report_scope == "host" and model.reporting_host_evidence != "validated_profile":
+        gaps.append("a validated host profile for the reporting callback")
+    if site.unlock_seconds:
+        gaps.append("the unlock formula is not judged from the duration literal")
+    else:
+        gaps.append("no unlock duration was found; unlock behavior is not judged")
+    gaps.append("performance-fee share mint is not judged")
+    gaps.append("protocol-fee share split is not judged")
+    gaps.append("locked-share adjustments are not judged")
+    if site.store_relation != "equal":
+        gaps.append(
+            "the stored assignment is not the reported value itself, so equality is not judged"
+        )
+    return [
+        SemanticCandidate(
+            detector="accounting.reported_balance",
+            family=FAMILY,
+            title="A report stores a called value as the accounted total",
+            summary=(
+                f"{function.contract}.{function.name} stores `{site.field}` from `{site.local}`, "
+                f"which is assigned from `{site.call}`. "
+                f"Form: {site.reported_form}. Scope: {site.report_scope}. "
+                f"Role getter: {site.role_getter or 'none'}. "
+                "Equality with the reported quantity does not prove that quantity is the "
+                "correct economic value."
+            ),
+            file=function.file,
+            line=max(line, function.line),
+            contract=function.contract,
+            function=function.signature,
+            path=(
+                f"{function.contract}.{function.signature} @{function.file}:{function.line}",
+                f"reported call: {site.call[:80]}",
+                f"stored field: {site.field}",
+                f"form: {site.reported_form}",
+                f"scope: {site.report_scope}",
+            ),
+            facts=(
+                ("balance_backed", "true" if site.balance_backed else "false"),
+                ("stored_getter", site.getter),
+                ("reported_call", site.call[:100]),
+                ("stored_field", site.field),
+                ("role_getter", site.role_getter),
+                ("token_behavior", "unknown"),
+                ("unlock_seconds", site.unlock_seconds),
+                ("loss_ignored", "true" if site.loss_ignored else "false"),
+                ("outflow", site.outflow),
+                ("reported_form", site.reported_form),
+                ("report_scope", site.report_scope),
+                ("external_getter", site.external_getter),
+                ("external_contract", site.external_contract),
+                ("external_address_getter", site.address_getter),
+                ("reporting_host", site.host),
+                ("reporting_host_evidence", model.reporting_host_evidence if site.host else ""),
+                ("gain", site.gain),
+                ("store_relation", site.store_relation),
+                ("asset_units", site.asset_units),
+                (
+                    "host_dependence",
+                    "callback" if site.report_scope == "host" else "",
+                ),
+            ),
+            observed=("a called value is written into stored accounting",),
+            missing=tuple(gaps),
+            confidence="medium" if site.judgeable else "low",
+            impact_tags=("custody", "vault_accounting"),
+        )
+    ]
+
+
+def _fee_share_candidates(model: ResearchModel, function: RFunction) -> list[SemanticCandidate]:
+    from app.parsing.solidity_fee_shares import fee_share_candidates
+
+    return fee_share_candidates(model, function)
+
+
+def _store_relation(rhs: str, local: str) -> str:
+    """``equal`` only when the stored field is assigned that local and nothing else."""
+    if re.sub(r"\s+", "", rhs) == local:
+        return "equal"
+    return "upper_bound"
+
+
+def _stored_report(
+    model: ResearchModel, function: RFunction
+) -> tuple[str, str, str, int, str] | None:
+    """(local, field, call expression, assignment index, relation) for the first store."""
+    body = function.body
+    for match in _LOCAL_FROM_CALL.finditer(body):
+        local = match.group("name")
+        call = match.group("rhs").strip()
+        if local in _CALL_KEYWORDS or "(" not in call:
+            continue
+        for store in _STORE.finditer(body[match.end() :]):
+            rhs = store.group("rhs").strip()
+            if not re.search(rf"\b{re.escape(local)}\b", rhs):
+                continue
+            if _BALANCE_OF_THIS.search(rhs):
+                continue
+            lhs = re.sub(r"\s+", "", store.group("lhs"))
+            field = lhs.split(".")[-1]
+            if not field or field == local:
+                continue
+            if "." not in lhs and field not in model.state_vars(function.contract):
+                continue
+            return local, field, call, match.end() + store.start(), _store_relation(rhs, local)
+    return None
+
+
+def _unique_function(model: ResearchModel, name: str) -> RFunction | None:
+    found = [
+        function
+        for contract in model.contracts.values()
+        if not contract.is_interface
+        for function in contract.functions
+        if function.kind == "function" and function.name == name and function.has_body
+    ]
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def _called_names(expr: str) -> list[str]:
+    members = re.findall(r"\.([A-Za-z_]\w*)\s*\(", expr)
+    if members:
+        return [name for name in members if name not in _CALL_KEYWORDS]
+    return [
+        name
+        for name in re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", expr)
+        if name not in _CALL_KEYWORDS
+    ]
+
+
+def _return_expr(body: str) -> str:
+    found = [str(item) for item in re.findall(r"return\s+([^;]+);", body)]
+    if len(found) != 1:
+        return ""
+    return found[0].strip()
+
+
+def _primary_call(expr: str) -> str:
+    """The call that produces the expression, ignoring calls nested in its arguments."""
+    compact = expr.strip()
+    member = re.search(r"\.([A-Za-z_]\w*)\s*\(", compact)
+    if member and compact.rstrip().endswith(")"):
+        # The last member call is the value. A cast such as ``T(x).method()`` ends that way.
+        names = [str(item) for item in re.findall(r"\.([A-Za-z_]\w*)\s*\(", compact)]
+        if names:
+            return names[-1]
+    plain = re.match(r"([A-Za-z_]\w*)\s*\(", compact)
+    return str(plain.group(1)) if plain else ""
+
+
+@dataclass(frozen=True)
+class _ReportedValue:
+    form: str
+    scope: str
+    external_getter: str = ""
+    external_contract: str = ""
+    address_getter: str = ""
+
+
+_CAST_HOOK = re.compile(
+    r"[A-Za-z_]\w*\s*\(\s*address\s*\(\s*this\s*\)\s*\)\s*\.\s*([A-Za-z_]\w*)\s*\(",
+    re.S,
+)
+
+
+def _lookup(model: ResearchModel, owners: tuple[str, ...], name: str) -> RFunction | None:
+    """The nearest body of ``name`` in ``owners``. Another contract's body is not a match."""
+    for owner in owners:
+        item = model.contracts.get(owner)
+        if item is None or item.is_interface:
+            continue
+        matches = [
+            function
+            for function in item.functions
+            if function.kind == "function" and function.name == name and function.has_body
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+    return None
+
+
+def _is_idle_balance(expr: str) -> bool:
+    return _primary_call(expr) == "balanceOf" and bool(_BALANCE_OF_THIS.search(expr))
+
+
+def _top_sum(expr: str) -> tuple[str, str] | None:
+    depth = 0
+    splits: list[int] = []
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "+" and depth == 0:
+            splits.append(index)
+    if len(splits) != 1:
+        return None
+    cut = splits[0]
+    left, right = expr[:cut].strip(), expr[cut + 1 :].strip()
+    if not left or not right:
+        return None
+    return left, right
+
+
+def _unit_evidence(model: ResearchModel, contract: str, getter: str) -> str:
+    """Why ``getter`` is denominated in the asset, or "" when that is not established.
+
+    A public ``uint`` is not enough. ``validated_profile`` is an explicit profile
+    claim. ``source`` means every write of the variable is a token balance or the
+    amount of a token transfer in the same function.
+    """
+    key = f"{contract}.{getter}"
+    if model.asset_unit_evidence.get(key) == "validated_profile":
+        return "validated_profile"
+    if not getter.endswith("()"):
+        return ""
+    variable = getter[:-2]
+    if not re.fullmatch(r"[A-Za-z_]\w*", variable):
+        return ""
+    writes: list[tuple[RFunction, str]] = []
+    for function in model.functions_of(contract):
+        if not function.has_body:
+            continue
+        for match in re.finditer(
+            rf"\b{re.escape(variable)}\s*(?:\+=|(?<![=!<>])=(?!=))\s*([^;]+);",
+            function.body,
+        ):
+            writes.append((function, match.group(1).strip()))
+    if not writes:
+        return ""
+    for function, rhs in writes:
+        if not _rhs_is_asset_amount(function.body, rhs):
+            return ""
+    return "source"
+
+
+def _rhs_is_asset_amount(body: str, rhs: str) -> bool:
+    """True when every top-level term is a token balance or a transfer amount."""
+    parts = _sum_terms(rhs)
+    if not parts:
+        return False
+    for part in parts:
+        compact = re.sub(r"\s+", "", part)
+        if "balanceOf(" in compact:
+            continue
+        if re.fullmatch(r"[A-Za-z_]\w*", compact) and _transfer_amount(body, compact):
+            continue
+        return False
+    return True
+
+
+def _sum_terms(expr: str) -> list[str]:
+    depth = 0
+    start = 0
+    terms: list[str] = []
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char in "+-" and depth == 0:
+            terms.append(expr[start:index].strip())
+            start = index + 1
+    terms.append(expr[start:].strip())
+    return [term for term in terms if term]
+
+
+def _transfer_amount(body: str, name: str) -> bool:
+    for match in re.finditer(
+        r"(?:safeTransferFrom|transferFrom|safeTransfer|transfer)\s*\(([^;]*)\)",
+        body,
+    ):
+        args = [re.sub(r"\s+", "", item) for item in _split_args(match.group(1))]
+        if args and args[-1] == name:
+            return True
+    return False
+
+
+def _split_args(text: str) -> list[str]:
+    depth = 0
+    start = 0
+    found: list[str] = []
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            found.append(text[start:index].strip())
+            start = index + 1
+    found.append(text[start:].strip())
+    return [item for item in found if item]
+
+
+def _addend(model: ResearchModel, contract: str, expr: str) -> tuple[str, str, str] | None:
+    """(public uint getter, declaring contract, address getter) for one readable addend."""
+    from app.discovery.bounty.properties import public_getter
+
+    compact = re.sub(r"\s+", "", expr)
+    if re.fullmatch(r"[A-Za-z_]\w*", compact):
+        kind = model.state_vars(contract).get(compact, "")
+        getter = public_getter(model, contract, compact)
+        if getter == f"{compact}()" and re.fullmatch(r"u?int\d*", kind.replace(" ", "")):
+            return getter, contract, ""
+        return None
+    member = re.fullmatch(r"([A-Za-z_]\w*)\.([A-Za-z_]\w*)\(\)", compact)
+    if member is None:
+        return None
+    variable, method = member.group(1), member.group(2)
+    if public_getter(model, contract, variable) != f"{variable}()":
+        return None
+    owner = model.contract_for_type(model.state_vars(contract).get(variable, ""))
+    if not owner:
+        return None
+    target = _lookup(model, model.lineage(owner), method)
+    if target is None or target.params or not target.exposed:
+        return None
+    if not target.returns or not target.returns[0].type_name.startswith("uint"):
+        return None
+    return target.signature, owner, f"{variable}()"
+
+
+def _classify_reported(
+    model: ResearchModel, contract: str, expr: str, depth: int, scope: str
+) -> _ReportedValue | None:
+    """What ``expr`` reports, following only this contract's lineage or the named host."""
+    if depth > 4:
+        return None
+    expr = expr.strip()
+    if not expr:
+        return None
+    parts = _top_sum(expr)
+    if parts is not None:
+        left, right = parts
+        other = ""
+        idle = False
+        for side in (left, right):
+            if _is_idle_balance(side):
+                idle = True
+            else:
+                other = side
+        if not idle or not other:
+            return _ReportedValue("other", scope)
+        addend = _addend(model, contract, other)
+        if addend is None:
+            return _ReportedValue("other", scope)
+        getter, owner, address_getter = addend
+        if not _unit_evidence(model, owner, getter):
+            # Public and unsigned is not an asset amount. Keep the getter so the
+            # candidate can say which value was refused.
+            return _ReportedValue("unproven_units", scope, getter, owner, address_getter)
+        return _ReportedValue("idle_plus_getter", scope, getter, owner, address_getter)
+    hook = _CAST_HOOK.search(expr)
+    if hook and _primary_call(expr) == hook.group(1) and hook.group(1) != "balanceOf":
+        host = model.reporting_host
+        if not host:
+            return _ReportedValue("other", "unresolved")
+        target = _lookup(model, model.lineage(host), hook.group(1))
+        if target is None:
+            return _ReportedValue("other", "unresolved")
+        returned = _return_expr(target.body)
+        if not returned:
+            return _ReportedValue("other", "unresolved")
+        # Stay on the named host so an override is not resolved on the base that
+        # merely forwards to it.
+        inner = _classify_reported(model, host, returned, depth + 1, "host")
+        if inner is None or inner.form == "other":
+            return _ReportedValue("other", "unresolved")
+        return _ReportedValue(
+            inner.form, "host", inner.external_getter, inner.external_contract, inner.address_getter
+        )
+    if _is_idle_balance(expr):
+        return _ReportedValue("idle_balance", scope)
+    name = _primary_call(expr)
+    if not name or name in _CALL_KEYWORDS:
+        return _ReportedValue("other", scope)
+    target = _lookup(model, model.lineage(contract), name)
+    if target is None:
+        return _ReportedValue("other", "unresolved")
+    returned = _return_expr(target.body)
+    if not returned:
+        return _ReportedValue("other", "unresolved")
+    next_scope = (
+        scope if scope == "host" else ("self" if target.contract == contract else "lineage")
+    )
+    return _classify_reported(model, target.contract, returned, depth + 1, next_scope)
+
+
+def _gain_signature(model: ResearchModel, contract: str, getter: str, report_name: str) -> str:
+    """One exposed function, other than the report, that writes the public addend."""
+    if not getter.endswith("()"):
+        return ""
+    variable = getter[:-2]
+    if not re.fullmatch(r"[A-Za-z_]\w*", variable):
+        return ""
+    found: list[str] = []
+    for function in model.functions_of(contract):
+        if (
+            not function.exposed
+            or not function.has_body
+            or function.kind != "function"
+            or function.name == report_name
+        ):
+            continue
+        if re.search(rf"\b{re.escape(variable)}\s*(?:\+=|(?<![=!<>])=(?!=))", function.body):
+            found.append(function.signature)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def _expr_is_field(model: ResearchModel, expr: str, field: str, depth: int) -> bool:
+    if depth > 4:
+        return False
+    compact = re.sub(r"\s+", "", expr)
+    if re.fullmatch(rf"(?:[A-Za-z_]\w*\.)*{re.escape(field)}", compact):
+        return True
+    name = _primary_call(expr)
+    if not name or name in _CALL_KEYWORDS:
+        return False
+    target = _unique_function(model, name)
+    if target is None:
+        return False
+    returned = _return_expr(target.body)
+    if not returned:
+        return False
+    return _expr_is_field(model, returned, field, depth + 1)
+
+
+def _stored_getter(model: ResearchModel, contract: str, field: str) -> str:
+    from app.discovery.bounty.properties import public_getter
+
+    direct = public_getter(model, contract, field)
+    if direct.endswith("()"):
+        return direct
+    found: list[str] = []
+    for function in model.functions_of(contract):
+        if (
+            not function.exposed
+            or not function.has_body
+            or function.params
+            or function.mutability not in {"view", "pure"}
+            or function.kind != "function"
+        ):
+            continue
+        if not function.returns or not function.returns[0].type_name.startswith("uint"):
+            continue
+        returned = _return_expr(function.body)
+        if returned and _expr_is_field(model, returned, field, 0):
+            found.append(function.signature)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def _authorization_bodies(model: ResearchModel, function: RFunction) -> list[str]:
+    texts = [function.body]
+    for name in function.modifiers:
+        modifier = model.modifier(function.contract, name.split("(")[0])
+        if modifier is not None and modifier.body:
+            texts.append(modifier.body)
+    followed: list[str] = []
+    for text in texts:
+        for name in _called_names(text):
+            target = _unique_function(model, name)
+            if target is not None:
+                followed.append(target.body)
+    return texts + followed
+
+
+def _role_getter(model: ResearchModel, function: RFunction) -> str:
+    fields: list[str] = []
+    for text in _authorization_bodies(model, function):
+        for match in _SENDER_EQ.finditer(text):
+            expr = (match.group(1) or match.group(2) or "").strip()
+            idents = re.findall(r"[A-Za-z_]\w*", expr)
+            if idents:
+                fields.append(idents[-1])
+    seen: set[str] = set()
+    for field_name in fields:
+        if field_name in seen or field_name in {"msg", "sender", "_sender"}:
+            continue
+        seen.add(field_name)
+        for item in model.functions_of(function.contract):
+            if (
+                item.name == field_name
+                and item.exposed
+                and not item.params
+                and item.has_body
+                and item.returns
+                and item.returns[0].type_name.replace(" payable", "") == "address"
+                and re.search(rf"\b{re.escape(field_name)}\b", item.body)
+            ):
+                return item.signature
+    return ""
+
+
+def _strip_comments(text: str) -> str:
+    """Comments are not duration literals. A remark such as ``365.2425 days`` is not ``N days``."""
+    without_block = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", " ", without_block)
+
+
+def _unlock_seconds(model: ResearchModel, contract: str) -> str:
+    numbers: set[int] = set()
+    for owner in model.lineage(contract):
+        item = model.contracts.get(owner)
+        if item is None:
+            continue
+        for function in item.functions:
+            if not function.has_body:
+                continue
+            for match in _DAYS.finditer(_strip_comments(function.body)):
+                numbers.add(int(match.group(1)))
+    if len(numbers) != 1:
+        return ""
+    seconds = next(iter(numbers)) * 86400
+    if seconds <= 0 or seconds > 366 * 86400:
+        return ""
+    return str(seconds)
+
+
+def _loss_ignored(body: str, local: str, field: str) -> bool:
+    stores: list[int] = []
+    for match in _STORE.finditer(body):
+        lhs = re.sub(r"\s+", "", match.group("lhs"))
+        if lhs.split(".")[-1] != field:
+            continue
+        if not re.search(rf"\b{re.escape(local)}\b", match.group("rhs")):
+            continue
+        stores.append(match.start())
+    if not stores:
+        return False
+    return all(_inside_increase_guard(body, index, local) for index in stores)
+
+
+def _inside_increase_guard(body: str, index: int, local: str) -> bool:
+    depth = 0
+    cursor = index
+    while cursor > 0:
+        char = body[cursor]
+        if char == "}":
+            depth += 1
+        elif char == "{":
+            if depth == 0:
+                return _guard_increases(body[max(0, cursor - 400) : cursor], local)
+            depth -= 1
+        cursor -= 1
+    return False
+
+
+def _guard_increases(head: str, local: str) -> bool:
+    text = head.rstrip()
+    if not text.endswith(")"):
+        return False
+    depth = 0
+    start = -1
+    for cursor in range(len(text) - 1, -1, -1):
+        char = text[cursor]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                start = cursor
+                break
+    if start < 0:
+        return False
+    prefix = text[:start].rstrip()
+    if not prefix.endswith("if"):
+        return False
+    condition = text[start + 1 : -1]
+    return local in condition and ">" in condition
+
+
+def _outflow_signature(model: ResearchModel, function: RFunction, field: str) -> str:
+    found: list[str] = []
+    for item in model.functions_of(function.contract):
+        if (
+            not item.exposed
+            or not item.has_body
+            or item.signature == function.signature
+            or item.kind != "function"
+        ):
+            continue
+        if not re.search(r"\.\s*(?:transfer|safeTransfer)\s*\(", item.body):
+            continue
+        if re.search(rf"\b{re.escape(field)}\b", item.body):
+            continue
+        found.append(item.signature)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+__all__ = ["MemberCall", "ReportedSite", "analyze_balance_delta", "reported_site"]

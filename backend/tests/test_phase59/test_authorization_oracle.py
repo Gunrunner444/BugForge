@@ -88,7 +88,21 @@ def test_expected_authorization_error_and_control_change_hold() -> None:
     assert result.evaluated is True
     assert result.positive_control == "changed"
     assert SELECTOR in result.reason
+    assert "positive control changed it" in result.reason
     assert result.as_dict()["verified"] is False
+
+
+def test_a_held_authorization_does_not_invent_a_positive_control() -> None:
+    oracle = _oracle(control_sender="")
+    result = evaluate(
+        _sequence_for(),
+        oracle,
+        _held_observation(control_ok=-1, control_before="", control_after=""),
+    )
+    assert result.verdict is PropertyVerdict.PROPERTY_HELD
+    assert result.positive_control == "not_run"
+    assert "no positive control was part of this test" in result.reason
+    assert "changed it" not in result.reason
 
 
 def test_a_different_revert_does_not_hold() -> None:

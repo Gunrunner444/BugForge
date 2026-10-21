@@ -364,13 +364,17 @@ def test_mechanism_and_identity_mismatch_are_not_violations() -> None:
 
 
 def test_strength_requires_bound_fresh_oracle_violation() -> None:
-    assert execution_summary(_candidate(), (_record(),)).strength == "strong_candidate"
-    corroborated = _record(corroboration="corroborated_candidate")
+    fresh = _record(token_fixture="standard")
+    assert execution_summary(_candidate(), (fresh,)).strength == "strong_candidate"
+    assert execution_summary(_candidate(), (_record(),)).strength == "unconfirmed_assumption"
+    corroborated = _record(corroboration="corroborated_candidate", token_fixture="standard")
     assert execution_summary(_candidate(), (corroborated,)).strength == "corroborated_candidate"
     assert not is_strong(_record(identity_status="identity_mismatch"))
     assert not is_strong(_record(stale=True))
     assert not is_strong(_record(declaration="no_property_available"))
-    disagreement = execution_summary(_candidate(), (_record(corroboration="disagreement"),))
+    disagreement = execution_summary(
+        _candidate(), (_record(corroboration="disagreement", token_fixture="standard"),)
+    )
     assert disagreement.corroboration == "disagreement"
     assert any("disagrees" in note for note in disagreement.uncertainties)
     assert execution_summary(_candidate(), ()).strength == "static_candidate"

@@ -286,8 +286,11 @@ def test_fee_on_transfer_campaign_credits_more_than_it_received(
         if f["detector"] == "accounting.fee_on_transfer_mismatch"
     )
     assert finding["verified"] is False
-    assert finding["poc_status"] == "local_harness_violation_unverified"
-    assert finding["qualification"] != "mechanism_observation"
+    assert finding["candidate_strength"] == "unconfirmed_assumption"
+    assert finding["qualification"] == "assumption_unconfirmed"
+    assert finding["poc_status"] == "local_fixture_unconfirmed"
+    assert observed["strong_candidate"] is False
+    assert observed["outcome"] == Outcome.PROPERTY_VIOLATED.value
     ledger = reloaded.research_ledger(campaign.campaign_id)["RESEARCH_COVERAGE"]
     assert ledger["by_family"]["token_movement"]["violated"] >= 1
 

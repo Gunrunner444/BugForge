@@ -26,6 +26,7 @@ from app.parsing.solidity_research import (
     member_calls,
     plain_calls,
 )
+from app.parsing.solidity_research_suite import is_hypothesis
 
 DISCLAIMER = "triage score only; it is not a statement about exploitability"
 MAX_ENTRIES = 64
@@ -243,6 +244,9 @@ def prioritize(
     policy = "program" if categories else "uniform"
     by_function: dict[str, list[SemanticCandidate]] = {}
     for item in candidates:
+        # A hypothesis is not evidence of a defect, so it adds no triage weight.
+        if is_hypothesis(item):
+            continue
         by_function.setdefault(f"{item.contract}.{item.function}", []).append(item)
 
     entries: list[PriorityEntry] = []

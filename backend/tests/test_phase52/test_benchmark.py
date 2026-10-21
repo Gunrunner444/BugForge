@@ -18,8 +18,9 @@ def test_static_benchmark_detects_every_vulnerable_case_and_no_safe_twin() -> No
     report = run_benchmark(HISTORY)
     assert report["schema"] == BENCHMARK_SCHEMA
     cases = json.loads((HISTORY / "benchmark.json").read_text())["cases"]
-    assert report["totals"] == {"tp": len(cases), "fn": 0, "fp": 0, "tn": len(cases)}
-    assert all(case["static"] == "pass" for case in report["cases"])
+    detectors = [case for case in cases if case.get("kind", "detector") == "detector"]
+    assert report["totals"] == {"tp": len(detectors), "fn": 0, "fp": 0, "tn": len(detectors)}
+    assert all(case["static"] == "pass" for case in report["cases"] if case["kind"] == "detector")
     # honesty: a fixture regression signal, not a real-world rate; never verified
     assert report["real_world_rate"] is None and report["verified"] is False
     assert report["disclaimer"] == DISCLAIMER and "not a real-world" in DISCLAIMER

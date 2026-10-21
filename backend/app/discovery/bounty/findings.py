@@ -29,6 +29,7 @@ from app.discovery.orchestration.model import (
     ResearchState,
 )
 from app.parsing.solidity_research import SemanticCandidate
+from app.parsing.solidity_research_suite import is_hypothesis
 
 if TYPE_CHECKING:
     from app.discovery.bounty.deployment_identity import DeploymentIdentity
@@ -167,6 +168,15 @@ def build_findings(
     ):
         if len(findings) >= MAX_FINDINGS:
             break
+        if is_hypothesis(candidate) and execution_summary(
+            candidate, execution_list
+        ).strength not in {
+            "strong_candidate",
+            "corroborated_candidate",
+            "unconfirmed_assumption",
+            "fixture_only",
+        }:
+            continue
         deployment = deployment_for(candidate.contract) if deployment_for else None
         finding = _one(
             candidate,
@@ -234,6 +244,8 @@ def _one(
     execution = execution_summary(candidate, executions)
     if execution.strength in {"strong_candidate", "corroborated_candidate"} and poc == "none":
         poc = "local_harness_violation_unverified"
+    elif execution.strength in {"fixture_only", "unconfirmed_assumption"} and poc == "none":
+        poc = "local_fixture_unconfirmed"
     elif execution.strength == "mechanism_observation" and poc == "none":
         poc = "mechanism_observation_unproven"
     own = tuple(
@@ -257,6 +269,15 @@ def _one(
     )
     uncertainties = _uncertainties(manifest, scope.status, candidate, poc, severity)
     uncertainties = (*uncertainties, *execution.uncertainties)
+    if execution.strength in {"fixture_only", "unconfirmed_assumption"}:
+        qualification = Qualification(
+            "assumption_unconfirmed",
+            (
+                "the local property violation depends on an assumption that is not "
+                "established for the target; this is not a target-applicable finding",
+                *execution.uncertainties,
+            ),
+        )
     if deployment is not None and deployment.binding != "bound":
         uncertainties = (*uncertainties, f"deployment binding is {deployment.binding}")
     if name_ambiguous:
@@ -353,23 +374,47 @@ _STATUS_ORDER = (
 )
 
 
+def _applicability(record: Mapping[str, Any]) -> dict[str, Any]:
+    value = record.get("applicability")
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def is_strong(record: Mapping[str, Any]) -> bool:
-    """Recomputed from the structured fields; a stored flag alone is never trusted."""
-    return bool(
+    """Recomputed from the structured fields; a stored flag alone is never trusted.
+
+    A local violation under a contradicted or unknown material assumption is not
+    a target-applicable candidate. A missing applicability record is strong only
+    when the token fixture is an explicit standard name. An empty fixture is not
+    that evidence and must be re-analyzed.
+    """
+    from app.discovery.bounty.applicability import (
+        LEGACY_STRONG_FIXTURES,
+        applicability_is_strong,
+    )
+
+    if not (
         record.get("outcome") == "property_violated"
         and record.get("declaration") == "property_under_test"
         and record.get("verdict") == "property_violated"
         and record.get("oracle_kind") not in {"", "none", None}
         and record.get("identity_status") == "bound"
         and not record.get("stale")
-    )
+    ):
+        return False
+    applicability = _applicability(record)
+    if applicability:
+        return applicability_is_strong(record)
+    # Legacy rows predate applicability. Only an explicit standard fixture stays
+    # eligible. A missing or empty fixture is not proof of standard behavior.
+    return str(record.get("token_fixture") or "") in LEGACY_STRONG_FIXTURES
 
 
 def execution_summary(
     candidate: SemanticCandidate, executions: tuple[dict[str, Any], ...]
 ) -> ExecutionSummary:
-    key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
-    own = [item for item in executions if item.get("derived_from") == key]
+    base = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    key_line = f"{base}#{candidate.line}"
+    own = [item for item in executions if item.get("derived_from") in {base, key_line}]
     if not own:
         return ExecutionSummary("not_executed", "static_candidate", (), (), "not_applicable", ())
     fresh = [item for item in own if not item.get("stale")]
@@ -397,10 +442,32 @@ def execution_summary(
     held = any(item.get("outcome") == "property_held" for item in fresh)
     if strong and held:
         notes.append("the property held on another sequence; the contradiction stays open")
+    blocked = [
+        item for item in fresh if item.get("outcome") == "property_violated" and not is_strong(item)
+    ]
     if strong and corroboration == "corroborated_candidate":
         strength = "corroborated_candidate"
     elif strong:
         strength = "strong_candidate"
+    elif blocked:
+        dispositions = {str(_applicability(item).get("disposition") or "") for item in blocked}
+        strength = "fixture_only" if "fixture_only" in dispositions else "unconfirmed_assumption"
+        notes.append(
+            "a local property violation is recorded, but a material assumption is not "
+            "established for the target"
+        )
+        for item in blocked:
+            for assumption in _applicability(item).get("assumptions") or ():
+                if not isinstance(assumption, Mapping):
+                    continue
+                if assumption.get("material") and assumption.get("status") in {
+                    "unknown",
+                    "contradicted",
+                }:
+                    notes.append(
+                        f"{assumption.get('name')}={assumption.get('value')} is "
+                        f"{assumption.get('status')}: {assumption.get('evidence')}"
+                    )
     elif any(item.get("outcome") == "mechanism_observed" for item in fresh):
         strength = "mechanism_observation"
         notes.append(

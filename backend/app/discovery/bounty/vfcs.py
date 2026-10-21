@@ -11,12 +11,21 @@ minimization never produce verification.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 
+from app.discovery.bounty.entrypoints import (
+    entrypoints_for,
+    forwarded_entry_params,
+    path_lines,
+)
+from app.discovery.bounty.shares import ShareAccounting, position_entry, share_accounting
 from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
+from app.parsing.solidity_accounting import reported_site
+from app.parsing.solidity_fee_shares import fee_share_site
 from app.parsing.solidity_research import (
     ResearchModel,
     RFunction,
@@ -35,6 +44,9 @@ VICTIM = "victim"
 ATTACKER_CONTROLLED = "attacker_controlled"
 UNCONSTRAINED = "unconstrained"
 _BOUNDARY_VALUES = ("zero", "one", "max_uint", "contract_balance", "total_supply")
+# A value property that held at the fixture amount is retried where rounding
+# remainders are largest relative to the amount.
+_SMALL_AMOUNTS = ("one", "two", "three")
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,9 @@ class VfcsCall:
     arguments: tuple[tuple[str, str], ...] = ()
     primitive: bool = False
     established_by: str = ""
+    # Signature of the semantic candidate this call stands in for. Empty when the
+    # call is the candidate itself or an unrelated step.
+    entrypoint_for: str = ""
 
     @property
     def identity(self) -> str:
@@ -81,6 +96,13 @@ class Vfcs:
     identity: SequenceIdentity
     status: str = "candidate"
     verified: bool = False
+    # Exposed call path that reaches the candidate. Empty when the candidate is
+    # itself the call, or when no path was established.
+    call_path: tuple[str, ...] = ()
+    path_notes: tuple[str, ...] = ()
+    # Contract the harness deploys when it is not the candidate's contract.
+    # Empty keeps the candidate contract, so existing sequences are unchanged.
+    execution_contract: str = ""
 
 
 @dataclass(frozen=True)
@@ -120,9 +142,21 @@ def stamp_source_identity(sequence: Vfcs, sources: Mapping[str, str]) -> Vfcs:
     )
 
 
-def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceIdentity) -> str:
-    # Content hashes and implementation are not part of the id. A deployment still is,
-    # and sequences without one keep the id shape from before that field existed.
+def sequence_id_of(
+    calls: Iterable[VfcsCall],
+    template: str,
+    identity: SequenceIdentity,
+    *,
+    derived_from: str = "",
+) -> str:
+    """Identity of one hypothesis, not of an in-memory object.
+
+    ``derived_from`` is the candidate key. ``entrypoint_for`` is the helper a
+    promoted call stands in for. Two helpers that reach the same exposed call
+    therefore stay distinct. ``call_path`` and ``path_notes`` are omitted, so
+    equivalent executions of one candidate still deduplicate. Content hashes and
+    the implementation address stay out of the id. A deployment still is.
+    """
     bound: dict[str, str] = {
         "campaign_id": identity.campaign_id,
         "source_snapshot": identity.source_snapshot,
@@ -132,16 +166,30 @@ def sequence_id_of(calls: Iterable[VfcsCall], template: str, identity: SequenceI
     }
     if identity.deployment:
         bound["deployment"] = identity.deployment
-    return "vf_" + digest(
-        (
-            [(c.contract, c.function, c.role, c.actor, c.arguments, c.primitive) for c in calls],
-            template,
-            bound,
-        )
-    )
+    rows = [
+        (c.contract, c.function, c.role, c.actor, c.arguments, c.primitive, c.entrypoint_for)
+        for c in calls
+    ]
+    return "vf_" + digest((rows, template, bound, derived_from))
 
 
 # ---- generation -----------------------------------------------------------------------------
+
+
+def _candidate_key(
+    candidate: SemanticCandidate, lines: Mapping[tuple[str, str, str], set[int]]
+) -> str:
+    """``detector@contract.function``, plus ``#line`` when that triple has two locations.
+
+    ``cap()`` already keeps both source locations. Collapsing them onto one key made
+    ``candidate_for`` and ``execution_summary`` attach one location's result to the other.
+    The same candidate supplied twice is still one location, so its key does not change.
+    """
+    base = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    ident = (candidate.detector, candidate.contract, candidate.function)
+    if len(lines.get(ident, ())) > 1:
+        return f"{base}#{candidate.line}"
+    return base
 
 
 def generate(
@@ -161,17 +209,21 @@ def generate(
     found: dict[str, Vfcs] = {}
     skipped: list[tuple[str, str]] = []
     truncated = False
+    material = list(candidates)
+    lines: dict[tuple[str, str, str], set[int]] = {}
+    for candidate in material:
+        ident = (candidate.detector, candidate.contract, candidate.function)
+        lines.setdefault(ident, set()).add(candidate.line)
     if sources is not None:
         problems = model_source_problems(model, sources)
         if problems:
             reason = "model source attestation does not match the supplied sources: " + problems[0]
-            for candidate in candidates:
-                key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
-                skipped.append((key, reason))
+            for candidate in material:
+                skipped.append((_candidate_key(candidate, lines), reason))
             return VfcsResult((), tuple(skipped), False)
         identity = replace(identity, source_hashes=source_hashes_of(sources))
-    for candidate in candidates:
-        key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    for candidate in material:
+        key = _candidate_key(candidate, lines)
         if len(found) >= limit:
             truncated = True
             skipped.append((key, "the sequence limit was reached"))
@@ -181,31 +233,74 @@ def generate(
             skipped.append((key, "no sequence template applies to this detector"))
             continue
         built = builder(model, candidate)
+        plans: list[tuple[str, list[VfcsCall], str]]
         if isinstance(built, str):
             skipped.append((key, built))
             continue
-        template, calls, prop = built
-        if not calls or len(calls) > MAX_VFCS_LENGTH:
-            skipped.append((key, "the sequence would exceed the length limit"))
-            continue
-        sequence = Vfcs(
-            sequence_id=sequence_id_of(calls, template, identity),
-            template=template,
-            origin=f"template:{template}",
-            calls=tuple(calls),
-            property_under_test=prop,
-            derived_from=key,
-            identity=identity,
-        )
-        if sequence.sequence_id in found:
-            skipped.append((key, "deduplicated: an equivalent sequence was already generated"))
-            continue
-        found[sequence.sequence_id] = sequence
+        if isinstance(built, list):
+            if not built:
+                skipped.append((key, "the candidate produced no sequence"))
+                continue
+            plans = built
+        else:
+            plans = [built]
+        for template, calls, prop in plans:
+            if len(found) >= limit:
+                truncated = True
+                skipped.append((key, "the sequence limit was reached"))
+                continue
+            if not calls or len(calls) > MAX_VFCS_LENGTH:
+                skipped.append((key, "the sequence would exceed the length limit"))
+                continue
+            for promoted in _promote(model, candidate, calls):
+                if len(found) >= limit:
+                    truncated = True
+                    skipped.append((key, "the sequence limit was reached"))
+                    break
+                promoted_calls, call_path, path_notes, execution_contract = promoted
+                if not promoted_calls or len(promoted_calls) > MAX_VFCS_LENGTH:
+                    skipped.append((key, "the sequence would exceed the length limit"))
+                    continue
+                if any(
+                    value == "asset_exit:unsupported"
+                    for call in promoted_calls
+                    for _n, value in call.arguments
+                ):
+                    skipped.append(
+                        (
+                            key,
+                            "the exit amount is in asset units and no source-backed "
+                            "conversion or limit was resolved",
+                        )
+                    )
+                    continue
+                sequence = Vfcs(
+                    sequence_id=sequence_id_of(
+                        promoted_calls, template, identity, derived_from=key
+                    ),
+                    template=template,
+                    origin=f"template:{template}",
+                    calls=tuple(promoted_calls),
+                    property_under_test=prop,
+                    derived_from=key,
+                    identity=identity,
+                    call_path=call_path,
+                    path_notes=path_notes,
+                    execution_contract=execution_contract,
+                )
+                if sequence.sequence_id in found:
+                    skipped.append(
+                        (key, "deduplicated: an equivalent sequence was already generated")
+                    )
+                    continue
+                found[sequence.sequence_id] = sequence
     return VfcsResult(tuple(found.values()), tuple(skipped), truncated)
 
 
-Built = tuple[str, list[VfcsCall], str] | str
+Plan = tuple[str, list[VfcsCall], str]
+Built = Plan | list[Plan] | str
 Builder = Callable[[ResearchModel, SemanticCandidate], Built]
+_VariantIter = Iterator[tuple[str, list[VfcsCall]]]
 
 
 def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
@@ -213,6 +308,96 @@ def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction |
         if function.signature == signature and function.has_body:
             return function
     return None
+
+
+def _promote(
+    model: ResearchModel, candidate: SemanticCandidate, calls: list[VfcsCall]
+) -> tuple[tuple[tuple[VfcsCall, ...], tuple[str, ...], tuple[str, ...], str], ...]:
+    """Rewrite candidate calls onto each exposed entry that source structure reaches.
+
+    The candidate identity stays on the sequence. A helper with no established
+    entry is left as the original call and the gap is recorded on the sequence.
+    An already ABI-callable exposed function is not rewritten.
+    """
+    function = _resolve(model, candidate.contract, candidate.function)
+    aimed = [
+        call
+        for call in calls
+        if not call.primitive
+        and call.contract == candidate.contract
+        and call.function == candidate.function
+    ]
+    if function is None or not aimed:
+        return ((tuple(calls), (), (), ""),)
+    found = entrypoints_for(model, function)
+    if found.directly_executable:
+        return ((tuple(calls), (), found.incomplete, ""),)
+    if not found.paths:
+        notes = found.incomplete or (f"no exposed entrypoint reaches {function.identity}",)
+        gap = ("no exposed entrypoint was established; the helper was not wrapped",)
+        return ((tuple(calls), (), notes + gap, ""),)
+    promoted: list[tuple[tuple[VfcsCall, ...], tuple[str, ...], tuple[str, ...], str]] = []
+    for path in found.paths:
+        entry = _resolve(model, path.entry_contract, path.entry_signature)
+        if entry is None:
+            continue
+        binding = forwarded_entry_params(path, function)
+        rewritten: list[VfcsCall] = []
+        for call in calls:
+            if (
+                call.primitive
+                or call.contract != candidate.contract
+                or call.function != candidate.function
+            ):
+                rewritten.append(call)
+                continue
+            rewritten.append(_entry_call(call, entry, function, binding))
+        contract = "" if path.entry_contract == candidate.contract else path.entry_contract
+        notes = path.notes + found.incomplete
+        unbound = tuple(
+            param.name for param in entry.params if param.name and param.name not in binding
+        )
+        if unbound:
+            shown = ", ".join(unbound[:6])
+            notes = (*notes, f"entry parameters without a forwarded candidate value: {shown}")
+        promoted.append((tuple(rewritten), path_lines(path), notes, contract))
+    if not promoted:
+        return (
+            (
+                tuple(calls),
+                (),
+                found.incomplete + ("an exposed path did not resolve to a function",),
+                "",
+            ),
+        )
+    return tuple(promoted)
+
+
+def _entry_call(
+    call: VfcsCall,
+    entry: RFunction,
+    helper: RFunction,
+    binding: dict[str, str],
+) -> VfcsCall:
+    values = dict(call.arguments)
+    arguments = []
+    for index, param in enumerate(entry.params):
+        key = param.name or f"arg{index}"
+        if param.name and param.name in binding:
+            arguments.append((key, values.get(binding[param.name], UNCONSTRAINED)))
+        else:
+            arguments.append((key, UNCONSTRAINED))
+    why = call.established_by or f"entrypoint:{entry.contract}.{entry.signature}"
+    return VfcsCall(
+        entry.contract,
+        entry.signature,
+        call.role,
+        call.actor,
+        tuple(arguments),
+        False,
+        why[:240],
+        helper.signature,
+    )
 
 
 def _split_callee(text: str) -> tuple[str, str]:
@@ -306,6 +491,89 @@ def _actor_parameter(model: ResearchModel, candidate: SemanticCandidate) -> Buil
     return "forwarded-actor", calls, "the callee must bind the acted-for account to the caller"
 
 
+def _payout_lifecycle(model: ResearchModel, function: RFunction, donate: VfcsCall) -> Built | None:
+    """Deposit, then exit, when source links the two. None when this is not a payout.
+
+    A string means the payout cannot be sized, so no withdrawal-without-a-position
+    sequence is emitted in its place.
+    """
+    info = share_accounting(model, function)
+    if not info.decreases_shares and not info.pay_param:
+        return None
+    if info.share_reader is None or info.slot is None:
+        return "no source-backed reader reports the share position this payout uses"
+    setup = position_entry(model, function.contract, info.slot)
+    if setup is None:
+        return "no exposed deposit establishes the share position this payout redeems"
+    deposit = VfcsCall(
+        setup.contract,
+        setup.function,
+        "deposit",
+        ATTACKER,
+        setup.arguments,
+        False,
+        setup.basis[:240],
+    )
+    victim = replace(
+        deposit,
+        role="victim_deposit",
+        actor=VICTIM,
+        arguments=tuple(
+            (name, VICTIM if value == ATTACKER else value) for name, value in setup.arguments
+        ),
+    )
+    exit_call = _call(function, "withdraw", ATTACKER, _exit_overrides(function, info))
+    return (
+        "deposit→donate→withdraw",
+        [deposit, donate, victim, exit_call],
+        "a sized exit must not increase the attacker's assets or the designated recipient; "
+        "share units and asset units are not interchangeable",
+    )
+
+
+def _exit_overrides(function: RFunction, info: ShareAccounting) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for index, param in enumerate(function.params):
+        name = param.name or f"arg{index}"
+        if _is_address(param.type_name):
+            # A distinct payout receiver is the designated alternate wallet.
+            # The owner of the burned shares stays the caller.
+            overrides[name] = "recipient" if name == info.pay_to else ATTACKER
+        elif _is_uint(param.type_name):
+            overrides[name] = _amount_role(name, info) or "zero"
+    return overrides
+
+
+def _amount_role(name: str, info: ShareAccounting) -> str:
+    pay, burn = info.pay_param, info.burn_param
+    if name and name == pay and name == burn:
+        if info.pay_bare and info.burn_bare:
+            return "share_balance"
+        if info.burn_bare and not info.pay_bare:
+            return "share_balance"
+        return _asset_override(info)
+    if name and name == burn and name != pay:
+        return "share_balance"
+    if name and name == pay and name != burn:
+        return _asset_override(info)
+    return ""
+
+
+def _asset_override(info: ShareAccounting) -> str:
+    if info.asset_sizer:
+        return f"asset_exit:{info.asset_sizer}"
+    return "asset_exit:unsupported"
+
+
+def _is_address(type_name: str) -> bool:
+    return type_name.replace(" ", "") in {"address", "addresspayable"}
+
+
+def _is_uint(type_name: str) -> bool:
+    text = type_name.replace(" ", "")
+    return text == "uint" or bool(re.fullmatch(r"u?int\d*", text))
+
+
 def _donation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -318,13 +586,16 @@ def _donation(model: ResearchModel, candidate: SemanticCandidate) -> Built:
         "balanceOf(address(this)) is read by the candidate function",
     )
     if candidate.detector == "accounting.balance_as_deposit":
+        linked = _payout_lifecycle(model, function, donate)
+        if linked is not None:
+            return linked
         calls = [donate, _call(function, "credit", ATTACKER, default=ATTACKER_CONTROLLED)]
         return "donate→credit", calls, "a donation must not be credited as a deposit"
     withdraw = _withdraw_like(model, function.contract, function.signature)
     if withdraw is None:
         return "no function that pays out was found in the contract"
     calls = [
-        _call(function, "deposit", ATTACKER, default="minimum_amount"),
+        _call(function, "deposit", ATTACKER, default="unit_amount"),
         donate,
         _call(function, "deposit", VICTIM, default="victim_amount"),
         _call(withdraw, "withdraw", ATTACKER, default="all_shares"),
@@ -345,6 +616,67 @@ def _token_behavior(model: ResearchModel, candidate: SemanticCandidate) -> Built
         calls.append(_call(withdraw, "withdraw", ATTACKER, default="credited_balance"))
     template = "deposit→withdraw" if withdraw is not None else "deposit"
     return template, calls, "credited balance must equal the amount received"
+
+
+def _round_trip(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """Attacker deposits, another depositor deposits, the attacker withdraws its credit.
+
+    The second depositor puts funds in custody that an over-paying withdrawal could
+    take. Without an initializer the attacker withdraws twice; the repeat asks for
+    whatever credit it still has. A contract that needs a one-time initializer
+    spends the first call on it and withdraws once, so the sequence stays within
+    the length cap. A token argument the path pins to the custodied token is bound
+    to that token; any other parameter keeps the role's default.
+    """
+    deposit = _own(model, candidate)
+    if isinstance(deposit, str):
+        return deposit
+    payout = _resolve(model, candidate.contract, candidate.fact("payout_function"))
+    if payout is None:
+        return "the payout function is not in the model"
+    differs = candidate.fact("token_must_differ_from")
+    if differs:
+        return (
+            f"the custody path needs a token argument other than {differs}; the local "
+            "harness provides one fixture token"
+        )
+
+    # An argument-bound token is custodied because it is passed. A state-bound one
+    # only matches the passed token when construction bound the same token.
+    passed = "bound_token" if candidate.fact("token_binding") == "argument" else "custodied_token"
+
+    def call(
+        function: RFunction, role: str, actor: str, default: str, token: str, amount: str
+    ) -> VfcsCall:
+        overrides = {name: passed for name in (token,) if name}
+        if amount:
+            overrides[amount] = default
+        built = _call(function, role, actor, overrides, default=default)
+        return replace(built, contract=candidate.contract)
+
+    put_token = candidate.fact("deposit_token_argument")
+    put_amount = candidate.fact("deposit_amount_argument")
+    take_token = candidate.fact("payout_token_argument")
+    take_amount = candidate.fact("payout_amount_argument")
+    calls = [
+        call(deposit, "deposit", ATTACKER, "minimum_amount", put_token, put_amount),
+        call(deposit, "victim_deposit", VICTIM, "victim_amount", put_token, put_amount),
+        call(payout, "withdraw", ATTACKER, "actor_credit", take_token, take_amount),
+    ]
+    initializer = candidate.fact("initializer")
+    template = "deposit→deposit→withdraw→withdraw"
+    if initializer:
+        setup = _resolve(model, candidate.contract, initializer)
+        if setup is None or setup.params:
+            return f"the initializer {initializer} is not a parameterless function in the model"
+        first = replace(_call(setup, "initialize", ATTACKER), contract=candidate.contract)
+        calls.insert(0, first)
+        template = "initialize→deposit→deposit→withdraw"
+    else:
+        calls.append(
+            call(payout, "withdraw_again", ATTACKER, "actor_credit", take_token, take_amount)
+        )
+    return template, calls, "a caller must not withdraw more value than it deposited"
 
 
 def _message(model: ResearchModel, candidate: SemanticCandidate) -> Built:
@@ -474,6 +806,196 @@ def _swallowed_call(model: ResearchModel, candidate: SemanticCandidate) -> Built
     )
 
 
+def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """Profit, no-change, unauthorized, loss, and unlock sequences for one report.
+
+    Each sequence is a separate hypothesis. An unauthorized revert is not a
+    profit-accounting result, and a duration warp is not an unlock-formula proof.
+    """
+    function = _own(model, candidate)
+    if isinstance(function, str):
+        return function
+    site = reported_site(model, function)
+    if site is None:
+        return "the function does not store a called value into accounting state"
+    actor = "deployer" if site.role_getter else ATTACKER
+    why = (
+        f"role_getter:{site.role_getter}"
+        if site.role_getter
+        else "no source role getter; the report caller is the ordinary attacker"
+    )
+    report = replace(_call(function, "report", actor), established_by=why[:240])
+    if not site.judgeable:
+        return [
+            (
+                "report",
+                [report],
+                "the reported value is not idle holdings or idle holdings plus one public "
+                "getter, so the reconciliation is not judged",
+            )
+        ]
+    donate = _primitive(
+        "token",
+        "transfer(address,uint256)",
+        "donation",
+        ATTACKER,
+        "increase the token balance without writing the stored total",
+    )
+    if site.store_relation == "equal" and site.reported_form == "idle_balance":
+        statement = (
+            "after the report, the stored total equals the idle token balance; "
+            "this does not prove fees, locked shares, or the unlock formula"
+        )
+    elif site.store_relation == "equal":
+        statement = (
+            "after the report, the stored total equals the idle token balance plus "
+            f"{site.external_getter}; this does not prove fees or the unlock formula"
+        )
+    elif site.reported_form == "idle_balance":
+        statement = (
+            "after the report, the stored total is at most the idle token balance; "
+            "this upper bound does not prove that a profit was recognized"
+        )
+    else:
+        statement = (
+            "after the report, the stored total is at most the idle token balance plus "
+            f"{site.external_getter}; this upper bound does not prove profit recognition"
+        )
+    plans: list[Plan] = [
+        ("donate→report", [donate, report], statement),
+        (
+            "report",
+            [report],
+            "a report with no balance change keeps the stored total consistent with "
+            "the source-backed amount; this is not a fee or unlock proof",
+        ),
+    ]
+    if site.role_getter:
+        plans.append(
+            (
+                "unauthorized-report",
+                [_call(function, "unauthorized_report", ATTACKER)],
+                "a caller other than the source-declared role must revert; "
+                "that revert is only the caller check and is not a profit-accounting result",
+            )
+        )
+    if site.outflow:
+        outflow = _resolve(model, function.contract, site.outflow)
+        if outflow is not None:
+            second = replace(report, role="report_after")
+            plans.append(
+                (
+                    "donate→report→outflow→report",
+                    [donate, report, _call(outflow, "outflow", ATTACKER), second],
+                    "after the reportable balance falls, a later report still stores at most "
+                    "the source-backed total",
+                )
+            )
+    if site.gain:
+        owner = site.host or function.contract
+        gain = _resolve(model, owner, site.gain)
+        if gain is not None:
+            plans.append(
+                (
+                    "gain→report",
+                    [_call(gain, "gain", ATTACKER), report],
+                    "after the public component increases, the stored total is reconciled "
+                    "with idle holdings plus that component; this does not prove a fee formula",
+                )
+            )
+    if site.unlock_seconds and site.role_getter:
+        warp = VfcsCall(
+            "vm",
+            "warp(uint256)",
+            "time",
+            "harness",
+            (("seconds", site.unlock_seconds),),
+            True,
+            f"the only duration literal in this contract is {site.unlock_seconds} seconds",
+        )
+        second = replace(report, role="report_after")
+        plans.append(
+            (
+                "donate→report→warp→report",
+                [donate, report, warp, second],
+                "after the source duration, a second report is reconciled with the "
+                "source-backed total; this does not prove the unlock formula",
+            )
+        )
+    return plans
+
+
+def _fee_donation(amount: str, why: str) -> VfcsCall:
+    return VfcsCall(
+        "token",
+        "transfer(address,uint256)",
+        "donation",
+        ATTACKER,
+        (("amount", amount),),
+        True,
+        why,
+    )
+
+
+def _fee_shares(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """No-change, profit, rounding, and dust reports. Amounts stay in the sequence."""
+    function = _own(model, candidate)
+    if isinstance(function, str):
+        return function
+    site = fee_share_site(model, function)
+    if site is None:
+        return "the function does not establish a fee-share formula"
+    actor = "deployer" if site.role_getter else ATTACKER
+    why = (
+        f"role_getter:{site.role_getter}"
+        if site.role_getter
+        else "no source role getter; the report caller is the ordinary attacker"
+    )
+    report = replace(_call(function, "report", actor), established_by=why[:240])
+    if not site.complete:
+        return [
+            (
+                "fee-no-change",
+                [report],
+                site.gap or "the fee-share configuration is not readable, so it is not judged",
+            )
+        ]
+    return [
+        (
+            "fee-no-change",
+            [report],
+            "a report with no asset increase mints no performance or protocol fee shares",
+        ),
+        (
+            "fee-profit",
+            [
+                _fee_donation(
+                    "1000000000000000000",
+                    "donate 1000000000000000000 asset units before the fee report",
+                ),
+                report,
+            ],
+            "profit of 1000000000000000000 is charged with the configured fee split",
+        ),
+        (
+            "fee-rounding",
+            [
+                _fee_donation("15", "donate 15 asset units so the fee division has a remainder"),
+                report,
+            ],
+            "a 15-unit profit exercises floor division of the fee-share formula",
+        ),
+        (
+            "fee-dust",
+            [
+                _fee_donation("9", "donate 9 asset units so a 10 percent fee rounds to zero"),
+                report,
+            ],
+            "a 9-unit profit rounds the fee-share amount down to zero",
+        ),
+    ]
+
+
 def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -494,6 +1016,8 @@ _BUILDERS: dict[str, Builder] = {
     "accounting.balance_as_deposit": _donation,
     "accounting.fee_on_transfer_mismatch": _token_behavior,
     "accounting.unchecked_token_return": _token_behavior,
+    "accounting.reported_balance": _reported,
+    "accounting.fee_shares": _fee_shares,
     "message.field_not_bound": _message,
     "message.missing_domain_separation": _message,
     "message.missing_expiry": _message,
@@ -511,6 +1035,7 @@ _BUILDERS: dict[str, Builder] = {
     "aa.unauthenticated_account_execution": _account_validation,
     "arithmetic.batch_accumulation_overflow": _boundary,
     "arithmetic.unsafe_downcast_after_arithmetic": _boundary,
+    "conservation.round_trip_value": _round_trip,
 }
 
 
@@ -528,26 +1053,37 @@ def mutate(
     by_id = {item.sequence_id: item for item in parents}
     known = set(by_id)
     out: dict[str, Vfcs] = {}
+    # Variants are taken round-robin across signals so one parent cannot spend the
+    # whole budget; children already known are skipped and do not count.
+    pending: list[tuple[FeedbackSignal, Vfcs, _VariantIter]] = []
     for signal in sorted(
         list(signals)[:MAX_FEEDBACK_SIGNALS], key=lambda s: (s.kind, s.sequence_id, s.call_index)
     ):
         parent = by_id.get(signal.sequence_id)
-        if parent is None:
-            continue
-        for operator, calls in _variants(parent, signal):
-            if not calls or len(calls) > MAX_VFCS_LENGTH:
-                continue
-            child_id = sequence_id_of(calls, parent.template, parent.identity)
-            if child_id in known or child_id in out:
-                continue
+        if parent is not None:
+            pending.append((signal, parent, iter(_variants(parent, signal))))
+    while pending and len(out) < limit:
+        still: list[tuple[FeedbackSignal, Vfcs, _VariantIter]] = []
+        for signal, parent, variants in pending:
             if len(out) >= limit:
-                return tuple(out.values())
-            out[child_id] = replace(
-                parent,
-                sequence_id=child_id,
-                origin=f"mutation:{signal.kind}:{operator}:{parent.sequence_id}",
-                calls=tuple(calls),
-            )
+                break
+            for operator, calls in variants:
+                if not calls or len(calls) > MAX_VFCS_LENGTH:
+                    continue
+                child_id = sequence_id_of(
+                    calls, parent.template, parent.identity, derived_from=parent.derived_from
+                )
+                if child_id in known or child_id in out:
+                    continue
+                out[child_id] = replace(
+                    parent,
+                    sequence_id=child_id,
+                    origin=f"mutation:{signal.kind}:{operator}:{parent.sequence_id}",
+                    calls=tuple(calls),
+                )
+                still.append((signal, parent, variants))
+                break
+        pending = still
     return tuple(out.values())
 
 
@@ -579,6 +1115,23 @@ def _variants(parent: Vfcs, signal: FeedbackSignal) -> Iterable[tuple[str, list[
         swapped = list(calls)
         swapped[index], swapped[index + 1] = swapped[index + 1], swapped[index]
         yield "reorder", swapped
+    if kind == "near_miss":
+        for position, call in enumerate(calls):
+            if call.role != "deposit" or call.primitive:
+                continue
+            for value in _SMALL_AMOUNTS:
+                arguments = tuple(
+                    (n, value if v == "minimum_amount" else v) for n, v in call.arguments
+                )
+                if arguments != call.arguments:
+                    yield (
+                        f"small_amount_{value}",
+                        [
+                            *calls[:position],
+                            replace(call, arguments=arguments),
+                            *calls[position + 1 :],
+                        ],
+                    )
     if kind == "coverage_gain" and len(calls) < MAX_VFCS_LENGTH and not calls[index].primitive:
         yield "repeat_call", [*calls[: index + 1], calls[index], *calls[index + 1 :]]
     if kind in {"caller_context_mismatch", "contradiction"}:

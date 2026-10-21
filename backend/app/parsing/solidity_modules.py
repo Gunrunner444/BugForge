@@ -30,7 +30,6 @@ from typing import Any
 from app.parsing.solidity_account_abstraction import account_abstraction_present
 from app.parsing.solidity_caller_context import has_sender_authorization
 from app.parsing.solidity_research import (
-    MAX_CANDIDATES_PER_FAMILY,
     ResearchModel,
     RFunction,
     SemanticCandidate,
@@ -237,8 +236,6 @@ def _unauthenticated_callbacks(
                     impact_tags=tags,
                 )
             )
-            if len(found) >= MAX_CANDIDATES_PER_FAMILY:
-                return found
     return found
 
 
@@ -267,4 +264,4 @@ def analyze_protocol_modules(model: ResearchModel) -> list[SemanticCandidate]:
                 ("bridge", "access_control", "custody"),
             )
         )
-    return found[:MAX_CANDIDATES_PER_FAMILY]
+    return found

@@ -67,6 +67,8 @@ class CampaignAnalysis:
     sequence_skipped: dict[str, str] = field(default_factory=dict)
     # Every file the analysis tried to read. Skipped files are not in ``sources``.
     file_reads: tuple[FileRead, ...] = ()
+    # Suite budget: how many candidates were found, kept, and why the rest were dropped.
+    candidate_budget: dict[str, Any] = field(default_factory=dict)
 
     def all_models(self) -> tuple[ResearchModel, ...]:
         """The main model first, then each distinct follow-up model (stable order)."""
@@ -81,9 +83,15 @@ class CampaignAnalysis:
         return self.sequence_sources.get(sequence_id, {})
 
     def candidate_for(self, derived_from: str) -> SemanticCandidate | None:
+        exact: list[SemanticCandidate] = []
         for item in self.candidates:
-            if f"{item.detector}@{item.contract}.{item.function}" == derived_from:
+            base = f"{item.detector}@{item.contract}.{item.function}"
+            if derived_from == f"{base}#{item.line}":
                 return item
+            if derived_from == base:
+                exact.append(item)
+        if len(exact) == 1:
+            return exact[0]
         return None
 
     def deployment_for(self, contract: str) -> DeploymentIdentity | None:
@@ -114,6 +122,29 @@ def _ordered(
     )
 
 
+def _name_reporting_host(model: ResearchModel | None, host: str, evidence: str) -> None:
+    """Record a concrete reporting host. An unknown name is left unset."""
+    if model is None or not host:
+        return
+    item = model.contracts.get(host)
+    if item is None or item.is_interface:
+        return
+    model.reporting_host = host
+    model.reporting_host_evidence = evidence
+
+
+def _name_asset_units(model: ResearchModel | None, evidence: Mapping[str, str] | None) -> None:
+    """Copy structured profile unit claims. Anything else is ignored."""
+    if model is None or not evidence:
+        return
+    for key, tag in evidence.items():
+        if tag != "validated_profile" or "." not in key:
+            continue
+        contract, getter = key.split(".", 1)
+        if getter.endswith("()") and contract in model.contracts:
+            model.asset_unit_evidence[key] = "validated_profile"
+
+
 def analyze_campaign(
     *,
     manifest: BountyManifest,
@@ -124,10 +155,15 @@ def analyze_campaign(
     contract: str = "",
     address: str = "",
     chain_id: str = "",
+    reporting_host: str = "",
+    reporting_host_evidence: str = "",
+    asset_unit_evidence: Mapping[str, str] | None = None,
 ) -> CampaignAnalysis:
     sources, primary_reads = read_source_files(repo_root, files)
     read_log: list[FileRead] = list(primary_reads)
     model = build_research_model(sources) if sources else None
+    _name_reporting_host(model, reporting_host, reporting_host_evidence)
+    _name_asset_units(model, asset_unit_evidence)
     target = deployment_identity(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
     )
@@ -142,6 +178,7 @@ def analyze_campaign(
     )
     candidates: list[SemanticCandidate] = []
     sequences: list[Vfcs] = []
+    budgets: list[dict[str, Any]] = []
     models: dict[str, ResearchModel] = {}
     sequence_sources: dict[str, dict[str, str]] = {}
     sequence_skipped: dict[str, str] = {}
@@ -178,7 +215,9 @@ def analyze_campaign(
                 sequence_sources[item.sequence_id] = part_sources
 
     if model is not None:
-        absorb(model, run_suite(model).candidates, sources)
+        primary = run_suite(model)
+        budgets.append(primary.budget())
+        absorb(model, primary.candidates, sources)
         ambiguous |= set(model.ambiguous)
 
     # Bounded follow-up over dropped high-priority files.
@@ -193,7 +232,11 @@ def analyze_campaign(
             continue
         covered |= set(batch_sources)
         part = build_research_model(batch_sources)
-        found = tuple(c for c in run_suite(part).candidates if c.file in batch_sources)
+        _name_reporting_host(part, reporting_host, reporting_host_evidence)
+        _name_asset_units(part, asset_unit_evidence)
+        suite = run_suite(part)
+        budgets.append(suite.budget())
+        found = tuple(c for c in suite.candidates if c.file in batch_sources)
         absorb(part, found, batch_sources)
         ambiguous |= set(part.ambiguous)
         followup["batches"].append({"files": sorted(batch_sources), "candidates": len(found)})
@@ -226,7 +269,11 @@ def analyze_campaign(
             if not alone:
                 continue
             part = build_research_model(alone)
-            found = tuple(c for c in run_suite(part).candidates if c.contract == name)
+            _name_reporting_host(part, reporting_host, reporting_host_evidence)
+            _name_asset_units(part, asset_unit_evidence)
+            suite = run_suite(part)
+            budgets.append(suite.budget())
+            found = tuple(c for c in suite.candidates if c.contract == name)
             absorb(part, found, alone)
             followup["ambiguous_passes"].append(
                 {"contract": name, "file": path, "candidates": len(found)}
@@ -259,13 +306,40 @@ def analyze_campaign(
         sequence_identity=seq_identity,
         ambiguous_contracts=frozenset(ambiguous),
         followup=followup,
-        truncated=bool(selection.truncated or (model is not None and model.truncated)),
+        truncated=bool(
+            selection.truncated
+            or (model is not None and model.truncated)
+            or any(bool(item.get("truncated")) for item in budgets)
+        ),
+        candidate_budget=_merge_budgets(budgets, retained=len(unique)),
         _deployments=deployments,
         sequence_sources=sequence_sources,
         sequence_skipped=sequence_skipped,
         source_hashes=hashes,
         file_reads=tuple(read_log),
     )
+
+
+def _merge_budgets(parts: list[dict[str, Any]], *, retained: int) -> dict[str, Any]:
+    dropped: dict[tuple[str, str], int] = {}
+    found = 0
+    notes: list[str] = []
+    for part in parts:
+        found += int(part.get("candidates_found", 0))
+        notes.extend(str(item) for item in part.get("notes", []))
+        for item in part.get("dropped", []):
+            key = (str(item.get("reason", "")), str(item.get("family", "")))
+            dropped[key] = dropped.get(key, 0) + int(item.get("count", 0))
+    return {
+        "candidates_found": found,
+        "candidates_kept": retained,
+        "truncated": any(bool(part.get("truncated")) for part in parts) or found > retained,
+        "dropped": [
+            {"reason": reason, "family": family, "count": count}
+            for (reason, family), count in sorted(dropped.items())
+        ],
+        "notes": notes[:12],
+    }
 
 
 def _sha256(text: str) -> str:

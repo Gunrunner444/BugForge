@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from app.discovery.bounty.properties import (
+    EVIDENCE_SLOTS,
     OracleKind,
     OracleObservation,
     OracleSpec,
@@ -75,7 +76,18 @@ MAX_RUNS = 160  # forge invocations per executor (one campaign request)
 HARNESS_SCHEMA = "bugforge.harness/2"
 ATTACKER_ADDR = "address(0xA11CE)"
 VICTIM_ADDR = "address(0xB0B)"
+# A second wallet the harness treats as attacker-controlled. Payouts to it are part
+# of the attacker's economic balance. It is not a protocol address.
+RECIPIENT_ADDR = "address(0xD1A1)"
 FIXTURE_AMOUNT = "1000000000000000000"  # 1e18 fixture units; local only
+# A harness-only signing key. It is not a secret and not an account that exists anywhere else.
+SIGNER = "signer"
+SIGNER_KEY = "uint256(0xBEEF)"
+SIGNER_EXPR = "vm.addr(uint256(0xBEEF))"
+_EIP712_SPEC = re.compile(
+    r"^eip712:(v|r|s):typehash=(0x[0-9a-fA-F]{64}):signer=key:chain=(current|other):"
+    r"fields=([A-Za-z0-9:,_x]+)$"
+)
 # Forge deploys the test contract at this fixed address (default sender, nonce 1).
 # Only events emitted by the harness itself are observations; any other emitter,
 # including the analyzed contract, is ignored.
@@ -98,6 +110,13 @@ K_CONTROL_BEFORE = 12
 K_CONTROL_AFTER = 13
 K_WORD = 14
 K_FIXTURE = 15
+# 0/1 attacker wallet before/after; 2/3 designated recipient wallet before/after.
+K_ACTOR = 16
+K_EVIDENCE = 17  # index into properties.EVIDENCE_SLOTS; supplementary, never the verdict
+# 1 when a declared asset getter returned the harness token; 0 when setup did not.
+K_SETUP = 18
+# 1 when a source role getter returned the deploying contract; 0 when it did not.
+K_ROLE = 19
 
 
 class Outcome(StrEnum):
@@ -322,7 +341,14 @@ class ExecutionIdentity:
 
 
 def target_contract(sequence: Vfcs) -> str:
-    """The contract a sequence targets: the candidate's contract, never calls[0]."""
+    """The contract a sequence deploys.
+
+    An entrypoint on another contract (the contract that reaches an internal or
+    library candidate) is used when the sequence names one. Otherwise the target
+    stays the candidate's contract, never ``calls[0]``.
+    """
+    if sequence.execution_contract:
+        return sequence.execution_contract
     _detector, _, target = sequence.derived_from.partition("@")
     contract = target.partition(".")[0]
     if contract:
@@ -645,6 +671,7 @@ TOKEN_ORACLES = frozenset(
     {
         OracleKind.CREDIT_LE_RECEIVED,
         OracleKind.CREDIT_LE_HOLDINGS,
+        OracleKind.CREDIT_MATCHES_REPORTED,
         OracleKind.BALANCE_NOT_INCREASED,
     }
 )
@@ -710,6 +737,31 @@ def _constructor(model: ResearchModel, contract: str) -> RFunction | None:
         if function.kind == "constructor":
             return function
     return None
+
+
+def _mapping_keys(type_name: str) -> tuple[str, ...] | None:
+    """Getter arguments of a public variable, or None when the type is not a simple getter."""
+    keys: list[str] = []
+    current = type_name
+    while current.startswith("mapping(") and current.endswith(")"):
+        inner = current[len("mapping(") : -1]
+        depth = 0
+        arrow = -1
+        for index, char in enumerate(inner):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif depth == 0 and inner.startswith("=>", index):
+                arrow = index
+                break
+        if arrow < 0:
+            return None
+        keys.append(inner[:arrow])
+        current = inner[arrow + 2 :]
+    if "[" in current or current.startswith("mapping"):
+        return None
+    return tuple(keys)
 
 
 def _resolve(model: ResearchModel, contract: str, signature: str) -> RFunction | None:
@@ -794,7 +846,15 @@ class _Synth:
         self.funded: set[str] = set()
         self.approved: set[str] = set()
         self.counter = 0
+        self.withdrawal_reads = 0
         self.body = ""
+        self.needs_sign = False
+        self.signatures: dict[str, tuple[str, str, str]] = {}
+        self.twin_ready = False
+        self.ctor_args: list[str] = []
+        self.prepared: Any = None
+        self.profile_ready = False
+        self.asset_lines: list[str] = []
 
     # -- token fixture -------------------------------------------------------------------
     def want_token(self, kind: str, why: str) -> None:
@@ -878,6 +938,17 @@ class _Synth:
             self.steps.append(f"        bytes[] memory {name} = new bytes[](1);")
             self.steps.append(f"        {name}[0] = {encoded};")
             return name
+        if override in {"bound_token", "custodied_token"}:
+            if abi != "address":
+                raise _UnbuildableError(
+                    f"token argument {param.name or '?'} is not an address", "param_not_expressible"
+                )
+            self.want_token(self.oracle.token_fixture or "standard", "the custodied token argument")
+            # Passing the token binds it only when the contract custodies whatever
+            # token it is given. A state-bound token needs a construction binding.
+            if override == "bound_token":
+                self.token_bound = True
+            return "address(bfToken)"
         if _is_token_type(self.model, param.type_name) and not abi.endswith("]"):
             self.want_token(self.oracle.token_fixture or "standard", "a token-typed parameter")
             self.token_bound = True
@@ -893,6 +964,8 @@ class _Synth:
             raise _UnbuildableError(
                 "fixed-size arrays are not expressible", "param_not_expressible"
             )
+        if override.startswith("eip712:"):
+            return self._eip712(override, abi)
         if abi == "address":
             if override == "reverting_callee":
                 if not self.failing_callee:
@@ -901,18 +974,47 @@ class _Synth:
                         "unsupported_primitive",
                     )
                 return "address(bfCallee)"
+            if override == SIGNER:
+                return SIGNER_EXPR
             if override in {VICTIM, "victim", "second_owner"}:
                 return VICTIM_ADDR
+            if override == "recipient":
+                return RECIPIENT_ADDR
             if override in {"attacker_controlled", "attacker_substituted", ATTACKER}:
                 return ATTACKER_ADDR
             return ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
         if abi.startswith("uint") or abi.startswith("int"):
+            if override == "actor_credit" and abi in {"uint256", "uint"}:
+                return self.actor_credit(call)
+            if override == "share_balance" and abi in {"uint256", "uint"}:
+                if not self.oracle.getter.endswith("(address)"):
+                    raise _UnbuildableError(
+                        "no source-backed share balance reader is bound to this exit",
+                        "share_reader_unresolved",
+                    )
+                return self.actor_credit(call)
+            if override.startswith("asset_exit:") and abi in {"uint256", "uint"}:
+                return self.asset_exit(call, override.split(":", 1)[1])
             if override == "max_uint":
                 return f"type({abi}).max"
             if override == "zero":
                 return "0"
             if override == "one":
                 return "1"
+            if override in {"two", "three"}:
+                return "2" if override == "two" else "3"
+            if override == "timestamp":
+                return "block.timestamp"
+            if override == "timestamp_plus":
+                return "block.timestamp + 1"
+            if override == "timestamp_minus":
+                return "block.timestamp - 1"
+            if re.fullmatch(r"[0-9]{1,78}", override):
+                return override
+            if override == "unit_amount":
+                return "1"
+            if override == "all_shares" and abi in {"uint256", "uint"}:
+                return self.actor_credit(call)
             if self.token_kind and override in _AMOUNT_LIKE and abi in {"uint256", "uint"}:
                 return FIXTURE_AMOUNT
             if override == "amount_one":
@@ -928,8 +1030,193 @@ class _Synth:
             # Empty calldata still hits the reverting callee's fallback.
             return 'bytes("")'
         if abi.startswith("bytes"):
+            if override == "zero":
+                return f"{abi}(0)"
+            if abi == "bytes32" and re.fullmatch(r"hex:0x[0-9a-fA-F]{64}", override):
+                return f"bytes32({override[4:]})"
             return f"{abi}(0)"
         raise _UnbuildableError(f"type {abi} is not expressible", "param_not_expressible")
+
+    def _actor_expr(self, role: str) -> str:
+        if role in {"", ATTACKER, "attacker"}:
+            return ATTACKER_ADDR
+        if role in {VICTIM, "victim"}:
+            return VICTIM_ADDR
+        if role == SIGNER:
+            return SIGNER_EXPR
+        if role == "governor":
+            return "address(0xC0FE)"
+        if role == "pause_guardian":
+            return "address(0x6A2D)"
+        if role == "deployer":
+            return "address(this)"
+        raise _UnbuildableError(f"actor {role!r} is not a harness actor", "unknown_actor")
+
+    def _sender(self, actor: str) -> str:
+        if actor not in {ATTACKER, VICTIM, SIGNER, "deployer"}:
+            raise _UnbuildableError(f"actor {actor!r} is not a harness actor", "unknown_actor")
+        return self._actor_expr(actor)
+
+    def _eip712_field(self, type_name: str, value: str) -> str:
+        if type_name == "address":
+            return self._actor_expr(value)
+        if type_name == "bool" and value in {"true", "false"}:
+            return value
+        if type_name == "uint256":
+            if value == "max":
+                return "type(uint256).max"
+            if value == "timestamp":
+                return "block.timestamp"
+            if value == "timestamp_plus":
+                return "block.timestamp + 1"
+            if value == "timestamp_minus":
+                return "block.timestamp - 1"
+            if re.fullmatch(r"[0-9]{1,78}", value):
+                return f"uint256({value})"
+        if type_name == "bytes32" and re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
+            return f"bytes32({value})"
+        raise _UnbuildableError(
+            "an EIP-712 field is not a static address, bool, uint256, or bytes32",
+            "signature_unparsed",
+        )
+
+    def _eip712(self, override: str, abi: str) -> str:
+        """Sign one digest on the target and return its v, r, or s component."""
+        match = _EIP712_SPEC.fullmatch(override)
+        if match is None or len(override) > 900:
+            raise _UnbuildableError(
+                "the signature specification is not a supported EIP-712 value",
+                "signature_unparsed",
+            )
+        component, typehash, chain, fields_text = match.groups()
+        expected = {"v": "uint8", "r": "bytes32", "s": "bytes32"}[component]
+        if abi != expected:
+            raise _UnbuildableError(
+                f"EIP-712 component {component} does not match {abi}", "signature_unparsed"
+            )
+        parts = [part for part in fields_text.split(",") if part]
+        if not parts or len(parts) > 12:
+            raise _UnbuildableError(
+                "an EIP-712 signature needs 1 to 12 static fields", "signature_unparsed"
+            )
+        body = override.split(":", 2)[2]
+        cached = self.signatures.get(body)
+        if cached is None:
+            encoded = []
+            for part in parts:
+                type_name, separator, value = part.partition(":")
+                if not separator:
+                    raise _UnbuildableError(
+                        "an EIP-712 field is missing its type", "signature_unparsed"
+                    )
+                encoded.append(self._eip712_field(type_name, value))
+            name = self._name("Sig")
+            chain_expr = "block.chainid" if chain == "current" else "block.chainid + 1"
+            self.steps.append(
+                f"        (uint8 {name}V, bytes32 {name}R, bytes32 {name}S) = _bfSign("
+                f"address(t), {typehash}, abi.encode({', '.join(encoded)}), "
+                f"{chain_expr}, {SIGNER_KEY});"
+            )
+            cached = (f"{name}V", f"{name}R", f"{name}S")
+            self.signatures[body] = cached
+            self.needs_sign = True
+        return cached[{"v": 0, "r": 1, "s": 2}[component]]
+
+    def actor_credit(self, call: VfcsCall) -> str:
+        """The actor's current credit read from the oracle getter, or the deposited amount."""
+        getter = self.oracle.getter
+        if not getter.endswith("(address)"):
+            return FIXTURE_AMOUNT
+        actor = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        ok, value = self._name("CredOk"), self._name("Cred")
+        self.steps.append(
+            f"        (bool {ok}, uint256 {value}) = _bfRead(address(t), "
+            f'abi.encodeWithSignature("{getter}", {actor}));'
+        )
+        self.steps.append(
+            f"        if (!{ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        if self.oracle.kind is OracleKind.BALANCE_NOT_INCREASED and call.actor == ATTACKER:
+            slot = 8 + self.withdrawal_reads
+            self.withdrawal_reads += 1
+            if slot < len(EVIDENCE_SLOTS):
+                self.steps.append(
+                    f"        emit BugForgeObservation({K_EVIDENCE}, {slot}, {value});"
+                )
+        return value
+
+    def asset_exit(self, call: VfcsCall, spec: str) -> str:
+        """An asset-unit exit amount from a source-backed view. Zero shares stays zero."""
+        getter = self.oracle.getter
+        if not getter.endswith("(address)") or spec in {"", "unsupported"}:
+            raise _UnbuildableError(
+                "the asset exit has no source-backed share reader or conversion",
+                "share_reader_unresolved",
+            )
+        if not (spec.endswith("(address)") or spec.endswith("(uint256)")):
+            raise _UnbuildableError(
+                f"asset conversion {spec} is not a supported view",
+                "share_reader_unresolved",
+            )
+        actor = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        share_ok, shares = self._name("PosOk"), self._name("Pos")
+        self.steps.append(
+            f"        (bool {share_ok}, uint256 {shares}) = _bfRead(address(t), "
+            f'abi.encodeWithSignature("{getter}", {actor}));'
+        )
+        self.steps.append(
+            f"        if (!{share_ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        if spec.endswith("(address)"):
+            read = f'_bfRead(address(t), abi.encodeWithSignature("{spec}", {actor}))'
+        else:
+            read = f'_bfRead(address(t), abi.encodeWithSignature("{spec}", {shares}))'
+        ok, value = self._name("ExitOk"), self._name("Exit")
+        self.steps.append(f"        (bool {ok}, uint256 {value}) = {read};")
+        self.steps.append(
+            f"        if (!{ok}) {{ emit BugForgeObservation({K_READ_FAILED}, 0, {K_ACTOR}); }}"
+        )
+        sized = self._name("Sized")
+        self.steps.append(
+            f"        uint256 {sized} = ({share_ok} && {ok} && {shares} != 0) ? {value} : 0;"
+        )
+        if self.oracle.kind is OracleKind.BALANCE_NOT_INCREASED and call.actor == ATTACKER:
+            slot = 8 + self.withdrawal_reads
+            self.withdrawal_reads += 1
+            if slot < len(EVIDENCE_SLOTS):
+                self.steps.append(
+                    f"        emit BugForgeObservation({K_EVIDENCE}, {slot}, {sized});"
+                )
+        return sized
+
+    def read_actor(self, slot: int) -> None:
+        self.steps.append(
+            f"        emit BugForgeObservation({K_ACTOR}, {slot}, bfToken.balanceOf({ATTACKER_ADDR}));"
+        )
+        self.steps.append(
+            "        emit BugForgeObservation("
+            f"{K_ACTOR}, {slot + 2}, bfToken.balanceOf({RECIPIENT_ADDR}));"
+        )
+
+    def read_evidence(self, phase: int) -> None:
+        """Holdings, the victim's balance and both credits; a failed credit read is omitted."""
+        self.steps.append(
+            f"        emit BugForgeObservation({K_EVIDENCE}, {phase}, "
+            "bfToken.balanceOf(address(t)));"
+        )
+        self.steps.append(
+            f"        emit BugForgeObservation({K_EVIDENCE}, {2 + phase}, "
+            f"bfToken.balanceOf({VICTIM_ADDR}));"
+        )
+        getter = self.oracle.getter
+        if not getter.endswith("(address)"):
+            return
+        # Through a helper: locals here would push the test function past the stack limit.
+        for base, actor in ((4, ATTACKER_ADDR), (6, VICTIM_ADDR)):
+            self.steps.append(
+                f"        _bfEvidence({base + phase}, address(t), "
+                f'abi.encodeWithSignature("{getter}", {actor}));'
+            )
 
     def nested(self, target: str) -> str:
         contract, _, signature = target.partition(".")
@@ -985,6 +1272,25 @@ class _Synth:
                 f"{param.name} is {stripped}, not profile type {profile.model_type}",
                 "profile_type_mismatch",
             )
+        if prepared.harness_token:
+            fields = ", ".join(f"{param.name}.{path}" for path in prepared.harness_token_fields)
+            self.want_token(
+                self.oracle.token_fixture or "standard",
+                f"profile {profile.profile_id} assigns the harness token to {fields}",
+            )
+            self.token_bound = True
+            self.primitives.append(
+                Primitive(
+                    name=f"constructor_profile_token:{prepared.harness_token}",
+                    purpose=f"construct {owner} with the harness token as {fields}",
+                    actor="harness",
+                    value="address(bfToken)",
+                    property_relevance="the custodied token is the token the harness measures",
+                    established_by="the profile's harness_token fixture",
+                )
+            )
+        self.prepared = prepared
+        self.profile_ready = True
         self.pre_deploy.extend(prepared.deploy_lines)
         self.profile_contracts = prepared.contracts
         self.profile_imports = prepared.import_paths
@@ -999,6 +1305,70 @@ class _Synth:
             )
         )
         return prepared.expression
+
+    def _bind_initialized_asset(self) -> None:
+        """Pass the harness token through a declared setup and read it back.
+
+        The profile names the parameter and the getter. A matching name is not
+        enough: the run stays inconclusive unless the getter returns the token.
+        """
+        profile = self.profile
+        if profile is None or profile.property_template != "initialization-asset":
+            return
+        if profile.contract != self.contract:
+            return
+        if not self.profile_ready:
+            from app.discovery.bounty.constructor_profile import ProfileError, prepare_profile
+
+            try:
+                prepared = prepare_profile(profile, self.sources or {})
+            except ProfileError as exc:
+                raise _UnbuildableError(exc.reason, exc.code) from exc
+            self.prepared = prepared
+            self.profile_ready = True
+            self.pre_deploy.extend(prepared.deploy_lines)
+            self.profile_contracts = prepared.contracts
+            self.profile_imports = prepared.import_paths
+        if not self.token_bound:
+            self.want_token(
+                self.oracle.token_fixture or "standard",
+                f"profile {profile.profile_id} assigns the harness token",
+            )
+            self.token_bound = True
+        count = len(self.sequence.calls)
+        getter = profile.property_getter
+        init = profile.initialization_function
+        lines = ["        {"]
+        if init:
+            lines.extend(
+                [
+                    "            (bool bfInitOk, ) = address(t).call("
+                    f'abi.encodeWithSignature("{init}", address(bfToken)));',
+                    "            if (!bfInitOk) {",
+                    f"                emit BugForgeObservation({K_SETUP}, 0, 0);",
+                    f"                emit BugForgeObservation({K_DONE}, {count}, 1);",
+                    "                return;",
+                    "            }",
+                ]
+            )
+        lines.extend(
+            [
+                "            (bool bfAssetOk, bytes memory bfAssetOut) = address(t).staticcall("
+                f'abi.encodeWithSignature("{getter}"));',
+                "            address bfBound = address(0);",
+                "            if (bfAssetOk && bfAssetOut.length >= 32) {",
+                "                bfBound = abi.decode(bfAssetOut, (address));",
+                "            }",
+                "            if (bfBound != address(bfToken)) {",
+                f"                emit BugForgeObservation({K_SETUP}, 0, 0);",
+                f"                emit BugForgeObservation({K_DONE}, {count}, 1);",
+                "                return;",
+                "            }",
+                f"            emit BugForgeObservation({K_SETUP}, 0, 1);",
+                "        }",
+            ]
+        )
+        self.asset_lines = lines
 
     # -- constructor ---------------------------------------------------------------------
     def constructor_args(self) -> list[str]:
@@ -1103,7 +1473,54 @@ class _Synth:
 
     # -- primitives ------------------------------------------------------------------------
     def primitive(self, index: int, call: VfcsCall) -> None:
-        actor_addr = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
+        actor_addr = self._sender(call.actor) if call.actor in {ATTACKER, VICTIM, SIGNER} else ""
+        if call.function == "deploy_twin()":
+            if self.twin_ready:
+                raise _UnbuildableError("the twin instance is already deployed", "twin_unavailable")
+            args = ", ".join(self.ctor_args)
+            self.steps.append(f"        {self.contract} bfTwin = new {self.contract}({args});")
+            self.twin_ready = True
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="deploy_twin",
+                    purpose=f"deploy a second {self.contract} with the same constructor",
+                    actor="harness",
+                    value=self.contract,
+                    property_relevance="a second verifying contract for a domain check",
+                    established_by="the same constructor arguments as the target",
+                )
+            )
+            return
+        if call.function == "warp(uint256)":
+            seconds = next(
+                (
+                    value
+                    for name, value in call.arguments
+                    if name == "seconds" and re.fullmatch(r"[0-9]{1,9}", value)
+                ),
+                "",
+            )
+            if seconds:
+                self.steps.append(f"        vm.warp(block.timestamp + {seconds});")
+                label = f"+{seconds} seconds"
+            else:
+                self.steps.append("        vm.warp(block.timestamp + 1 days);")
+                label = "+1 day"
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="time_advance:warp",
+                    purpose="advance the local clock",
+                    actor="harness",
+                    value=label,
+                    property_relevance=call.established_by,
+                    established_by=call.established_by,
+                )
+            )
+            return
+        if not actor_addr:
+            raise _UnbuildableError(f"actor {call.actor!r} is not a harness actor", "unknown_actor")
         if call.function == "deploy_reverting()":
             self.failing_callee = True
             self.steps.append(
@@ -1121,20 +1538,6 @@ class _Synth:
                 )
             )
             return
-        if call.function == "warp(uint256)":
-            self.steps.append("        vm.warp(block.timestamp + 1 days);")
-            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
-            self.primitives.append(
-                Primitive(
-                    name="time_advance:warp",
-                    purpose="advance the local clock",
-                    actor="harness",
-                    value="+1 day",
-                    property_relevance=call.established_by,
-                    established_by=call.established_by,
-                )
-            )
-            return
         if call.contract == "token" and call.function in {
             "transfer(address,uint256)",
             "approve(address,uint256)",
@@ -1143,6 +1546,17 @@ class _Synth:
             self.fund(call.actor, actor_addr)
             verb = "transfer" if call.function.startswith("transfer") else "approve"
             amount = FIXTURE_AMOUNT if verb == "transfer" else "type(uint256).max"
+            if verb == "transfer":
+                chosen = next(
+                    (
+                        value
+                        for name, value in call.arguments
+                        if name == "amount" and re.fullmatch(r"[1-9][0-9]{0,27}", value)
+                    ),
+                    "",
+                )
+                if chosen:
+                    amount = chosen
             ok = self._name("Prim")
             self.steps.append(f"        vm.prank({actor_addr});")
             self.steps.append(
@@ -1175,8 +1589,16 @@ class _Synth:
         getter = oracle.getter
         if not getter:
             return
-        if getter.endswith("(address)"):
-            actor = ATTACKER_ADDR if oracle.getter_actor in {"", ATTACKER} else VICTIM_ADDR
+        if getter.endswith("(address,address)"):
+            roles = [part.strip() for part in oracle.getter_actor.split(",") if part.strip()]
+            if len(roles) != 2:
+                raise _UnbuildableError(
+                    "a two-address getter needs two actors", "getter_unresolved"
+                )
+            args = ", ".join(self._actor_expr(role) for role in roles)
+            data = f'abi.encodeWithSignature("{getter}", {args})'
+        elif getter.endswith("(address)"):
+            actor = self._actor_expr(oracle.getter_actor)
             data = f'abi.encodeWithSignature("{getter}", {actor})'
         else:
             data = f'abi.encodeWithSignature("{getter}")'
@@ -1195,6 +1617,168 @@ class _Synth:
     def read_credit(self, slot: int) -> None:
         self.read_getter(K_CREDITED, slot)
 
+    def read_external(self, slot: int) -> None:
+        """Read the public report addend. A failed read is not emitted as zero."""
+        getter = self.oracle.external_getter
+        if not re.fullmatch(r"[A-Za-z_]\w*\(\)", getter):
+            raise _UnbuildableError(
+                "the external report getter is not a zero-argument function",
+                "external_getter_unresolved",
+            )
+        address_getter = self.oracle.external_address_getter
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_RECEIVED});"
+        if address_getter:
+            if not re.fullmatch(r"[A-Za-z_]\w*\(\)", address_getter):
+                raise _UnbuildableError(
+                    "the external address getter is not a zero-argument function",
+                    "external_getter_unresolved",
+                )
+            self.steps.append(
+                f"        (bool bfExtAddrOk_{slot}, bytes memory bfExtAddrRet_{slot}) = "
+                f'address(t).staticcall(abi.encodeWithSignature("{address_getter}"));'
+            )
+            self.steps.append(
+                f"        if (!bfExtAddrOk_{slot} || bfExtAddrRet_{slot}.length < 32) {{ {failed} }} "
+                "else {"
+            )
+            self.steps.append(
+                f"            address bfExtAddr_{slot} = abi.decode(bfExtAddrRet_{slot}, (address));"
+            )
+            self.steps.append(
+                f"            (bool bfExtOk_{slot}, bytes memory bfExtRet_{slot}) = "
+                f'bfExtAddr_{slot}.staticcall(abi.encodeWithSignature("{getter}"));'
+            )
+            self.steps.append(
+                f"            if (bfExtOk_{slot} && bfExtRet_{slot}.length >= 32) {{ "
+                f"emit BugForgeObservation({K_RECEIVED}, {slot}, "
+                f"abi.decode(bfExtRet_{slot}, (uint256))); }} else {{ {failed} }}"
+            )
+            self.steps.append("        }")
+            return
+        self.steps.append(
+            f"        (bool bfExtOk_{slot}, bytes memory bfExtRet_{slot}) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{getter}"));'
+        )
+        self.steps.append(
+            f"        if (bfExtOk_{slot} && bfExtRet_{slot}.length >= 32) {{ "
+            f"emit BugForgeObservation({K_RECEIVED}, {slot}, "
+            f"abi.decode(bfExtRet_{slot}, (uint256))); }} else {{ {failed} }}"
+        )
+
+    def read_fee_ledger(self, phase: str) -> None:
+        """Read the fee-share ledger. A failed staticcall is not stored as zero.
+
+        The reads share two locals. A fresh bool and bytes for every getter
+        overflows the legacy Solidity stack in this function.
+        """
+        oracle = self.oracle
+        if phase == "before":
+            self.steps.append("        bool bfFeeOk;")
+            self.steps.append("        bytes memory bfFeeRet;")
+            self.steps.append("        address bfPerfWho;")
+            self.steps.append("        address bfProtoWho;")
+            self.steps.append("        uint256 bfProtoBps;")
+            self._read_fee_uint("fee_assets_before", oracle.getter)
+            self._read_fee_uint("fee_supply_before", oracle.fee_supply_getter)
+            self._read_fee_uint("fee_performance_bps", oracle.fee_rate_getter)
+            self._read_fee_protocol()
+            self._read_fee_recipient("bfPerfWho", oracle.fee_recipient_getter)
+            self._read_fee_balance("fee_performance_before", "bfPerfWho")
+            self._read_fee_balance("fee_protocol_before", "bfProtoWho")
+            self._read_fee_balance("fee_self_before", "address(t)")
+            return
+        self._read_fee_uint("fee_assets_after", oracle.getter)
+        self._read_fee_balance("fee_performance_after", "bfPerfWho")
+        self._read_fee_balance("fee_protocol_after", "bfProtoWho")
+        self._read_fee_balance("fee_self_after", "address(t)")
+
+    def _fee_signature(self, signature: str, kind: str) -> str:
+        pattern = r"[A-Za-z_]\w*\(\)" if kind == "uint" else r"[A-Za-z_]\w*\(address\)"
+        if not re.fullmatch(pattern, signature):
+            raise _UnbuildableError(
+                f"the fee getter {signature or 'empty'} is not a {kind} signature",
+                "fee_getter_unresolved",
+            )
+        return signature
+
+    def _read_fee_uint(self, slot_name: str, signature: str) -> None:
+        signature = self._fee_signature(signature, "uint")
+        slot = EVIDENCE_SLOTS.index(slot_name)
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}"));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"emit BugForgeObservation({K_EVIDENCE}, {slot}, "
+            "abi.decode(bfFeeRet, (uint256))); } "
+            f"else {{ emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE}); }}"
+        )
+
+    def _read_fee_protocol(self) -> None:
+        oracle = self.oracle
+        config = self._fee_signature(oracle.protocol_config_getter, "uint")
+        slot = EVIDENCE_SLOTS.index("fee_protocol_bps")
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE});"
+        decode = (
+            "            if (bfFeeOk && bfFeeRet.length >= 64) {\n"
+            "                (bfProtoBps, bfProtoWho) = "
+            "abi.decode(bfFeeRet, (uint256, address));\n"
+            f"                emit BugForgeObservation({K_EVIDENCE}, {slot}, bfProtoBps);\n"
+            f"            }} else {{ {failed} }}"
+        )
+        if oracle.protocol_factory_getter:
+            factory = self._fee_signature(oracle.protocol_factory_getter, "uint")
+            self.steps.append(
+                "        (bfFeeOk, bfFeeRet) = "
+                f'address(t).staticcall(abi.encodeWithSignature("{factory}"));'
+            )
+            self.steps.append(
+                "        if (!bfFeeOk || bfFeeRet.length < 32) { " + failed + " } else {"
+            )
+            # bfPerfWho is still unset here. Reuse it so the factory address
+            # does not add another stack slot in the legacy codegen.
+            self.steps.append("            bfPerfWho = abi.decode(bfFeeRet, (address));")
+            self.steps.append(
+                "            (bfFeeOk, bfFeeRet) = bfPerfWho.staticcall("
+                f'abi.encodeWithSignature("{config}"));'
+            )
+            self.steps.append(decode)
+            self.steps.append("        }")
+            return
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{config}"));'
+        )
+        self.steps.append(decode)
+
+    def _read_fee_recipient(self, variable: str, signature: str) -> None:
+        signature = self._fee_signature(signature, "uint")
+        slot = EVIDENCE_SLOTS.index("fee_performance_before")
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE});"
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}"));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"{variable} = abi.decode(bfFeeRet, (address)); }} else {{ {failed} }}"
+        )
+
+    def _read_fee_balance(self, slot_name: str, who: str) -> None:
+        signature = self._fee_signature(self.oracle.share_getter, "address")
+        slot = EVIDENCE_SLOTS.index(slot_name)
+        self.steps.append(
+            "        (bfFeeOk, bfFeeRet) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{signature}", {who}));'
+        )
+        self.steps.append(
+            "        if (bfFeeOk && bfFeeRet.length >= 32) { "
+            f"emit BugForgeObservation({K_EVIDENCE}, {slot}, "
+            "abi.decode(bfFeeRet, (uint256))); } "
+            f"else {{ emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_EVIDENCE}); }}"
+        )
+
     def _positive_control(self, index: int, encoded: str) -> None:
         sender = self.oracle.control_sender
         if not re.fullmatch(r"address\(0x[0-9A-Fa-f]{1,40}\)", sender):
@@ -1210,16 +1794,49 @@ class _Synth:
         )
         self.read_getter(K_CONTROL_AFTER, index)
 
-    def _emit_call(self, index: int, sender: str, encoded: str) -> None:
+    def _require_deployer_role(self, index: int, call: VfcsCall) -> None:
+        """Prove the deploying contract is the source-declared role, then allow an unpranked call."""
+        match = re.fullmatch(r"role_getter:([A-Za-z_]\w*\(\))", call.established_by)
+        if match is None:
+            raise _UnbuildableError(
+                "a deployer call has no source role getter",
+                "role_unconfirmed",
+            )
+        getter = match.group(1)
+        count = len(self.sequence.calls)
+        self.steps.append(
+            f"        (bool bfRoleOk_{index}, bytes memory bfRoleRet_{index}) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{getter}"));'
+        )
+        self.steps.append(
+            f"        if (!bfRoleOk_{index} || bfRoleRet_{index}.length < 32 || "
+            f"abi.decode(bfRoleRet_{index}, (address)) != address(this)) {{"
+        )
+        self.steps.append(f"            emit BugForgeObservation({K_ROLE}, {index}, 0);")
+        self.steps.append(f"            emit BugForgeObservation({K_DONE}, {count}, 1);")
+        self.steps.append("            return;")
+        self.steps.append("        }")
+        self.steps.append(f"        emit BugForgeObservation({K_ROLE}, {index}, 1);")
+
+    def _emit_call(
+        self,
+        index: int,
+        sender: str,
+        encoded: str,
+        dest: str = "address(t)",
+        *,
+        prank: bool = True,
+    ) -> None:
         oracle = self.oracle
         capture = bool(oracle.revert_selector) or oracle.kind is OracleKind.CONFIGURED_VALUE
-        self.steps.append(f"        vm.prank({sender});")
+        if prank:
+            self.steps.append(f"        vm.prank({sender});")
         if capture:
             self.steps.append(
-                f"        (bool ok_{index}, bytes memory ret_{index}) = address(t).call({encoded});"
+                f"        (bool ok_{index}, bytes memory ret_{index}) = {dest}.call({encoded});"
             )
         else:
-            self.steps.append(f"        (bool ok_{index}, ) = address(t).call({encoded});")
+            self.steps.append(f"        (bool ok_{index}, ) = {dest}.call({encoded});")
         self.steps.append(
             f"        emit BugForgeObservation({K_CALL}, {index}, ok_{index} ? 1 : 0);"
         )
@@ -1270,6 +1887,133 @@ class _Synth:
             f"uint256(uint160(address({variable}))));"
         )
 
+    def _bodies(self, signature: str) -> tuple[str, ...]:
+        found: list[str] = []
+        for name in sorted(self.model.contracts):
+            item = self.model.contracts[name]
+            for candidate in item.functions:
+                if (
+                    candidate.kind == "function"
+                    and candidate.signature == signature
+                    and candidate.has_body
+                ):
+                    found.append(name)
+        return tuple(found)
+
+    def _target_delegates(self) -> bool:
+        for function in self.model.functions_of(self.contract, inherited=True):
+            if (
+                function.kind == "fallback"
+                and function.has_body
+                and re.search(r"\bdelegatecall\s*\(", function.body)
+            ):
+                return True
+        return False
+
+    def _declaration_is_public(self, text: str, name: str) -> bool:
+        clean = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        clean = re.sub(r"//.*?$", " ", clean, flags=re.M)
+        for statement in clean.split(";"):
+            if re.search(r"\bfunction\b", statement):
+                continue
+            if re.search(rf"\b{re.escape(name)}\b", statement) and re.search(
+                r"\bpublic\b", statement
+            ):
+                return True
+        return False
+
+    def _public_getter(self, call: VfcsCall) -> RFunction | None:
+        """A public state-variable getter. The parser records the variable, not the getter."""
+        name, separator, tail = call.function.partition("(")
+        if not separator or not tail.endswith(")"):
+            return None
+        found: tuple[str, str, str] | None = None
+        for owner in self.model.lineage(self.contract):
+            item = self.model.contracts.get(owner)
+            if item is None:
+                continue
+            for var_name, type_name in item.state_vars:
+                if var_name == name:
+                    found = (owner, item.file, type_name)
+                    break
+            if found is not None:
+                break
+        if found is None:
+            return None
+        owner, path, type_name = found
+        if not self._declaration_is_public((self.sources or {}).get(path, ""), name):
+            return None
+        keys = _mapping_keys(type_name)
+        if keys is None or f"{name}({','.join(keys)})" != call.function:
+            return None
+        return RFunction(
+            file=path,
+            contract=owner,
+            name=name,
+            kind="function",
+            signature=call.function,
+            line=0,
+            visibility="public",
+            mutability="view",
+            modifiers=(),
+            params=tuple(Param(key, f"arg{index}") for index, key in enumerate(keys)),
+            returns=(),
+            body="",
+            has_body=True,
+        )
+
+    def _callable(self, call: VfcsCall) -> RFunction:
+        """The function to encode. A foreign function is sent through the target fallback."""
+        function = _resolve(self.model, call.contract, call.function)
+        if function is not None and call.contract == self.contract:
+            return function
+        if call.contract == self.contract:
+            getter = self._public_getter(call)
+            if getter is not None:
+                return getter
+        if function is None:
+            raise _UnbuildableError(
+                "a call is not a function of the target contract", "call_outside_target"
+            )
+        bodies = self._bodies(function.signature)
+        if len(bodies) != 1:
+            raise _UnbuildableError(
+                f"{call.function} has {len(bodies)} concrete bodies; the harness does not pick one",
+                "delegate_ambiguous",
+            )
+        if not self._target_delegates():
+            raise _UnbuildableError(
+                "a call is not a function of the target contract", "call_outside_target"
+            )
+        self.primitives.append(
+            Primitive(
+                name="delegate_fallback",
+                purpose=(
+                    f"send {call.contract}.{call.function} to {self.contract} "
+                    "through its delegatecall fallback"
+                ),
+                actor=call.actor,
+                value=call.contract,
+                property_relevance="the call uses the target's storage and address",
+                established_by="one concrete body and a fallback that delegatecalls",
+            )
+        )
+        return function
+
+    def _destination(self, call: VfcsCall) -> str:
+        instance = dict(call.arguments).get("__instance", "")
+        if instance in {"", "target"}:
+            return "address(t)"
+        if instance == "twin":
+            if not self.twin_ready:
+                raise _UnbuildableError(
+                    "the twin instance was not deployed before this call", "twin_unavailable"
+                )
+            return "address(bfTwin)"
+        raise _UnbuildableError(
+            "the call instance is not the target or its twin", "twin_unavailable"
+        )
+
     # -- assemble --------------------------------------------------------------------------
     def build(self) -> str:
         for call in self.sequence.calls:
@@ -1284,55 +2028,87 @@ class _Synth:
                 )
         oracle = self.oracle
         probe = probe_index(self.sequence, oracle) if oracle.executable else -1
-        if oracle.kind in TOKEN_ORACLES:
+        tracking = oracle.balance_relation == "payout_matches_credit"
+        if oracle.kind in TOKEN_ORACLES or oracle.kind is OracleKind.FEE_SHARES_MATCH or tracking:
             self.want_token(oracle.token_fixture or "standard", oracle.expression)
         ctor_args = self.constructor_args()
+        self.ctor_args = ctor_args
+        self._bind_initialized_asset()
         if oracle.kind in TOKEN_ORACLES:
             self.approve(ATTACKER, ATTACKER_ADDR, "the probe deposits fixture tokens")
+        conserving = oracle.kind is OracleKind.BALANCE_NOT_INCREASED
+        state_reads = {
+            OracleKind.STATE_UNCHANGED,
+            OracleKind.CALL_MUST_FAIL,
+            OracleKind.STATE_EQUALS,
+        }
+        if conserving:
+            if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
+                self.approve(VICTIM, VICTIM_ADDR, "another depositor's funds are in custody")
+            self.read_actor(0)
+            self.read_evidence(0)
         for index, call in enumerate(self.sequence.calls):
             if call.primitive:
                 self.primitive(index, call)
                 continue
-            function = _resolve(self.model, call.contract, call.function)
-            if function is None or call.contract != self.contract:
-                raise _UnbuildableError(
-                    "a call is not a function of the target contract", "call_outside_target"
-                )
+            function = self._callable(call)
             encoded = self.encode(call, function)
             if index == probe and oracle.control_sender:
                 self._positive_control(index, encoded)
-            if (
-                index == probe
-                and oracle.getter
-                and oracle.kind
-                in {
-                    OracleKind.STATE_UNCHANGED,
-                    OracleKind.CALL_MUST_FAIL,
-                }
-            ):
+            if index == probe and tracking:
+                self.read_actor(0)
+                self.read_evidence(0)
+            if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_BEFORE, index)
-            if index == probe and oracle.kind in TOKEN_ORACLES:
+            if index == probe and oracle.kind is OracleKind.FEE_SHARES_MATCH:
+                self.read_fee_ledger("before")
+            if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 0)
                 self.read_credit(0)
-            sender = ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
-            if call.actor not in {ATTACKER, VICTIM}:
-                raise _UnbuildableError(
-                    f"actor {call.actor!r} is not a harness actor", "unknown_actor"
+            if call.actor == "deployer":
+                self._require_deployer_role(index, call)
+                self._emit_call(
+                    index, "address(this)", encoded, self._destination(call), prank=False
                 )
-            self._emit_call(index, sender, encoded)
-            if (
-                index == probe
-                and oracle.getter
-                and oracle.kind
-                in {
-                    OracleKind.STATE_UNCHANGED,
-                    OracleKind.CALL_MUST_FAIL,
-                }
-            ):
+            else:
+                sender = self._sender(call.actor)
+                self._emit_call(index, sender, encoded, self._destination(call))
+            if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_AFTER, index)
-            if index == probe and oracle.kind in TOKEN_ORACLES:
+            if index == probe and tracking:
+                self.read_actor(1)
+                self.read_evidence(1)
+            if index == probe and oracle.kind is OracleKind.FEE_SHARES_MATCH:
+                self.read_fee_ledger("after")
+            if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
+                if (
+                    oracle.kind
+                    in {OracleKind.CREDIT_LE_HOLDINGS, OracleKind.CREDIT_MATCHES_REPORTED}
+                    and oracle.external_getter
+                ):
+                    self.read_external(2)
+        if conserving:
+            self.read_actor(1)
+            self.read_evidence(1)
+        # A second actor can supply or approve before a non-balance probe. Funding
+        # them only for balance oracles made an unauthorized withdrawal look like
+        # an empty account reverting, which is not an authorization result.
+        if self.token_kind:
+            self.approve(ATTACKER, ATTACKER_ADDR, "the attacker can move the fixture token")
+            if any(call.actor == VICTIM and not call.primitive for call in self.sequence.calls):
+                self.approve(
+                    VICTIM,
+                    VICTIM_ADDR,
+                    "another actor in this sequence moves the fixture token",
+                )
+            if any(call.actor == SIGNER and not call.primitive for call in self.sequence.calls):
+                self.approve(
+                    SIGNER,
+                    SIGNER_EXPR,
+                    "the signing owner moves the fixture token",
+                )
         if self.token_kind and not self.token_bound:
             raise _UnbuildableError(
                 f"{self.contract} reads its token from state the harness cannot bind "
@@ -1345,6 +2121,7 @@ class _Synth:
                 *self.pre_deploy,
                 deploy,
                 f"        emit BugForgeObservation({K_DEPLOYED}, 0, 1);",
+                *self.asset_lines,
                 *self.post_deploy,
                 *self.steps,
                 f"        emit BugForgeObservation({K_DONE}, {len(self.sequence.calls)}, 1);",
@@ -1363,6 +2140,8 @@ class _Synth:
             reverting=_REVERTING_CALLEE if self.failing_callee else "",
             profile_contracts=self.profile_contracts,
             body=body,
+            evidence=K_EVIDENCE,
+            sign_helper=_SIGN_HELPER if self.needs_sign else "",
         )
 
     def imports(self) -> tuple[str, ...]:
@@ -1373,6 +2152,39 @@ class _Synth:
             if path not in files:
                 files.append(path)
         return tuple(files)
+
+
+def delegate_execution_host(
+    profile: Any, model: ResearchModel, contract: str, sources: Mapping[str, str] | None
+) -> str:
+    """A profile host that delegatecalls ``contract`` after that code is placed.
+
+    Empty unless the profile names a different contract, places this one at an
+    address literal, and that host's fallback delegatecalls. The sequence still
+    names the logic contract.
+    """
+    if profile is None or getattr(profile, "property_template", "") != "initialization-asset":
+        return ""
+    host = str(getattr(profile, "contract", "") or "")
+    if not host or host == contract:
+        return ""
+    placed = [
+        item
+        for item in getattr(profile, "fixtures", ())
+        if getattr(item, "kind", "") == "source_contract"
+        and getattr(item, "contract", "") == contract
+        and getattr(item, "place_at", "")
+    ]
+    if len(placed) != 1 or not _deployable(model, host, sources):
+        return ""
+    for function in model.functions_of(host, inherited=True):
+        if (
+            function.kind == "fallback"
+            and function.has_body
+            and re.search(r"\bdelegatecall\s*\(", function.body)
+        ):
+            return host
+    return ""
 
 
 def build_harness(
@@ -1417,7 +2229,21 @@ def build_harness(
         )
     if item is None or not _deployable(model, contract, sources):
         return fail("target contract is not a deployable source", "not_deployable")
-    synth = _Synth(model, sequence, contract, oracle, sources, profile)
+    host = delegate_execution_host(profile, model, contract, sources)
+    synth = _Synth(model, sequence, host or contract, oracle, sources, profile)
+    if host:
+        synth.primitives.append(
+            Primitive(
+                name="delegate_host",
+                purpose=f"deploy {host} and execute {contract} through its delegatecall fallback",
+                actor="harness",
+                value=host,
+                property_relevance="the logic contract's storage is the host's storage",
+                established_by=(
+                    "the profile places the logic runtime at an address literal in the host"
+                ),
+            )
+        )
     try:
         source = synth.build()
     except _UnbuildableError as exc:
@@ -1455,10 +2281,49 @@ contract VfcsHarness is Test {{
         return (true, abi.decode(out, (uint256)));
     }}
 
+    function _bfEvidence(uint256 slot, address target, bytes memory data) internal {{
+        (bool ok, uint256 value) = _bfRead(target, data);
+        if (ok) emit BugForgeObservation({evidence}, slot, value);
+    }}
+
     function test_vfcs_execute() public {{
 {body}
     }}
-}}
+{sign_helper}}}
+"""
+
+# Domain name and version are read from the target. The struct typehash and fields
+# come from the sequence. Static fields only: abi.encodePacked(typehash, abi.encode(fields))
+# matches abi.encode(typehash, fields...) for address, bool, uint256, and bytes32.
+_SIGN_HELPER = """
+    function _bfDomainString(address target, string memory sig) internal view returns (string memory) {
+        (bool ok, bytes memory out) = target.staticcall(abi.encodeWithSignature(sig));
+        require(ok && out.length >= 64, "bf-domain");
+        return abi.decode(out, (string));
+    }
+
+    function _bfSign(
+        address target,
+        bytes32 typehash,
+        bytes memory fields,
+        uint256 chainId,
+        uint256 key
+    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes(_bfDomainString(target, "name()"))),
+                keccak256(bytes(_bfDomainString(target, "version()"))),
+                chainId,
+                target
+            )
+        );
+        bytes32 structHash = keccak256(abi.encodePacked(typehash, fields));
+        bytes32 digest = keccak256(abi.encodePacked("\\x19\\x01", domainSeparator, structHash));
+        return vm.sign(key, digest);
+    }
 """
 
 _FIXTURE_TOKEN = """
@@ -1530,6 +2395,9 @@ interface Vm {
     function warp(uint256) external;
     function roll(uint256) external;
     function deal(address, uint256) external;
+    function addr(uint256) external pure returns (address);
+    function sign(uint256, bytes32) external pure returns (uint8, bytes32, bytes32);
+    function etch(address, bytes calldata) external;
 }
 
 contract Test {
@@ -1659,6 +2527,8 @@ def observation_from_events(
     readable = True
     received: dict[int, int] = {}
     credited: dict[int, int] = {}
+    actor: dict[int, int] = {}
+    evidence: dict[int, int] = {}
     deployed = done = False
     revert_selector = ""
     revert_data_ok = True
@@ -1681,6 +2551,10 @@ def observation_from_events(
             received[index] = value
         elif kind == K_CREDITED:
             credited[index] = value
+        elif kind == K_ACTOR:
+            actor[index] = value
+        elif kind == K_EVIDENCE and 0 <= index < len(EVIDENCE_SLOTS):
+            evidence[index] = value
         elif kind == K_DONE:
             done = index == count
         elif kind == K_REVERT:
@@ -1713,6 +2587,11 @@ def observation_from_events(
         credited=credited[1] - credited[0] if {0, 1} <= set(credited) else None,
         holdings_after=received.get(1),
         credit_after=credited.get(1),
+        external_after=received.get(2),
+        actor_before=actor.get(0),
+        actor_after=actor.get(1),
+        recipient_before=actor.get(2),
+        recipient_after=actor.get(3),
         revert_selector=revert_selector,
         revert_data_ok=revert_data_ok,
         control_ok=control_ok,
@@ -1720,6 +2599,7 @@ def observation_from_events(
         control_after=control_after,
         observed_word=observed_word,
         fixture_word=fixture_word,
+        evidence=tuple((EVIDENCE_SLOTS[slot], evidence[slot]) for slot in sorted(evidence)),
     )
     return observation, deployed, done
 
@@ -1749,6 +2629,8 @@ class StatefulObservation:
     identity: ExecutionIdentity | None = None
     harness: HarnessArtifact | None = None
     reason_code: str = ""
+    applicability_disposition: str = ""
+    token_fixture: str = ""
 
     @property
     def no_oracle(self) -> bool:
@@ -1756,14 +2638,39 @@ class StatefulObservation:
 
     @property
     def strong_candidate(self) -> bool:
-        """Only an executed, identity-bound oracle violation is a strong candidate."""
-        return (
+        """An identity-bound violation whose material assumptions are confirmed."""
+        from app.discovery.bounty.applicability import LEGACY_STRONG_FIXTURES
+
+        base = (
             self.outcome is Outcome.PROPERTY_VIOLATED
             and self.declaration == PropertyDeclaration.PROPERTY_UNDER_TEST.value
             and self.property_checked
             and self.identity is not None
             and self.identity.bound
         )
+        if not base:
+            return False
+        if self.applicability_disposition:
+            if self.applicability_disposition != "target_applicable":
+                return False
+            if self.oracle_kind in {
+                "credit_le_received",
+                "credit_le_holdings",
+                "credit_matches_reported",
+                "balance_not_increased",
+                "fee_shares_match",
+            }:
+                return self.token_fixture in LEGACY_STRONG_FIXTURES or self.token_fixture in {
+                    "fee_on_transfer",
+                    "false_return",
+                    "rebasing",
+                }
+            return self.token_fixture in {"", *LEGACY_STRONG_FIXTURES} or self.token_fixture in {
+                "fee_on_transfer",
+                "false_return",
+                "rebasing",
+            }
+        return self.token_fixture in LEGACY_STRONG_FIXTURES
 
     def signal(self) -> FeedbackSignal | None:
         """Turn an execution observation into bounded feedback. None = nothing to learn."""
@@ -1804,6 +2711,8 @@ class StatefulObservation:
             "formulation": self.formulation,
             "oracle_kind": self.oracle_kind,
             "strong_candidate": self.strong_candidate,
+            "applicability_disposition": self.applicability_disposition,
+            "token_fixture": self.token_fixture,
             "evaluation": self.evaluation.as_dict() if self.evaluation else None,
             "result": self.result.as_dict() if self.result else None,
             "identity": self.identity.as_dict() if self.identity else None,
@@ -1893,7 +2802,53 @@ class ProjectSettings:
     evm_requested: str = ""
 
 
-def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = None) -> str:
+_REMAPPING = re.compile(r"^[A-Za-z0-9_@./-]+=src/[A-Za-z0-9_@./+-]+/$")
+_IMPORT_PATH = re.compile(r"""import\s+(?:[^'";]*?\s+from\s+)?["']([^"']+)["']""")
+
+
+def derived_remappings(sources: Mapping[str, str]) -> tuple[str, ...]:
+    """Remap an import prefix only when one source file contains that suffix.
+
+    The prefix and the directory both come from the source set. A prefix that
+    matches nothing, or more than one file, is left unresolved.
+    """
+    imports: set[str] = set()
+    for text in sources.values():
+        imports.update(_IMPORT_PATH.findall(text))
+    paths = [path for path in sources if path.endswith(".sol")]
+    found: list[str] = []
+    for imported in sorted(imports):
+        if imported.startswith(("./", "../", "src/", "forge-std/")):
+            continue
+        candidate = ""
+        for index, char in enumerate(imported):
+            if char != "/" or index == 0 or index == len(imported) - 1:
+                continue
+            prefix = imported[: index + 1]
+            suffix = imported[index + 1 :]
+            matches = [path for path in paths if path.endswith("/" + suffix) or path == suffix]
+            if len(matches) != 1:
+                continue
+            directory = matches[0][: -len(suffix)]
+            if not directory.endswith("/"):
+                continue
+            item = f"{prefix}=src/{directory}"
+            if _REMAPPING.fullmatch(item):
+                candidate = item
+            break
+        if candidate and candidate not in found:
+            found.append(candidate)
+        if len(found) == 4:
+            break
+    return tuple(found)
+
+
+def foundry_config(
+    pipeline: str,
+    solc: str,
+    settings: ProjectSettings | None = None,
+    remappings: tuple[str, ...] = (),
+) -> str:
     """Server-owned Foundry config. Nothing from the analyzed repository reaches it.
 
     ``pipeline`` may force a corroboration variant. It is never interpolated.
@@ -1920,6 +2875,11 @@ def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = 
     ):
         evm_line = f"evm_version = {json.dumps(settings.evm_version)}\n"
     solc_line = f"solc = {json.dumps(solc)}\n" if solc else ""
+    listed = ["forge-std/=lib/forge-std/src/"]
+    for item in remappings:
+        if _REMAPPING.fullmatch(item) and item not in listed and len(listed) < 5:
+            listed.append(item)
+    remap_line = "remappings = [" + ", ".join(json.dumps(item) for item in listed) + "]\n"
     return (
         "[profile.default]\n"
         'src = "src"\n'
@@ -1936,7 +2896,7 @@ def foundry_config(pipeline: str, solc: str, settings: ProjectSettings | None = 
         + f"via_ir = {via_ir}\n"
         + f"optimizer = {optimizer}\n"
         + runs_line
-        + 'remappings = ["forge-std/=lib/forge-std/src/"]\n'
+        + remap_line
         + "\n[lint]\nlint_on_build = false\n"
     )
 
@@ -2121,7 +3081,7 @@ class StatefulExecutor:
         self.runs += 1
         forge = tool_path("forge") or "forge"
         solc = str(self.compiler.path) if self.compiler is not None else (tool_path("solc") or "")
-        config = foundry_config(harness.pipeline, solc, self.project)
+        config = foundry_config(harness.pipeline, solc, self.project, derived_remappings(sources))
         common: dict[str, Any] = {
             "pipeline": harness.pipeline,
             "forge_version": self.tools.forge_version,
@@ -2249,6 +3209,7 @@ class _Base:
         harness: HarnessArtifact | None = None,
         result: ExecutionResult | None = None,
         evaluation: PropertyEvaluation | None = None,
+        applicability: str = "",
     ) -> StatefulObservation:
         executed = outcome in RUNNABLE
         declaration = self.spec.declaration.value
@@ -2281,6 +3242,8 @@ class _Base:
             identity=self.identity,
             harness=harness,
             reason_code=code or outcome.value,
+            applicability_disposition=applicability or self.spec.applicability.disposition,
+            token_fixture=self.oracle.token_fixture,
         )
 
 
@@ -2331,6 +3294,51 @@ def interpret(
         if not deployed:
             reason = f"the target could not be deployed locally: {reason}"
         return failed(reason, "harness_failed", "failed")
+    if any(kind == K_ROLE and value == 0 for kind, _index, value in events):
+        reason = "the harness contract is not the source-declared authorized caller"
+        return base.done(
+            Outcome.INCONCLUSIVE,
+            reason,
+            "role_unconfirmed",
+            harness=harness,
+            applicability="not_applicable",
+            result=ExecutionResult(
+                "completed",
+                "ok",
+                "passed",
+                "incomplete",
+                "not_evaluated",
+                return_code=return_code,
+                failure_reason=reason,
+                events=events,
+                stdout_tail=_tail(stdout, 600),
+                stderr_tail=_tail(stderr, 600),
+                duration_ms=duration_ms,
+                **common,
+            ),
+        )
+    if any(kind == K_SETUP and value == 0 for kind, _index, value in events):
+        reason = "initialization did not leave the harness token in the declared asset getter"
+        return base.done(
+            Outcome.INCONCLUSIVE,
+            reason,
+            "asset_binding_unconfirmed",
+            harness=harness,
+            result=ExecutionResult(
+                "completed",
+                "ok",
+                "passed",
+                "incomplete",
+                "not_evaluated",
+                return_code=return_code,
+                failure_reason=reason,
+                events=events,
+                stdout_tail=_tail(stdout, 600),
+                stderr_tail=_tail(stderr, 600),
+                duration_ms=duration_ms,
+                **common,
+            ),
+        )
     if not deployed or not done:
         return failed("the harness did not report a complete run", "incomplete_run", "passed")
     outcome, evaluation, reason = classify(base.sequence, base.oracle, observation)
@@ -2360,7 +3368,27 @@ def interpret(
     code = outcome.value
     if outcome is Outcome.INCONCLUSIVE and not evaluation.precondition_ok:
         code = "precondition_failed"
-    return base.done(outcome, reason, code, harness=harness, result=result, evaluation=evaluation)
+    from app.discovery.bounty.applicability import apply_execution_applicability
+
+    role_values = [value for kind, _index, value in events if kind == K_ROLE]
+    updated = apply_execution_applicability(
+        base.spec.applicability,
+        identity_status=base.identity.status,
+        reason_code=code,
+        role_proven=bool(role_values) and all(value == 1 for value in role_values),
+        role_denied=False,
+        execution_id=base.sequence.sequence_id,
+        property_id=base.spec.property_id,
+    )
+    return base.done(
+        outcome,
+        reason,
+        code,
+        harness=harness,
+        result=result,
+        evaluation=evaluation,
+        applicability=updated.disposition,
+    )
 
 
 # ---- independent checks -----------------------------------------------------------------------
@@ -2681,6 +3709,9 @@ def run_feedback_loop(
     all_mutated: list[Vfcs] = []
     by_id = {s.sequence_id: s for s in sequences}
 
+    # Earlier signals stay offered: mutate skips children already run, so a parent
+    # whose variants did not fit one round's budget gets the next round's.
+    offered: dict[str, FeedbackSignal] = {}
     for _round in range(max(1, rounds)):
         signals: list[FeedbackSignal] = []
         next_frontier: list[Vfcs] = []
@@ -2711,7 +3742,9 @@ def run_feedback_loop(
                         "from_outcome": obs.outcome.value,
                     }
                 )
-            if obs.outcome is Outcome.PROPERTY_VIOLATED:
+            # A local violation whose material assumptions are not confirmed stays in
+            # the record. It does not spend the minimization budget as a bounty lead.
+            if obs.outcome is Outcome.PROPERTY_VIOLATED and obs.strong_candidate:
                 result = _minimize_sequence(executor, sequence, model, exact, spec, context)
                 if result is not None:
                     minimized[sequence.sequence_id] = result
@@ -2729,9 +3762,11 @@ def run_feedback_loop(
                 )
                 independent[sequence.sequence_id] = corroboration
                 independent_runs[sequence.sequence_id] = runs
-        if not signals:
+        for signal in signals:
+            offered.setdefault(f"{signal.kind}:{signal.sequence_id}:{signal.call_index}", signal)
+        if not offered:
             break
-        children = mutate(list(by_id.values()), signals, limit=limit)
+        children = mutate(list(by_id.values()), list(offered.values()), limit=limit)
         for child in children:
             if child.sequence_id in by_id:
                 continue

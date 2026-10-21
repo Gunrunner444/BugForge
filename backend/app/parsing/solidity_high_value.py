@@ -37,7 +37,6 @@ from __future__ import annotations
 import re
 
 from app.parsing.solidity_research import (
-    MAX_CANDIDATES_PER_FAMILY,
     ResearchModel,
     RFunction,
     SemanticCandidate,
@@ -64,7 +63,7 @@ def analyze_high_value(model: ResearchModel) -> list[SemanticCandidate]:
     out.extend(_read_only_reentrancy(model))
     out.extend(_transient_misuse(model))
     out.extend(_eip7702_assumptions(model))
-    return out[:MAX_CANDIDATES_PER_FAMILY]
+    return out
 
 
 _INTERNAL_CALL = re.compile(r"(?<![.\w])([A-Za-z_]\w*)\s*\(")
@@ -166,8 +165,6 @@ def _read_only_reentrancy(model: ResearchModel) -> list[SemanticCandidate]:
                         impact_tags=("read_only_reentrancy",),
                     )
                 )
-                if len(found) >= MAX_CANDIDATES_PER_FAMILY:
-                    return found
     return found
 
 
@@ -300,8 +297,6 @@ def _transient_misuse(model: ResearchModel) -> list[SemanticCandidate]:
                     impact_tags=("transient_storage",),
                 )
             )
-            if len(found) >= MAX_CANDIDATES_PER_FAMILY:
-                return found
     return found
 
 
@@ -470,6 +465,4 @@ def _eip7702_assumptions(model: ResearchModel) -> list[SemanticCandidate]:
                     impact_tags=("eip7702", "access_control"),
                 )
             )
-            if len(found) >= MAX_CANDIDATES_PER_FAMILY:
-                return found
     return found

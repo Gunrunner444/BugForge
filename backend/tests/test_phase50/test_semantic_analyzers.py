@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from app.parsing.solidity_research_suite import is_hypothesis
 from tests.test_phase50.phase50_support import (
     analyze,
     analyze_text,
@@ -55,8 +56,10 @@ def _without_labelled_prefund(candidates):
 
 @pytest.mark.parametrize("name", SAFE_FIXTURES)
 def test_safe_fixtures_report_nothing(name: str) -> None:
+    # Hypothesis families fire on safe code by design; they are not defect suspicions.
     result = analyze(name)
-    assert _without_labelled_prefund(result.candidates) == ()
+    suspicions = tuple(item for item in result.candidates if not is_hypothesis(item))
+    assert _without_labelled_prefund(suspicions) == ()
 
 
 def test_every_candidate_is_static_and_unverified() -> None:

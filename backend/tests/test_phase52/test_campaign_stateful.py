@@ -160,12 +160,21 @@ def test_end_to_end_campaign_execution_is_durable_and_drives_findings(repo: Path
     assert engines["foundry"]["status"] == "usable"
     for name in ("echidna", "medusa"):
         assert engines[name]["status"] in {"usable", "installed", "unavailable"}
-    # every executed violation lists its check paths; a usable engine was really run
+    # A target-applicable violation lists its independent check paths. A local
+    # violation whose material assumption is unconfirmed stays in the record and
+    # does not spend that budget.
     executed = [e for e in status["executions"].values() if e["outcome"] == "property_violated"]
-    assert executed and all(e["check_paths"] for e in executed)
+    strong = [e for e in executed if e.get("strong_candidate")]
+    unconfirmed = [e for e in executed if not e.get("strong_candidate")]
+    assert strong and all(e["check_paths"] for e in strong)
+    assert unconfirmed and all(
+        (e.get("applicability") or {}).get("disposition")
+        in {"unconfirmed", "fixture_only", "not_applicable"}
+        for e in unconfirmed
+    )
     for name, entry in engines.items():
         if entry.get("role") == "property_engine" and entry["status"] == "usable":
-            ran = [p for e in executed for p in e["check_paths"] if p["path"] == f"{name}:property"]
+            ran = [p for e in strong for p in e["check_paths"] if p["path"] == f"{name}:property"]
             assert ran and all(p["verdict"] != "not_evaluated" for p in ran)
 
 
