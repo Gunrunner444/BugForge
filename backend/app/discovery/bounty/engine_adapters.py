@@ -157,7 +157,7 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
         if state_judged is None or state_violated is None:
             return None
         return pre + reached + state_judged, state_violated
-    elif kind is OracleKind.CREDIT_LE_HOLDINGS:
+    elif kind in {OracleKind.CREDIT_LE_HOLDINGS, OracleKind.CREDIT_MATCHES_REPORTED}:
         extra = ""
         ceiling = f"bfVal[{K_RECEIVED}][1]"
         if oracle.external_getter:
@@ -167,7 +167,8 @@ def _judge(sequence: Vfcs, oracle: OracleSpec) -> tuple[str, str] | None:
             f"        return !bfReadFailed && bfSeen[{K_RECEIVED}][1] && bfSeen[{K_CREDITED}][1]"
             f"{extra} && _bfOk({probe});\n"
         )
-        violated = f"        return bfVal[{K_CREDITED}][1] > {ceiling};\n"
+        compare = "!=" if kind is OracleKind.CREDIT_MATCHES_REPORTED else ">"
+        violated = f"        return bfVal[{K_CREDITED}][1] {compare} {ceiling};\n"
     else:
         return None
     return pre + reached + judged, violated

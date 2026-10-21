@@ -671,6 +671,7 @@ TOKEN_ORACLES = frozenset(
     {
         OracleKind.CREDIT_LE_RECEIVED,
         OracleKind.CREDIT_LE_HOLDINGS,
+        OracleKind.CREDIT_MATCHES_REPORTED,
         OracleKind.BALANCE_NOT_INCREASED,
     }
 )
@@ -1953,7 +1954,11 @@ class _Synth:
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
-                if oracle.kind is OracleKind.CREDIT_LE_HOLDINGS and oracle.external_getter:
+                if (
+                    oracle.kind
+                    in {OracleKind.CREDIT_LE_HOLDINGS, OracleKind.CREDIT_MATCHES_REPORTED}
+                    and oracle.external_getter
+                ):
                     self.read_external(2)
         if conserving:
             self.read_actor(1)
@@ -2505,7 +2510,7 @@ class StatefulObservation:
     @property
     def strong_candidate(self) -> bool:
         """An identity-bound violation whose material assumptions are confirmed."""
-        from app.discovery.bounty.applicability import LEGACY_APPLICABLE_FIXTURES
+        from app.discovery.bounty.applicability import LEGACY_STRONG_FIXTURES
 
         base = (
             self.outcome is Outcome.PROPERTY_VIOLATED
@@ -2518,7 +2523,7 @@ class StatefulObservation:
             return False
         if self.applicability_disposition:
             return self.applicability_disposition == "target_applicable"
-        return self.token_fixture in LEGACY_APPLICABLE_FIXTURES
+        return self.token_fixture in LEGACY_STRONG_FIXTURES
 
     def signal(self) -> FeedbackSignal | None:
         """Turn an execution observation into bounded feedback. None = nothing to learn."""
@@ -3225,6 +3230,8 @@ def interpret(
         reason_code=code,
         role_proven=bool(role_values) and all(value == 1 for value in role_values),
         role_denied=False,
+        execution_id=base.sequence.sequence_id,
+        property_id=base.spec.property_id,
     )
     return base.done(
         outcome,

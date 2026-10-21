@@ -47,7 +47,7 @@ MAX_FIELDS = 32
 MAX_DEPTH = 4
 MAX_ARRAY = 24
 MAX_FIXTURES = 8
-MAX_BOUND_FILES = 16
+MAX_BOUND_FILES = 24
 
 # Harness addresses. The attacker is the existing probe actor and cannot be a
 # privileged role. These are local labels, not live accounts.

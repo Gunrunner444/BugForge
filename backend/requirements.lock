@@ -1,7 +1,8 @@
 # Constraints from the Python 3.12 environment that ran the Phase 64 regression.
 # CI installs with: pip install -e ".[dev]" -c requirements.lock
 # This is a constraints file (-c), not a hashed lock. It pins the packages that
-# resolver selected. pip's build-isolation build backends are not pinned here.
+# resolver selected. pip's build-isolation backends, including setuptools and
+# wheel, are not pinned and can still float. That does not change this runtime set.
 # Direct ranges in pyproject.toml stay the compatibility floor.
 # Newer releases (for example FastAPI 0.156.x) were not adopted. No package
 # version changed in Phase 65.

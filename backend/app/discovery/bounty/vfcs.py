@@ -840,23 +840,33 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
         ATTACKER,
         "increase the token balance without writing the stored total",
     )
-    if site.reported_form == "idle_balance":
+    if site.store_relation == "equal" and site.reported_form == "idle_balance":
+        statement = (
+            "after the report, the stored total equals the idle token balance; "
+            "this does not prove fees, locked shares, or the unlock formula"
+        )
+    elif site.store_relation == "equal":
+        statement = (
+            "after the report, the stored total equals the idle token balance plus "
+            f"{site.external_getter}; this does not prove fees or the unlock formula"
+        )
+    elif site.reported_form == "idle_balance":
         statement = (
             "after the report, the stored total is at most the idle token balance; "
-            "assets held outside this contract are not part of this check"
+            "this upper bound does not prove that a profit was recognized"
         )
     else:
         statement = (
             "after the report, the stored total is at most the idle token balance plus "
-            f"{site.external_getter}"
+            f"{site.external_getter}; this upper bound does not prove profit recognition"
         )
     plans: list[Plan] = [
         ("donate→report", [donate, report], statement),
         (
             "report",
             [report],
-            "a report that observes no new profit or loss keeps the stored total "
-            "within the token balance",
+            "a report with no balance change keeps the stored total consistent with "
+            "the source-backed amount; this is not a fee or unlock proof",
         ),
     ]
     if site.role_getter:
@@ -888,8 +898,8 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
                 (
                     "gain→report",
                     [_call(gain, "gain", ATTACKER), report],
-                    "after the public component increases, the stored total is at most "
-                    "idle holdings plus that component; this does not prove a fee formula",
+                    "after the public component increases, the stored total is reconciled "
+                    "with idle holdings plus that component; this does not prove a fee formula",
                 )
             )
     if site.unlock_seconds and site.role_getter:
@@ -907,7 +917,7 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
             (
                 "donate→report→warp→report",
                 [donate, report, warp, second],
-                "after the source duration, a second report still stores at most the "
+                "after the source duration, a second report is reconciled with the "
                 "source-backed total; this does not prove the unlock formula",
             )
         )

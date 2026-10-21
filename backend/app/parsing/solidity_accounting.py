@@ -413,6 +413,9 @@ class ReportedSite:
     address_getter: str = ""
     host: str = ""
     gain: str = ""
+    # ``equal`` when the stored field is assigned the reported local itself.
+    # ``upper_bound`` when the assignment is a reduced or scaled expression.
+    store_relation: str = "upper_bound"
 
     @property
     def judgeable(self) -> bool:
@@ -431,7 +434,7 @@ def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | N
     found = _stored_report(model, function)
     if found is None:
         return None
-    local, field, call, assign_at = found
+    local, field, call, assign_at, relation = found
     getter = _stored_getter(model, function.contract, field)
     classified = _classify_reported(model, function.contract, call, 0, "self")
     form = classified.form if classified is not None else "other"
@@ -468,6 +471,7 @@ def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | N
         address_getter=address_getter if form == "idle_plus_getter" and getter else "",
         host=host,
         gain=gain if form == "idle_plus_getter" and getter else "",
+        store_relation=relation,
     )
 
 
@@ -494,7 +498,15 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
         gaps.append("a validated host profile for the reporting callback")
     if site.unlock_seconds:
         gaps.append("the unlock formula is not judged from the duration literal")
-    gaps.append("protocol-fee configuration is not part of this reconciliation")
+    else:
+        gaps.append("no unlock duration was found; unlock behavior is not judged")
+    gaps.append("performance-fee share mint is not judged")
+    gaps.append("protocol-fee share split is not judged")
+    gaps.append("locked-share adjustments are not judged")
+    if site.store_relation != "equal":
+        gaps.append(
+            "the stored assignment is not the reported value itself, so equality is not judged"
+        )
     return [
         SemanticCandidate(
             detector="accounting.reported_balance",
@@ -535,6 +547,7 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
                 ("reporting_host", site.host),
                 ("reporting_host_evidence", model.reporting_host_evidence if site.host else ""),
                 ("gain", site.gain),
+                ("store_relation", site.store_relation),
             ),
             observed=("a called value is written into stored accounting",),
             missing=tuple(gaps),
@@ -544,8 +557,17 @@ def _reported_balance(model: ResearchModel, function: RFunction) -> list[Semanti
     ]
 
 
-def _stored_report(model: ResearchModel, function: RFunction) -> tuple[str, str, str, int] | None:
-    """(local, field, call expression, assignment index) for the first reconciliation."""
+def _store_relation(rhs: str, local: str) -> str:
+    """``equal`` only when the stored field is assigned that local and nothing else."""
+    if re.sub(r"\s+", "", rhs) == local:
+        return "equal"
+    return "upper_bound"
+
+
+def _stored_report(
+    model: ResearchModel, function: RFunction
+) -> tuple[str, str, str, int, str] | None:
+    """(local, field, call expression, assignment index, relation) for the first store."""
     body = function.body
     for match in _LOCAL_FROM_CALL.finditer(body):
         local = match.group("name")
@@ -564,7 +586,7 @@ def _stored_report(model: ResearchModel, function: RFunction) -> tuple[str, str,
                 continue
             if "." not in lhs and field not in model.state_vars(function.contract):
                 continue
-            return local, field, call, match.end() + store.start()
+            return local, field, call, match.end() + store.start(), _store_relation(rhs, local)
     return None
 
 

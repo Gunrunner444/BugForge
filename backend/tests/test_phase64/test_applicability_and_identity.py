@@ -227,9 +227,16 @@ def test_legacy_fee_record_without_applicability_is_not_strong() -> None:
     del record["applicability"]
     assert is_strong(record) is False
     assert is_strong(_record()) is True
+    explicit = _record(token_fixture="standard")
+    del explicit["applicability"]
+    assert is_strong(explicit) is True
     bare = _record(token_fixture="")
     del bare["applicability"]
-    assert is_strong(bare) is True
+    assert is_strong(bare) is False
+    missing_name = _record()
+    del missing_name["applicability"]
+    del missing_name["token_fixture"]
+    assert is_strong(missing_name) is False
     custom = _record(token_fixture="custom_rebase")
     del custom["applicability"]
     assert is_strong(custom) is False

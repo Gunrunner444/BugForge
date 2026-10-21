@@ -89,8 +89,12 @@ class OracleKind(StrEnum):
     BALANCE_NOT_INCREASED = "balance_not_increased"
     # credited balance (public getter for the actor) must not exceed tokens received
     CREDIT_LE_RECEIVED = "credit_le_received"
-    # solvency formulation: the actor's credit must not exceed what the contract holds
+    # solvency formulation: the actor's credit must not exceed what the contract holds.
+    # This is an upper bound. It does not prove profit, fees, or unlocking.
     CREDIT_LE_HOLDINGS = "credit_le_holdings"
+    # The stored total equals the source-backed reportable amount.
+    # Still not a fee, locked-share, or unlock-formula proof.
+    CREDIT_MATCHES_REPORTED = "credit_matches_reported"
     # Behavioral probe: did a reverting callee's failure reach the outer call?
     # Outer success is evidence of a mechanism, not a security-property violation.
     MECHANISM_PROBE = "mechanism_probe"
@@ -1176,27 +1180,56 @@ def _reported_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
         if role != probe and any(call.role == role for call in sequence.calls)
     ]
     assumptions: tuple[str, ...]
+    equal = site.store_relation == "equal"
+    kind = OracleKind.CREDIT_MATCHES_REPORTED if equal else OracleKind.CREDIT_LE_HOLDINGS
     if site.reported_form == "idle_balance":
-        expression = f"{site.getter} after the report is at most the contract's idle token balance"
-        why = f"{fn.name} writes {site.field} from a call that resolves to idle token holdings"
+        if equal:
+            expression = f"{site.getter} after the report equals the contract's idle token balance"
+            why = f"{fn.name} assigns {site.field} from a call that resolves to idle token holdings"
+        else:
+            expression = (
+                f"{site.getter} after the report is at most the contract's idle token balance"
+            )
+            why = f"{fn.name} writes {site.field} from a call that resolves to idle token holdings"
         assumptions = (
             "the compared values are both asset units",
             "an authorized fee paid to someone other than the attacker is not theft",
             "this check is idle holdings only and does not price assets deployed elsewhere",
         )
     else:
-        expression = (
-            f"{site.getter} after the report is at most the idle token balance plus "
-            f"{site.external_getter}"
-        )
-        why = (
-            f"{fn.name} writes {site.field} from idle holdings plus the public getter "
-            f"{site.external_getter}"
-        )
+        if equal:
+            expression = (
+                f"{site.getter} after the report equals the idle token balance plus "
+                f"{site.external_getter}"
+            )
+            why = (
+                f"{fn.name} assigns {site.field} from idle holdings plus the public getter "
+                f"{site.external_getter}"
+            )
+        else:
+            expression = (
+                f"{site.getter} after the report is at most the idle token balance plus "
+                f"{site.external_getter}"
+            )
+            why = (
+                f"{fn.name} writes {site.field} from idle holdings plus the public getter "
+                f"{site.external_getter}"
+            )
         assumptions = (
             "the compared values are both asset units",
             "an authorized fee paid to someone other than the attacker is not theft",
             "the extra component is the named public getter, not an unreadable yield source",
+        )
+    if equal:
+        assumptions = (
+            *assumptions,
+            "this equality reconciles the stored total with the reported amount and does "
+            "not prove fees, locked shares, or the unlock formula",
+        )
+    else:
+        assumptions = (
+            *assumptions,
+            "this is an upper bound and does not prove that a profit was recognized",
         )
     if site.report_scope == "host":
         assumptions = (
@@ -1206,7 +1239,7 @@ def _reported_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: 
         )
     return (
         OracleSpec(
-            kind=OracleKind.CREDIT_LE_HOLDINGS,
+            kind=kind,
             probe_role=probe,
             probe_function=fn.signature,
             precondition_roles=tuple(pre),
@@ -1492,49 +1525,78 @@ def evaluate(
             True,
             True,
         )
-    if kind is OracleKind.CREDIT_LE_HOLDINGS:
-        if (
-            not observation.readable
-            or observation.credit_after is None
-            or observation.holdings_after is None
-        ):
-            return PropertyEvaluation(
-                PropertyVerdict.NOT_EVALUATED, "credit or holdings could not be read", probe
-            )
-        if probe_ok != 1:
-            return PropertyEvaluation(
-                PropertyVerdict.NOT_EVALUATED, "the credit call reverted; nothing credited", probe
-            )
-        ceiling = observation.holdings_after
-        ceiling_text = f"holdings {observation.holdings_after}"
-        if oracle.external_getter:
-            if observation.external_after is None:
+    if kind in {OracleKind.CREDIT_LE_HOLDINGS, OracleKind.CREDIT_MATCHES_REPORTED}:
+        measured = _reported_ceiling(oracle, observation, probe, probe_ok)
+        if isinstance(measured, PropertyEvaluation):
+            return measured
+        ceiling, ceiling_text = measured
+        credit = observation.credit_after
+        assert credit is not None
+        if kind is OracleKind.CREDIT_MATCHES_REPORTED:
+            if credit != ceiling:
                 return PropertyEvaluation(
-                    PropertyVerdict.NOT_EVALUATED,
-                    f"{oracle.external_getter} was not observed; a missing addend is not zero",
+                    PropertyVerdict.PROPERTY_VIOLATED,
+                    f"credit {credit} != {ceiling_text}",
                     probe,
+                    True,
+                    True,
                 )
-            ceiling += observation.external_after
-            ceiling_text = (
-                f"holdings {observation.holdings_after} + {oracle.external_getter} "
-                f"{observation.external_after}"
+            return PropertyEvaluation(
+                PropertyVerdict.PROPERTY_HELD,
+                f"credit {credit} == {ceiling_text}",
+                probe,
+                True,
+                True,
             )
-        if observation.credit_after > ceiling:
+        if credit > ceiling:
             return PropertyEvaluation(
                 PropertyVerdict.PROPERTY_VIOLATED,
-                f"credit {observation.credit_after} exceeds {ceiling_text}",
+                f"credit {credit} exceeds {ceiling_text}",
                 probe,
                 True,
                 True,
             )
         return PropertyEvaluation(
             PropertyVerdict.PROPERTY_HELD,
-            f"credit {observation.credit_after} <= {ceiling_text}",
+            f"credit {credit} <= {ceiling_text}",
             probe,
             True,
             True,
         )
     return PropertyEvaluation(PropertyVerdict.NOT_EVALUATED, f"unknown oracle {kind.value}")
+
+
+def _reported_ceiling(
+    oracle: OracleSpec, observation: OracleObservation, probe: int, probe_ok: int
+) -> tuple[int, str] | PropertyEvaluation:
+    """Idle holdings plus one observed addend. A missing reading is not zero."""
+    if (
+        not observation.readable
+        or observation.credit_after is None
+        or observation.holdings_after is None
+    ):
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED, "credit or holdings could not be read", probe
+        )
+    if probe_ok != 1:
+        return PropertyEvaluation(
+            PropertyVerdict.NOT_EVALUATED, "the credit call reverted; nothing credited", probe
+        )
+    ceiling = observation.holdings_after
+    ceiling_text = f"holdings {observation.holdings_after}"
+    if oracle.external_getter:
+        if observation.external_after is None:
+            return PropertyEvaluation(
+                PropertyVerdict.NOT_EVALUATED,
+                f"{oracle.external_getter} was not observed; a missing addend is not zero",
+                probe,
+            )
+        ceiling += observation.external_after
+        ceiling_text = (
+            f"holdings {observation.holdings_after} + {oracle.external_getter} "
+            f"{observation.external_after}"
+        )
+    return ceiling, ceiling_text
 
 
 def _unfunded_exit(sequence: Vfcs, observation: OracleObservation) -> bool:

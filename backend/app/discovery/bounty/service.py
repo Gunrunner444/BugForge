@@ -1560,6 +1560,8 @@ class BountyCampaignService:
                 reason_code=str(record["reason_code"]),
                 role_proven=bool(role_values) and all(value == 1 for value in role_values),
                 role_denied=any(value == 0 for value in role_values),
+                execution_id=obs.sequence_id,
+                property_id=str(record.get("property_id") or ""),
             )
             record["applicability"] = applicability.as_dict()
             record["token_fixture"] = spec.oracle.token_fixture

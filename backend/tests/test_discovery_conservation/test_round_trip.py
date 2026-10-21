@@ -396,11 +396,19 @@ def test_a_hypothesis_is_a_finding_only_after_an_executed_violation() -> None:
             "verdict": "property_violated",
             "oracle_kind": "balance_not_increased",
             "identity_status": "bound",
+            "token_fixture": "standard",
         }
     }
     (finding,) = build_findings([candidate], manifest=mani, identity=identity, executions=violated)
     assert finding.candidate_strength == "strong_candidate"
     assert finding.verified is False
+    incomplete = {
+        "x": {key: value for key, value in violated["x"].items() if key != "token_fixture"}
+    }
+    (blocked,) = build_findings(
+        [candidate], manifest=mani, identity=identity, executions=incomplete
+    )
+    assert blocked.candidate_strength == "unconfirmed_assumption"
 
 
 def test_a_hypothesis_adds_no_triage_weight() -> None:

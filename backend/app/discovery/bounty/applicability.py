@@ -15,9 +15,12 @@ from typing import Any
 # Fixtures whose result depends on behavior a normal ERC-20 does not have.
 MATERIAL_FIXTURES = frozenset({"fee_on_transfer", "false_return", "rebasing"})
 _STANDARD = frozenset({"standard", "standard_erc20"})
-# A stored result with no applicability record is strong only for these fixtures.
-# Anything else, including a misspelled or newly introduced name, stays ineligible.
+# Older rows named these fixtures before applicability existed. An empty name is
+# not in this set: a missing fixture is not proof that the token is standard.
 LEGACY_APPLICABLE_FIXTURES = frozenset({"", "standard", "standard_erc20"})
+# Strength is stricter than display. An absent fixture must be re-analyzed
+# before a violation can be strong. An explicit standard fixture can stay eligible.
+LEGACY_STRONG_FIXTURES = frozenset({"standard", "standard_erc20"})
 _PROVEN = frozenset({"source", "validated_profile"})
 _ROLE_PROVEN = frozenset({"runtime", "validated_profile"})
 
@@ -216,14 +219,18 @@ def reconcile_identity(applicability: Applicability, identity_status: str) -> Ap
     return Applicability(_disposition(assumptions, executable=True), assumptions)
 
 
-def confirm_validated_role(applicability: Applicability) -> Applicability:
-    """The harness read the role getter and it returned the deploying contract."""
+def confirm_validated_role(
+    applicability: Applicability, *, execution_id: str = "", property_id: str = ""
+) -> Applicability:
+    """Confirm the role for this execution only. The input object is not mutated."""
+    bound = execution_id or "unbound"
+    named = property_id or "unbound"
+    evidence = (
+        "the harness read the role getter and it returned the deploying contract "
+        f"for execution {bound} and property {named}; another execution does not inherit this"
+    )
     assumptions = tuple(
-        replace(
-            item,
-            status="confirmed",
-            evidence=("the harness read the role getter and it returned the deploying contract"),
-        )
+        replace(item, status="confirmed", evidence=evidence)
         if item.name == "privileged_actor"
         else item
         for item in applicability.assumptions
@@ -259,13 +266,15 @@ def apply_execution_applicability(
     reason_code: str,
     role_proven: bool,
     role_denied: bool,
+    execution_id: str = "",
+    property_id: str = "",
 ) -> Applicability:
-    """Recompute applicability from the execution record. This is the persisted path."""
+    """Recompute applicability from this execution. A sibling record is left untouched."""
     updated = reconcile_identity(applicability, identity_status)
     if role_denied or reason_code == "role_unconfirmed":
         return deny_unconfirmed_role(updated)
     if role_proven:
-        return confirm_validated_role(updated)
+        return confirm_validated_role(updated, execution_id=execution_id, property_id=property_id)
     return updated
 
 
