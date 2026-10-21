@@ -397,6 +397,7 @@ def _rows(report: dict[str, object]) -> list[dict[str, object]]:
                 "verdict": item.get("verdict", ""),
                 "verified": item.get("verified"),
                 "strong_candidate": item.get("strong_candidate"),
+                "applicability_disposition": item.get("applicability_disposition", ""),
                 "declaration": item.get("declaration", ""),
                 "derived_from": meta.get("derived_from", ""),
                 "template": meta.get("template", ""),
@@ -459,6 +460,7 @@ def test_blind_campaigns_distinguish_seeded_pairs(
             measured.append(
                 {
                     "pair_id": pair["pair_id"],
+                    "detector": detector,
                     "economic_class": pair["economic_class"],
                     "family": pair["family"],
                     "detector_emitted_on_planted": detector in _detectors(planted),
@@ -515,8 +517,14 @@ def test_blind_campaigns_distinguish_seeded_pairs(
         violation = item["planted_violation"]
         assert isinstance(violation, dict)
         assert violation["verified"] is False
-        assert violation["strong_candidate"] is True
         assert violation["declaration"] == "property_under_test"
+        # A fee-on-transfer violation is real locally and is not target-applicable
+        # until a source fact says that token behavior is in scope.
+        if item["detector"] == "accounting.fee_on_transfer_mismatch":
+            assert violation["strong_candidate"] is False
+            assert violation["applicability_disposition"] == "unconfirmed"
+        else:
+            assert violation["strong_candidate"] is True
     assert gap_record["property_violated"] is False
     assert "unbound_token" in gap_record["reason_codes"]
     assert all(item["verified"] is False for item in gap_record["report"]["findings"])  # type: ignore[index]

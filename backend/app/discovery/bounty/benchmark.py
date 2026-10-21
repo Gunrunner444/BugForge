@@ -39,6 +39,7 @@ FUNNEL_STAGES = (
     "harness_built",
     "forge_executed",
     "property_judged",
+    "target_applicable",
 )
 
 
@@ -129,7 +130,14 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                 if not built.sequences:
                     outcomes[role] = "no_sequence"
                     continue
-                sequence = built.sequences[0]
+                wanted = str(case.get("template") or "")
+                matched = [
+                    item for item in built.sequences if not wanted or item.template == wanted
+                ]
+                if not matched:
+                    outcomes[role] = "no_sequence"
+                    continue
+                sequence = matched[0]
                 spec_ = build_property(sequence, model, twin)
                 obs = executor.execute(sequence, model, {path.name: text}, spec=spec_)
                 outcomes[role] = obs.outcome.value
@@ -140,6 +148,7 @@ def run_benchmark(directory: Path, *, executor: Any = None) -> dict[str, Any]:
                     obs.harness is not None and obs.harness.buildable,
                     bool(obs.executed),
                     obs.outcome.value in {"property_violated", "property_held"},
+                    getattr(obs, "applicability_disposition", "") == "target_applicable",
                 )
                 for stage, ok in zip(FUNNEL_STAGES, reached, strict=True):
                     funnel[stage] += int(ok)

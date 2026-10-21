@@ -23,9 +23,9 @@ def test_static_benchmark_scores_hypotheses_apart_from_detectors() -> None:
         "fp": 0,
         "tn": len(detectors),
     }
-    assert report["hypotheses"]["cases"] == len(hypotheses) == 6
-    assert report["hypotheses"]["emitted_vulnerable"] == 6
-    assert report["hypotheses"]["emitted_safe"] == 6
+    assert report["hypotheses"]["cases"] == len(hypotheses) == 7
+    assert report["hypotheses"]["emitted_vulnerable"] == 7
+    assert report["hypotheses"]["emitted_safe"] == 7
     statics = {c["id"]: c["static"] for c in report["cases"] if c["kind"] == "hypothesis"}
     assert set(statics.values()) == {"emitted_both"}
     assert report["verified"] is False and report["real_world_rate"] is None
@@ -48,8 +48,13 @@ def test_execution_discriminates_round_trip_twins_and_feedback_finds_the_roundin
     unbound = by_id["roundtrip_unbound_token"]
     assert unbound["stateful"] == {"vulnerable": "inconclusive", "safe": "inconclusive"}
     assert unbound["vulnerability_label"] == "inconclusive_not_judged"
-    assert report["hypotheses"]["execution_discriminated"] == 4
-    assert report["hypotheses"]["discriminated_after_feedback"] == 5
+    reported = by_id["reported_loss"]
+    assert reported["stateful"] == {"vulnerable": "property_violated", "safe": "property_held"}
+    assert reported["execution_discriminates"] is True
+    assert reported["vulnerability_label"] == "local_property_violation_unverified"
+    # Six prior hypotheses, four of which discriminate before feedback, plus reported_loss.
+    assert report["hypotheses"]["execution_discriminated"] == 5
+    assert report["hypotheses"]["discriminated_after_feedback"] == 6
     feedback = report["feedback"]
     assert feedback["by_role"]["safe"]["variants_violated"] == 0
     assert feedback["cases_with_violating_variant"] == {"vulnerable": 1, "safe": 0}

@@ -24,6 +24,7 @@ from app.discovery.bounty.shares import ShareAccounting, position_entry, share_a
 from app.discovery.orchestration.codec import digest
 from app.discovery.sequences import MAX_MUTATIONS as _EXISTING_MUTATIONS
 from app.discovery.sequences import MAX_SEQUENCE_LENGTH as _EXISTING_LENGTH
+from app.parsing.solidity_accounting import reported_site
 from app.parsing.solidity_research import (
     ResearchModel,
     RFunction,
@@ -174,6 +175,22 @@ def sequence_id_of(
 # ---- generation -----------------------------------------------------------------------------
 
 
+def _candidate_key(
+    candidate: SemanticCandidate, lines: Mapping[tuple[str, str, str], set[int]]
+) -> str:
+    """``detector@contract.function``, plus ``#line`` when that triple has two locations.
+
+    ``cap()`` already keeps both source locations. Collapsing them onto one key made
+    ``candidate_for`` and ``execution_summary`` attach one location's result to the other.
+    The same candidate supplied twice is still one location, so its key does not change.
+    """
+    base = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    ident = (candidate.detector, candidate.contract, candidate.function)
+    if len(lines.get(ident, ())) > 1:
+        return f"{base}#{candidate.line}"
+    return base
+
+
 def generate(
     model: ResearchModel,
     candidates: Iterable[SemanticCandidate],
@@ -191,17 +208,21 @@ def generate(
     found: dict[str, Vfcs] = {}
     skipped: list[tuple[str, str]] = []
     truncated = False
+    material = list(candidates)
+    lines: dict[tuple[str, str, str], set[int]] = {}
+    for candidate in material:
+        ident = (candidate.detector, candidate.contract, candidate.function)
+        lines.setdefault(ident, set()).add(candidate.line)
     if sources is not None:
         problems = model_source_problems(model, sources)
         if problems:
             reason = "model source attestation does not match the supplied sources: " + problems[0]
-            for candidate in candidates:
-                key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
-                skipped.append((key, reason))
+            for candidate in material:
+                skipped.append((_candidate_key(candidate, lines), reason))
             return VfcsResult((), tuple(skipped), False)
         identity = replace(identity, source_hashes=source_hashes_of(sources))
-    for candidate in candidates:
-        key = f"{candidate.detector}@{candidate.contract}.{candidate.function}"
+    for candidate in material:
+        key = _candidate_key(candidate, lines)
         if len(found) >= limit:
             truncated = True
             skipped.append((key, "the sequence limit was reached"))
@@ -211,55 +232,72 @@ def generate(
             skipped.append((key, "no sequence template applies to this detector"))
             continue
         built = builder(model, candidate)
+        plans: list[tuple[str, list[VfcsCall], str]]
         if isinstance(built, str):
             skipped.append((key, built))
             continue
-        template, calls, prop = built
-        if not calls or len(calls) > MAX_VFCS_LENGTH:
-            skipped.append((key, "the sequence would exceed the length limit"))
-            continue
-        for promoted in _promote(model, candidate, calls):
+        if isinstance(built, list):
+            if not built:
+                skipped.append((key, "the candidate produced no sequence"))
+                continue
+            plans = built
+        else:
+            plans = [built]
+        for template, calls, prop in plans:
             if len(found) >= limit:
                 truncated = True
                 skipped.append((key, "the sequence limit was reached"))
-                break
-            promoted_calls, call_path, path_notes, execution_contract = promoted
-            if not promoted_calls or len(promoted_calls) > MAX_VFCS_LENGTH:
+                continue
+            if not calls or len(calls) > MAX_VFCS_LENGTH:
                 skipped.append((key, "the sequence would exceed the length limit"))
                 continue
-            if any(
-                value == "asset_exit:unsupported"
-                for call in promoted_calls
-                for _n, value in call.arguments
-            ):
-                skipped.append(
-                    (
-                        key,
-                        "the exit amount is in asset units and no source-backed "
-                        "conversion or limit was resolved",
+            for promoted in _promote(model, candidate, calls):
+                if len(found) >= limit:
+                    truncated = True
+                    skipped.append((key, "the sequence limit was reached"))
+                    break
+                promoted_calls, call_path, path_notes, execution_contract = promoted
+                if not promoted_calls or len(promoted_calls) > MAX_VFCS_LENGTH:
+                    skipped.append((key, "the sequence would exceed the length limit"))
+                    continue
+                if any(
+                    value == "asset_exit:unsupported"
+                    for call in promoted_calls
+                    for _n, value in call.arguments
+                ):
+                    skipped.append(
+                        (
+                            key,
+                            "the exit amount is in asset units and no source-backed "
+                            "conversion or limit was resolved",
+                        )
                     )
+                    continue
+                sequence = Vfcs(
+                    sequence_id=sequence_id_of(
+                        promoted_calls, template, identity, derived_from=key
+                    ),
+                    template=template,
+                    origin=f"template:{template}",
+                    calls=tuple(promoted_calls),
+                    property_under_test=prop,
+                    derived_from=key,
+                    identity=identity,
+                    call_path=call_path,
+                    path_notes=path_notes,
+                    execution_contract=execution_contract,
                 )
-                continue
-            sequence = Vfcs(
-                sequence_id=sequence_id_of(promoted_calls, template, identity, derived_from=key),
-                template=template,
-                origin=f"template:{template}",
-                calls=tuple(promoted_calls),
-                property_under_test=prop,
-                derived_from=key,
-                identity=identity,
-                call_path=call_path,
-                path_notes=path_notes,
-                execution_contract=execution_contract,
-            )
-            if sequence.sequence_id in found:
-                skipped.append((key, "deduplicated: an equivalent sequence was already generated"))
-                continue
-            found[sequence.sequence_id] = sequence
+                if sequence.sequence_id in found:
+                    skipped.append(
+                        (key, "deduplicated: an equivalent sequence was already generated")
+                    )
+                    continue
+                found[sequence.sequence_id] = sequence
     return VfcsResult(tuple(found.values()), tuple(skipped), truncated)
 
 
-Built = tuple[str, list[VfcsCall], str] | str
+Plan = tuple[str, list[VfcsCall], str]
+Built = Plan | list[Plan] | str
 Builder = Callable[[ResearchModel, SemanticCandidate], Built]
 _VariantIter = Iterator[tuple[str, list[VfcsCall]]]
 
@@ -497,7 +535,9 @@ def _exit_overrides(function: RFunction, info: ShareAccounting) -> dict[str, str
     for index, param in enumerate(function.params):
         name = param.name or f"arg{index}"
         if _is_address(param.type_name):
-            overrides[name] = ATTACKER
+            # A distinct payout receiver is the designated alternate wallet.
+            # The owner of the burned shares stays the caller.
+            overrides[name] = "recipient" if name == info.pay_to else ATTACKER
         elif _is_uint(param.type_name):
             overrides[name] = _amount_role(name, info) or "zero"
     return overrides
@@ -765,6 +805,96 @@ def _swallowed_call(model: ResearchModel, candidate: SemanticCandidate) -> Built
     )
 
 
+def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
+    """Profit, no-change, unauthorized, loss, and unlock sequences for one report.
+
+    Each sequence is a separate hypothesis. An unauthorized revert is not a
+    profit-accounting result, and a duration warp is not an unlock-formula proof.
+    """
+    function = _own(model, candidate)
+    if isinstance(function, str):
+        return function
+    site = reported_site(model, function)
+    if site is None:
+        return "the function does not store a called value into accounting state"
+    actor = "deployer" if site.role_getter else ATTACKER
+    why = (
+        f"role_getter:{site.role_getter}"
+        if site.role_getter
+        else "no source role getter; the report caller is the ordinary attacker"
+    )
+    report = replace(_call(function, "report", actor), established_by=why[:240])
+    if not site.balance_backed:
+        return [
+            (
+                "report",
+                [report],
+                "the reported value is not uniquely the contract's token balance, "
+                "so the reconciliation is not judged",
+            )
+        ]
+    donate = _primitive(
+        "token",
+        "transfer(address,uint256)",
+        "donation",
+        ATTACKER,
+        "increase the token balance without writing the stored total",
+    )
+    statement = (
+        "after the report, the stored total is at most the token balance the reported call observed"
+    )
+    plans: list[Plan] = [
+        ("donate→report", [donate, report], statement),
+        (
+            "report",
+            [report],
+            "a report that observes no new profit or loss keeps the stored total "
+            "within the token balance",
+        ),
+    ]
+    if site.role_getter:
+        plans.append(
+            (
+                "unauthorized-report",
+                [_call(function, "unauthorized_report", ATTACKER)],
+                "a caller other than the source-declared role must revert; "
+                "that revert is only the caller check and is not a profit-accounting result",
+            )
+        )
+    if site.outflow:
+        outflow = _resolve(model, function.contract, site.outflow)
+        if outflow is not None:
+            second = replace(report, role="report_after")
+            plans.append(
+                (
+                    "donate→report→outflow→report",
+                    [donate, report, _call(outflow, "outflow", ATTACKER), second],
+                    "after the token balance falls, a later report still stores at most "
+                    "the token balance",
+                )
+            )
+    if site.unlock_seconds and site.role_getter:
+        warp = VfcsCall(
+            "vm",
+            "warp(uint256)",
+            "time",
+            "harness",
+            (("seconds", site.unlock_seconds),),
+            True,
+            f"the only duration literal in this contract is {site.unlock_seconds} seconds",
+        )
+        second = replace(report, role="report_after")
+        plans.append(
+            (
+                "donate→report→warp→report",
+                [donate, report, warp, second],
+                "after the source duration, a second report still stores at most the "
+                "token balance; this does not prove the unlock formula",
+            )
+        )
+    return plans
+
+
 def _boundary(model: ResearchModel, candidate: SemanticCandidate) -> Built:
     function = _own(model, candidate)
     if isinstance(function, str):
@@ -785,6 +915,7 @@ _BUILDERS: dict[str, Builder] = {
     "accounting.balance_as_deposit": _donation,
     "accounting.fee_on_transfer_mismatch": _token_behavior,
     "accounting.unchecked_token_return": _token_behavior,
+    "accounting.reported_balance": _reported,
     "message.field_not_bound": _message,
     "message.missing_domain_separation": _message,
     "message.missing_expiry": _message,

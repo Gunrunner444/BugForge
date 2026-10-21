@@ -222,6 +222,23 @@
         "vulnerable": "property_violated",
         "safe": "property_held"
       }
+    },
+    {
+      "id": "reported_loss",
+      "kind": "hypothesis",
+      "vulnerable": "reported_loss_vulnerable.sol",
+      "safe": "reported_loss_safe.sol",
+      "detector": "accounting.reported_balance",
+      "contract": "ReportDesk",
+      "template": "donate→report→outflow→report",
+      "family": "accounting / reported balance",
+      "ground_truth": "local_property_violation_unverified",
+      "property": "after the token balance falls, the stored total is at most that balance",
+      "rationale": "Both twins report a called balance into accounted. The vulnerable twin writes it only when the balance increased, so a later skim leaves accounted above the tokens still held. The safe twin stores the live balance. This is a local standard-token property, not a claim about any deployed strategy.",
+      "stateful": {
+        "vulnerable": "property_violated",
+        "safe": "property_held"
+      }
     }
   ]
 }

@@ -297,7 +297,7 @@ def test_converted_shares_are_not_compared_with_assets() -> None:
     assert "not compared" in spec.unsupported_reason or "converted" in spec.unsupported_reason
 
 
-def test_python_and_in_evm_judges_agree_on_sized_exits() -> None:
+def test_generated_judge_source_rejects_a_zero_sized_exit() -> None:
     calls = (
         VfcsCall(
             "Vault",

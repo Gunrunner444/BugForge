@@ -97,6 +97,7 @@ class ShareAccounting:
     decreases_shares: bool = False
     asset_sizer: str = ""
     asset_basis: str = ""
+    pay_to: str = ""
     notes: tuple[str, ...] = ()
 
 
@@ -108,6 +109,7 @@ class _Bag:
     decreases: list[tuple[Slot, str, bool, bool]] = field(default_factory=list)
     scalars: list[tuple[Slot, str]] = field(default_factory=list)
     sizers: list[tuple[str, str, int]] = field(default_factory=list)
+    pay_tos: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     visits: int = 0
 
@@ -190,6 +192,13 @@ def _fill(function: RFunction, amount: str) -> tuple[tuple[str, str], ...] | Non
     return tuple(arguments)
 
 
+def _one_name(names: list[str]) -> str:
+    unique = set(names)
+    if len(unique) != 1:
+        return ""
+    return next(iter(unique))
+
+
 def _summarize(model: ResearchModel, function: RFunction, bag: _Bag) -> ShareAccounting:
     pulls = _unique_flags(bag.pulls)
     pays = _unique_flags(bag.pays)
@@ -214,6 +223,7 @@ def _summarize(model: ResearchModel, function: RFunction, bag: _Bag) -> ShareAcc
         share_unit=share_unit,
         pull_param=pull_param,
         pay_param=pay_param,
+        pay_to=_one_name(bag.pay_tos),
         mint_param=mint_param,
         burn_param=burn_param,
         mint_bare=mint_bare,
@@ -502,6 +512,10 @@ def _flow(
             traced = _trace(arguments[1], binding)
             if traced is not None and traced[0]:
                 bag.pays.append(traced)
+            destination = _trace(arguments[0], binding)
+            # msg.sender is not a parameter, so a payout to the caller is not redirected.
+            if destination is not None and destination[0]:
+                bag.pay_tos.append(destination[0])
 
 
 def _effect(expression: str, binding: dict[str, tuple[str, bool]]) -> tuple[str, bool] | None:

@@ -1,0 +1,279 @@
+"""Applicability, provenance, and report-candidate discovery. No Forge."""
+
+from __future__ import annotations
+
+import textwrap
+
+from app.discovery.bounty.analysis import CampaignAnalysis
+from app.discovery.bounty.applicability import (
+    assess,
+    deny_unconfirmed_role,
+    mark_not_applicable,
+    reconcile_identity,
+)
+from app.discovery.bounty.findings import execution_summary, is_strong
+from app.discovery.bounty.properties import PropertyDeclaration, build_property
+from app.discovery.bounty.vfcs import SequenceIdentity, VfcsCall, generate, sequence_id_of
+from app.parsing.solidity_research import SemanticCandidate, build_research_model
+from app.parsing.solidity_research_suite import run_suite
+
+_ERC = """
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+"""
+
+
+def _src(body: str) -> str:
+    return textwrap.dedent(body).strip() + "\n"
+
+
+def _desk(report_body: str, *, extra: str = "") -> str:
+    return _src(
+        f"""
+        pragma solidity ^0.8.20;
+        {_ERC}
+        contract Desk {{
+            struct Store {{ address keeper; uint256 accounted; }}
+            Store private data;
+            IERC20 public immutable token;
+            constructor(IERC20 token_) {{ token = token_; data.keeper = msg.sender; }}
+            modifier onlyKeeper() {{ require(msg.sender == data.keeper, "!keeper"); _; }}
+            function keeper() external view returns (address) {{ return data.keeper; }}
+            function accounted() external view returns (uint256) {{ return data.accounted; }}
+            function _live() internal view returns (uint256) {{
+                return token.balanceOf(address(this));
+            }}
+            function report() external onlyKeeper {{
+                uint256 live = _live();
+                {report_body}
+            }}
+            {extra}
+        }}
+        """
+    )
+
+
+def _candidates(source: str, detector: str) -> tuple[object, list[SemanticCandidate]]:
+    model = build_research_model({"Desk.sol": source})
+    found = [item for item in run_suite(model).candidates if item.detector == detector]
+    return model, found
+
+
+def _record(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "outcome": "property_violated",
+        "declaration": "property_under_test",
+        "verdict": "property_violated",
+        "oracle_kind": "credit_le_holdings",
+        "identity_status": "bound",
+        "stale": False,
+        "token_fixture": "standard",
+        "applicability": {"disposition": "target_applicable", "assumptions": []},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_fee_fixture_without_support_is_not_target_applicable() -> None:
+    result = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "unknown"})
+    assert result.disposition == "unconfirmed"
+    assert result.assumptions[0].status == "unknown"
+    assert result.assumptions[0].material is True
+    record = _record(
+        token_fixture="fee_on_transfer",
+        oracle_kind="credit_le_received",
+        applicability=result.as_dict(),
+    )
+    assert is_strong(record) is False
+
+
+def test_contradicted_fee_assumption_is_fixture_only() -> None:
+    result = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "standard"})
+    assert result.disposition == "fixture_only"
+    assert (
+        is_strong(_record(applicability=result.as_dict(), token_fixture="fee_on_transfer")) is False
+    )
+
+
+def test_standard_token_violation_stays_eligible() -> None:
+    result = assess(
+        token_fixture="standard",
+        facts={"token_behavior": "unknown", "role_getter": "keeper()"},
+    )
+    assert result.disposition == "target_applicable"
+    assert is_strong(_record(applicability=result.as_dict())) is True
+
+
+def test_a_source_fact_that_matches_the_fixture_stays_eligible() -> None:
+    result = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "fee_on_transfer"})
+    assert result.disposition == "target_applicable"
+    assert result.assumptions[0].status == "confirmed"
+    assert is_strong(_record(applicability=result.as_dict(), token_fixture="fee_on_transfer"))
+
+
+def test_an_unbound_identity_blocks_applicability() -> None:
+    built = assess(token_fixture="standard", identity_status="identity_mismatch")
+    assert built.disposition == "not_applicable"
+    reconciled = reconcile_identity(
+        assess(token_fixture="standard"),
+        "identity_mismatch",
+    )
+    assert reconciled.disposition == "not_applicable"
+    assert reconcile_identity(built, "bound").disposition == "not_applicable"
+    stale = mark_not_applicable(assess(token_fixture="standard"), "source set changed")
+    assert stale.disposition == "not_applicable"
+    assert is_strong(_record(applicability=stale.as_dict(), stale=True)) is False
+
+
+def test_a_failed_role_proof_is_not_target_applicable() -> None:
+    granted = assess(token_fixture="standard", facts={"role_getter": "keeper()"})
+    assert granted.disposition == "target_applicable"
+    denied = deny_unconfirmed_role(granted)
+    assert denied.disposition == "not_applicable"
+    role = next(item for item in denied.assumptions if item.name == "privileged_actor")
+    assert role.status == "contradicted"
+    assert is_strong(_record(applicability=denied.as_dict())) is False
+
+
+def test_legacy_fee_record_without_applicability_is_not_strong() -> None:
+    record = _record(token_fixture="fee_on_transfer")
+    del record["applicability"]
+    assert is_strong(record) is False
+    assert is_strong(_record()) is True
+
+
+def test_stale_or_unbound_identity_blocks_a_violation() -> None:
+    assert is_strong(_record(stale=True)) is False
+    assert is_strong(_record(identity_status="identity_mismatch")) is False
+    unevaluated = _record(outcome="property_held", verdict="property_held")
+    assert is_strong(unevaluated) is False
+
+
+def test_same_function_candidates_keep_separate_execution_results() -> None:
+    source = _src(
+        f"""
+        pragma solidity ^0.8.20;
+        {_ERC}
+        contract Desk {{
+            IERC20 public immutable token;
+            mapping(address => uint256) public book;
+            mapping(address => uint256) public bonus;
+            constructor(IERC20 token_) {{ token = token_; }}
+            function deposit(uint256 amount, address receiver) external {{
+                token.transferFrom(msg.sender, address(this), amount);
+                book[receiver] += amount;
+                token.transferFrom(msg.sender, address(this), amount);
+                bonus[receiver] += amount;
+            }}
+        }}
+        """
+    )
+    model = build_research_model({"Desk.sol": source})
+    found = [
+        item
+        for item in run_suite(model).candidates
+        if item.detector == "accounting.fee_on_transfer_mismatch"
+    ]
+    assert len(found) == 2
+    assert found[0].line != found[1].line
+    generated = generate(model, found, SequenceIdentity(campaign_id="same"))
+    keys = {item.derived_from for item in generated.sequences}
+    assert len(keys) == 2
+    assert all("#" in key for key in keys)
+    bag = type("Bag", (), {"candidates": tuple(found)})()
+    for candidate in found:
+        key = f"{candidate.detector}@Desk.deposit(uint256,address)#{candidate.line}"
+        assert CampaignAnalysis.candidate_for(bag, key) is candidate
+    violated, held = found
+    base = "accounting.fee_on_transfer_mismatch@Desk.deposit(uint256,address)"
+    executions = (
+        {
+            "derived_from": f"{base}#{violated.line}",
+            "outcome": "property_violated",
+            "declaration": "property_under_test",
+            "verdict": "property_violated",
+            "oracle_kind": "credit_le_received",
+            "identity_status": "bound",
+            "property_id": "pr_a",
+            "bundle_id": "b_a",
+            "applicability": {"disposition": "target_applicable", "assumptions": []},
+        },
+        {
+            "derived_from": f"{base}#{held.line}",
+            "outcome": "property_held",
+            "declaration": "property_under_test",
+            "verdict": "property_held",
+            "oracle_kind": "credit_le_received",
+            "identity_status": "bound",
+            "property_id": "pr_b",
+            "bundle_id": "b_b",
+        },
+    )
+    assert execution_summary(violated, executions).status == "property_violated"
+    assert execution_summary(held, executions).status == "property_held"
+    assert execution_summary(held, executions).strength != "strong_candidate"
+
+
+def test_sequence_id_ignores_source_hash_and_keeps_deployment() -> None:
+    calls = (VfcsCall("Desk", "report()", "report", "deployer"),)
+    left = SequenceIdentity(campaign_id="c", source_hashes=(("Desk.sol", "a"),))
+    right = SequenceIdentity(campaign_id="c", source_hashes=(("Desk.sol", "b"),))
+    assert sequence_id_of(calls, "report", left, derived_from="k") == sequence_id_of(
+        calls, "report", right, derived_from="k"
+    )
+    deployed = SequenceIdentity(campaign_id="c", deployment="1:0x1")
+    other = SequenceIdentity(campaign_id="c", deployment="1:0x2")
+    assert sequence_id_of(calls, "report", deployed) != sequence_id_of(calls, "report", other)
+
+
+def test_equivalent_sequences_deduplicate() -> None:
+    source = _desk("data.accounted = live;")
+    model, found = _candidates(source, "accounting.reported_balance")
+    once = generate(model, found, SequenceIdentity(campaign_id="c"))
+    twice = generate(model, found + found, SequenceIdentity(campaign_id="c"))
+    assert [item.sequence_id for item in once.sequences] == [
+        item.sequence_id for item in twice.sequences
+    ]
+    assert any("deduplicated" in reason for _key, reason in twice.skipped)
+
+
+def test_report_candidate_is_balance_backed_only_when_the_call_resolves() -> None:
+    model, found = _candidates(_desk("data.accounted = live;"), "accounting.reported_balance")
+    assert len(found) == 1
+    assert found[0].fact("balance_backed") == "true"
+    assert found[0].fact("stored_getter") == "accounted()"
+    assert found[0].fact("role_getter") == "keeper()"
+    opaque = _desk(
+        "data.accounted = live;",
+        extra="function _live() internal pure returns (uint256) { return 1; }",
+    )
+    # The second _live is a duplicate; the unique-body rule must refuse it.
+    model = build_research_model({"Desk.sol": opaque})
+    hits = [
+        item
+        for item in run_suite(model).candidates
+        if item.detector == "accounting.reported_balance"
+    ]
+    assert hits
+    assert hits[0].fact("balance_backed") == "false"
+    generated = generate(model, hits, SequenceIdentity(campaign_id="opaque"))
+    spec = build_property(generated.sequences[0], model, hits[0])
+    assert spec.declaration is PropertyDeclaration.PROPERTY_UNSUPPORTED
+    assert spec.applicability.disposition == "not_applicable"
+
+
+def test_loss_ignoring_is_a_different_transition_from_a_safe_report() -> None:
+    _model, safe = _candidates(_desk("data.accounted = live;"), "accounting.reported_balance")
+    _model, loss = _candidates(
+        _desk(
+            "if (live > data.accounted) { data.accounted = live; }",
+            extra="function skim(uint256 amount) external { token.transfer(msg.sender, amount); }",
+        ),
+        "accounting.reported_balance",
+    )
+    assert safe[0].fact("loss_ignored") == "false"
+    assert loss[0].fact("loss_ignored") == "true"
+    assert loss[0].fact("outflow") == "skim(uint256)"

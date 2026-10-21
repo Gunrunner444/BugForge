@@ -83,9 +83,15 @@ class CampaignAnalysis:
         return self.sequence_sources.get(sequence_id, {})
 
     def candidate_for(self, derived_from: str) -> SemanticCandidate | None:
+        exact: list[SemanticCandidate] = []
         for item in self.candidates:
-            if f"{item.detector}@{item.contract}.{item.function}" == derived_from:
+            base = f"{item.detector}@{item.contract}.{item.function}"
+            if derived_from == f"{base}#{item.line}":
                 return item
+            if derived_from == base:
+                exact.append(item)
+        if len(exact) == 1:
+            return exact[0]
         return None
 
     def deployment_for(self, contract: str) -> DeploymentIdentity | None:

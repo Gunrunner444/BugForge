@@ -1221,7 +1221,9 @@ class BountyCampaignService:
         # a file that vanished keeps its analyzed text out of the set: identity fails closed
         return current
 
-    def stateful_execute(self, campaign_id: str, *, rounds: int = 3) -> dict[str, Any]:
+    def stateful_execute(
+        self, campaign_id: str, *, rounds: int = 3, max_runs: int | None = None
+    ) -> dict[str, Any]:
         """Phase 52 (hardened): the executable closed loop over the campaign's VFCS plans.
 
         Every sequence runs against the exact source set it was built from (re-read
@@ -1325,12 +1327,21 @@ class BountyCampaignService:
         engines = [PropertyEngine(name) for name in usable_property_engines(registry)]
         project = _project_settings(campaign.manifest.compiler) if compiler is not None else None
         profile_record, profile = _accepted_profile(campaign)
-        executor = StatefulExecutor(
-            compiler=compiler,
-            project=project,
-            compiler_required=required,
-            profile=profile,
-        )
+        if max_runs is None:
+            executor = StatefulExecutor(
+                compiler=compiler,
+                project=project,
+                compiler_required=required,
+                profile=profile,
+            )
+        else:
+            executor = StatefulExecutor(
+                compiler=compiler,
+                project=project,
+                compiler_required=required,
+                profile=profile,
+                max_runs=max_runs,
+            )
         result = run_feedback_loop(
             executor,
             tuple(runnable),
@@ -1502,6 +1513,16 @@ class BountyCampaignService:
                 ),
                 "verified": False,
             }
+            record = executions[obs.sequence_id]
+            from app.discovery.bounty.applicability import deny_unconfirmed_role, reconcile_identity
+            from app.discovery.bounty.findings import is_strong
+
+            applicability = reconcile_identity(spec.applicability, str(record["identity_status"]))
+            if record["reason_code"] == "role_unconfirmed":
+                applicability = deny_unconfirmed_role(applicability)
+            record["applicability"] = applicability.as_dict()
+            record["token_fixture"] = spec.oracle.token_fixture
+            record["strong_candidate"] = is_strong(record)
         return bundles, blobs, executions
 
     def stateful_status(self, campaign_id: str) -> dict[str, Any]:
@@ -1810,6 +1831,13 @@ class BountyCampaignService:
                 record["stale"] = False
             else:
                 record["stale"] = record.get("source_set_digest") not in valid_digests
+                if record["stale"]:
+                    current_applicability = record.get("applicability")
+                    if isinstance(current_applicability, dict):
+                        updated = dict(current_applicability)
+                        updated["disposition"] = "not_applicable"
+                        record["applicability"] = updated
+                    record["strong_candidate"] = False
             found[sid] = record
         return found
 

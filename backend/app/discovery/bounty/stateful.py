@@ -115,6 +115,8 @@ K_ACTOR = 16
 K_EVIDENCE = 17  # index into properties.EVIDENCE_SLOTS; supplementary, never the verdict
 # 1 when a declared asset getter returned the harness token; 0 when setup did not.
 K_SETUP = 18
+# 1 when a source role getter returned the deploying contract; 0 when it did not.
+K_ROLE = 19
 
 
 class Outcome(StrEnum):
@@ -975,6 +977,8 @@ class _Synth:
                 return SIGNER_EXPR
             if override in {VICTIM, "victim", "second_owner"}:
                 return VICTIM_ADDR
+            if override == "recipient":
+                return RECIPIENT_ADDR
             if override in {"attacker_controlled", "attacker_substituted", ATTACKER}:
                 return ATTACKER_ADDR
             return ATTACKER_ADDR if call.actor == ATTACKER else VICTIM_ADDR
@@ -1043,10 +1047,12 @@ class _Synth:
             return "address(0xC0FE)"
         if role == "pause_guardian":
             return "address(0x6A2D)"
+        if role == "deployer":
+            return "address(this)"
         raise _UnbuildableError(f"actor {role!r} is not a harness actor", "unknown_actor")
 
     def _sender(self, actor: str) -> str:
-        if actor not in {ATTACKER, VICTIM, SIGNER}:
+        if actor not in {ATTACKER, VICTIM, SIGNER, "deployer"}:
             raise _UnbuildableError(f"actor {actor!r} is not a harness actor", "unknown_actor")
         return self._actor_expr(actor)
 
@@ -1485,6 +1491,33 @@ class _Synth:
                 )
             )
             return
+        if call.function == "warp(uint256)":
+            seconds = next(
+                (
+                    value
+                    for name, value in call.arguments
+                    if name == "seconds" and re.fullmatch(r"[0-9]{1,9}", value)
+                ),
+                "",
+            )
+            if seconds:
+                self.steps.append(f"        vm.warp(block.timestamp + {seconds});")
+                label = f"+{seconds} seconds"
+            else:
+                self.steps.append("        vm.warp(block.timestamp + 1 days);")
+                label = "+1 day"
+            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
+            self.primitives.append(
+                Primitive(
+                    name="time_advance:warp",
+                    purpose="advance the local clock",
+                    actor="harness",
+                    value=label,
+                    property_relevance=call.established_by,
+                    established_by=call.established_by,
+                )
+            )
+            return
         if not actor_addr:
             raise _UnbuildableError(f"actor {call.actor!r} is not a harness actor", "unknown_actor")
         if call.function == "deploy_reverting()":
@@ -1499,20 +1532,6 @@ class _Synth:
                     purpose="a local callee that reverts on every call",
                     actor="harness",
                     value="fallback revert",
-                    property_relevance=call.established_by,
-                    established_by=call.established_by,
-                )
-            )
-            return
-        if call.function == "warp(uint256)":
-            self.steps.append("        vm.warp(block.timestamp + 1 days);")
-            self.steps.append(f"        emit BugForgeObservation({K_PRIMITIVE}, {index}, 1);")
-            self.primitives.append(
-                Primitive(
-                    name="time_advance:warp",
-                    purpose="advance the local clock",
-                    actor="harness",
-                    value="+1 day",
                     property_relevance=call.established_by,
                     established_by=call.established_by,
                 )
@@ -1601,10 +1620,43 @@ class _Synth:
         )
         self.read_getter(K_CONTROL_AFTER, index)
 
-    def _emit_call(self, index: int, sender: str, encoded: str, dest: str = "address(t)") -> None:
+    def _require_deployer_role(self, index: int, call: VfcsCall) -> None:
+        """Prove the deploying contract is the source-declared role, then allow an unpranked call."""
+        match = re.fullmatch(r"role_getter:([A-Za-z_]\w*\(\))", call.established_by)
+        if match is None:
+            raise _UnbuildableError(
+                "a deployer call has no source role getter",
+                "role_unconfirmed",
+            )
+        getter = match.group(1)
+        count = len(self.sequence.calls)
+        self.steps.append(
+            f"        (bool bfRoleOk_{index}, bytes memory bfRoleRet_{index}) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{getter}"));'
+        )
+        self.steps.append(
+            f"        if (!bfRoleOk_{index} || bfRoleRet_{index}.length < 32 || "
+            f"abi.decode(bfRoleRet_{index}, (address)) != address(this)) {{"
+        )
+        self.steps.append(f"            emit BugForgeObservation({K_ROLE}, {index}, 0);")
+        self.steps.append(f"            emit BugForgeObservation({K_DONE}, {count}, 1);")
+        self.steps.append("            return;")
+        self.steps.append("        }")
+        self.steps.append(f"        emit BugForgeObservation({K_ROLE}, {index}, 1);")
+
+    def _emit_call(
+        self,
+        index: int,
+        sender: str,
+        encoded: str,
+        dest: str = "address(t)",
+        *,
+        prank: bool = True,
+    ) -> None:
         oracle = self.oracle
         capture = bool(oracle.revert_selector) or oracle.kind is OracleKind.CONFIGURED_VALUE
-        self.steps.append(f"        vm.prank({sender});")
+        if prank:
+            self.steps.append(f"        vm.prank({sender});")
         if capture:
             self.steps.append(
                 f"        (bool ok_{index}, bytes memory ret_{index}) = {dest}.call({encoded});"
@@ -1837,8 +1889,14 @@ class _Synth:
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 0)
                 self.read_credit(0)
-            sender = self._sender(call.actor)
-            self._emit_call(index, sender, encoded, self._destination(call))
+            if call.actor == "deployer":
+                self._require_deployer_role(index, call)
+                self._emit_call(
+                    index, "address(this)", encoded, self._destination(call), prank=False
+                )
+            else:
+                sender = self._sender(call.actor)
+                self._emit_call(index, sender, encoded, self._destination(call))
             if index == probe and oracle.getter and oracle.kind in state_reads:
                 self.read_getter(K_AFTER, index)
             if index == probe and tracking:
@@ -2386,6 +2444,8 @@ class StatefulObservation:
     identity: ExecutionIdentity | None = None
     harness: HarnessArtifact | None = None
     reason_code: str = ""
+    applicability_disposition: str = ""
+    token_fixture: str = ""
 
     @property
     def no_oracle(self) -> bool:
@@ -2393,14 +2453,21 @@ class StatefulObservation:
 
     @property
     def strong_candidate(self) -> bool:
-        """Only an executed, identity-bound oracle violation is a strong candidate."""
-        return (
+        """An identity-bound violation whose material assumptions are confirmed."""
+        from app.discovery.bounty.applicability import MATERIAL_FIXTURES
+
+        base = (
             self.outcome is Outcome.PROPERTY_VIOLATED
             and self.declaration == PropertyDeclaration.PROPERTY_UNDER_TEST.value
             and self.property_checked
             and self.identity is not None
             and self.identity.bound
         )
+        if not base:
+            return False
+        if self.applicability_disposition:
+            return self.applicability_disposition == "target_applicable"
+        return self.token_fixture not in MATERIAL_FIXTURES
 
     def signal(self) -> FeedbackSignal | None:
         """Turn an execution observation into bounded feedback. None = nothing to learn."""
@@ -2441,6 +2508,8 @@ class StatefulObservation:
             "formulation": self.formulation,
             "oracle_kind": self.oracle_kind,
             "strong_candidate": self.strong_candidate,
+            "applicability_disposition": self.applicability_disposition,
+            "token_fixture": self.token_fixture,
             "evaluation": self.evaluation.as_dict() if self.evaluation else None,
             "result": self.result.as_dict() if self.result else None,
             "identity": self.identity.as_dict() if self.identity else None,
@@ -2937,6 +3006,7 @@ class _Base:
         harness: HarnessArtifact | None = None,
         result: ExecutionResult | None = None,
         evaluation: PropertyEvaluation | None = None,
+        applicability: str = "",
     ) -> StatefulObservation:
         executed = outcome in RUNNABLE
         declaration = self.spec.declaration.value
@@ -2969,6 +3039,8 @@ class _Base:
             identity=self.identity,
             harness=harness,
             reason_code=code or outcome.value,
+            applicability_disposition=applicability or self.spec.applicability.disposition,
+            token_fixture=self.oracle.token_fixture,
         )
 
 
@@ -3019,6 +3091,29 @@ def interpret(
         if not deployed:
             reason = f"the target could not be deployed locally: {reason}"
         return failed(reason, "harness_failed", "failed")
+    if any(kind == K_ROLE and value == 0 for kind, _index, value in events):
+        reason = "the harness contract is not the source-declared authorized caller"
+        return base.done(
+            Outcome.INCONCLUSIVE,
+            reason,
+            "role_unconfirmed",
+            harness=harness,
+            applicability="not_applicable",
+            result=ExecutionResult(
+                "completed",
+                "ok",
+                "passed",
+                "incomplete",
+                "not_evaluated",
+                return_code=return_code,
+                failure_reason=reason,
+                events=events,
+                stdout_tail=_tail(stdout, 600),
+                stderr_tail=_tail(stderr, 600),
+                duration_ms=duration_ms,
+                **common,
+            ),
+        )
     if any(kind == K_SETUP and value == 0 for kind, _index, value in events):
         reason = "initialization did not leave the harness token in the declared asset getter"
         return base.done(
@@ -3424,7 +3519,9 @@ def run_feedback_loop(
                         "from_outcome": obs.outcome.value,
                     }
                 )
-            if obs.outcome is Outcome.PROPERTY_VIOLATED:
+            # A local violation whose material assumptions are not confirmed stays in
+            # the record. It does not spend the minimization budget as a bounty lead.
+            if obs.outcome is Outcome.PROPERTY_VIOLATED and obs.strong_candidate:
                 result = _minimize_sequence(executor, sequence, model, exact, spec, context)
                 if result is not None:
                     minimized[sequence.sequence_id] = result

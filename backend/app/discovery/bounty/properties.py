@@ -28,10 +28,12 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from app.discovery.bounty.applicability import Applicability, assess
 from app.discovery.bounty.shares import share_accounting
 from app.discovery.bounty.vfcs import ATTACKER, Vfcs
 from app.discovery.orchestration.codec import digest
 from app.parsing.keccak import function_selector
+from app.parsing.solidity_accounting import reported_site
 from app.parsing.solidity_conservation import custody_pair
 from app.parsing.solidity_research import ResearchModel, RFunction, SemanticCandidate
 
@@ -196,6 +198,7 @@ class PropertySpec:
     alternates: tuple[OracleSpec, ...] = ()
     status: str = "hypothesis"  # a hypothesis until executed evidence exists
     verified: bool = False
+    applicability: Applicability = Applicability()
 
     @property
     def executable(self) -> bool:
@@ -221,6 +224,7 @@ class PropertySpec:
             "status": self.status,
             "executable": self.executable,
             "verified": False,
+            "applicability": self.applicability.as_dict(),
         }
 
 
@@ -440,6 +444,19 @@ def build_property(
         declaration = PropertyDeclaration.PROPERTY_UNSUPPORTED
     else:
         declaration = PropertyDeclaration.NO_PROPERTY_AVAILABLE
+    facts = dict(candidate.facts) if candidate is not None else {}
+    if not facts.get("role_getter"):
+        for call in sequence.calls:
+            if call.established_by.startswith("role_getter:"):
+                facts["role_getter"] = call.established_by.split(":", 1)[1]
+                break
+    applicability = assess(
+        token_fixture=oracle.token_fixture,
+        facts=facts,
+        executable=bool(
+            oracle.executable and declaration is PropertyDeclaration.PROPERTY_UNDER_TEST
+        ),
+    )
     provenance = PropertyProvenance(
         file=file,
         line_start=start,
@@ -460,6 +477,7 @@ def build_property(
         provenance=provenance,
         unsupported_reason=unsupported,
         alternates=tuple(alternates),
+        applicability=applicability,
     )
 
 
@@ -1115,6 +1133,70 @@ _ORACLE_BUILDERS: dict[str, Any] = {
     "deposit→deposit→withdraw→withdraw": _round_trip,
     "initialize→deposit→deposit→withdraw": _round_trip,
 }
+
+
+def _reported_oracle(sequence: Vfcs, model: ResearchModel, fn: RFunction, _det: str) -> OracleBuilt:
+    """Reconcile the stored total with the contract token balance, when that is what was reported."""
+    site = reported_site(model, fn)
+    if site is None or not site.balance_backed or not site.getter:
+        reason = "the reported value is not uniquely the contract's token balance"
+        return OracleSpec(), (), (), reason, (), reason
+    if sequence.template == "unauthorized-report":
+        return (
+            OracleSpec(
+                kind=OracleKind.CALL_MUST_FAIL,
+                probe_role="unauthorized_report",
+                probe_function=fn.signature,
+                expression=(
+                    "the unauthorized caller must revert; a revert is the caller check, "
+                    "not a profit-accounting result"
+                ),
+            ),
+            (),
+            (site.field,),
+            "the source restricts this call to a declared role",
+            ("a reverting unauthorized call is not evidence that profit accounting is safe",),
+            "",
+        )
+    probe = (
+        "report_after" if any(call.role == "report_after" for call in sequence.calls) else "report"
+    )
+    pre: list[str] = []
+    if any(call.role == "donation" for call in sequence.calls):
+        pre.append("donation")
+    if probe == "report_after":
+        for role in ("report", "outflow", "time"):
+            if any(call.role == role for call in sequence.calls):
+                pre.append(role)
+    return (
+        OracleSpec(
+            kind=OracleKind.CREDIT_LE_HOLDINGS,
+            probe_role=probe,
+            probe_function=fn.signature,
+            precondition_roles=tuple(pre),
+            getter=site.getter,
+            token_fixture="standard",
+            expression=f"{site.getter} after the report is at most the contract token balance",
+        ),
+        (),
+        (site.field,),
+        f"{fn.name} writes {site.field} from a call that resolves to the contract token balance",
+        (
+            "the compared values are both asset units",
+            "an authorized fee paid to someone other than the attacker is not theft",
+        ),
+        "",
+    )
+
+
+for _report_template in (
+    "donate→report",
+    "report",
+    "unauthorized-report",
+    "donate→report→outflow→report",
+    "donate→report→warp→report",
+):
+    _ORACLE_BUILDERS[_report_template] = _reported_oracle
 
 
 # ---- evaluation -------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ behavior is reported as ``unknown`` unless the source establishes it.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from app.parsing.solidity_research import (
     MemberCall,
@@ -39,6 +40,7 @@ def analyze_balance_delta(model: ResearchModel) -> list[SemanticCandidate]:
         found.extend(_pull_all(model, function))
         found.extend(_balance_as_deposit(model, function))
         found.extend(_unchecked_return(function))
+        found.extend(_reported_balance(model, function))
     found.extend(_cached_balance(model))
     return cap(found)
 
@@ -352,4 +354,401 @@ def _cached_balance(model: ResearchModel) -> list[SemanticCandidate]:
     return found
 
 
-__all__ = ["MemberCall", "analyze_balance_delta"]
+# ---- reported balance reconciliation -------------------------------------------------------
+
+_CALL_KEYWORDS = frozenset(
+    {
+        "if",
+        "for",
+        "while",
+        "require",
+        "assert",
+        "revert",
+        "return",
+        "emit",
+        "abi",
+        "uint",
+        "uint256",
+        "address",
+        "new",
+    }
+)
+_LOCAL_FROM_CALL = re.compile(
+    r"(?:u?int\d*\s+)?(?P<name>[A-Za-z_]\w*)\s*(?<![=!<>])=(?!=)\s*(?P<rhs>[^;]*\([^;]*)\s*;"
+)
+_STORE = re.compile(
+    r"(?P<lhs>[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*(?<![=!<>])=(?!=)\s*(?P<rhs>[^;]*);"
+)
+_BALANCE_OF_THIS = re.compile(r"balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)")
+_DAYS = re.compile(r"\b(\d+)\s+days\b")
+_SENDER_EQ = re.compile(
+    r"(?:msg\.sender|_sender)\s*==\s*([^&|;]+)|([^&|;]+)\s*==\s*(?:msg\.sender|_sender)"
+)
+
+
+@dataclass(frozen=True)
+class ReportedSite:
+    """One exposed function that stores a value obtained from a call."""
+
+    local: str
+    field: str
+    getter: str
+    call: str
+    balance_backed: bool
+    role_getter: str
+    unlock_seconds: str
+    loss_ignored: bool
+    outflow: str
+
+
+def reported_site(model: ResearchModel, function: RFunction) -> ReportedSite | None:
+    """The reconciliation this function performs, or None when the shape is absent.
+
+    ``balance_backed`` is true only when the reported call uniquely resolves to
+    ``balanceOf(address(this))``. A name, an interface, or an ambiguous callee is not enough.
+    """
+    if not function.exposed or not function.has_body or function.kind != "function":
+        return None
+    found = _stored_report(model, function)
+    if found is None:
+        return None
+    local, field, call, assign_at = found
+    getter = _stored_getter(model, function.contract, field)
+    backed = _resolves_to_balance(model, call, 0)
+    role = _role_getter(model, function)
+    unlock = _unlock_seconds(model, function.contract)
+    ignored = _loss_ignored(function.body, local, field)
+    outflow = _outflow_signature(model, function, field)
+    return ReportedSite(
+        local=local,
+        field=field,
+        getter=getter,
+        call=call[:120],
+        balance_backed=backed and bool(getter),
+        role_getter=role,
+        unlock_seconds=unlock,
+        loss_ignored=ignored,
+        outflow=outflow,
+    )
+
+
+def _reported_balance(model: ResearchModel, function: RFunction) -> list[SemanticCandidate]:
+    site = reported_site(model, function)
+    if site is None:
+        return []
+    line = function.line + function.body.find(site.local)
+    if line < function.line:
+        line = function.line
+    return [
+        SemanticCandidate(
+            detector="accounting.reported_balance",
+            family=FAMILY,
+            title="A report stores a called value as the accounted total",
+            summary=(
+                f"{function.contract}.{function.name} stores `{site.field}` from `{site.local}`, "
+                f"which is assigned from `{site.call}`. "
+                f"Balance-backed: {str(site.balance_backed).lower()}. "
+                f"Role getter: {site.role_getter or 'none'}."
+            ),
+            file=function.file,
+            line=max(line, function.line),
+            contract=function.contract,
+            function=function.signature,
+            path=(
+                f"{function.contract}.{function.signature} @{function.file}:{function.line}",
+                f"reported call: {site.call[:80]}",
+                f"stored field: {site.field}",
+            ),
+            facts=(
+                ("balance_backed", "true" if site.balance_backed else "false"),
+                ("stored_getter", site.getter),
+                ("reported_call", site.call[:100]),
+                ("stored_field", site.field),
+                ("role_getter", site.role_getter),
+                ("token_behavior", "unknown"),
+                ("unlock_seconds", site.unlock_seconds),
+                ("loss_ignored", "true" if site.loss_ignored else "false"),
+                ("outflow", site.outflow),
+            ),
+            observed=("a called value is written into stored accounting",),
+            missing=(
+                ()
+                if site.balance_backed
+                else ("a unique resolution of the reported call to the contract token balance",)
+            ),
+            confidence="medium" if site.balance_backed else "low",
+            impact_tags=("custody", "vault_accounting"),
+        )
+    ]
+
+
+def _stored_report(model: ResearchModel, function: RFunction) -> tuple[str, str, str, int] | None:
+    """(local, field, call expression, assignment index) for the first reconciliation."""
+    body = function.body
+    for match in _LOCAL_FROM_CALL.finditer(body):
+        local = match.group("name")
+        call = match.group("rhs").strip()
+        if local in _CALL_KEYWORDS or "(" not in call:
+            continue
+        for store in _STORE.finditer(body[match.end() :]):
+            rhs = store.group("rhs").strip()
+            if not re.search(rf"\b{re.escape(local)}\b", rhs):
+                continue
+            if _BALANCE_OF_THIS.search(rhs):
+                continue
+            lhs = re.sub(r"\s+", "", store.group("lhs"))
+            field = lhs.split(".")[-1]
+            if not field or field == local:
+                continue
+            if "." not in lhs and field not in model.state_vars(function.contract):
+                continue
+            return local, field, call, match.end() + store.start()
+    return None
+
+
+def _unique_function(model: ResearchModel, name: str) -> RFunction | None:
+    found = [
+        function
+        for contract in model.contracts.values()
+        if not contract.is_interface
+        for function in contract.functions
+        if function.kind == "function" and function.name == name and function.has_body
+    ]
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def _called_names(expr: str) -> list[str]:
+    members = re.findall(r"\.([A-Za-z_]\w*)\s*\(", expr)
+    if members:
+        return [name for name in members if name not in _CALL_KEYWORDS]
+    return [
+        name
+        for name in re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", expr)
+        if name not in _CALL_KEYWORDS
+    ]
+
+
+def _return_expr(body: str) -> str:
+    found = [str(item) for item in re.findall(r"return\s+([^;]+);", body)]
+    if len(found) != 1:
+        return ""
+    return found[0].strip()
+
+
+def _primary_call(expr: str) -> str:
+    """The call that produces the expression, ignoring calls nested in its arguments."""
+    compact = expr.strip()
+    member = re.search(r"\.([A-Za-z_]\w*)\s*\(", compact)
+    if member and compact.rstrip().endswith(")"):
+        # The last member call is the value. A cast such as ``T(x).method()`` ends that way.
+        names = [str(item) for item in re.findall(r"\.([A-Za-z_]\w*)\s*\(", compact)]
+        if names:
+            return names[-1]
+    plain = re.match(r"([A-Za-z_]\w*)\s*\(", compact)
+    return str(plain.group(1)) if plain else ""
+
+
+def _resolves_to_balance(model: ResearchModel, expr: str, depth: int) -> bool:
+    if depth > 4:
+        return False
+    name = _primary_call(expr)
+    if not name or name in _CALL_KEYWORDS:
+        return False
+    if name == "balanceOf" and _BALANCE_OF_THIS.search(expr):
+        return True
+    target = _unique_function(model, name)
+    if target is None:
+        return False
+    returned = _return_expr(target.body)
+    if not returned:
+        return False
+    return _resolves_to_balance(model, returned, depth + 1)
+
+
+def _expr_is_field(model: ResearchModel, expr: str, field: str, depth: int) -> bool:
+    if depth > 4:
+        return False
+    compact = re.sub(r"\s+", "", expr)
+    if re.fullmatch(rf"(?:[A-Za-z_]\w*\.)*{re.escape(field)}", compact):
+        return True
+    name = _primary_call(expr)
+    if not name or name in _CALL_KEYWORDS:
+        return False
+    target = _unique_function(model, name)
+    if target is None:
+        return False
+    returned = _return_expr(target.body)
+    if not returned:
+        return False
+    return _expr_is_field(model, returned, field, depth + 1)
+
+
+def _stored_getter(model: ResearchModel, contract: str, field: str) -> str:
+    from app.discovery.bounty.properties import public_getter
+
+    direct = public_getter(model, contract, field)
+    if direct.endswith("()"):
+        return direct
+    found: list[str] = []
+    for function in model.functions_of(contract):
+        if (
+            not function.exposed
+            or not function.has_body
+            or function.params
+            or function.mutability not in {"view", "pure"}
+            or function.kind != "function"
+        ):
+            continue
+        if not function.returns or not function.returns[0].type_name.startswith("uint"):
+            continue
+        returned = _return_expr(function.body)
+        if returned and _expr_is_field(model, returned, field, 0):
+            found.append(function.signature)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def _authorization_bodies(model: ResearchModel, function: RFunction) -> list[str]:
+    texts = [function.body]
+    for name in function.modifiers:
+        modifier = model.modifier(function.contract, name.split("(")[0])
+        if modifier is not None and modifier.body:
+            texts.append(modifier.body)
+    followed: list[str] = []
+    for text in texts:
+        for name in _called_names(text):
+            target = _unique_function(model, name)
+            if target is not None:
+                followed.append(target.body)
+    return texts + followed
+
+
+def _role_getter(model: ResearchModel, function: RFunction) -> str:
+    fields: list[str] = []
+    for text in _authorization_bodies(model, function):
+        for match in _SENDER_EQ.finditer(text):
+            expr = (match.group(1) or match.group(2) or "").strip()
+            idents = re.findall(r"[A-Za-z_]\w*", expr)
+            if idents:
+                fields.append(idents[-1])
+    seen: set[str] = set()
+    for field_name in fields:
+        if field_name in seen or field_name in {"msg", "sender", "_sender"}:
+            continue
+        seen.add(field_name)
+        for item in model.functions_of(function.contract):
+            if (
+                item.name == field_name
+                and item.exposed
+                and not item.params
+                and item.has_body
+                and item.returns
+                and item.returns[0].type_name.replace(" payable", "") == "address"
+                and re.search(rf"\b{re.escape(field_name)}\b", item.body)
+            ):
+                return item.signature
+    return ""
+
+
+def _strip_comments(text: str) -> str:
+    """Comments are not duration literals. A remark such as ``365.2425 days`` is not ``N days``."""
+    without_block = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", " ", without_block)
+
+
+def _unlock_seconds(model: ResearchModel, contract: str) -> str:
+    numbers: set[int] = set()
+    for owner in model.lineage(contract):
+        item = model.contracts.get(owner)
+        if item is None:
+            continue
+        for function in item.functions:
+            if not function.has_body:
+                continue
+            for match in _DAYS.finditer(_strip_comments(function.body)):
+                numbers.add(int(match.group(1)))
+    if len(numbers) != 1:
+        return ""
+    seconds = next(iter(numbers)) * 86400
+    if seconds <= 0 or seconds > 366 * 86400:
+        return ""
+    return str(seconds)
+
+
+def _loss_ignored(body: str, local: str, field: str) -> bool:
+    stores: list[int] = []
+    for match in _STORE.finditer(body):
+        lhs = re.sub(r"\s+", "", match.group("lhs"))
+        if lhs.split(".")[-1] != field:
+            continue
+        if not re.search(rf"\b{re.escape(local)}\b", match.group("rhs")):
+            continue
+        stores.append(match.start())
+    if not stores:
+        return False
+    return all(_inside_increase_guard(body, index, local) for index in stores)
+
+
+def _inside_increase_guard(body: str, index: int, local: str) -> bool:
+    depth = 0
+    cursor = index
+    while cursor > 0:
+        char = body[cursor]
+        if char == "}":
+            depth += 1
+        elif char == "{":
+            if depth == 0:
+                return _guard_increases(body[max(0, cursor - 400) : cursor], local)
+            depth -= 1
+        cursor -= 1
+    return False
+
+
+def _guard_increases(head: str, local: str) -> bool:
+    text = head.rstrip()
+    if not text.endswith(")"):
+        return False
+    depth = 0
+    start = -1
+    for cursor in range(len(text) - 1, -1, -1):
+        char = text[cursor]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                start = cursor
+                break
+    if start < 0:
+        return False
+    prefix = text[:start].rstrip()
+    if not prefix.endswith("if"):
+        return False
+    condition = text[start + 1 : -1]
+    return local in condition and ">" in condition
+
+
+def _outflow_signature(model: ResearchModel, function: RFunction, field: str) -> str:
+    found: list[str] = []
+    for item in model.functions_of(function.contract):
+        if (
+            not item.exposed
+            or not item.has_body
+            or item.signature == function.signature
+            or item.kind != "function"
+        ):
+            continue
+        if not re.search(r"\.\s*(?:transfer|safeTransfer)\s*\(", item.body):
+            continue
+        if re.search(rf"\b{re.escape(field)}\b", item.body):
+            continue
+        found.append(item.signature)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+__all__ = ["MemberCall", "ReportedSite", "analyze_balance_delta", "reported_site"]
