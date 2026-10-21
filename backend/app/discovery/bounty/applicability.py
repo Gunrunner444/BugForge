@@ -15,6 +15,11 @@ from typing import Any
 # Fixtures whose result depends on behavior a normal ERC-20 does not have.
 MATERIAL_FIXTURES = frozenset({"fee_on_transfer", "false_return", "rebasing"})
 _STANDARD = frozenset({"standard", "standard_erc20"})
+# A stored result with no applicability record is strong only for these fixtures.
+# Anything else, including a misspelled or newly introduced name, stays ineligible.
+LEGACY_APPLICABLE_FIXTURES = frozenset({"", "standard", "standard_erc20"})
+_PROVEN = frozenset({"source", "validated_profile"})
+_ROLE_PROVEN = frozenset({"runtime", "validated_profile"})
 
 
 @dataclass(frozen=True)
@@ -76,24 +81,26 @@ def assess(
     assumptions: list[Assumption] = []
     fixture = token_fixture or ""
     behavior = facts.get("token_behavior", "")
+    behavior_evidence = facts.get("token_behavior_evidence", "")
     if fixture in MATERIAL_FIXTURES:
-        if behavior == fixture:
+        if behavior == fixture and behavior_evidence in _PROVEN:
             assumptions.append(
                 Assumption(
                     "token_behavior",
                     fixture,
                     "confirmed",
-                    f"a candidate fact records token_behavior={behavior}",
+                    f"{behavior_evidence} evidence records token_behavior={behavior}",
                     True,
                 )
             )
-        elif behavior in _STANDARD:
+        elif behavior in _STANDARD and behavior_evidence in _PROVEN:
             assumptions.append(
                 Assumption(
                     "token_behavior",
                     fixture,
                     "contradicted",
-                    f"candidate fact token_behavior={behavior} contradicts fixture {fixture}",
+                    f"{behavior_evidence} evidence records token_behavior={behavior}, "
+                    f"which contradicts fixture {fixture}",
                     True,
                 )
             )
@@ -103,34 +110,81 @@ def assess(
                     "token_behavior",
                     fixture,
                     "unknown",
-                    "no source fact establishes this nonstandard token behavior; "
-                    "the fixture is a harness convenience",
+                    "no source or validated-profile fact establishes this nonstandard "
+                    "token behavior; a harness setting is not target evidence",
                     True,
                 )
             )
-    elif fixture == "standard":
+    elif fixture in _STANDARD:
         assumptions.append(
             Assumption(
                 "token_behavior",
-                "standard",
+                fixture,
                 "confirmed",
                 "the harness baseline is a standard token and this property does not "
                 "depend on fee-on-transfer or rebasing behavior",
                 False,
             )
         )
-    role = facts.get("role_getter", "")
-    if role:
+    elif fixture:
         assumptions.append(
             Assumption(
-                "privileged_actor",
-                role,
-                "confirmed",
-                "the source compares the caller with this getter; the harness reads it "
-                "and does not make the call unless it equals the deploying contract",
+                "token_behavior",
+                fixture,
+                "unknown",
+                "the fixture name is not a known token behavior and is not treated "
+                "as target-applicable",
                 True,
             )
         )
+    role = facts.get("role_getter", "")
+    if role:
+        role_evidence = facts.get("role_evidence", "")
+        if role_evidence in _ROLE_PROVEN:
+            assumptions.append(
+                Assumption(
+                    "privileged_actor",
+                    role,
+                    "confirmed",
+                    f"{role_evidence} evidence shows the caller matches {role}",
+                    True,
+                )
+            )
+        else:
+            assumptions.append(
+                Assumption(
+                    "privileged_actor",
+                    role,
+                    "unknown",
+                    "the source names a role getter; this run has not shown that the "
+                    "caller holds that role",
+                    True,
+                )
+            )
+    if facts.get("report_scope") == "host":
+        host = facts.get("reporting_host", "") or "unknown"
+        host_evidence = facts.get("reporting_host_evidence", "")
+        if host_evidence == "validated_profile" and host != "unknown":
+            assumptions.append(
+                Assumption(
+                    "reporting_host",
+                    host,
+                    "confirmed",
+                    f"validated profile names {host} as the reporting host in this source "
+                    "set; this is not evidence about every deployment",
+                    True,
+                )
+            )
+        else:
+            assumptions.append(
+                Assumption(
+                    "reporting_host",
+                    host,
+                    "unknown",
+                    "the report callback is host-scoped and no validated host profile was supplied",
+                    True,
+                )
+            )
     if identity_status not in {"", "bound"}:
         assumptions.append(
             Assumption(
@@ -162,6 +216,21 @@ def reconcile_identity(applicability: Applicability, identity_status: str) -> Ap
     return Applicability(_disposition(assumptions, executable=True), assumptions)
 
 
+def confirm_validated_role(applicability: Applicability) -> Applicability:
+    """The harness read the role getter and it returned the deploying contract."""
+    assumptions = tuple(
+        replace(
+            item,
+            status="confirmed",
+            evidence=("the harness read the role getter and it returned the deploying contract"),
+        )
+        if item.name == "privileged_actor"
+        else item
+        for item in applicability.assumptions
+    )
+    return Applicability(_disposition(assumptions, executable=True), assumptions)
+
+
 def deny_unconfirmed_role(applicability: Applicability) -> Applicability:
     """The harness read the role getter and it was not the deploying contract.
 
@@ -181,6 +250,23 @@ def deny_unconfirmed_role(applicability: Applicability) -> Applicability:
         for item in applicability.assumptions
     )
     return Applicability(_disposition(assumptions, executable=True), assumptions)
+
+
+def apply_execution_applicability(
+    applicability: Applicability,
+    *,
+    identity_status: str,
+    reason_code: str,
+    role_proven: bool,
+    role_denied: bool,
+) -> Applicability:
+    """Recompute applicability from the execution record. This is the persisted path."""
+    updated = reconcile_identity(applicability, identity_status)
+    if role_denied or reason_code == "role_unconfirmed":
+        return deny_unconfirmed_role(updated)
+    if role_proven:
+        return confirm_validated_role(updated)
+    return updated
 
 
 def mark_not_applicable(applicability: Applicability, evidence: str) -> Applicability:

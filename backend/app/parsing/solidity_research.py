@@ -68,6 +68,9 @@ class RFunction:
     returns: tuple[Param, ...]
     body: str
     has_body: bool
+    # 1-based file line of the first character inside the body. 0 means the
+    # parser did not record a span; callers then fall back to ``line``.
+    body_line: int = 0
 
     @property
     def exposed(self) -> bool:
@@ -132,6 +135,11 @@ class ResearchModel:
     # treat that as a match for whatever source text is supplied.
     source_hashes: tuple[tuple[str, str], ...] = ()
     source_set_digest: str = ""
+    # Concrete contract whose reporting callback may be read. Empty means an
+    # external ``address(this)`` hook is unresolved. A name alone is not a
+    # validated profile; ``reporting_host_evidence`` records why it was set.
+    reporting_host: str = ""
+    reporting_host_evidence: str = ""
 
     def bases_of(self, contract: str) -> tuple[str, ...]:
         """Base contracts, nearest first, bounded and cycle-safe."""
@@ -647,6 +655,7 @@ def _member(
         body = clean[index + 1 : close]
         stop = close + 1
     line = _line(newlines, base_offset + match.start())
+    body_line = _line(newlines, base_offset + index + 1) if has_body else line
     params = parse_params(params_text)
     if word == "modifier":
         return RModifier(contract, name, params, body, line), stop
@@ -677,6 +686,7 @@ def _member(
             returns=returns,
             body=body,
             has_body=has_body,
+            body_line=body_line,
         ),
         stop,
     )
@@ -853,11 +863,16 @@ def plain_calls(body: str) -> list[tuple[str, tuple[str, ...], int]]:
 
 
 def line_of_text(function: RFunction, needle: str) -> int:
-    """Source line of the first occurrence of ``needle`` in the function body."""
+    """Source line of the first occurrence of ``needle`` in the function body.
+
+    ``str.find`` is a character offset. The line is the body's starting line
+    plus the newlines before that offset, not the offset itself.
+    """
     index = function.body.find(needle)
     if index < 0:
         return function.line
-    return function.line + function.body[:index].count("\n")
+    origin = function.body_line or function.line
+    return origin + function.body[:index].count("\n")
 
 
 # ---- shared candidate type ------------------------------------------------------------------

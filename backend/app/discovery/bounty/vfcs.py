@@ -824,13 +824,13 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
         else "no source role getter; the report caller is the ordinary attacker"
     )
     report = replace(_call(function, "report", actor), established_by=why[:240])
-    if not site.balance_backed:
+    if not site.judgeable:
         return [
             (
                 "report",
                 [report],
-                "the reported value is not uniquely the contract's token balance, "
-                "so the reconciliation is not judged",
+                "the reported value is not idle holdings or idle holdings plus one public "
+                "getter, so the reconciliation is not judged",
             )
         ]
     donate = _primitive(
@@ -840,9 +840,16 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
         ATTACKER,
         "increase the token balance without writing the stored total",
     )
-    statement = (
-        "after the report, the stored total is at most the token balance the reported call observed"
-    )
+    if site.reported_form == "idle_balance":
+        statement = (
+            "after the report, the stored total is at most the idle token balance; "
+            "assets held outside this contract are not part of this check"
+        )
+    else:
+        statement = (
+            "after the report, the stored total is at most the idle token balance plus "
+            f"{site.external_getter}"
+        )
     plans: list[Plan] = [
         ("donate→report", [donate, report], statement),
         (
@@ -869,8 +876,20 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
                 (
                     "donate→report→outflow→report",
                     [donate, report, _call(outflow, "outflow", ATTACKER), second],
-                    "after the token balance falls, a later report still stores at most "
-                    "the token balance",
+                    "after the reportable balance falls, a later report still stores at most "
+                    "the source-backed total",
+                )
+            )
+    if site.gain:
+        owner = site.host or function.contract
+        gain = _resolve(model, owner, site.gain)
+        if gain is not None:
+            plans.append(
+                (
+                    "gain→report",
+                    [_call(gain, "gain", ATTACKER), report],
+                    "after the public component increases, the stored total is at most "
+                    "idle holdings plus that component; this does not prove a fee formula",
                 )
             )
     if site.unlock_seconds and site.role_getter:
@@ -889,7 +908,7 @@ def _reported(model: ResearchModel, candidate: SemanticCandidate) -> Built:
                 "donate→report→warp→report",
                 [donate, report, warp, second],
                 "after the source duration, a second report still stores at most the "
-                "token balance; this does not prove the unlock formula",
+                "source-backed total; this does not prove the unlock formula",
             )
         )
     return plans

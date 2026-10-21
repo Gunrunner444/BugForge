@@ -6,6 +6,7 @@ import textwrap
 
 from app.discovery.bounty.analysis import CampaignAnalysis
 from app.discovery.bounty.applicability import (
+    apply_execution_applicability,
     assess,
     deny_unconfirmed_role,
     mark_not_applicable,
@@ -91,27 +92,41 @@ def test_fee_fixture_without_support_is_not_target_applicable() -> None:
 
 
 def test_contradicted_fee_assumption_is_fixture_only() -> None:
-    result = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "standard"})
+    result = assess(
+        token_fixture="fee_on_transfer",
+        facts={"token_behavior": "standard", "token_behavior_evidence": "source"},
+    )
     assert result.disposition == "fixture_only"
     assert (
         is_strong(_record(applicability=result.as_dict(), token_fixture="fee_on_transfer")) is False
     )
+    unproven = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "standard"})
+    assert unproven.disposition == "unconfirmed"
 
 
 def test_standard_token_violation_stays_eligible() -> None:
-    result = assess(
-        token_fixture="standard",
-        facts={"token_behavior": "unknown", "role_getter": "keeper()"},
-    )
+    result = assess(token_fixture="standard", facts={"token_behavior": "unknown"})
     assert result.disposition == "target_applicable"
     assert is_strong(_record(applicability=result.as_dict())) is True
+    alias = assess(token_fixture="standard_erc20")
+    assert alias.disposition == "target_applicable"
+    assert alias.assumptions[0].material is False
 
 
 def test_a_source_fact_that_matches_the_fixture_stays_eligible() -> None:
-    result = assess(token_fixture="fee_on_transfer", facts={"token_behavior": "fee_on_transfer"})
+    result = assess(
+        token_fixture="fee_on_transfer",
+        facts={"token_behavior": "fee_on_transfer", "token_behavior_evidence": "source"},
+    )
     assert result.disposition == "target_applicable"
     assert result.assumptions[0].status == "confirmed"
     assert is_strong(_record(applicability=result.as_dict(), token_fixture="fee_on_transfer"))
+    harness = assess(
+        token_fixture="fee_on_transfer",
+        facts={"token_behavior": "fee_on_transfer", "token_behavior_evidence": "harness"},
+    )
+    assert harness.disposition == "unconfirmed"
+    assert harness.assumptions[0].status == "unknown"
 
 
 def test_an_unbound_identity_blocks_applicability() -> None:
@@ -129,13 +144,82 @@ def test_an_unbound_identity_blocks_applicability() -> None:
 
 
 def test_a_failed_role_proof_is_not_target_applicable() -> None:
-    granted = assess(token_fixture="standard", facts={"role_getter": "keeper()"})
+    unproven = assess(token_fixture="standard", facts={"role_getter": "keeper()"})
+    assert unproven.disposition == "unconfirmed"
+    role = next(item for item in unproven.assumptions if item.name == "privileged_actor")
+    assert role.status == "unknown"
+    granted = assess(
+        token_fixture="standard",
+        facts={"role_getter": "keeper()", "role_evidence": "runtime"},
+    )
     assert granted.disposition == "target_applicable"
     denied = deny_unconfirmed_role(granted)
     assert denied.disposition == "not_applicable"
-    role = next(item for item in denied.assumptions if item.name == "privileged_actor")
-    assert role.status == "contradicted"
+    denied_role = next(item for item in denied.assumptions if item.name == "privileged_actor")
+    assert denied_role.status == "contradicted"
     assert is_strong(_record(applicability=denied.as_dict())) is False
+
+
+def test_unknown_fixture_names_fail_closed_on_the_finding_path() -> None:
+    missing = assess(token_fixture="")
+    assert missing.disposition == "target_applicable"
+    assert all(item.name != "token_behavior" for item in missing.assumptions)
+    unknown = assess(token_fixture="misspelled_fee")
+    assert unknown.disposition == "unconfirmed"
+    record = _record(applicability=unknown.as_dict(), token_fixture="misspelled_fee")
+    assert is_strong(record) is False
+    host = assess(
+        token_fixture="standard",
+        facts={
+            "report_scope": "host",
+            "reporting_host": "IdleHost",
+            "reporting_host_evidence": "validated_profile",
+        },
+    )
+    assert host.disposition == "target_applicable"
+    named = next(item for item in host.assumptions if item.name == "reporting_host")
+    assert named.status == "confirmed"
+    assert "every deployment" in named.evidence
+    unnamed = assess(token_fixture="standard", facts={"report_scope": "host"})
+    assert unnamed.disposition == "unconfirmed"
+    built = assess(token_fixture="standard", facts={"role_getter": "keeper()"})
+    proven = apply_execution_applicability(
+        built,
+        identity_status="bound",
+        reason_code="property_violated",
+        role_proven=True,
+        role_denied=False,
+    )
+    assert proven.disposition == "target_applicable"
+    assert is_strong(_record(applicability=proven.as_dict())) is True
+    blocked = apply_execution_applicability(
+        built,
+        identity_status="identity_mismatch",
+        reason_code="property_violated",
+        role_proven=True,
+        role_denied=False,
+    )
+    assert blocked.disposition == "not_applicable"
+    denied = apply_execution_applicability(
+        built,
+        identity_status="bound",
+        reason_code="role_unconfirmed",
+        role_proven=False,
+        role_denied=True,
+    )
+    assert denied.disposition == "not_applicable"
+    untouched = apply_execution_applicability(
+        assess(token_fixture="standard"),
+        identity_status="bound",
+        reason_code="property_held",
+        role_proven=False,
+        role_denied=False,
+    )
+    assert untouched.disposition == "target_applicable"
+    assert (
+        is_strong(_record(applicability=blocked.as_dict(), identity_status="identity_mismatch"))
+        is False
+    )
 
 
 def test_legacy_fee_record_without_applicability_is_not_strong() -> None:
@@ -143,6 +227,12 @@ def test_legacy_fee_record_without_applicability_is_not_strong() -> None:
     del record["applicability"]
     assert is_strong(record) is False
     assert is_strong(_record()) is True
+    bare = _record(token_fixture="")
+    del bare["applicability"]
+    assert is_strong(bare) is True
+    custom = _record(token_fixture="custom_rebase")
+    del custom["applicability"]
+    assert is_strong(custom) is False
 
 
 def test_stale_or_unbound_identity_blocks_a_violation() -> None:
@@ -244,8 +334,22 @@ def test_report_candidate_is_balance_backed_only_when_the_call_resolves() -> Non
     model, found = _candidates(_desk("data.accounted = live;"), "accounting.reported_balance")
     assert len(found) == 1
     assert found[0].fact("balance_backed") == "true"
+    assert found[0].fact("reported_form") == "idle_balance"
+    assert found[0].fact("report_scope") == "self"
     assert found[0].fact("stored_getter") == "accounted()"
     assert found[0].fact("role_getter") == "keeper()"
+    generated = generate(model, found, SequenceIdentity(campaign_id="role"))
+    spec = build_property(generated.sequences[0], model, found[0])
+    assert spec.applicability.disposition == "unconfirmed"
+    proven = apply_execution_applicability(
+        spec.applicability,
+        identity_status="bound",
+        reason_code="property_violated",
+        role_proven=True,
+        role_denied=False,
+    )
+    assert proven.disposition == "target_applicable"
+    assert is_strong(_record(applicability=proven.as_dict())) is True
     opaque = _desk(
         "data.accounted = live;",
         extra="function _live() internal pure returns (uint256) { return 1; }",

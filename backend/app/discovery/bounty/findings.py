@@ -383,10 +383,10 @@ def is_strong(record: Mapping[str, Any]) -> bool:
     """Recomputed from the structured fields; a stored flag alone is never trusted.
 
     A local violation under a contradicted or unknown material assumption is not
-    a target-applicable candidate. A missing applicability record does not promote
-    a nonstandard token fixture.
+    a target-applicable candidate. A missing applicability record promotes only a
+    standard token fixture or a record with no token fixture.
     """
-    from app.discovery.bounty.applicability import MATERIAL_FIXTURES
+    from app.discovery.bounty.applicability import LEGACY_APPLICABLE_FIXTURES
 
     if not (
         record.get("outcome") == "property_violated"
@@ -400,7 +400,9 @@ def is_strong(record: Mapping[str, Any]) -> bool:
     applicability = _applicability(record)
     if applicability:
         return applicability.get("disposition") == "target_applicable"
-    return str(record.get("token_fixture") or "") not in MATERIAL_FIXTURES
+    # Legacy rows predate applicability. Only a standard-token fixture, or a
+    # record that names no token fixture, stays eligible. Unknown names do not.
+    return str(record.get("token_fixture") or "") in LEGACY_APPLICABLE_FIXTURES
 
 
 def execution_summary(

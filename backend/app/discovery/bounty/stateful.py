@@ -1605,6 +1605,54 @@ class _Synth:
     def read_credit(self, slot: int) -> None:
         self.read_getter(K_CREDITED, slot)
 
+    def read_external(self, slot: int) -> None:
+        """Read the public report addend. A failed read is not emitted as zero."""
+        getter = self.oracle.external_getter
+        if not re.fullmatch(r"[A-Za-z_]\w*\(\)", getter):
+            raise _UnbuildableError(
+                "the external report getter is not a zero-argument function",
+                "external_getter_unresolved",
+            )
+        address_getter = self.oracle.external_address_getter
+        failed = f"emit BugForgeObservation({K_READ_FAILED}, {slot}, {K_RECEIVED});"
+        if address_getter:
+            if not re.fullmatch(r"[A-Za-z_]\w*\(\)", address_getter):
+                raise _UnbuildableError(
+                    "the external address getter is not a zero-argument function",
+                    "external_getter_unresolved",
+                )
+            self.steps.append(
+                f"        (bool bfExtAddrOk_{slot}, bytes memory bfExtAddrRet_{slot}) = "
+                f'address(t).staticcall(abi.encodeWithSignature("{address_getter}"));'
+            )
+            self.steps.append(
+                f"        if (!bfExtAddrOk_{slot} || bfExtAddrRet_{slot}.length < 32) {{ {failed} }} "
+                "else {"
+            )
+            self.steps.append(
+                f"            address bfExtAddr_{slot} = abi.decode(bfExtAddrRet_{slot}, (address));"
+            )
+            self.steps.append(
+                f"            (bool bfExtOk_{slot}, bytes memory bfExtRet_{slot}) = "
+                f'bfExtAddr_{slot}.staticcall(abi.encodeWithSignature("{getter}"));'
+            )
+            self.steps.append(
+                f"            if (bfExtOk_{slot} && bfExtRet_{slot}.length >= 32) {{ "
+                f"emit BugForgeObservation({K_RECEIVED}, {slot}, "
+                f"abi.decode(bfExtRet_{slot}, (uint256))); }} else {{ {failed} }}"
+            )
+            self.steps.append("        }")
+            return
+        self.steps.append(
+            f"        (bool bfExtOk_{slot}, bytes memory bfExtRet_{slot}) = "
+            f'address(t).staticcall(abi.encodeWithSignature("{getter}"));'
+        )
+        self.steps.append(
+            f"        if (bfExtOk_{slot} && bfExtRet_{slot}.length >= 32) {{ "
+            f"emit BugForgeObservation({K_RECEIVED}, {slot}, "
+            f"abi.decode(bfExtRet_{slot}, (uint256))); }} else {{ {failed} }}"
+        )
+
     def _positive_control(self, index: int, encoded: str) -> None:
         sender = self.oracle.control_sender
         if not re.fullmatch(r"address\(0x[0-9A-Fa-f]{1,40}\)", sender):
@@ -1905,6 +1953,8 @@ class _Synth:
             if index == probe and oracle.kind in TOKEN_ORACLES and not conserving:
                 self.read_balance(index, 1)
                 self.read_credit(1)
+                if oracle.kind is OracleKind.CREDIT_LE_HOLDINGS and oracle.external_getter:
+                    self.read_external(2)
         if conserving:
             self.read_actor(1)
             self.read_evidence(1)
@@ -2403,6 +2453,7 @@ def observation_from_events(
         credited=credited[1] - credited[0] if {0, 1} <= set(credited) else None,
         holdings_after=received.get(1),
         credit_after=credited.get(1),
+        external_after=received.get(2),
         actor_before=actor.get(0),
         actor_after=actor.get(1),
         recipient_before=actor.get(2),
@@ -2454,7 +2505,7 @@ class StatefulObservation:
     @property
     def strong_candidate(self) -> bool:
         """An identity-bound violation whose material assumptions are confirmed."""
-        from app.discovery.bounty.applicability import MATERIAL_FIXTURES
+        from app.discovery.bounty.applicability import LEGACY_APPLICABLE_FIXTURES
 
         base = (
             self.outcome is Outcome.PROPERTY_VIOLATED
@@ -2467,7 +2518,7 @@ class StatefulObservation:
             return False
         if self.applicability_disposition:
             return self.applicability_disposition == "target_applicable"
-        return self.token_fixture not in MATERIAL_FIXTURES
+        return self.token_fixture in LEGACY_APPLICABLE_FIXTURES
 
     def signal(self) -> FeedbackSignal | None:
         """Turn an execution observation into bounded feedback. None = nothing to learn."""
@@ -3165,7 +3216,25 @@ def interpret(
     code = outcome.value
     if outcome is Outcome.INCONCLUSIVE and not evaluation.precondition_ok:
         code = "precondition_failed"
-    return base.done(outcome, reason, code, harness=harness, result=result, evaluation=evaluation)
+    from app.discovery.bounty.applicability import apply_execution_applicability
+
+    role_values = [value for kind, _index, value in events if kind == K_ROLE]
+    updated = apply_execution_applicability(
+        base.spec.applicability,
+        identity_status=base.identity.status,
+        reason_code=code,
+        role_proven=bool(role_values) and all(value == 1 for value in role_values),
+        role_denied=False,
+    )
+    return base.done(
+        outcome,
+        reason,
+        code,
+        harness=harness,
+        result=result,
+        evaluation=evaluation,
+        applicability=updated.disposition,
+    )
 
 
 # ---- independent checks -----------------------------------------------------------------------

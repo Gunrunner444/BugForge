@@ -122,6 +122,17 @@ def _ordered(
     )
 
 
+def _name_reporting_host(model: ResearchModel | None, host: str, evidence: str) -> None:
+    """Record a concrete reporting host. An unknown name is left unset."""
+    if model is None or not host:
+        return
+    item = model.contracts.get(host)
+    if item is None or item.is_interface:
+        return
+    model.reporting_host = host
+    model.reporting_host_evidence = evidence
+
+
 def analyze_campaign(
     *,
     manifest: BountyManifest,
@@ -132,10 +143,13 @@ def analyze_campaign(
     contract: str = "",
     address: str = "",
     chain_id: str = "",
+    reporting_host: str = "",
+    reporting_host_evidence: str = "",
 ) -> CampaignAnalysis:
     sources, primary_reads = read_source_files(repo_root, files)
     read_log: list[FileRead] = list(primary_reads)
     model = build_research_model(sources) if sources else None
+    _name_reporting_host(model, reporting_host, reporting_host_evidence)
     target = deployment_identity(
         manifest, contract=contract, address=address, chain_id=chain_id, model=model
     )
@@ -204,6 +218,7 @@ def analyze_campaign(
             continue
         covered |= set(batch_sources)
         part = build_research_model(batch_sources)
+        _name_reporting_host(part, reporting_host, reporting_host_evidence)
         suite = run_suite(part)
         budgets.append(suite.budget())
         found = tuple(c for c in suite.candidates if c.file in batch_sources)
@@ -239,6 +254,7 @@ def analyze_campaign(
             if not alone:
                 continue
             part = build_research_model(alone)
+            _name_reporting_host(part, reporting_host, reporting_host_evidence)
             suite = run_suite(part)
             budgets.append(suite.budget())
             found = tuple(c for c in suite.candidates if c.contract == name)

@@ -850,19 +850,53 @@ class BountyCampaignService:
             # not be restamped; execution fails closed until reanalyze().
             campaign.cache["analysis_stale"] = campaign.cache.get("analysis_token") != token
             return cast("CampaignAnalysis", cached)
-        analysis = analyze_campaign(
-            manifest=campaign.manifest,
-            identity=campaign.identity,
-            repo_root=campaign.spec.repo_root,
-            files=campaign.request.files,
-            selection=campaign.selection,
-            contract=campaign.spec.contract,
-            address=campaign.spec.address,
-            chain_id=campaign.spec.chain_id,
-        )
-        from app.discovery.bounty.constructor_profile import attach_profile_seed
 
-        attach_profile_seed(campaign, analysis)
+        def _build(host_name: str = "", evidence: str = "") -> CampaignAnalysis:
+            return analyze_campaign(
+                manifest=campaign.manifest,
+                identity=campaign.identity,
+                repo_root=campaign.spec.repo_root,
+                files=campaign.request.files,
+                selection=campaign.selection,
+                contract=campaign.spec.contract,
+                address=campaign.spec.address,
+                chain_id=campaign.spec.chain_id,
+                reporting_host=host_name,
+                reporting_host_evidence=evidence,
+            )
+
+        analysis = _build()
+        from app.discovery.bounty.constructor_profile import (
+            ProfileError,
+            attach_profile_seed,
+            parse_profile,
+        )
+        from app.discovery.bounty.stateful import delegate_execution_host
+
+        attached = attach_profile_seed(campaign, analysis)
+        host = ""
+        raw = campaign.spec.constructor_profile
+        if (
+            isinstance(attached, dict)
+            and attached.get("validation") == "accepted"
+            and isinstance(raw, dict)
+            and raw
+            and analysis.model is not None
+        ):
+            try:
+                profile = parse_profile(raw)
+            except ProfileError:
+                profile = None
+            if profile is not None:
+                host = delegate_execution_host(
+                    profile,
+                    analysis.model,
+                    campaign.spec.contract,
+                    analysis.sources,
+                )
+        if host:
+            analysis = _build(host, "validated_profile")
+            attach_profile_seed(campaign, analysis)
         campaign.cache["analysis"] = analysis
         campaign.cache["analysis_token"] = token
         campaign.cache["analysis_stale"] = False
@@ -1514,12 +1548,19 @@ class BountyCampaignService:
                 "verified": False,
             }
             record = executions[obs.sequence_id]
-            from app.discovery.bounty.applicability import deny_unconfirmed_role, reconcile_identity
+            from app.discovery.bounty.applicability import apply_execution_applicability
             from app.discovery.bounty.findings import is_strong
+            from app.discovery.bounty.stateful import K_ROLE
 
-            applicability = reconcile_identity(spec.applicability, str(record["identity_status"]))
-            if record["reason_code"] == "role_unconfirmed":
-                applicability = deny_unconfirmed_role(applicability)
+            events = obs.result.events if obs.result is not None else ()
+            role_values = [value for kind, _index, value in events if kind == K_ROLE]
+            applicability = apply_execution_applicability(
+                spec.applicability,
+                identity_status=str(record["identity_status"]),
+                reason_code=str(record["reason_code"]),
+                role_proven=bool(role_values) and all(value == 1 for value in role_values),
+                role_denied=any(value == 0 for value in role_values),
+            )
             record["applicability"] = applicability.as_dict()
             record["token_fixture"] = spec.oracle.token_fixture
             record["strong_candidate"] = is_strong(record)

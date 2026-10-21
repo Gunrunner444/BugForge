@@ -17,7 +17,7 @@ import pytest
 from app.discovery.bounty.campaign import BountyManifest
 from app.discovery.bounty.constructor_profile import sha256_text
 from app.discovery.bounty.service import BountyCampaignService, CampaignSpec
-from app.parsing.solidity_research import build_research_model
+from app.parsing.solidity_research import ResearchModel, SemanticCandidate, build_research_model
 from app.parsing.solidity_research_suite import run_suite
 
 PIN = "82806289f967590c4efbf6bc3d237e4e7f0a0966"
@@ -51,6 +51,7 @@ OZ_FILES = (
     "contracts/utils/math/Math.sol",
 )
 IDLE = Path(__file__).resolve().parents[1] / "fixtures" / "yearn_replay" / "IdleHost.sol"
+DEPLOYED = Path(__file__).resolve().parents[1] / "fixtures" / "yearn_replay" / "DeployedHost.sol"
 
 
 def _require(name: str) -> str:
@@ -156,22 +157,47 @@ def _profile(files: dict[str, str]) -> dict[str, object]:
     }
 
 
-def test_the_pinned_sources_expose_a_balance_backed_report(tmp_path: Path) -> None:
-    files = assemble(tmp_path)
-    model = build_research_model(files)
-    found = [
+def _report_candidates(model: ResearchModel) -> list[SemanticCandidate]:
+    return [
         item
         for item in run_suite(model).candidates
         if item.detector == "accounting.reported_balance" and item.function == "report()"
     ]
+
+
+def test_the_pinned_sources_expose_a_balance_backed_report(tmp_path: Path) -> None:
+    files = assemble(tmp_path)
+    text = files["src/TokenizedStrategy.sol"]
+    expected_line = text[: text.index("S.totalAssets = newTotalAssets;")].count("\n") + 1
+    model = build_research_model(files)
+    unresolved = _report_candidates(model)
+    assert len(unresolved) == 1
+    bare = unresolved[0]
+    assert bare.contract == "TokenizedStrategy"
+    assert bare.line == expected_line
+    assert bare.fact("balance_backed") == "false"
+    assert bare.fact("report_scope") == "unresolved"
+    assert bare.fact("reported_form") == "other"
+    function = model.function("TokenizedStrategy", "report")
+    assert function is not None
+    assert bare.line != function.line + function.body.find("newTotalAssets")
+    model.reporting_host = "IdleHost"
+    model.reporting_host_evidence = "validated_profile"
+    found = _report_candidates(model)
     assert len(found) == 1
-    assert found[0].contract == "TokenizedStrategy"
-    assert found[0].fact("balance_backed") == "true"
-    assert found[0].fact("stored_getter") == "totalAssets()"
-    assert found[0].fact("role_getter") == "keeper()"
-    assert found[0].fact("unlock_seconds") == "864000"
-    assert found[0].fact("loss_ignored") == "false"
-    assert found[0].fact("token_behavior") == "unknown"
+    hosted = found[0]
+    assert hosted.fact("balance_backed") == "true"
+    assert hosted.fact("reported_form") == "idle_balance"
+    assert hosted.fact("report_scope") == "host"
+    assert hosted.fact("reporting_host") == "IdleHost"
+    assert hosted.fact("stored_getter") == "totalAssets()"
+    assert hosted.fact("role_getter") == "keeper()"
+    assert hosted.fact("unlock_seconds") == "864000"
+    assert hosted.fact("loss_ignored") == "false"
+    assert hosted.fact("token_behavior") == "unknown"
+    assert hosted.line == expected_line
+    assert any("unlock formula" in item for item in hosted.missing)
+    assert any("protocol-fee" in item for item in hosted.missing)
 
 
 def test_yearn_replay_executes_the_report_through_the_campaign_service(
@@ -253,25 +279,164 @@ def test_yearn_replay_executes_the_report_through_the_campaign_service(
     observations = result["observations"]
     assert isinstance(observations, list)
     analysis = service._analysis(campaign)
-    report_ids = {
-        item.sequence_id
+    report_candidates = [
+        item
+        for item in analysis.candidates
+        if item.detector == "accounting.reported_balance" and item.function == "report()"
+    ]
+    assert report_candidates
+    assert report_candidates[0].fact("reported_form") == "idle_balance"
+    assert report_candidates[0].fact("report_scope") == "host"
+    report_sequences = [
+        item
         for item in analysis.sequences
         if item.derived_from.startswith("accounting.reported_balance@")
-    }
+    ]
+    report_ids = {item.sequence_id for item in report_sequences}
     assert report_ids
-    judged = [
+    report_obs = [item for item in observations if item["sequence_id"] in report_ids]
+    held = [item for item in report_obs if item["outcome"] == "property_held"]
+    violated = [item for item in report_obs if item["outcome"] == "property_violated"]
+    inconclusive = [item for item in report_obs if item["outcome"] == "inconclusive"]
+    unsupported = [
         item
-        for item in observations
-        if item["sequence_id"] in report_ids
-        and item["outcome"]
-        in {
-            "property_held",
-            "property_violated",
-            "inconclusive",
-        }
+        for item in report_obs
+        if item["declaration"] == "property_unsupported"
+        or item["outcome"] == "sequence_executed_no_oracle"
     ]
-    assert judged, [
-        (item["sequence_id"], item["outcome"], item.get("reason")) for item in observations
+    role_blocked = [item for item in report_obs if item["reason_code"] == "role_unconfirmed"]
+    failures = [
+        item
+        for item in report_obs
+        if item["outcome"] in {"compile_failed", "execution_failed", "unavailable"}
     ]
+    accounting = [item for item in held + violated if item["oracle_kind"] == "credit_le_holdings"]
+    assert accounting, {
+        "candidates": len(report_candidates),
+        "sequences": len(report_sequences),
+        "executed": len(report_obs),
+        "held": len(held),
+        "violated": len(violated),
+        "inconclusive": [(item["outcome"], item.get("reason")) for item in inconclusive],
+        "unsupported": len(unsupported),
+        "role_blocked": len(role_blocked),
+        "failures": [(item["outcome"], item.get("reason")) for item in failures],
+    }
     assert not any(item.get("verified") for item in observations)
     assert result["forge_runs"] >= 1
+
+
+def test_deployed_host_reports_above_idle_holdings_without_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host with a public deployed balance is not judged as an idle-only strategy."""
+    if os.environ.get("BUGFORGE_YEARN_EXECUTE") != "1":
+        if os.environ.get("BUGFORGE_REQUIRE_YEARN") == "1":
+            pytest.fail("the Yearn job must execute the deployed-host replay")
+        pytest.skip("BUGFORGE_YEARN_EXECUTE is not set")
+    from tests.test_phase52.phase52_support import _has
+
+    if not (_has("forge") and _has("solc")):
+        pytest.fail("forge and solc are required to execute the Yearn replay")
+    files = assemble(tmp_path)
+    deployed_text = DEPLOYED.read_text()
+    files["src/DeployedHost.sol"] = deployed_text
+    root = tmp_path / "deployed-campaign"
+    root.mkdir()
+    for path, text in files.items():
+        destination = root / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text)
+    import app.discovery.bounty.service as service_module
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(
+        get_settings(),
+        "bounty_campaign_database_url",
+        f"sqlite:///{tmp_path / 'deployed.sqlite'}",
+        raising=False,
+    )
+    monkeypatch.setattr(service_module, "_SERVICE", None, raising=False)
+    profile = _profile(files)
+    profile["profile_id"] = "yearn-deployed-host"
+    profile["contract"] = "DeployedHost"
+    profile["source_file"] = "src/DeployedHost.sol"
+    profile["source_sha256"] = sha256_text(deployed_text)
+    profile["struct_file"] = "src/DeployedHost.sol"
+    bound = list(profile["bound_files"])
+    bound.append({"path": "src/DeployedHost.sol", "sha256": sha256_text(deployed_text)})
+    profile["bound_files"] = bound
+    profile["assumptions"] = [
+        "DeployedHost is a local host whose report adds a public deployed balance",
+        "TokenizedStrategy runtime is placed at the address literal in BaseStrategy",
+        "MockFactory returns a zero protocol fee and is not the vault factory",
+        "this run is a local source replay, not deployed-runtime equivalence",
+    ]
+    manifest = BountyManifest.from_dict(
+        {
+            "platform": "local",
+            "program_id": "yearn-deployed-replay",
+            "program_name": "Yearn deployed-host replay",
+            "rules_version": "local",
+            "in_scope": [{"kind": "contract", "identifier": "TokenizedStrategy"}],
+            "out_of_scope": [],
+            "known_issues": [],
+            "poc_requirement": "required",
+            "testing_mode": "local_only",
+            "repository": "https://github.com/yearn/tokenized-strategy",
+            "source_commit": PIN,
+            "deployments": [],
+            "chain_ids": ["1"],
+            "compiler": {
+                "version": "0.8.18",
+                "optimizer": "enabled",
+                "optimizer_runs": "200",
+                "via_ir": "false",
+                "evm_version": "paris",
+            },
+            "impact_categories": [
+                {
+                    "name": "Direct theft of user funds",
+                    "severity": "critical",
+                    "weight": 90,
+                    "tags": ["custody", "vault_accounting"],
+                }
+            ],
+        }
+    )
+    service = BountyCampaignService()
+    campaign = service.create(
+        CampaignSpec(
+            manifest=manifest,
+            repo_root=root,
+            contract="TokenizedStrategy",
+            source_file="src/TokenizedStrategy.sol",
+            files=tuple(sorted(files)),
+            constructor_profile=profile,
+            address=LITERAL,
+            chain_id="1",
+        )
+    )
+    result = service.stateful_execute(campaign.campaign_id, rounds=1, max_runs=30)
+    assert result["available"] is True, result.get("blocker") or result.get("reason")
+    analysis = service._analysis(campaign)
+    report = [
+        item
+        for item in analysis.candidates
+        if item.detector == "accounting.reported_balance" and item.function == "report()"
+    ]
+    assert len(report) == 1
+    assert report[0].fact("reported_form") == "idle_plus_getter"
+    assert report[0].fact("balance_backed") == "false"
+    assert report[0].fact("external_getter") == "deployed()"
+    assert report[0].fact("report_scope") == "host"
+    assert report[0].fact("reporting_host") == "DeployedHost"
+    gain_ids = {item.sequence_id for item in analysis.sequences if item.template == "gain→report"}
+    assert gain_ids
+    observations = result["observations"]
+    assert isinstance(observations, list)
+    gained = [item for item in observations if item["sequence_id"] in gain_ids]
+    assert gained, [(item["outcome"], item.get("reason")) for item in observations]
+    assert gained[0]["outcome"] == "property_held", gained[0]
+    assert "deployed()" in str(gained[0]["reason"])
+    assert gained[0]["verified"] is False
